@@ -1,10 +1,12 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	_ "embed"
 	"fmt"
 	"sync"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -32,3 +34,138 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error      { return s.db.Close() }
 func (s *Store) DB() *sql.DB       { return s.db } // test-only accessor
+
+type Task struct {
+	ID            string
+	Skill         string
+	Prompt        string
+	SystemContext string
+	TimeoutSec    int
+}
+
+type TaskRow struct {
+	ID         string
+	Skill      string
+	Prompt     string
+	Status     string
+	Output     string
+	Error      string
+	CreatedAt  string
+	StartedAt  string
+	FinishedAt string
+}
+
+type Chunk struct {
+	Type EventType
+	Data string
+	TS   string
+}
+
+func nowUTC() string { return time.Now().UTC().Format(time.RFC3339Nano) }
+
+func (s *Store) Insert(t Task) error {
+	_, err := s.db.Exec(
+		`INSERT INTO tasks(id,skill,prompt,status,created_at) VALUES(?,?,?,?,?)`,
+		t.ID, t.Skill, t.Prompt, "assigned", nowUTC(),
+	)
+	return err
+}
+
+func (s *Store) MarkRunning(id string) error {
+	res, err := s.db.Exec(
+		`UPDATE tasks SET status='running', started_at=? WHERE id=? AND status='assigned'`,
+		nowUTC(), id,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("task %s not in assigned state", id)
+	}
+	return nil
+}
+
+func (s *Store) Complete(id, output string) error {
+	res, err := s.db.Exec(
+		`UPDATE tasks SET status='completed', output=?, finished_at=? WHERE id=? AND status IN ('assigned','running')`,
+		output, nowUTC(), id,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("task %s not in active state", id)
+	}
+	return nil
+}
+
+func (s *Store) Fail(id, reason string) error {
+	res, err := s.db.Exec(
+		`UPDATE tasks SET status='failed', error=?, finished_at=? WHERE id=? AND status IN ('assigned','running')`,
+		reason, nowUTC(), id,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("task %s not in active state", id)
+	}
+	return nil
+}
+
+func (s *Store) GetTaskWithChunks(id string) (TaskRow, []Chunk, error) {
+	var r TaskRow
+	var output, errStr, started, finished sql.NullString
+	err := s.db.QueryRow(
+		`SELECT id,skill,prompt,status,output,error,created_at,started_at,finished_at FROM tasks WHERE id=?`, id,
+	).Scan(&r.ID, &r.Skill, &r.Prompt, &r.Status, &output, &errStr, &r.CreatedAt, &started, &finished)
+	if err != nil {
+		return r, nil, err
+	}
+	r.Output, r.Error, r.StartedAt, r.FinishedAt = output.String, errStr.String, started.String, finished.String
+
+	rows, err := s.db.Query(`SELECT type, data, ts FROM task_chunks WHERE task_id=? ORDER BY id ASC`, id)
+	if err != nil {
+		return r, nil, err
+	}
+	defer rows.Close()
+	var chunks []Chunk
+	for rows.Next() {
+		var c Chunk
+		var t string
+		if err := rows.Scan(&t, &c.Data, &c.TS); err != nil {
+			return r, nil, err
+		}
+		c.Type = EventType(t)
+		chunks = append(chunks, c)
+	}
+	return r, chunks, rows.Err()
+}
+
+func (s *Store) ListTasks(limit, offset int) ([]TaskRow, error) {
+	rows, err := s.db.Query(
+		`SELECT id,skill,prompt,status,output,error,created_at,started_at,finished_at FROM tasks ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		limit, offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TaskRow
+	for rows.Next() {
+		var r TaskRow
+		var output, errStr, started, finished sql.NullString
+		if err := rows.Scan(&r.ID, &r.Skill, &r.Prompt, &r.Status, &output, &errStr, &r.CreatedAt, &started, &finished); err != nil {
+			return nil, err
+		}
+		r.Output, r.Error, r.StartedAt, r.FinishedAt = output.String, errStr.String, started.String, finished.String
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// Used to silence unused import in case context isn't referenced directly above.
+var _ = context.Background
