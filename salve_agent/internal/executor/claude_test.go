@@ -56,3 +56,55 @@ func TestClaude_NormalStreaming(t *testing.T) {
 	}
 	require.Equal(t, "hello world", got)
 }
+
+func TestClaude_CapabilityParsed(t *testing.T) {
+	e := NewClaudeExecutor(ClaudeConfig{Bin: fakeClaudePath(t), Env: []string{"FAKE_CLAUDE_MODE=capability"}})
+	sink := &captureSink{}
+	res, err := e.Run(context.Background(), Task{ID: "t"}, sink)
+	require.NoError(t, err)
+	require.Equal(t, "installed foo", res.Summary)
+	require.Equal(t, "foo CLI now available", res.CapabilityChange)
+
+	var sawCap bool
+	for _, ev := range sink.events {
+		if ev.Type == "capability" && ev.Data == "foo CLI now available" {
+			sawCap = true
+		}
+	}
+	require.True(t, sawCap, "expected capability event before close")
+}
+
+func TestClaude_NoCapabilityChange(t *testing.T) {
+	e := NewClaudeExecutor(ClaudeConfig{Bin: fakeClaudePath(t), Env: []string{"FAKE_CLAUDE_MODE=nochange"}})
+	sink := &captureSink{}
+	res, err := e.Run(context.Background(), Task{ID: "t"}, sink)
+	require.NoError(t, err)
+	require.Equal(t, "answer", res.Summary)
+	require.Equal(t, "", res.CapabilityChange)
+}
+
+func TestClaude_Exit1(t *testing.T) {
+	e := NewClaudeExecutor(ClaudeConfig{Bin: fakeClaudePath(t), Env: []string{"FAKE_CLAUDE_MODE=exit1"}})
+	sink := &captureSink{}
+	_, err := e.Run(context.Background(), Task{ID: "t"}, sink)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "boom")
+}
+
+func TestClaude_Timeout(t *testing.T) {
+	e := NewClaudeExecutor(ClaudeConfig{Bin: fakeClaudePath(t), Env: []string{"FAKE_CLAUDE_MODE=sleep", "FAKE_CLAUDE_SLEEP=10"}})
+	sink := &captureSink{}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	_, err := e.Run(ctx, Task{ID: "t"}, sink)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "timeout")
+}
+
+func TestClaude_GarbageLines_StillCompletes(t *testing.T) {
+	e := NewClaudeExecutor(ClaudeConfig{Bin: fakeClaudePath(t), Env: []string{"FAKE_CLAUDE_MODE=garbage"}})
+	sink := &captureSink{}
+	res, err := e.Run(context.Background(), Task{ID: "t"}, sink)
+	require.NoError(t, err)
+	require.Equal(t, "ok", res.Summary)
+}
