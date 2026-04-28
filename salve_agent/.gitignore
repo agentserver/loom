@@ -1,0 +1,6 @@
+data.db
+data.db-*
+journal/CURRENT_STATE.md
+journal/history.md
+config.yaml
+*.tmp

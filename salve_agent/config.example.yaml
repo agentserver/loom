@@ -1,0 +1,34 @@
+server:
+  url: https://agent.example.com
+  name: salve-agent
+
+credentials:
+  sandbox_id: ""
+  tunnel_token: ""
+  proxy_token: ""
+  short_id: ""
+
+claude:
+  bin: claude
+  workdir: ""
+  extra_args: []
+
+mcp_servers:
+  echo_stdio:
+    transport: stdio
+    command: /usr/bin/env
+    args: ["python3", "-m", "echo_mcp"]
+    env:
+      LOG_LEVEL: info
+  remote_http:
+    transport: http
+    url: https://mcp.example.com
+    headers:
+      Authorization: Bearer XXX
+
+discovery:
+  display_name: salve_agent
+  description: General-purpose task executor with claude + MCP
+  skills:
+    - chat
+    - mcp
