@@ -136,6 +136,7 @@ func (e *MCPExecutor) connStdio(name string, cfg MCPServerCfg) (*stdioConn, erro
 		return c, nil
 	}
 	cmd := exec.Command(cfg.Command, cfg.Args...)
+	cmd.Env = cmd.Environ()
 	for k, v := range cfg.Env {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
 	}
