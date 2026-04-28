@@ -5,3 +5,4 @@ journal/history.md
 config.yaml
 *.tmp
 salve-agent
+testdata/fake-mcp-stdio/fake-mcp-stdio
