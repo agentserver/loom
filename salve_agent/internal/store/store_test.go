@@ -97,3 +97,23 @@ func typesOf(es []Event) []EventType {
 	}
 	return out
 }
+
+func TestRecover_MarksInflightAsFailedAndQueues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "x.db")
+	s, _ := Open(path)
+	require.NoError(t, s.Insert(Task{ID: "t-running"}))
+	require.NoError(t, s.MarkRunning("t-running"))
+	require.NoError(t, s.Insert(Task{ID: "t-assigned"}))
+	s.Close()
+
+	s2, _ := Open(path)
+	defer s2.Close()
+	require.NoError(t, s2.Recover())
+
+	pa, err := s2.PopPendingAcks()
+	require.NoError(t, err)
+	require.Len(t, pa, 2)
+	for _, p := range pa {
+		require.Equal(t, "failed", p.Status)
+	}
+}

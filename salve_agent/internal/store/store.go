@@ -238,5 +238,85 @@ func (s *Store) unsubscribeAll(taskID string) {
 	delete(s.subs, taskID)
 }
 
+type PendingAck struct {
+	TaskID string
+	Status string // "completed" | "failed"
+	Reason string // optional
+}
+
+func (s *Store) Recover() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query(`SELECT id FROM tasks WHERE status IN ('assigned','running')`)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+
+	for _, id := range ids {
+		if _, err := tx.Exec(
+			`UPDATE tasks SET status='failed', error=?, finished_at=? WHERE id=?`,
+			"agent restarted", nowUTC(), id,
+		); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(
+			`INSERT OR REPLACE INTO pending_acks(task_id,status,enqueued_at) VALUES(?,?,?)`,
+			id, "failed", nowUTC(),
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) EnqueuePendingAck(id, status string) error {
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO pending_acks(task_id,status,enqueued_at) VALUES(?,?,?)`,
+		id, status, nowUTC(),
+	)
+	return err
+}
+
+func (s *Store) PopPendingAcks() ([]PendingAck, error) {
+	rows, err := s.db.Query(`SELECT pa.task_id, pa.status, COALESCE(t.error,''), COALESCE(t.output,'')
+                             FROM pending_acks pa JOIN tasks t ON t.id=pa.task_id
+                             ORDER BY pa.enqueued_at ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PendingAck
+	for rows.Next() {
+		var p PendingAck
+		var output string
+		if err := rows.Scan(&p.TaskID, &p.Status, &p.Reason, &output); err != nil {
+			return nil, err
+		}
+		if p.Status == "completed" {
+			p.Reason = output
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeletePendingAck(id string) error {
+	_, err := s.db.Exec(`DELETE FROM pending_acks WHERE task_id=?`, id)
+	return err
+}
+
 // Used to silence unused import in case context isn't referenced directly above.
 var _ = context.Background
