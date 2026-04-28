@@ -42,3 +42,26 @@ func TestLoad_MissingURL(t *testing.T) {
 	_, err := Load(path)
 	require.ErrorContains(t, err, "server.url")
 }
+
+func TestSaveLoad_Roundtrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	c := &Config{
+		Server:    Server{URL: "https://x", Name: "n"},
+		Discovery: Discovery{DisplayName: "D", Skills: []string{"chat"}},
+	}
+	c.Credentials.SandboxID = "sb-1"
+	c.Credentials.TunnelToken = "tt"
+	c.Credentials.ProxyToken = "pt"
+	c.Credentials.ShortID = "sid"
+
+	require.NoError(t, c.Save(path))
+	got, err := Load(path)
+	require.NoError(t, err)
+	require.Equal(t, c.Credentials, got.Credentials)
+	require.Equal(t, c.Server, got.Server)
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+}
