@@ -3,6 +3,9 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -76,4 +79,44 @@ func TestMCP_BoomReturnsError(t *testing.T) {
 	body, _ := json.Marshal(map[string]string{"server": "demo", "tool": "boom"})
 	_, err := e.Run(context.Background(), Task{Prompt: string(body)}, &captureSink{})
 	require.ErrorContains(t, err, "intentional failure")
+}
+
+func TestMCP_HTTP_EchoCapability(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Method string
+			Params struct{ Name string }
+		}
+		_ = json.Unmarshal(body, &req)
+		var result string
+		cap := false
+		hint := ""
+		switch req.Params.Name {
+		case "echo":
+			result = `"hello"`
+		case "raise":
+			result = `"raised"`
+			cap = true
+			hint = "http-cap"
+		}
+		resp := map[string]interface{}{"jsonrpc": "2.0", "id": 1,
+			"result": map[string]interface{}{
+				"result":             json.RawMessage(result),
+				"capability_changed": cap,
+				"change_hint":        hint,
+			}}
+		b, _ := json.Marshal(resp)
+		w.Write(b)
+	}))
+	defer srv.Close()
+
+	e := NewMCPExecutor(map[string]MCPServerCfg{"web": {Transport: "http", URL: srv.URL}})
+	defer e.Close()
+
+	body, _ := json.Marshal(map[string]string{"server": "web", "tool": "raise"})
+	res, err := e.Run(context.Background(), Task{Prompt: string(body)}, &captureSink{})
+	require.NoError(t, err)
+	require.Equal(t, "http-cap", res.CapabilityChange)
+	require.Equal(t, "raised", res.Summary)
 }

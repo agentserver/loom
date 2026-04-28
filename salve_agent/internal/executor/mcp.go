@@ -218,11 +218,42 @@ func (e *MCPExecutor) callStdio(ctx context.Context, name string, cfg MCPServerC
 	}
 }
 
-// ---------- http (placeholder, fleshed out in Task 14) ----------
+// ---------- http ----------
 
 func (e *MCPExecutor) callHTTP(ctx context.Context, cfg MCPServerCfg, tool string, args map[string]interface{}) (json.RawMessage, error) {
-	return nil, fmt.Errorf("http transport not yet implemented")
+	body, _ := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]interface{}{"name": tool, "arguments": args},
+	})
+	req, err := http.NewRequestWithContext(ctx, "POST", cfg.URL, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range cfg.Headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := e.httpCli.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("mcp http: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode/100 != 2 {
+		return nil, fmt.Errorf("mcp http %d: %s", resp.StatusCode, string(raw))
+	}
+	var rpc struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct{ Message string } `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &rpc); err != nil {
+		return nil, fmt.Errorf("mcp http parse: %w", err)
+	}
+	if rpc.Error != nil {
+		return nil, fmt.Errorf("%s", rpc.Error.Message)
+	}
+	return rpc.Result, nil
 }
-
-// suppress unused import warnings if any
-var _ = strings.NewReader
