@@ -167,5 +167,76 @@ func (s *Store) ListTasks(limit, offset int) ([]TaskRow, error) {
 	return out, rows.Err()
 }
 
+type sink struct {
+	s      *Store
+	taskID string
+}
+
+type Sink interface {
+	Write(eventType, data string)
+	Close()
+}
+
+func (s *Store) ChunkSink(taskID string) Sink { return &sink{s: s, taskID: taskID} }
+
+func (sk *sink) Write(eventType, data string) {
+	_, err := sk.s.db.Exec(
+		`INSERT INTO task_chunks(task_id,ts,type,data) VALUES(?,?,?,?)`,
+		sk.taskID, nowUTC(), eventType, data,
+	)
+	if err != nil {
+		// store failure is best-effort for chunks; don't abort task.
+		return
+	}
+	sk.s.publish(sk.taskID, Event{Type: EventType(eventType), Data: data})
+}
+
+func (sk *sink) Close() {
+	sk.s.publish(sk.taskID, Event{Type: EventDone})
+	sk.s.unsubscribeAll(sk.taskID)
+}
+
+func (s *Store) Subscribe(taskID string) (<-chan Event, func()) {
+	ch := make(chan Event, 32)
+	s.mu.Lock()
+	s.subs[taskID] = append(s.subs[taskID], ch)
+	s.mu.Unlock()
+
+	cancel := func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for i, c := range s.subs[taskID] {
+			if c == ch {
+				s.subs[taskID] = append(s.subs[taskID][:i], s.subs[taskID][i+1:]...)
+				close(ch)
+				return
+			}
+		}
+	}
+	return ch, cancel
+}
+
+func (s *Store) publish(taskID string, e Event) {
+	s.mu.Lock()
+	subs := append([]chan Event(nil), s.subs[taskID]...)
+	s.mu.Unlock()
+	for _, c := range subs {
+		select {
+		case c <- e:
+		default:
+			// slow consumer — drop rather than block writer
+		}
+	}
+}
+
+func (s *Store) unsubscribeAll(taskID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range s.subs[taskID] {
+		close(c)
+	}
+	delete(s.subs, taskID)
+}
+
 // Used to silence unused import in case context isn't referenced directly above.
 var _ = context.Background

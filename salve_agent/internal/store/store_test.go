@@ -3,6 +3,7 @@ package store
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -53,4 +54,46 @@ func TestFail_RecordsReason(t *testing.T) {
 	row, _, _ := s.GetTaskWithChunks("t1")
 	require.Equal(t, "failed", row.Status)
 	require.Equal(t, "boom", row.Error)
+}
+
+func TestChunkSink_PersistsAndPublishes(t *testing.T) {
+	s, _ := Open(filepath.Join(t.TempDir(), "x.db"))
+	defer s.Close()
+	require.NoError(t, s.Insert(Task{ID: "t1"}))
+
+	ch, cancel := s.Subscribe("t1")
+	defer cancel()
+
+	sink := s.ChunkSink("t1")
+	sink.Write("chunk", "hello")
+	sink.Write("capability", "ok")
+	sink.Close()
+
+	received := drain(ch, 3, time.Second)
+	require.Equal(t, []EventType{EventChunk, EventCapability, EventDone}, typesOf(received))
+
+	_, chunks, _ := s.GetTaskWithChunks("t1")
+	require.Len(t, chunks, 2) // done event is not persisted
+}
+
+func drain(ch <-chan Event, n int, timeout time.Duration) []Event {
+	var got []Event
+	deadline := time.After(timeout)
+	for len(got) < n {
+		select {
+		case e := <-ch:
+			got = append(got, e)
+		case <-deadline:
+			return got
+		}
+	}
+	return got
+}
+
+func typesOf(es []Event) []EventType {
+	out := make([]EventType, len(es))
+	for i, e := range es {
+		out[i] = e.Type
+	}
+	return out
 }
