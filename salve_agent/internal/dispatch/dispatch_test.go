@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/yourorg/salve_agent/internal/executor"
@@ -21,6 +22,22 @@ func (s *stubExec) Run(ctx context.Context, t executor.Task, sink executor.Sink)
 	s.called = true
 	sink.Close()
 	return s.res, s.err
+}
+
+// blockingExec blocks until its context is cancelled, then returns the ctx.Err().
+type blockingExec struct {
+	ctxDone chan struct{}
+}
+
+func newBlockingExec() *blockingExec {
+	return &blockingExec{ctxDone: make(chan struct{})}
+}
+
+func (b *blockingExec) Run(ctx context.Context, t executor.Task, sink executor.Sink) (executor.Result, error) {
+	defer sink.Close()
+	<-ctx.Done()
+	close(b.ctxDone)
+	return executor.Result{}, ctx.Err()
 }
 
 type stubJournal struct {
@@ -88,4 +105,31 @@ func TestCapabilityChange_CallsJournal(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, j.calls)
 	require.Equal(t, "x", j.lastChange)
+}
+
+// TestRespectsTaskTimeout verifies that a per-task TimeoutSec is enforced: the
+// executor's context must be cancelled within the deadline even though the
+// parent context has no deadline of its own.
+func TestRespectsTaskTimeout(t *testing.T) {
+	blk := newBlockingExec()
+	j := &stubJournal{}
+	d := New(map[string]executor.Executor{"": blk}, j, newStore(t))
+
+	// Parent context has no deadline; task carries a 1-second timeout.
+	parentCtx := context.Background()
+	start := time.Now()
+	_, err := d.Run(parentCtx, executor.Task{ID: "t", TimeoutSec: 1})
+	elapsed := time.Since(start)
+
+	// The blocking executor's context must have been cancelled.
+	select {
+	case <-blk.ctxDone:
+		// good – executor ctx was cancelled
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("executor ctx was not cancelled after task returned")
+	}
+
+	require.Error(t, err, "expected timeout error")
+	require.Less(t, elapsed, 5*time.Second, "timeout took longer than expected")
+	require.Greater(t, elapsed, 500*time.Millisecond, "timeout fired too early")
 }

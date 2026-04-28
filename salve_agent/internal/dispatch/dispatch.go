@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/yourorg/salve_agent/internal/executor"
 	"github.com/yourorg/salve_agent/internal/store"
@@ -40,8 +41,18 @@ func (d *Dispatcher) Run(ctx context.Context, t executor.Task) (executor.Result,
 		return executor.Result{}, err
 	}
 
+	runCtx := ctx
+	if t.TimeoutSec > 0 {
+		var tcancel context.CancelFunc
+		runCtx, tcancel = context.WithTimeout(ctx, time.Duration(t.TimeoutSec)*time.Second)
+		defer tcancel()
+	} else {
+		var tcancel context.CancelFunc
+		runCtx, tcancel = context.WithTimeout(ctx, 300*time.Second) // default 5 min
+		defer tcancel()
+	}
 	sink := d.store.ChunkSink(t.ID)
-	res, err := exec.Run(ctx, t, sink)
+	res, err := exec.Run(runCtx, t, sink)
 	if err != nil {
 		_ = d.store.Fail(t.ID, err.Error())
 		return executor.Result{}, err
