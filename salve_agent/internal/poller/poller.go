@@ -9,10 +9,15 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/yourorg/salve_agent/internal/dispatch"
 	"github.com/yourorg/salve_agent/internal/executor"
 	"github.com/yourorg/salve_agent/internal/store"
 )
+
+// Dispatcher is the contract poller uses to hand a task off for execution.
+// salve's *dispatch.Dispatcher and master's *orchestrator.Orchestrator both satisfy this.
+type Dispatcher interface {
+	Run(ctx context.Context, t executor.Task) (executor.Result, error)
+}
 
 type Config struct {
 	ServerURL  string
@@ -24,11 +29,11 @@ type Config struct {
 type Poller struct {
 	cfg  Config
 	cli  *http.Client
-	disp *dispatch.Dispatcher
+	disp Dispatcher
 	s    *store.Store
 }
 
-func New(cfg Config, d *dispatch.Dispatcher, s *store.Store) *Poller {
+func New(cfg Config, d Dispatcher, s *store.Store) *Poller {
 	if cfg.IdlePoll == 0 {
 		cfg.IdlePoll = 5 * time.Second
 	}
