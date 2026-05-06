@@ -13,6 +13,8 @@ type Config struct {
 	Claude      Claude               `yaml:"claude"`
 	MCPServers  map[string]MCPServer `yaml:"mcp_servers"`
 	Discovery   Discovery            `yaml:"discovery"`
+	Planner     Planner              `yaml:"planner"`
+	Fanout      Fanout               `yaml:"fanout"`
 }
 
 type Server struct {
@@ -48,6 +50,24 @@ type Discovery struct {
 	Skills      []string `yaml:"skills"`
 }
 
+type Planner struct {
+	Bin        string   `yaml:"bin"`
+	TimeoutSec int      `yaml:"timeout_sec"`
+	ExtraArgs  []string `yaml:"extra_args"`
+}
+
+type Fanout struct {
+	MaxConcurrency  int                 `yaml:"max_concurrency"`
+	DefaultPolicy   string              `yaml:"default_policy"`
+	PolicyBySkill   map[string]string   `yaml:"policy_by_skill"`
+	SubTaskDefaults SubTaskDefaults     `yaml:"subtask_defaults"`
+}
+
+type SubTaskDefaults struct {
+	TimeoutSec   int     `yaml:"timeout_sec"`
+	MaxBudgetUSD float64 `yaml:"max_budget_usd"`
+}
+
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -63,12 +83,33 @@ func Load(path string) (*Config, error) {
 	if c.Claude.Bin == "" {
 		c.Claude.Bin = "claude"
 	}
+	if c.Planner.Bin == "" {
+		c.Planner.Bin = c.Claude.Bin
+	}
+	if c.Planner.TimeoutSec == 0 {
+		c.Planner.TimeoutSec = 60
+	}
+	if c.Fanout.MaxConcurrency == 0 {
+		c.Fanout.MaxConcurrency = 4
+	}
+	if c.Fanout.DefaultPolicy == "" {
+		c.Fanout.DefaultPolicy = "best_effort"
+	}
+	if c.Fanout.SubTaskDefaults.TimeoutSec == 0 {
+		c.Fanout.SubTaskDefaults.TimeoutSec = 600
+	}
 	return &c, nil
 }
 
 func (c *Config) Validate() error {
 	if c.Server.URL == "" {
 		return fmt.Errorf("server.url is required")
+	}
+	if c.Fanout.MaxConcurrency < 0 {
+		return fmt.Errorf("fanout.max_concurrency must be >= 0 (got %d)", c.Fanout.MaxConcurrency)
+	}
+	if c.Fanout.DefaultPolicy != "" && c.Fanout.DefaultPolicy != "best_effort" && c.Fanout.DefaultPolicy != "all_or_nothing" {
+		return fmt.Errorf("fanout.default_policy must be best_effort or all_or_nothing")
 	}
 	return nil
 }
