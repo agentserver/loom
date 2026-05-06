@@ -92,7 +92,3 @@ func (o *Orchestrator) policyForSkill(skill string) string {
 	return "best_effort"
 }
 
-// Stub (replaced in Task 12)
-func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor.Result, error) {
-	return executor.Result{}, fmt.Errorf("runFanout not implemented")
-}
