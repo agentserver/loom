@@ -1,9 +1,0 @@
-data.db
-data.db-*
-journal/CURRENT_STATE.md
-journal/history.md
-config.yaml
-*.tmp
-salve-agent
-testdata/fake-mcp-stdio/fake-mcp-stdio
-cmd/master-agent/master-agent

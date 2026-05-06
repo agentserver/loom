@@ -1,0 +1,21 @@
+name: multi-agent CI
+on:
+  push:
+    paths: [multi-agent/**]
+  pull_request:
+    paths: [multi-agent/**]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: multi-agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - run: go vet ./...
+      - run: go test ./... -race -count=1 -coverprofile=cover.out
+      - run: go test -tags=contract ./tests/contract/...
