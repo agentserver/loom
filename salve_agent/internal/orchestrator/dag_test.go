@@ -72,3 +72,92 @@ func TestRender_RepeatedReferences(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "X X", out)
 }
+
+func TestScheduler_LinearChain(t *testing.T) {
+	nodes := []planner.Node{
+		{ID: "a", TargetID: "x", Prompt: "p"},
+		{ID: "b", TargetID: "y", Prompt: "p", DependsOn: []string{"a"}},
+		{ID: "c", TargetID: "z", Prompt: "p", DependsOn: []string{"b"}},
+	}
+	s := NewScheduler(nodes, 4)
+	require.False(t, s.Done())
+
+	ready := s.Ready()
+	require.Len(t, ready, 1)
+	require.Equal(t, "a", ready[0].ID)
+
+	s.MarkDispatched("a")
+	s.Report("a", "completed", "out-a", "")
+	require.False(t, s.Done())
+
+	ready = s.Ready()
+	require.Len(t, ready, 1)
+	require.Equal(t, "b", ready[0].ID)
+
+	s.MarkDispatched("b")
+	s.Report("b", "completed", "out-b", "")
+	s.MarkDispatched("c")
+	s.Report("c", "completed", "out-c", "")
+	require.True(t, s.Done())
+
+	fin := s.AllFinished()
+	require.Len(t, fin, 3)
+}
+
+func TestScheduler_DiamondParallel(t *testing.T) {
+	nodes := []planner.Node{
+		{ID: "n1", TargetID: "a", Prompt: "p"},
+		{ID: "n2", TargetID: "b", Prompt: "p", DependsOn: []string{"n1"}},
+		{ID: "n3", TargetID: "c", Prompt: "p", DependsOn: []string{"n1"}},
+		{ID: "n4", TargetID: "d", Prompt: "p", DependsOn: []string{"n2", "n3"}},
+	}
+	s := NewScheduler(nodes, 4)
+	require.Equal(t, []string{"n1"}, idsOf(s.Ready()))
+	s.MarkDispatched("n1")
+	s.Report("n1", "completed", "x", "")
+	ready := s.Ready()
+	require.ElementsMatch(t, []string{"n2", "n3"}, idsOf(ready))
+}
+
+func TestScheduler_MaxConcurrencyLimits(t *testing.T) {
+	nodes := []planner.Node{
+		{ID: "a", TargetID: "x", Prompt: "p"},
+		{ID: "b", TargetID: "y", Prompt: "p"},
+		{ID: "c", TargetID: "z", Prompt: "p"},
+	}
+	s := NewScheduler(nodes, 2)
+	require.Len(t, s.Ready(), 2)
+	s.MarkDispatched(s.Ready()[0].ID)
+	s.MarkDispatched(s.Ready()[0].ID)
+	require.Len(t, s.Ready(), 0)
+}
+
+func TestScheduler_DownstreamSkippedOnFailure(t *testing.T) {
+	nodes := []planner.Node{
+		{ID: "a", TargetID: "x", Prompt: "p"},
+		{ID: "b", TargetID: "y", Prompt: "p", DependsOn: []string{"a"}},
+		{ID: "c", TargetID: "z", Prompt: "p", DependsOn: []string{"b"}},
+	}
+	s := NewScheduler(nodes, 4)
+	s.MarkDispatched("a")
+	s.Report("a", "failed", "", "boom")
+	s.MarkDownstreamSkipped("a")
+	require.True(t, s.Done())
+
+	fin := s.AllFinished()
+	statuses := map[string]string{}
+	for _, f := range fin {
+		statuses[f.NodeID] = f.Status
+	}
+	require.Equal(t, "failed", statuses["a"])
+	require.Equal(t, "skipped", statuses["b"])
+	require.Equal(t, "skipped", statuses["c"])
+}
+
+func idsOf(ns []planner.Node) []string {
+	out := make([]string, len(ns))
+	for i, n := range ns {
+		out[i] = n.ID
+	}
+	return out
+}

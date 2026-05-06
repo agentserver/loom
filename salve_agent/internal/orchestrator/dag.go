@@ -77,6 +77,128 @@ func detectCycle(nodes []planner.Node) error {
 	return nil
 }
 
+type FinishedNode struct {
+	NodeID string
+	Status string // "completed" | "failed" | "skipped"
+	Output string
+	Error  string
+}
+
+type Scheduler struct {
+	nodes      []planner.Node
+	nodeByID   map[string]planner.Node
+	rev        map[string][]string
+	maxConc    int
+	inFlight   map[string]bool
+	finished   map[string]FinishedNode
+	pending    map[string]bool
+	failedDeps map[string]bool
+}
+
+func NewScheduler(nodes []planner.Node, maxConc int) *Scheduler {
+	if maxConc <= 0 {
+		maxConc = 1
+	}
+	s := &Scheduler{
+		nodes:      nodes,
+		nodeByID:   make(map[string]planner.Node, len(nodes)),
+		rev:        make(map[string][]string),
+		maxConc:    maxConc,
+		inFlight:   make(map[string]bool),
+		finished:   make(map[string]FinishedNode),
+		pending:    make(map[string]bool),
+		failedDeps: make(map[string]bool),
+	}
+	for _, n := range nodes {
+		s.nodeByID[n.ID] = n
+		for _, dep := range n.DependsOn {
+			s.rev[dep] = append(s.rev[dep], n.ID)
+		}
+		if len(n.DependsOn) == 0 {
+			s.pending[n.ID] = true
+		}
+	}
+	return s
+}
+
+func (s *Scheduler) Ready() []planner.Node {
+	free := s.maxConc - len(s.inFlight)
+	if free <= 0 {
+		return nil
+	}
+	var out []planner.Node
+	for id := range s.pending {
+		if free == 0 {
+			break
+		}
+		out = append(out, s.nodeByID[id])
+		free--
+	}
+	return out
+}
+
+func (s *Scheduler) MarkDispatched(nodeID string) {
+	delete(s.pending, nodeID)
+	s.inFlight[nodeID] = true
+}
+
+func (s *Scheduler) Report(nodeID, status, output, errMsg string) {
+	delete(s.inFlight, nodeID)
+	s.finished[nodeID] = FinishedNode{NodeID: nodeID, Status: status, Output: output, Error: errMsg}
+	if status != "completed" {
+		return
+	}
+	for _, downstream := range s.rev[nodeID] {
+		if _, done := s.finished[downstream]; done {
+			continue
+		}
+		if s.failedDeps[downstream] {
+			continue
+		}
+		ready := true
+		for _, dep := range s.nodeByID[downstream].DependsOn {
+			f, ok := s.finished[dep]
+			if !ok || f.Status != "completed" {
+				ready = false
+				break
+			}
+		}
+		if ready {
+			s.pending[downstream] = true
+		}
+	}
+}
+
+func (s *Scheduler) MarkDownstreamSkipped(failedID string) {
+	var stack []string
+	stack = append(stack, s.rev[failedID]...)
+	for len(stack) > 0 {
+		id := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if _, done := s.finished[id]; done {
+			continue
+		}
+		s.failedDeps[id] = true
+		delete(s.pending, id)
+		s.finished[id] = FinishedNode{NodeID: id, Status: "skipped", Error: fmt.Sprintf("upstream %s failed/skipped", failedID)}
+		stack = append(stack, s.rev[id]...)
+	}
+}
+
+func (s *Scheduler) Done() bool {
+	return len(s.pending) == 0 && len(s.inFlight) == 0
+}
+
+func (s *Scheduler) AllFinished() []FinishedNode {
+	out := make([]FinishedNode, 0, len(s.finished))
+	for _, n := range s.nodes {
+		if f, ok := s.finished[n.ID]; ok {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 var renderRe = regexp.MustCompile(`\{\{\s*([A-Za-z0-9_-]+)\.output\s*\}\}`)
 
 func Render(template string, outputs map[string]string) (string, error) {
