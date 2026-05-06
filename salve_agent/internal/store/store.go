@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -316,6 +318,99 @@ func (s *Store) PopPendingAcks() ([]PendingAck, error) {
 func (s *Store) DeletePendingAck(id string) error {
 	_, err := s.db.Exec(`DELETE FROM pending_acks WHERE task_id=?`, id)
 	return err
+}
+
+type SubTaskRow struct {
+	ParentID, NodeID, TargetID, ChildTaskID, Prompt string
+	DependsOn  []string
+	Status, Output, Error string
+	CreatedAt, StartedAt, FinishedAt string
+}
+
+func (s *Store) InsertSubTasks(parentID string, rows []SubTaskRow) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, r := range rows {
+		deps, _ := json.Marshal(r.DependsOn)
+		if r.CreatedAt == "" {
+			r.CreatedAt = nowUTC()
+		}
+		if r.Status == "" {
+			r.Status = "pending"
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO sub_tasks(parent_id,node_id,target_id,child_task_id,prompt,depends_on,status,output,error,created_at,started_at,finished_at)
+			 VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+			parentID, r.NodeID, r.TargetID, nullable(r.ChildTaskID), r.Prompt, string(deps), r.Status,
+			nullable(r.Output), nullable(r.Error), r.CreatedAt, nullable(r.StartedAt), nullable(r.FinishedAt),
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) UpdateSubTask(parentID, nodeID string, fields map[string]interface{}) error {
+	if len(fields) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(fields))
+	args := make([]interface{}, 0, len(fields)+2)
+	for k, v := range fields {
+		switch k {
+		case "child_task_id", "prompt", "status", "output", "error", "started_at", "finished_at", "target_id":
+		default:
+			return fmt.Errorf("UpdateSubTask: unknown field %q", k)
+		}
+		keys = append(keys, k+"=?")
+		args = append(args, v)
+	}
+	args = append(args, parentID, nodeID)
+	q := "UPDATE sub_tasks SET " + strings.Join(keys, ",") + " WHERE parent_id=? AND node_id=?"
+	res, err := s.db.Exec(q, args...)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("sub_task %s/%s not found", parentID, nodeID)
+	}
+	return nil
+}
+
+func (s *Store) ListSubTasks(parentID string) ([]SubTaskRow, error) {
+	rows, err := s.db.Query(
+		`SELECT parent_id,node_id,target_id,COALESCE(child_task_id,''),prompt,depends_on,status,
+		        COALESCE(output,''),COALESCE(error,''),created_at,COALESCE(started_at,''),COALESCE(finished_at,'')
+		 FROM sub_tasks WHERE parent_id=? ORDER BY created_at ASC`,
+		parentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SubTaskRow
+	for rows.Next() {
+		var r SubTaskRow
+		var depsJSON string
+		if err := rows.Scan(&r.ParentID, &r.NodeID, &r.TargetID, &r.ChildTaskID, &r.Prompt, &depsJSON,
+			&r.Status, &r.Output, &r.Error, &r.CreatedAt, &r.StartedAt, &r.FinishedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal([]byte(depsJSON), &r.DependsOn)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func nullable(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 // Used to silence unused import in case context isn't referenced directly above.

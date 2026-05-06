@@ -117,3 +117,46 @@ func TestRecover_MarksInflightAsFailedAndQueues(t *testing.T) {
 		require.Equal(t, "failed", p.Status)
 	}
 }
+
+func TestSubTasks_InsertAndList(t *testing.T) {
+	s, _ := Open(filepath.Join(t.TempDir(), "x.db"))
+	defer s.Close()
+	require.NoError(t, s.Insert(Task{ID: "p1"}))
+
+	rows := []SubTaskRow{
+		{ParentID: "p1", NodeID: "n1", TargetID: "agent-a", Prompt: "do a", DependsOn: nil, Status: "pending"},
+		{ParentID: "p1", NodeID: "n2", TargetID: "agent-b", Prompt: "do b", DependsOn: []string{"n1"}, Status: "pending"},
+	}
+	require.NoError(t, s.InsertSubTasks("p1", rows))
+
+	got, err := s.ListSubTasks("p1")
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	require.Equal(t, "n1", got[0].NodeID)
+	require.Equal(t, []string{"n1"}, got[1].DependsOn)
+	require.Equal(t, "pending", got[0].Status)
+}
+
+func TestSubTasks_Update(t *testing.T) {
+	s, _ := Open(filepath.Join(t.TempDir(), "x.db"))
+	defer s.Close()
+	require.NoError(t, s.Insert(Task{ID: "p1"}))
+	require.NoError(t, s.InsertSubTasks("p1", []SubTaskRow{
+		{ParentID: "p1", NodeID: "n1", TargetID: "a", Prompt: "p", Status: "pending"},
+	}))
+
+	require.NoError(t, s.UpdateSubTask("p1", "n1", map[string]interface{}{
+		"child_task_id": "ct-1",
+		"status":        "assigned",
+	}))
+	require.NoError(t, s.UpdateSubTask("p1", "n1", map[string]interface{}{
+		"status":      "completed",
+		"output":      "done",
+		"finished_at": "2026-04-28T10:00:00Z",
+	}))
+
+	rows, _ := s.ListSubTasks("p1")
+	require.Equal(t, "ct-1", rows[0].ChildTaskID)
+	require.Equal(t, "completed", rows[0].Status)
+	require.Equal(t, "done", rows[0].Output)
+}

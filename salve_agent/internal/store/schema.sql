@@ -25,3 +25,20 @@ CREATE TABLE IF NOT EXISTS pending_acks (
     status       TEXT NOT NULL,
     enqueued_at  TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS sub_tasks (
+    parent_id     TEXT NOT NULL REFERENCES tasks(id),
+    node_id       TEXT NOT NULL,
+    target_id     TEXT NOT NULL,
+    child_task_id TEXT,
+    prompt        TEXT NOT NULL,
+    depends_on    TEXT NOT NULL,
+    status        TEXT NOT NULL,
+    output        TEXT,
+    error         TEXT,
+    created_at    TEXT NOT NULL,
+    started_at    TEXT,
+    finished_at   TEXT,
+    PRIMARY KEY (parent_id, node_id)
+);
+CREATE INDEX IF NOT EXISTS idx_subtasks_parent ON sub_tasks(parent_id);
