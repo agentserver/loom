@@ -104,7 +104,23 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 		if inFlight == 0 {
 			break
 		}
-		d := <-doneCh
+		var d done
+		select {
+		case d = <-doneCh:
+		case <-time.After(60 * time.Second):
+			cancelAll()
+			// best-effort drain (give goroutines a chance to write after ctx cancel)
+			drainDeadline := time.After(5 * time.Second)
+			for inFlight > 0 {
+				select {
+				case <-doneCh:
+					inFlight--
+				case <-drainDeadline:
+					inFlight = 0 // give up draining
+				}
+			}
+			return executor.Result{}, fmt.Errorf("scheduler stuck: no progress in 60s")
+		}
 		inFlight--
 		sched.Report(d.NodeID, d.Status, d.Output, d.Error)
 		if d.Status == "completed" {
