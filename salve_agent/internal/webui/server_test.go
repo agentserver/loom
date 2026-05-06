@@ -89,4 +89,43 @@ func TestStream_LiveAndDone(t *testing.T) {
 	require.Contains(t, seen, "done")
 }
 
+func TestChildren_NotFound(t *testing.T) {
+	s := openStore(t)
+	h := NewHandler(s, "", &config.Config{})
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/tasks/none/children", nil))
+	require.Equal(t, 200, rr.Code)
+	require.Equal(t, "[]\n", rr.Body.String())
+}
+
+func TestChildren_ListsSubTasks(t *testing.T) {
+	s := openStore(t)
+	require.NoError(t, s.Insert(store.Task{ID: "p"}))
+	require.NoError(t, s.InsertSubTasks("p", []store.SubTaskRow{
+		{ParentID: "p", NodeID: "n1", TargetID: "a", Prompt: "x", Status: "completed", Output: "ok"},
+	}))
+	h := NewHandler(s, "", &config.Config{})
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/tasks/p/children", nil))
+	require.Equal(t, 200, rr.Code)
+	require.Contains(t, rr.Body.String(), `"NodeID":"n1"`)
+	require.Contains(t, rr.Body.String(), `"Status":"completed"`)
+}
+
+func TestTaskDetail_IncludesChildren(t *testing.T) {
+	s := openStore(t)
+	require.NoError(t, s.Insert(store.Task{ID: "p"}))
+	require.NoError(t, s.InsertSubTasks("p", []store.SubTaskRow{
+		{ParentID: "p", NodeID: "n1", TargetID: "a", Prompt: "x", Status: "pending"},
+	}))
+	h := NewHandler(s, "", &config.Config{})
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/tasks/p", nil))
+	require.Equal(t, 200, rr.Code)
+	require.Contains(t, rr.Body.String(), `"children"`)
+	require.Contains(t, rr.Body.String(), `"NodeID":"n1"`)
+}
+
 var _ = context.Background

@@ -65,9 +65,15 @@ func (h *Handler) taskRouter(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/tasks/")
 	parts := strings.SplitN(rest, "/", 2)
 	id := parts[0]
-	if len(parts) == 2 && parts[1] == "stream" {
-		h.stream(w, r, id)
-		return
+	if len(parts) == 2 {
+		switch parts[1] {
+		case "stream":
+			h.stream(w, r, id)
+			return
+		case "children":
+			h.children(w, r, id)
+			return
+		}
 	}
 	h.taskDetail(w, r, id)
 }
@@ -78,8 +84,24 @@ func (h *Handler) taskDetail(w http.ResponseWriter, r *http.Request, id string) 
 		http.Error(w, `{"error":"not found"}`, 404)
 		return
 	}
+	children, _ := h.s.ListSubTasks(id)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"task": row, "chunks": chunks})
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"task": row, "chunks": chunks, "children": children,
+	})
+}
+
+func (h *Handler) children(w http.ResponseWriter, r *http.Request, id string) {
+	rows, err := h.s.ListSubTasks(id)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	if rows == nil {
+		rows = []store.SubTaskRow{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(rows)
 }
 
 func (h *Handler) stream(w http.ResponseWriter, r *http.Request, id string) {
