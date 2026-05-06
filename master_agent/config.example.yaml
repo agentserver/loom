@@ -1,0 +1,33 @@
+server:
+  url: https://agent.example.com
+  name: master-agent
+
+credentials:
+  sandbox_id: ""
+  tunnel_token: ""
+  proxy_token: ""
+  short_id: ""
+
+claude:
+  bin: claude
+
+planner:
+  bin: claude
+  timeout_sec: 60
+  extra_args: []
+
+fanout:
+  max_concurrency: 4
+  default_policy: best_effort
+  policy_by_skill:
+    fanout_strict: all_or_nothing
+  subtask_defaults:
+    timeout_sec: 600
+    max_budget_usd: 0
+
+discovery:
+  display_name: master_agent
+  description: Orchestrator (route + fanout)
+  skills:
+    - route
+    - fanout
