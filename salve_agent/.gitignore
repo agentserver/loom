@@ -6,3 +6,4 @@ config.yaml
 *.tmp
 salve-agent
 testdata/fake-mcp-stdio/fake-mcp-stdio
+cmd/master-agent/master-agent
