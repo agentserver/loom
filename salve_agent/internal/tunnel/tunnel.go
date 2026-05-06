@@ -115,3 +115,10 @@ func (t *Tunnel) Run(ctx context.Context) error {
 		// Task: nil — our internal/poller handles task polling.
 	})
 }
+
+// SDKClient returns the underlying agentsdk.Client after EnsureRegistered has run.
+// Callers (e.g., master_agent's orchestrator) use it to call DelegateTask, WaitForTask, DiscoverAgents.
+// Returns nil if EnsureRegistered has not been called.
+func (t *Tunnel) SDKClient() *agentsdk.Client {
+	return t.sdk
+}
