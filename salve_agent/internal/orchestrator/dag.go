@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"fmt"
+	"regexp"
 
 	"github.com/yourorg/salve_agent/internal/planner"
 )
@@ -74,4 +75,26 @@ func detectCycle(nodes []planner.Node) error {
 		return fmt.Errorf("cycle detected (visited %d of %d nodes)", visited, len(nodes))
 	}
 	return nil
+}
+
+var renderRe = regexp.MustCompile(`\{\{\s*([A-Za-z0-9_-]+)\.output\s*\}\}`)
+
+func Render(template string, outputs map[string]string) (string, error) {
+	var firstErr error
+	out := renderRe.ReplaceAllStringFunc(template, func(match string) string {
+		sub := renderRe.FindStringSubmatch(match)
+		id := sub[1]
+		v, ok := outputs[id]
+		if !ok {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("template references missing node output: %s", id)
+			}
+			return match
+		}
+		return v
+	})
+	if firstErr != nil {
+		return "", firstErr
+	}
+	return out, nil
 }

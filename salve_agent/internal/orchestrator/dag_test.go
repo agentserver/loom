@@ -49,3 +49,26 @@ func TestValidate_TooLarge(t *testing.T) {
 	}
 	require.ErrorContains(t, Validate(nodes), "plan too large")
 }
+
+func TestRender_NoVars(t *testing.T) {
+	out, err := Render("hello world", nil)
+	require.NoError(t, err)
+	require.Equal(t, "hello world", out)
+}
+
+func TestRender_Substitutes(t *testing.T) {
+	out, err := Render("use {{a.output}} and {{b.output}}", map[string]string{"a": "X", "b": "Y"})
+	require.NoError(t, err)
+	require.Equal(t, "use X and Y", out)
+}
+
+func TestRender_MissingVarErrors(t *testing.T) {
+	_, err := Render("use {{ghost.output}}", map[string]string{"a": "X"})
+	require.ErrorContains(t, err, "ghost")
+}
+
+func TestRender_RepeatedReferences(t *testing.T) {
+	out, err := Render("{{a.output}} {{a.output}}", map[string]string{"a": "X"})
+	require.NoError(t, err)
+	require.Equal(t, "X X", out)
+}
