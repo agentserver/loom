@@ -280,6 +280,12 @@ func (s *Store) Recover() error {
 		); err != nil {
 			return err
 		}
+		if _, err := tx.Exec(
+			`UPDATE sub_tasks SET status='cancelled', finished_at=? WHERE parent_id=? AND status IN ('pending','assigned')`,
+			nowUTC(), id,
+		); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }

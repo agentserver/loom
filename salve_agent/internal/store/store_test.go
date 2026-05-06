@@ -160,3 +160,29 @@ func TestSubTasks_Update(t *testing.T) {
 	require.Equal(t, "completed", rows[0].Status)
 	require.Equal(t, "done", rows[0].Output)
 }
+
+func TestRecover_CancelsInflightSubTasks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "x.db")
+	s, _ := Open(path)
+	require.NoError(t, s.Insert(Task{ID: "p"}))
+	require.NoError(t, s.MarkRunning("p"))
+	require.NoError(t, s.InsertSubTasks("p", []SubTaskRow{
+		{ParentID: "p", NodeID: "n1", TargetID: "x", Prompt: "x", Status: "pending"},
+		{ParentID: "p", NodeID: "n2", TargetID: "x", Prompt: "x", Status: "assigned"},
+		{ParentID: "p", NodeID: "n3", TargetID: "x", Prompt: "x", Status: "completed", Output: "ok"},
+	}))
+	s.Close()
+
+	s2, _ := Open(path)
+	defer s2.Close()
+	require.NoError(t, s2.Recover())
+
+	rows, _ := s2.ListSubTasks("p")
+	statuses := map[string]string{}
+	for _, r := range rows {
+		statuses[r.NodeID] = r.Status
+	}
+	require.Equal(t, "cancelled", statuses["n1"])
+	require.Equal(t, "cancelled", statuses["n2"])
+	require.Equal(t, "completed", statuses["n3"])
+}
