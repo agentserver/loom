@@ -71,6 +71,22 @@ func TestEnsureRegistered_PersistsCredentials(t *testing.T) {
 	require.Equal(t, "sid", reloaded.Credentials.ShortID)
 }
 
+func TestEnsureRegistered_InitsSDKFromExistingCreds(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.Server{URL: "https://x", Name: "n"},
+	}
+	cfg.Credentials.SandboxID = "sb"
+	cfg.Credentials.TunnelToken = "tt"
+	cfg.Credentials.ProxyToken = "pt"
+	cfg.Credentials.ShortID = "sid"
+	cfgPath := filepath.Join(t.TempDir(), "c.yaml")
+	require.NoError(t, cfg.Save(cfgPath))
+
+	tn := New(cfg, cfgPath, http.DefaultServeMux)
+	require.NoError(t, tn.EnsureRegistered(context.Background()))
+	require.NotNil(t, tn.SDKClient(), "SDKClient should be initialized after EnsureRegistered")
+}
+
 func TestEnsureRegistered_SkipsWhenAlreadyRegistered(t *testing.T) {
 	// If credentials are already present, EnsureRegistered must be a no-op
 	// (no HTTP calls made, no error returned).

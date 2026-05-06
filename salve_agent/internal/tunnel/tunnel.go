@@ -41,6 +41,15 @@ func NewWithDeps(cfg *config.Config, cfgPath string, h http.Handler, deps Deps) 
 
 func (t *Tunnel) EnsureRegistered(ctx context.Context) error {
 	if t.cfg.Credentials.SandboxID != "" && t.cfg.Credentials.TunnelToken != "" {
+		if t.sdk == nil {
+			t.sdk = agentsdk.NewClient(agentsdk.Config{ServerURL: t.cfg.Server.URL, Name: t.cfg.Server.Name})
+			t.sdk.SetRegistration(&agentsdk.Registration{
+				SandboxID:   t.cfg.Credentials.SandboxID,
+				TunnelToken: t.cfg.Credentials.TunnelToken,
+				ProxyToken:  t.cfg.Credentials.ProxyToken,
+				ShortID:     t.cfg.Credentials.ShortID,
+			})
+		}
 		return nil
 	}
 	dc, err := agentsdk.RequestDeviceCode(ctx, t.cfg.Server.URL)
