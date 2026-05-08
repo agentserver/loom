@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-08
 **Status:** Draft (awaiting user review)
-**Scope:** Add a live end-to-end test that exercises `master-agent` + two `slave-agent` processes with a real `agentserver` and real `claude`. The pipeline captures an image on slave A, then compresses it on slave B, returning a final URL/byte-count to the master's reducer. Along the way, formalize a small `pkg/transport` library so that user-written sub-task agents have a documented, reusable way to pass large/binary artifacts between nodes without inflating prompts.
+**Scope:** Add a live end-to-end test that exercises `master-agent` + two custom workspace agents (built directly on `agentserver/pkg/agentsdk`, not on `cmd/slave-agent`) against a real `agentserver` with real `claude` running as the master's planner/reducer. The pipeline captures an image on agent A, then compresses it on agent B, returning a final URL/byte-count to the master's reducer. Along the way, formalize a small `pkg/transport` library so that user-written sub-task agents have a documented, reusable way to pass large/binary artifacts between nodes without inflating prompts.
 
 ## Motivation
 
@@ -14,45 +14,44 @@ This work delivers:
 
 1. A `pkg/transport` package with a `Transport` interface and two reference implementations (`http`, `sharedfs`). Not imported by `internal/*`.
 2. A documented "handle JSON" output convention.
-3. Two reference MCP tools (`mcp-image-capture`, `mcp-image-compress`) under `examples/image-pipeline/` that use `pkg/transport/http` to demonstrate the pattern.
+3. Two reference custom agents (`agent-image-capture`, `agent-image-compress`) under `examples/image-pipeline/` that use `pkg/transport/http` and the agentserver SDK directly (no claude, no MCP) to demonstrate the pattern.
 4. A bash e2e script that wires master + 2 slaves + agentserver + claude end-to-end and asserts pipeline success.
 
 ## Non-goals
 
 - No changes to `internal/orchestrator`, `internal/planner`, `internal/dispatch`, `internal/executor`, `internal/store`, or any other framework internal.
-- No new `skill` field on planner nodes; no orchestrator changes to thread skills through `DelegateTask`. Sub-tasks continue to land on slaves' default executor (claude), which calls MCP tools.
+- No new `skill` field on planner nodes; no orchestrator changes to thread skills through `DelegateTask`.
+- The two image agents are **not** based on `cmd/slave-agent` and do **not** use MCP or claude internally. They are independent `agentsdk` clients. This deliberate choice demonstrates that `master-agent` orchestrates **any** workspace agent, not only sibling slave-agents — keeping `multi-agent` honestly framework-shaped. (Discussion of why we don't reuse `slave-agent` here: the slave's claude executor does not propagate `mcp_servers` to the `claude` CLI invocation, so a "claude-on-slave calls MCP tool" path would require modifying `internal/executor/claude.go`, which is out of scope.)
 - No authentication, GC, or quota for the reference HTTP transport — it's testdata-grade.
-- No real-camera capture; the capture tool synthesizes a deterministic noise PNG.
+- No real-camera capture; the capture agent synthesizes a deterministic noise PNG.
 
 ## Architecture
 
 ### Data flow (happy path)
 
 ```
-[user] --POST {skill:fanout, prompt:"capture then compress"}--> [master-agent]
+[driver] --DelegateTask({target=master, skill:fanout, prompt:"capture then compress"})--> [master-agent]
                                                                      |
                                           master.planner (real claude) emits DAG:
-                                          [{id:n1, target_id:slave-cap, prompt:"capture a 256x256 image",  depends_on:[]},
-                                           {id:n2, target_id:slave-comp, prompt:"compress {{n1.output}} at q=50", depends_on:[n1]}]
+                                          [{id:n1, target_id:agent-image-capture,  prompt:"capture a 256x256 image",      depends_on:[]},
+                                           {id:n2, target_id:agent-image-compress, prompt:"compress {{n1.output}} at q=50", depends_on:[n1]}]
                                                                      |
-                                          DelegateTask(n1) -> slave-cap.claude
-                                              -> calls MCP image.capture(width:256,height:256)
-                                              -> capture tool generates PNG, transport.Put -> Handle{type:image_url, url:http://A:7001/...}
-                                              -> returns Handle.Marshal() as MCP tool result
-                                              -> slave-cap.claude returns that JSON string as task output
+                                          DelegateTask(n1) -> agent-image-capture (custom agentsdk Task handler)
+                                              -> synthesize 256x256 PNG via image/png
+                                              -> httpx.Put(image/png, bytes) -> Handle{type:image_url, url:http://A:7001/blobs/<id>, mime:image/png, bytes:N}
+                                              -> task.Complete(Output: Handle.Marshal())  // string of handle JSON
                                                                      |
-                                          orchestrator stores outputs[n1] = "<handle JSON>"
-                                          orchestrator Renders n2.prompt: substitutes {{n1.output}} with full handle JSON
+                                          orchestrator stores outputs[n1] = "<handle JSON string>"
+                                          orchestrator Renders n2.prompt: substitutes {{n1.output}} with full handle JSON string
                                                                      |
-                                          DelegateTask(n2) -> slave-comp.claude
-                                              -> sees handle JSON in prompt, extracts url
-                                              -> calls MCP image.compress(url:"...", quality:50)
-                                              -> compress tool: HTTP GET url, jpeg.Encode, transport.Put -> Handle{...mime:image/jpeg, ratio:0.4}
-                                              -> returns Handle.Marshal() as MCP tool result
-                                              -> slave-comp.claude returns that JSON as task output
+                                          DelegateTask(n2) -> agent-image-compress (custom agentsdk Task handler)
+                                              -> regex first https?:// URL out of task.Prompt
+                                              -> http.Get url -> image.Decode -> jpeg.Encode(quality=50)
+                                              -> httpx.Put(image/jpeg, bytes) -> Handle{type:image_url, mime:image/jpeg, bytes:M, meta:{original_bytes:N, ratio:M/N}}
+                                              -> task.Complete(Output: Handle.Marshal())
                                                                      |
                                           master.reducer (real claude) summarizes:
-                                          "Captured 51234-byte PNG, compressed to 20100 bytes (ratio 0.39). Final URL: http://B:7002/..."
+                                          "Captured 51234-byte PNG, compressed to 20100 bytes (ratio 0.39). Final URL: http://B:7002/blobs/<id>"
                                                                      |
 [driver] <--WaitForTask({task_id})-- final summary (TaskInfo.Output)
 ```
@@ -74,18 +73,30 @@ multi-agent/
 ├── examples/
 │   └── image-pipeline/
 │       ├── README.md                  # explains handle JSON convention + how to run e2e
-│       ├── mcp-image-capture/
-│       │   ├── main.go
-│       │   └── main_test.go           # stdio JSON-RPC smoke
-│       ├── mcp-image-compress/
-│       │   ├── main.go
-│       │   └── main_test.go
+│       ├── internal/
+│       │   ├── agentboot/
+│       │   │   └── agentboot.go       # shared registration + card publish + Connect helper
+│       │   │                          # used by both image agents (DRY)
+│       │   ├── imageops/
+│       │   │   ├── imageops.go        # SynthPNG(width,height,seed) and EncodeJPEG(reader,quality)
+│       │   │   └── imageops_test.go
+│       │   └── handlepick/
+│       │       ├── handlepick.go      # FirstURL(prompt) regex helper for compress agent
+│       │       └── handlepick_test.go
+│       ├── agent-image-capture/
+│       │   ├── main.go                # agentsdk Task handler: SynthPNG -> httpx.Put -> Complete(handle JSON)
+│       │   ├── main_test.go           # spins up agentboot + httpx, drives the handler with a fake Task
+│       │   └── config.example.yaml
+│       ├── agent-image-compress/
+│       │   ├── main.go                # agentsdk Task handler: FirstURL -> http.Get -> EncodeJPEG -> httpx.Put -> Complete
+│       │   ├── main_test.go
+│       │   └── config.example.yaml
 │       ├── e2e-driver/
-│       │   └── main.go                # Go binary: discovers master via agentsdk,
-│       │                              #   DelegateTask(skill=fanout), WaitForTask,
-│       │                              #   asserts reducer output + downloads final URL
+│       │   └── main.go                # discovers master via agentsdk, DelegateTask(skill=fanout),
+│       │                              #   WaitForTask, asserts reducer output + downloads final URL,
+│       │                              #   optionally inspects master/data.db sub_tasks via sqlite
 │       └── scripts/
-│           └── e2e.sh                 # builds, launches master + 2 slaves, runs driver, asserts
+│           └── e2e.sh                 # builds, launches master + 2 image agents, runs driver, asserts
 └── docs/superpowers/specs/2026-05-08-image-pipeline-e2e-design.md   # this file
 ```
 
@@ -177,7 +188,7 @@ func (s *Server) Close() error
 - HTTP routes: `GET /blobs/{id}` returns the bytes with the recorded `Content-Type`; `HEAD /blobs/{id}` returns size only.
 - Blob ID: first 16 hex chars of `sha256(data)` (content-addressed, automatic dedupe).
 - URL pattern: `<PublicURL>/blobs/<id>`, e.g. `http://127.0.0.1:54321/blobs/9f86d081884c7d65`.
-- No auth, no TTL — the process owns its state and dies when the MCP tool process exits.
+- No auth, no TTL — the process owns its state and dies when the agent process exits.
 
 ### `pkg/transport/sharedfs`
 
@@ -218,87 +229,79 @@ func (f *FS) Close() error // no-op
 - Get on a `file://` URL outside `dir` returns an error (path traversal guard).
 - Get on missing handle returns `os.ErrNotExist`-flavored error.
 
-## Reference MCP tools
+## Reference custom agents
 
-Both tools follow the existing stdio MCP shape used by `multi-agent/testdata/fake-mcp-stdio/main.go`. Each is a tiny Go `main` that reads JSON-RPC requests on stdin, writes responses on stdout, and prints diagnostics on stderr. Each starts an HTTP transport on its own ephemeral port at boot.
+Both binaries are independent agentsdk clients. Each:
+1. Loads YAML config (server URL, name, credentials, optional listen-addr).
+2. If credentials are missing, runs `RequestDeviceCode` + `PollForToken` + `Register`, prints the verification URL, writes credentials back to the config. Otherwise calls `SetRegistration`.
+3. POSTs its discovery card to `/api/agent/discovery/cards` (copying the helper from `multi-agent/internal/tunnel/tunnel.go:81`) so the master's planner can see it.
+4. Starts an in-process `httpx.Server` on `127.0.0.1:0` (random port) for transport.
+5. Calls `cli.Connect(ctx, agentsdk.Handlers{Task: handler})` to enter the task poll loop.
 
-### `mcp-image-capture`
+Step 1-3 + 5 are nearly identical between the two agents — that boilerplate lives in `examples/image-pipeline/internal/agentboot/agentboot.go`. Each agent's `main.go` is essentially: parse flags, call `agentboot.Run(ctx, cfg, taskHandler)`.
 
-| Field | Value |
-|---|---|
-| Server name (in slave config) | `image` |
-| Tool | `capture` |
-| Input args | `{"width":int=256,"height":int=256,"seed":int=42}` (all optional) |
-| Behavior | Generate a width×height PNG of seeded pseudo-random RGBA pixels. `transport.Put` it, set `Type="image_url"`, return `Handle.Marshal()` as the MCP tool result string. |
-| Capability change | `false`. |
-| Stderr boot line | `LISTEN <host:port>` (for e2e log capture). |
-| Failure modes | width/height out of bounds (1..4096) → MCP error. |
-
-### `mcp-image-compress`
+### `agent-image-capture`
 
 | Field | Value |
 |---|---|
-| Server name | `image` |
-| Tool | `compress` |
-| Input args | `{"url":string (required),"quality":int=50}` |
-| Behavior | HTTP GET the url, `image.Decode`, `jpeg.Encode(quality)`, `transport.Put` the JPEG bytes. Return new Handle with `Type="image_url"`, `MIME="image/jpeg"`, `Meta:{"original_bytes":"<n>","ratio":"<r>"}` (ratio = compressed/original to 2 decimals). |
-| Capability change | `false`. |
+| Discovery `display_name` | `image-capture` |
+| Discovery `description` | "Image capture agent. Always returns a JSON handle string `{type:image_url, url:..., mime:image/png, bytes:N}` pointing at a freshly generated 256x256 PNG. Ignores task prompt content." |
+| Discovery `skills` | `["capture"]` (purely informational — agent ignores skill on the incoming task) |
+| Task handler | Calls `imageops.SynthPNG(256,256,42)` → `httpx.Put(ctx,"image/png",reader)` → `task.Complete(ctx, TaskResult{Output: handle.WithType("image_url").Marshal()})`. |
+| Stderr boot line | `LISTEN <host:port>` (so the e2e script can log it). |
+| Failure modes | `httpx.Put` failure → `task.Fail(ctx, err.Error())`. |
+
+### `agent-image-compress`
+
+| Field | Value |
+|---|---|
+| Discovery `display_name` | `image-compress` |
+| Discovery `description` | "Image compress agent. Reads the first https?:// URL it finds in the task prompt, downloads the image, re-encodes as JPEG (quality=50 default; override via `quality=N` substring in prompt). Returns a JSON handle string `{type:image_url, url:..., mime:image/jpeg, bytes:M, meta:{original_bytes:N, ratio:M/N}}`." |
+| Discovery `skills` | `["compress"]` |
+| Task handler | `handlepick.FirstURL(task.Prompt)` → `http.Get` → `image.Decode` → `imageops.EncodeJPEG(image, quality)` → `httpx.Put(ctx,"image/jpeg",reader)` → `task.Complete`. |
 | Stderr boot line | `LISTEN <host:port>`. |
-| Failure modes | url missing → MCP error; HTTP GET fails or non-2xx → MCP error; image decode fails → MCP error; quality outside 1..100 → MCP error. |
+| Failure modes | no URL in prompt → `task.Fail("no URL in prompt")`; GET fails or non-2xx → `task.Fail`; decode fails → `task.Fail`. |
 
-### Smoke tests for the MCP tools
+### Tests for the custom agents
 
-`mcp-image-capture/main_test.go`:
-- Spawn the binary as a subprocess (`go test` builds via `os.Executable` path or `exec.Command("go", "run", ...)`); send `tools/call` JSON-RPC with `name=capture, arguments={width:64,height:64}`; assert the response's `content[0].text` parses as a Handle with `MIME==image/png`, `Bytes>0`. Then HTTP GET the Handle URL and assert byte length matches.
-- Same with default args.
-- Send `width=0` → expect MCP error response.
+`internal/imageops/imageops_test.go`:
+- `SynthPNG(64,64,42)` produces bytes that `image.Decode` decodes back to a 64x64 image; same seed → identical bytes.
+- `EncodeJPEG(decoded image, 50)` produces bytes that `image.Decode` decodes; output strictly smaller than the input PNG bytes for the noise image.
 
-`mcp-image-compress/main_test.go`:
-- Bring up an `httptest.Server` that serves a known PNG. Spawn the binary; call `compress` with that URL and `quality=50`; assert the returned Handle is `image/jpeg`, `Bytes < served PNG length`, and `Get` on the returned URL yields valid JPEG (decode succeeds).
-- Call with missing url → expect MCP error.
-- Call with url returning 500 → expect MCP error.
+`internal/handlepick/handlepick_test.go`:
+- `FirstURL("Compress {\"type\":\"image_url\",\"url\":\"http://x/y\",...}")` → `http://x/y`
+- `FirstURL("no urls here")` → `("", false)`
+- Doesn't get tripped up by trailing punctuation (`http://x/y."` returns `http://x/y`).
 
-## Slave / master configurations
+`agent-image-capture/main_test.go`:
+- Build a fake `*agentsdk.Task` (we cannot construct it directly because `proxyToken` and `serverURL` are unexported — instead, factor the actual work into a helper `runCapture(ctx, hx *httpx.Server) (string, error)` and test that helper). Asserts: returned string parses as Handle JSON; MIME is `image/png`; downloading the URL via `hx.Get` round-trips the bytes.
 
-The e2e script generates these on the fly into the work dir; checked-in `config.example.yaml` files under each MCP tool dir document the shape.
+`agent-image-compress/main_test.go`:
+- Spin up an `httptest.Server` that serves a known PNG. Construct a `runCompress(ctx, hx, prompt) (string, error)` helper. Pass a prompt containing the test server URL. Assert: returned string parses as Handle JSON; MIME is `image/jpeg`; bytes < input bytes; `hx.Get` round-trips a valid JPEG (decode succeeds).
+- Call helper with prompt missing URL → returns error.
 
-### slave-A (capture provider)
+## Agent configurations
 
-```yaml
-server: { url: ${AGENTSERVER_URL}, name: slave-cap-e2e }
-claude: { bin: claude }
-mcp_servers:
-  image:
-    transport: stdio
-    command: ${WORK}/bin/mcp-image-capture
-discovery:
-  display_name: image-capture
-  description: |
-    Image capture agent. Provides MCP tool `capture` (server=image, tool=capture).
-    Input: {"width":int,"height":int,"seed":int} (all optional, defaults 256/256/42).
-    Output: a JSON handle string {"type":"image_url","url":"http://...","bytes":N,"mime":"image/png"}.
-    Use this agent to PRODUCE an image. Do NOT pass an existing image to it.
-  skills: [chat, mcp]
-```
+The e2e script materializes these into the work dir; `config.example.yaml` lives under each agent dir for documentation.
 
-### slave-B (compress provider)
+The two image agents share a tiny config shape (much smaller than the full slave-agent config because there are no executors, no journal, no webui):
 
 ```yaml
-server: { url: ${AGENTSERVER_URL}, name: slave-comp-e2e }
-claude: { bin: claude }
-mcp_servers:
-  image:
-    transport: stdio
-    command: ${WORK}/bin/mcp-image-compress
+server:
+  url: ${AGENTSERVER_URL}
+  name: <agent-name>      # used for registration; e.g. agent-image-capture-e2e
+credentials:
+  sandbox_id: ""          # filled by device-flow on first run
+  tunnel_token: ""
+  proxy_token: ""
+  workspace_id: ""
+  short_id: ""
 discovery:
-  display_name: image-compress
+  display_name: <image-capture|image-compress>
   description: |
-    Image compression agent. Provides MCP tool `compress` (server=image, tool=compress).
-    Input: {"url":"<image url>","quality":int=50}. Reads the image from url, re-encodes as JPEG.
-    Output: a JSON handle string {"type":"image_url","url":"http://...","bytes":N,"mime":"image/jpeg",
-    "meta":{"original_bytes":"<n>","ratio":"<r>"}}.
-    Use this agent to COMPRESS an image you already have a url for.
-  skills: [chat, mcp]
+    <see Reference custom agents section above>
+  skills: [<capture|compress>]
+listen_addr: 127.0.0.1:0  # for the in-process httpx.Server
 ```
 
 ### master
@@ -354,7 +357,7 @@ The agent-side HTTP API requires a `Bearer <proxy_token>` header from a register
 ### `e2e-driver` behavior
 
 Reads from CLI flags or env:
-- `--config` (path to a yaml with the driver's own agent registration credentials, same shape as slave config but no executors needed; alternatively `--reuse-creds` points at slave-cap's config to piggyback)
+- `--config` (path to a yaml with the driver's own agent registration credentials — same minimal shape as the image agents, no listen_addr or discovery needed)
 - `--target-display-name` (default `master-e2e-image`) — what to look for in DiscoverAgents
 - `--prompt` (the master task prompt above)
 - `--skill` (default `fanout`)
@@ -384,28 +387,26 @@ Preconditions (asserted in script header):
 - `AGENTSERVER_URL` set and reachable.
 - `ANTHROPIC_API_KEY` set.
 - `claude`, `go`, `sqlite3` on PATH.
+- Pre-existing config files (with credentials filled in via prior interactive registration) at paths supplied by env vars: `MASTER_CONFIG`, `CAPTURE_CONFIG`, `COMPRESS_CONFIG`, `DRIVER_CONFIG`.
 
 Steps:
 
 1. `work=$(mktemp -d)`. Trap on EXIT: kill all spawned PIDs, `rm -rf "$work"`.
-2. From module root, `go build` five binaries into `$work/bin/`:
+2. From module root, `go build` four binaries into `$work/bin/`:
    - `./cmd/master-agent`
-   - `./cmd/slave-agent`
-   - `./examples/image-pipeline/mcp-image-capture`
-   - `./examples/image-pipeline/mcp-image-compress`
+   - `./examples/image-pipeline/agent-image-capture`
+   - `./examples/image-pipeline/agent-image-compress`
    - `./examples/image-pipeline/e2e-driver`
-3. Materialize three working dirs `$work/{master,slave-cap,slave-comp}` with respective `config.yaml` files (templates above).
-4. Launch in order, each backgrounded with stdout+stderr to `$work/<name>.log`:
-   - `slave-cap` (cwd=`$work/slave-cap`)
-   - `slave-comp` (cwd=`$work/slave-comp`)
-   - `master` (cwd=`$work/master`)
-5. Wait for registration: there is no log line that signals "card published successfully" — the existing code only logs on failure. Instead: poll `master`'s data.db for the `credentials` written back by `tunnel.EnsureRegistered` (the master writes credentials into `master/config.yaml` after device-flow completes; on subsequent runs they're already present). The script handles two cases:
-   - **First run** (no credentials in any config): the script aborts with a clear message, instructs the user to perform initial device-flow registration manually for each of the three configs, and rerun. (Auto-handling device flow in a script is out of scope.)
-   - **Subsequent runs** (credentials present): each agent skips device flow; the script polls until `agentsdk.DiscoverAgents` (called from the driver during step 6) sees all three agents — this is the real readiness check.
-6. Run the driver: `$work/bin/e2e-driver --reuse-creds $work/slave-cap/config.yaml --target-display-name master-e2e-image --prompt "<prompt>" --master-data-db $work/master/data.db --timeout 300s`.
-7. Driver exit code is the script's exit code. Print `OK image-pipeline e2e` on success; on failure, print log paths (`master.log`, `slave-cap.log`, `slave-comp.log`).
+3. Copy each of the four config files into per-agent subdirs of `$work` (so each agent has its own cwd for `data.db`, etc.).
+4. Launch the three long-running agents in order, each backgrounded with stdout+stderr to `$work/<name>.log`:
+   - `agent-image-capture` (cwd=`$work/capture`)
+   - `agent-image-compress` (cwd=`$work/compress`)
+   - `master-agent` (cwd=`$work/master`)
+5. Readiness: there is no "card published" success log. Instead, the e2e driver (run in step 6) polls `agentsdk.DiscoverAgents` until it sees all three target display names (`master-e2e-image`, `image-capture`, `image-compress`) in the response, with a 60s ceiling. This is the real readiness check.
+6. Run the driver: `$work/bin/e2e-driver --config $DRIVER_CONFIG --target-display-name master-e2e-image --prompt "<prompt>" --expect-agents image-capture,image-compress --master-data-db $work/master/data.db --timeout 300s`.
+7. Driver exit code is the script's exit code. Print `OK image-pipeline e2e` on success; on failure, print log paths (`master.log`, `capture.log`, `compress.log`).
 
-The credentials concern means **the e2e is a "second-run" scenario**: a one-time interactive setup is required. This matches the existing `cmd/master-agent/scripts/e2e.sh` (which also requires pre-registered slaves) and the e2e doc strings.
+The prerequisite "credentials filled in via prior interactive registration" means **the e2e is a "second-run" scenario**: a one-time interactive setup is required for each of the four configs (master, capture, compress, driver). The setup is a manual step run by whoever first sets up the test box; the README documents it. This matches the existing `cmd/master-agent/scripts/e2e.sh` (which also assumes pre-registered slaves).
 
 ## Test matrix summary
 
@@ -414,19 +415,22 @@ The credentials concern means **the e2e is a "second-run" scenario**: a one-time
 | Unit — handle JSON | `pkg/transport/transport_test.go` | `go test` | none |
 | Unit — http transport | `pkg/transport/http/http_test.go` | `go test -race` | none |
 | Unit — sharedfs transport | `pkg/transport/sharedfs/sharedfs_test.go` | `go test` | none |
-| Smoke — capture MCP tool | `examples/image-pipeline/mcp-image-capture/main_test.go` | `go test` | none |
-| Smoke — compress MCP tool | `examples/image-pipeline/mcp-image-compress/main_test.go` | `go test` (uses `httptest.Server` for the upstream image) | none |
+| Unit — imageops | `examples/image-pipeline/internal/imageops/imageops_test.go` | `go test` | none |
+| Unit — handlepick | `examples/image-pipeline/internal/handlepick/handlepick_test.go` | `go test` | none |
+| Smoke — capture handler | `examples/image-pipeline/agent-image-capture/main_test.go` | `go test` (uses in-process httpx) | none |
+| Smoke — compress handler | `examples/image-pipeline/agent-image-compress/main_test.go` | `go test` (uses `httptest.Server` for the upstream image) | none |
 | E2E — full pipeline | `examples/image-pipeline/scripts/e2e.sh` (which runs `e2e-driver`) | bash, manual | pre-registered configs + `AGENTSERVER_URL`, `ANTHROPIC_API_KEY`, `claude`, `go`, `sqlite3` |
 
 CI gates the first five (already covered by the existing `go test ./...` invocation once the new packages exist). The bash e2e is documented as manual-run, mirroring the existing `cmd/master-agent/scripts/e2e.sh` pattern.
 
 ## Open risks and mitigations
 
-- **Real claude as planner may not always emit `{{n1.output}}`.** Mitigation: the master prompt is explicit about it; if it still misbehaves, the `USE_FAKE_PLANNER=1` fallback path is documented (with the caveat that the fake's hardcoded `target_id` values need swapping in via a small sed step the script can perform after discovering the real agent IDs).
-- **Slave A's HTTP transport URL must be reachable from slave B.** Both slaves run on the same host in the e2e (default `127.0.0.1:0` random port); this is fine for the bash script. A cross-host run would need each MCP tool to bind a routable address — handled via `Options.Addr` and `Options.PublicURL`. Out of scope for the script; in scope for the package design.
-- **MCP tool process lifetime.** The HTTP transport server lives inside the MCP tool subprocess; if the slave's MCP executor recycles the subprocess between calls, the URL becomes invalid. The current `internal/executor/mcp.go` keeps stdio MCP processes alive in `e.stdios` for the executor's lifetime, so within one task the URL stays valid. Documented in the README; if the framework later changes that policy, swap `pkg/transport/sharedfs` (path-based, persistent across processes).
-- **Race between agent registration and master task submission.** There is no log line emitted on successful card publish (only on failure). The driver mitigates by polling `agentsdk.DiscoverAgents` until all three expected agents are visible (60s ceiling), then proceeds.
-- **Test cost.** Real claude is invoked at least three times per e2e run (planner, two sub-task chats, reducer = 3-4 calls). Documented in script header so users know.
+- **Real claude as planner may not always emit `{{n1.output}}`.** Mitigation: the master prompt is explicit about it; if it still misbehaves, swap `master.planner.bin` to point at a small inline fake planner script that the e2e installs to `$work/bin/fake-planner.sh`. The script discovers the real agent IDs (via DiscoverAgents) and writes a fixed chain DAG against them. Documented in README; not the default path.
+- **The capture agent's HTTP URL must be reachable from the compress agent.** Both run on the same host in the e2e (default `127.0.0.1:0`); fine. A cross-host run would need each agent to bind a routable address and override `Options.PublicURL`. Out of scope for the script; in scope for `pkg/transport/http`'s API.
+- **Custom-agent process lifetime owns the HTTP server.** The transport server lives inside each agent process; if the agent process restarts mid-task, prior URLs become invalid. The agents are long-lived (`Connect` blocks for the whole session), so this only matters across runs of the e2e. The README warns: rerunning the e2e invalidates URLs from a previous run.
+- **Race between agent registration and master task submission.** There is no log line emitted on successful card publish (only on failure). The driver mitigates by polling `agentsdk.DiscoverAgents` until all three expected display names are visible (60s ceiling), then proceeds.
+- **Test cost.** Real claude is invoked twice per e2e run (planner emits DAG once; reducer summarizes once). Sub-task chats (n1, n2) are handled by the custom Go agents, **not** by claude — so token cost is bounded to ~2 claude calls regardless of pipeline complexity. Documented in script header.
+- **`Task` struct's `proxyToken`/`serverURL` are unexported in agentsdk.** Tests cannot directly construct a `*agentsdk.Task` to drive the handler. Mitigation: each agent's `main.go` exposes the actual work as a tiny exported `runX(ctx, hx, prompt) (string, error)` helper that takes the inputs the handler would extract from `Task`; tests exercise the helper. The handler is a thin wrapper that calls the helper then `task.Complete`/`task.Fail`. This keeps the handler 5 lines and the work testable.
 
 ## Deliverables checklist
 
@@ -434,8 +438,11 @@ CI gates the first five (already covered by the existing `go test ./...` invocat
 - [ ] `multi-agent/pkg/transport/http/http.go` + test
 - [ ] `multi-agent/pkg/transport/sharedfs/sharedfs.go` + test
 - [ ] `multi-agent/examples/image-pipeline/README.md`
-- [ ] `multi-agent/examples/image-pipeline/mcp-image-capture/main.go` + smoke test
-- [ ] `multi-agent/examples/image-pipeline/mcp-image-compress/main.go` + smoke test
+- [ ] `multi-agent/examples/image-pipeline/internal/imageops/imageops.go` + test
+- [ ] `multi-agent/examples/image-pipeline/internal/handlepick/handlepick.go` + test
+- [ ] `multi-agent/examples/image-pipeline/internal/agentboot/agentboot.go`
+- [ ] `multi-agent/examples/image-pipeline/agent-image-capture/main.go` + test + config.example.yaml
+- [ ] `multi-agent/examples/image-pipeline/agent-image-compress/main.go` + test + config.example.yaml
 - [ ] `multi-agent/examples/image-pipeline/e2e-driver/main.go`
 - [ ] `multi-agent/examples/image-pipeline/scripts/e2e.sh`
 - [ ] All of the above pass `go build ./...`, `go vet ./...`, `go test ./...`
