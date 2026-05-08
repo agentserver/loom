@@ -106,6 +106,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("driver: final URL check: %v", err)
 	}
+	if !strings.HasPrefix(mime, "image/jpeg") {
+		log.Fatalf("driver: final URL Content-Type = %q, want image/jpeg", mime)
+	}
 	fmt.Printf("driver: final URL %s -> %d bytes (%s)\n", url, finalBytes, mime)
 
 	// Phase 5: optional sqlite deep check.
