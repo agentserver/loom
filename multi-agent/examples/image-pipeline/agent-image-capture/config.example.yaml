@@ -1,0 +1,20 @@
+server:
+  url: https://agent.example.com
+  name: agent-image-capture-e2e
+
+credentials:
+  sandbox_id: ""
+  tunnel_token: ""
+  proxy_token: ""
+  workspace_id: ""
+  short_id: ""
+
+discovery:
+  display_name: image-capture
+  description: |
+    Image capture agent. Always returns a JSON handle string
+    {"type":"image_url","url":"http://...","mime":"image/png","bytes":N}
+    pointing at a freshly generated 256x256 PNG. Ignores task prompt content.
+  skills: [capture]
+
+listen_addr: 127.0.0.1:0
