@@ -1,0 +1,22 @@
+server:
+  url: https://agent.example.com
+  name: agent-image-compress-e2e
+
+credentials:
+  sandbox_id: ""
+  tunnel_token: ""
+  proxy_token: ""
+  workspace_id: ""
+  short_id: ""
+
+discovery:
+  display_name: image-compress
+  description: |
+    Image compress agent. Reads the first https?:// URL it finds in the
+    task prompt, downloads the image, re-encodes as JPEG (quality=50 default;
+    override via "quality=N" substring in prompt). Returns a JSON handle
+    string {"type":"image_url","url":"http://...","mime":"image/jpeg","bytes":M,
+    "meta":{"original_bytes":"N","ratio":"M/N","quality":"N"}}.
+  skills: [compress]
+
+listen_addr: 127.0.0.1:0
