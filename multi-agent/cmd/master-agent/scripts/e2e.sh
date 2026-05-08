@@ -2,7 +2,7 @@
 # Manual end-to-end check for master-agent. Requires:
 #   - agentserver reachable at $AGENTSERVER_URL
 #   - claude on PATH and ANTHROPIC_API_KEY set
-#   - at least 2 salve-agents already running and registered to the same workspace
+#   - at least 2 slave-agents already running and registered to the same workspace
 set -euo pipefail
 : "${AGENTSERVER_URL:?must set AGENTSERVER_URL}"
 
@@ -36,7 +36,7 @@ agent_pid=$!
 echo "master-agent running as pid $agent_pid in $work"
 echo "manually:"
 echo "  1. visit https://code-<shortID>.<base> to confirm dashboard"
-echo "  2. POST a route task: skill=route, prompt='do X' → should pick a salve and return its output"
+echo "  2. POST a route task: skill=route, prompt='do X' → should pick a slave and return its output"
 echo "  3. POST a fanout task: skill=fanout, prompt='research and summarize Y'"
 echo "     → planner emits DAG; check /tasks/<id>/children for sub-task rows"
 echo "     → SSE /tasks/<id>/stream shows subtask_dispatched + subtask_done events"

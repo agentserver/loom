@@ -40,7 +40,7 @@ go test -tags=contract ./tests/contract/...    # contract (incl. DelegateTask sh
 
 ## End-to-end
 
-From the module root, with at least one or two salve-agents already registered to the same workspace:
+From the module root, with at least one or two slave-agents already registered to the same workspace:
 
 ```bash
 AGENTSERVER_URL=https://agent.example.com ./cmd/master-agent/scripts/e2e.sh

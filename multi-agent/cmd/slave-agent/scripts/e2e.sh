@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Manual end-to-end check for salve-agent. Requires:
+# Manual end-to-end check for slave-agent. Requires:
 #   - agentserver reachable at $AGENTSERVER_URL
 #   - claude on PATH and ANTHROPIC_API_KEY set
 #   - npx for the everything MCP server
@@ -17,7 +17,7 @@ trap 'kill "${agent_pid:-0}" 2>/dev/null || true; rm -rf "$work"' EXIT
 cat > "$work/config.yaml" <<EOF
 server:
   url: $AGENTSERVER_URL
-  name: salve-e2e
+  name: slave-e2e
 claude:
   bin: claude
 mcp_servers:
@@ -26,16 +26,16 @@ mcp_servers:
     command: npx
     args: ["-y", "@modelcontextprotocol/server-everything"]
 discovery:
-  display_name: salve-e2e
+  display_name: slave-e2e
   description: e2e
   skills: [chat, mcp]
 EOF
 
-go build -o "$work/salve-agent" ./cmd/salve-agent
-( cd "$work" && ./salve-agent config.yaml ) &
+go build -o "$work/slave-agent" ./cmd/slave-agent
+( cd "$work" && ./slave-agent config.yaml ) &
 agent_pid=$!
 
-echo "salve-agent running as pid $agent_pid in $work"
+echo "slave-agent running as pid $agent_pid in $work"
 echo "manually:"
 echo "  1. visit https://code-<shortID>.<base> to confirm dashboard"
 echo "  2. POST a task to /api/workspaces/<wid>/tasks with target_id=<sandbox_id>, skill=chat"

@@ -14,7 +14,7 @@ import (
 )
 
 // Dispatcher is the contract poller uses to hand a task off for execution.
-// salve's *dispatch.Dispatcher and master's *orchestrator.Orchestrator both satisfy this.
+// slave's *dispatch.Dispatcher and master's *orchestrator.Orchestrator both satisfy this.
 type Dispatcher interface {
 	Run(ctx context.Context, t executor.Task) (executor.Result, error)
 }

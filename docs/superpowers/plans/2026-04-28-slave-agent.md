@@ -1,26 +1,26 @@
-# salve_agent Implementation Plan
+# slave_agent Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build `salve_agent`, a Go custom-agent for agentserver that polls tasks, routes them by `skill` to ClaudeExecutor or MCPExecutor, persists history in SQLite, exposes a Web UI with SSE streaming, and maintains a `CURRENT_STATE.md` capability journal.
+**Goal:** Build `slave_agent`, a Go custom-agent for agentserver that polls tasks, routes them by `skill` to ClaudeExecutor or MCPExecutor, persists history in SQLite, exposes a Web UI with SSE streaming, and maintains a `CURRENT_STATE.md` capability journal.
 
 **Architecture:** Single Go binary, serial task processing, layered packages with one-way dependencies (`config` → `store` → `executor` → `journal` → `dispatch` → `poller` + `tunnel` + `webui` → `main`). External I/O: WebSocket via `agentsdk`, HTTP for task API, subprocess for `claude`, MCP transports stdio/HTTP, SQLite via pure-Go `modernc.org/sqlite`.
 
 **Tech Stack:** Go 1.22+, `github.com/agentserver/agentserver/pkg/agentsdk`, `modernc.org/sqlite`, `gopkg.in/yaml.v3`, stdlib `net/http`, `os/exec`, `text/template`. Tests use `testify/require` (or stdlib) and `httptest`.
 
-**Spec:** `docs/superpowers/specs/2026-04-27-salve-agent-design.md`
+**Spec:** `docs/superpowers/specs/2026-04-27-slave-agent-design.md`
 
 ---
 
 ## File Structure
 
 ```
-salve_agent/
+slave_agent/
 ├── go.mod
 ├── go.sum
 ├── README.md
 ├── config.example.yaml
-├── cmd/salve-agent/
+├── cmd/slave-agent/
 │   └── main.go                            # Wires components, handles signals
 ├── internal/
 │   ├── config/
@@ -84,24 +84,24 @@ salve_agent/
 
 ## Pre-flight
 
-- [ ] **Read the spec end-to-end before starting Task 1**: `docs/superpowers/specs/2026-04-27-salve-agent-design.md`. Every later task references section numbers (e.g., "spec §4.6").
+- [ ] **Read the spec end-to-end before starting Task 1**: `docs/superpowers/specs/2026-04-27-slave-agent-design.md`. Every later task references section numbers (e.g., "spec §4.6").
 
 ---
 
 ## Task 1: Project skeleton
 
 **Files:**
-- Create: `salve_agent/go.mod`
-- Create: `salve_agent/.gitignore`
-- Create: `salve_agent/README.md`
-- Create: `salve_agent/config.example.yaml`
-- Create: `salve_agent/cmd/salve-agent/main.go` (placeholder)
+- Create: `slave_agent/go.mod`
+- Create: `slave_agent/.gitignore`
+- Create: `slave_agent/README.md`
+- Create: `slave_agent/config.example.yaml`
+- Create: `slave_agent/cmd/slave-agent/main.go` (placeholder)
 
 - [ ] **Step 1: Init module**
 
 ```bash
-cd salve_agent
-go mod init github.com/yourorg/salve_agent
+cd slave_agent
+go mod init github.com/yourorg/slave_agent
 go get github.com/agentserver/agentserver/pkg/agentsdk@latest
 go get modernc.org/sqlite@latest
 go get gopkg.in/yaml.v3@latest
@@ -132,7 +132,7 @@ config.yaml
 ```yaml
 server:
   url: https://agent.example.com
-  name: salve-agent
+  name: slave-agent
 
 credentials:
   sandbox_id: ""
@@ -159,14 +159,14 @@ mcp_servers:
       Authorization: Bearer XXX
 
 discovery:
-  display_name: salve_agent
+  display_name: slave_agent
   description: General-purpose task executor with claude + MCP
   skills:
     - chat
     - mcp
 ```
 
-- [ ] **Step 4: Create placeholder `cmd/salve-agent/main.go`**
+- [ ] **Step 4: Create placeholder `cmd/slave-agent/main.go`**
 
 ```go
 package main
@@ -174,7 +174,7 @@ package main
 import "fmt"
 
 func main() {
-    fmt.Println("salve_agent: not yet implemented")
+    fmt.Println("slave_agent: not yet implemented")
 }
 ```
 
@@ -186,13 +186,13 @@ Expected: no errors.
 - [ ] **Step 6: Create README.md skeleton**
 
 ```markdown
-# salve_agent
+# slave_agent
 
-Custom agent for agentserver. See `docs/superpowers/specs/2026-04-27-salve-agent-design.md`.
+Custom agent for agentserver. See `docs/superpowers/specs/2026-04-27-slave-agent-design.md`.
 
 ## Build
 
-    go build -o salve-agent ./cmd/salve-agent
+    go build -o slave-agent ./cmd/slave-agent
 
 ## Configure
 
@@ -201,14 +201,14 @@ Custom agent for agentserver. See `docs/superpowers/specs/2026-04-27-salve-agent
 
 ## Run
 
-    ./salve-agent
+    ./slave-agent
 ```
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add salve_agent/
-git commit -m "feat(salve_agent): project skeleton"
+git add slave_agent/
+git commit -m "feat(slave_agent): project skeleton"
 ```
 
 ---
@@ -216,8 +216,8 @@ git commit -m "feat(salve_agent): project skeleton"
 ## Task 2: `config` package — Load
 
 **Files:**
-- Create: `salve_agent/internal/config/config.go`
-- Create: `salve_agent/internal/config/config_test.go`
+- Create: `slave_agent/internal/config/config.go`
+- Create: `slave_agent/internal/config/config_test.go`
 
 - [ ] **Step 1: Write failing test for Load**
 
@@ -360,8 +360,8 @@ func (c *Config) Validate() error {
 - [ ] **Step 5: Commit**
 
 ```bash
-git add salve_agent/internal/config/
-git commit -m "feat(salve_agent/config): Load + Validate"
+git add slave_agent/internal/config/
+git commit -m "feat(slave_agent/config): Load + Validate"
 ```
 
 ---
@@ -369,8 +369,8 @@ git commit -m "feat(salve_agent/config): Load + Validate"
 ## Task 3: `config.Save` — round-trip
 
 **Files:**
-- Modify: `salve_agent/internal/config/config.go`
-- Modify: `salve_agent/internal/config/config_test.go`
+- Modify: `slave_agent/internal/config/config.go`
+- Modify: `slave_agent/internal/config/config_test.go`
 
 - [ ] **Step 1: Failing test**
 
@@ -428,8 +428,8 @@ func (c *Config) Save(path string) error {
 - [ ] **Step 5: Commit**
 
 ```bash
-git add salve_agent/internal/config/
-git commit -m "feat(salve_agent/config): atomic Save with 0600 perms"
+git add slave_agent/internal/config/
+git commit -m "feat(slave_agent/config): atomic Save with 0600 perms"
 ```
 
 ---
@@ -437,10 +437,10 @@ git commit -m "feat(salve_agent/config): atomic Save with 0600 perms"
 ## Task 4: `store` schema + Open
 
 **Files:**
-- Create: `salve_agent/internal/store/schema.sql`
-- Create: `salve_agent/internal/store/events.go`
-- Create: `salve_agent/internal/store/store.go`
-- Create: `salve_agent/internal/store/store_test.go`
+- Create: `slave_agent/internal/store/schema.sql`
+- Create: `slave_agent/internal/store/events.go`
+- Create: `slave_agent/internal/store/store.go`
+- Create: `slave_agent/internal/store/store_test.go`
 
 - [ ] **Step 1: Write schema.sql**
 
@@ -570,8 +570,8 @@ func (s *Store) DB() *sql.DB       { return s.db } // test-only accessor
 - [ ] **Step 7: Commit**
 
 ```bash
-git add salve_agent/internal/store/
-git commit -m "feat(salve_agent/store): Open + embedded schema"
+git add slave_agent/internal/store/
+git commit -m "feat(slave_agent/store): Open + embedded schema"
 ```
 
 ---
@@ -579,8 +579,8 @@ git commit -m "feat(salve_agent/store): Open + embedded schema"
 ## Task 5: `store` task CRUD + state machine
 
 **Files:**
-- Modify: `salve_agent/internal/store/store.go`
-- Modify: `salve_agent/internal/store/store_test.go`
+- Modify: `slave_agent/internal/store/store.go`
+- Modify: `slave_agent/internal/store/store_test.go`
 
 - [ ] **Step 1: Failing tests**
 
@@ -778,8 +778,8 @@ var _ = context.Background
 - [ ] **Step 5: Commit**
 
 ```bash
-git add salve_agent/internal/store/
-git commit -m "feat(salve_agent/store): task CRUD + state transitions"
+git add slave_agent/internal/store/
+git commit -m "feat(slave_agent/store): task CRUD + state transitions"
 ```
 
 ---
@@ -787,8 +787,8 @@ git commit -m "feat(salve_agent/store): task CRUD + state transitions"
 ## Task 6: `store.ChunkSink` + SSE pubsub
 
 **Files:**
-- Modify: `salve_agent/internal/store/store.go`
-- Modify: `salve_agent/internal/store/store_test.go`
+- Modify: `slave_agent/internal/store/store.go`
+- Modify: `slave_agent/internal/store/store_test.go`
 
 - [ ] **Step 1: Failing tests**
 
@@ -924,8 +924,8 @@ func (s *Store) unsubscribeAll(taskID string) {
 - [ ] **Step 5: Commit**
 
 ```bash
-git add salve_agent/internal/store/
-git commit -m "feat(salve_agent/store): ChunkSink + SSE pubsub with non-blocking writer"
+git add slave_agent/internal/store/
+git commit -m "feat(slave_agent/store): ChunkSink + SSE pubsub with non-blocking writer"
 ```
 
 ---
@@ -933,8 +933,8 @@ git commit -m "feat(salve_agent/store): ChunkSink + SSE pubsub with non-blocking
 ## Task 7: `store.Recover` + pending_acks
 
 **Files:**
-- Modify: `salve_agent/internal/store/store.go`
-- Modify: `salve_agent/internal/store/store_test.go`
+- Modify: `slave_agent/internal/store/store.go`
+- Modify: `slave_agent/internal/store/store_test.go`
 
 - [ ] **Step 1: Failing tests**
 
@@ -1057,8 +1057,8 @@ func (s *Store) DeletePendingAck(id string) error {
 - [ ] **Step 5: Commit**
 
 ```bash
-git add salve_agent/internal/store/
-git commit -m "feat(salve_agent/store): Recover + pending_acks queue"
+git add slave_agent/internal/store/
+git commit -m "feat(slave_agent/store): Recover + pending_acks queue"
 ```
 
 ---
@@ -1066,7 +1066,7 @@ git commit -m "feat(salve_agent/store): Recover + pending_acks queue"
 ## Task 8: `executor` types
 
 **Files:**
-- Create: `salve_agent/internal/executor/executor.go`
+- Create: `slave_agent/internal/executor/executor.go`
 
 - [ ] **Step 1: Write executor.go**
 
@@ -1105,8 +1105,8 @@ type Executor interface {
 - [ ] **Step 3: Commit**
 
 ```bash
-git add salve_agent/internal/executor/
-git commit -m "feat(salve_agent/executor): core types + interface"
+git add slave_agent/internal/executor/
+git commit -m "feat(slave_agent/executor): core types + interface"
 ```
 
 ---
@@ -1114,8 +1114,8 @@ git commit -m "feat(salve_agent/executor): core types + interface"
 ## Task 9: `testdata/fake-claude.sh`
 
 **Files:**
-- Create: `salve_agent/testdata/fake-claude.sh`
-- Create: `salve_agent/testdata/fake-claude-text.sh`
+- Create: `slave_agent/testdata/fake-claude.sh`
+- Create: `slave_agent/testdata/fake-claude-text.sh`
 
 - [ ] **Step 1: Write `fake-claude.sh`**
 
@@ -1166,7 +1166,7 @@ case "$mode" in
 esac
 ```
 
-`chmod +x salve_agent/testdata/fake-claude.sh`
+`chmod +x slave_agent/testdata/fake-claude.sh`
 
 - [ ] **Step 2: Write `fake-claude-text.sh`** (used by journal merge calls)
 
@@ -1197,13 +1197,13 @@ EOF
 esac
 ```
 
-`chmod +x salve_agent/testdata/fake-claude-text.sh`
+`chmod +x slave_agent/testdata/fake-claude-text.sh`
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add salve_agent/testdata/
-git commit -m "test(salve_agent): fake claude scripts for unit tests"
+git add slave_agent/testdata/
+git commit -m "test(slave_agent): fake claude scripts for unit tests"
 ```
 
 ---
@@ -1211,8 +1211,8 @@ git commit -m "test(salve_agent): fake claude scripts for unit tests"
 ## Task 10: `ClaudeExecutor` — happy path streaming
 
 **Files:**
-- Create: `salve_agent/internal/executor/claude.go`
-- Create: `salve_agent/internal/executor/claude_test.go`
+- Create: `slave_agent/internal/executor/claude.go`
+- Create: `slave_agent/internal/executor/claude_test.go`
 
 - [ ] **Step 1: Failing test**
 
@@ -1409,8 +1409,8 @@ func splitCapability(s string) (summary, change string) {
 - [ ] **Step 5: Commit**
 
 ```bash
-git add salve_agent/internal/executor/claude.go salve_agent/internal/executor/claude_test.go
-git commit -m "feat(salve_agent/executor): ClaudeExecutor streaming happy path"
+git add slave_agent/internal/executor/claude.go slave_agent/internal/executor/claude_test.go
+git commit -m "feat(slave_agent/executor): ClaudeExecutor streaming happy path"
 ```
 
 ---
@@ -1418,7 +1418,7 @@ git commit -m "feat(salve_agent/executor): ClaudeExecutor streaming happy path"
 ## Task 11: `ClaudeExecutor` — capability parsing + edge cases
 
 **Files:**
-- Modify: `salve_agent/internal/executor/claude_test.go`
+- Modify: `slave_agent/internal/executor/claude_test.go`
 
 - [ ] **Step 1: Add tests**
 
@@ -1485,8 +1485,8 @@ If `TestClaude_Exit1` fails because `sink.Close` wasn't called on error, ensure 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add salve_agent/internal/executor/claude_test.go
-git commit -m "test(salve_agent/executor): capability parsing + timeout + exit1 + garbage"
+git add slave_agent/internal/executor/claude_test.go
+git commit -m "test(slave_agent/executor): capability parsing + timeout + exit1 + garbage"
 ```
 
 ---
@@ -1494,8 +1494,8 @@ git commit -m "test(salve_agent/executor): capability parsing + timeout + exit1 
 ## Task 12: `testdata/fake-mcp-stdio` — minimal stdio MCP server
 
 **Files:**
-- Create: `salve_agent/testdata/fake-mcp-stdio/main.go`
-- Create: `salve_agent/testdata/fake-mcp-stdio/go.mod`
+- Create: `slave_agent/testdata/fake-mcp-stdio/main.go`
+- Create: `slave_agent/testdata/fake-mcp-stdio/go.mod`
 
 This server speaks a tiny JSON-RPC subset over stdio: it reads one request line, writes one response line, and exits.
 
@@ -1574,15 +1574,15 @@ func main() {
 - [ ] **Step 3: Verify it builds**
 
 ```bash
-cd salve_agent/testdata/fake-mcp-stdio && go build -o fake-mcp-stdio . && ./fake-mcp-stdio < /dev/null
+cd slave_agent/testdata/fake-mcp-stdio && go build -o fake-mcp-stdio . && ./fake-mcp-stdio < /dev/null
 ```
 Expected: exits cleanly (no input → no output).
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add salve_agent/testdata/fake-mcp-stdio/
-git commit -m "test(salve_agent): minimal fake stdio MCP server"
+git add slave_agent/testdata/fake-mcp-stdio/
+git commit -m "test(slave_agent): minimal fake stdio MCP server"
 ```
 
 ---
@@ -1590,8 +1590,8 @@ git commit -m "test(salve_agent): minimal fake stdio MCP server"
 ## Task 13: `MCPExecutor` — stdio transport
 
 **Files:**
-- Create: `salve_agent/internal/executor/mcp.go`
-- Create: `salve_agent/internal/executor/mcp_test.go`
+- Create: `slave_agent/internal/executor/mcp.go`
+- Create: `slave_agent/internal/executor/mcp_test.go`
 
 - [ ] **Step 1: Failing test**
 
@@ -1914,8 +1914,8 @@ var _ = strings.NewReader
 - [ ] **Step 5: Commit**
 
 ```bash
-git add salve_agent/internal/executor/
-git commit -m "feat(salve_agent/executor): MCPExecutor stdio transport + routing"
+git add slave_agent/internal/executor/
+git commit -m "feat(slave_agent/executor): MCPExecutor stdio transport + routing"
 ```
 
 ---
@@ -1923,8 +1923,8 @@ git commit -m "feat(salve_agent/executor): MCPExecutor stdio transport + routing
 ## Task 14: `MCPExecutor` — HTTP transport
 
 **Files:**
-- Modify: `salve_agent/internal/executor/mcp.go`
-- Modify: `salve_agent/internal/executor/mcp_test.go`
+- Modify: `slave_agent/internal/executor/mcp.go`
+- Modify: `slave_agent/internal/executor/mcp_test.go`
 
 - [ ] **Step 1: Failing test using httptest**
 
@@ -2026,8 +2026,8 @@ func (e *MCPExecutor) callHTTP(ctx context.Context, cfg MCPServerCfg, tool strin
 - [ ] **Step 5: Commit**
 
 ```bash
-git add salve_agent/internal/executor/
-git commit -m "feat(salve_agent/executor): MCPExecutor HTTP transport"
+git add slave_agent/internal/executor/
+git commit -m "feat(slave_agent/executor): MCPExecutor HTTP transport"
 ```
 
 ---
@@ -2035,8 +2035,8 @@ git commit -m "feat(salve_agent/executor): MCPExecutor HTTP transport"
 ## Task 15: `journal` package
 
 **Files:**
-- Create: `salve_agent/internal/journal/journal.go`
-- Create: `salve_agent/internal/journal/journal_test.go`
+- Create: `slave_agent/internal/journal/journal.go`
+- Create: `slave_agent/internal/journal/journal_test.go`
 
 - [ ] **Step 1: Failing tests**
 
@@ -2053,7 +2053,7 @@ import (
     "testing"
 
     "github.com/stretchr/testify/require"
-    "github.com/yourorg/salve_agent/internal/executor"
+    "github.com/yourorg/slave_agent/internal/executor"
 )
 
 func fakeTextClaude(t *testing.T) string {
@@ -2117,7 +2117,7 @@ import (
     "sync"
     "time"
 
-    "github.com/yourorg/salve_agent/internal/executor"
+    "github.com/yourorg/slave_agent/internal/executor"
 )
 
 type Config struct {
@@ -2207,8 +2207,8 @@ func atomicWrite(path string, data []byte) error {
 - [ ] **Step 5: Commit**
 
 ```bash
-git add salve_agent/internal/journal/
-git commit -m "feat(salve_agent/journal): CURRENT_STATE merge + history append"
+git add slave_agent/internal/journal/
+git commit -m "feat(slave_agent/journal): CURRENT_STATE merge + history append"
 ```
 
 ---
@@ -2216,8 +2216,8 @@ git commit -m "feat(salve_agent/journal): CURRENT_STATE merge + history append"
 ## Task 16: `dispatch` package
 
 **Files:**
-- Create: `salve_agent/internal/dispatch/dispatch.go`
-- Create: `salve_agent/internal/dispatch/dispatch_test.go`
+- Create: `slave_agent/internal/dispatch/dispatch.go`
+- Create: `slave_agent/internal/dispatch/dispatch_test.go`
 
 - [ ] **Step 1: Failing tests**
 
@@ -2232,8 +2232,8 @@ import (
     "testing"
 
     "github.com/stretchr/testify/require"
-    "github.com/yourorg/salve_agent/internal/executor"
-    "github.com/yourorg/salve_agent/internal/store"
+    "github.com/yourorg/slave_agent/internal/executor"
+    "github.com/yourorg/slave_agent/internal/store"
 )
 
 type stubExec struct {
@@ -2324,8 +2324,8 @@ import (
     "context"
     "fmt"
 
-    "github.com/yourorg/salve_agent/internal/executor"
-    "github.com/yourorg/salve_agent/internal/store"
+    "github.com/yourorg/slave_agent/internal/executor"
+    "github.com/yourorg/slave_agent/internal/store"
 )
 
 type JournalRecorder interface {
@@ -2387,8 +2387,8 @@ func (d *Dispatcher) Run(ctx context.Context, t executor.Task) (executor.Result,
 - [ ] **Step 5: Commit**
 
 ```bash
-git add salve_agent/internal/dispatch/
-git commit -m "feat(salve_agent/dispatch): skill routing + lifecycle"
+git add slave_agent/internal/dispatch/
+git commit -m "feat(slave_agent/dispatch): skill routing + lifecycle"
 ```
 
 ---
@@ -2396,8 +2396,8 @@ git commit -m "feat(salve_agent/dispatch): skill routing + lifecycle"
 ## Task 17: `poller` — happy path with mocked agentserver
 
 **Files:**
-- Create: `salve_agent/internal/poller/poller.go`
-- Create: `salve_agent/internal/poller/poller_test.go`
+- Create: `slave_agent/internal/poller/poller.go`
+- Create: `slave_agent/internal/poller/poller_test.go`
 
 - [ ] **Step 1: Failing test**
 
@@ -2417,9 +2417,9 @@ import (
     "time"
 
     "github.com/stretchr/testify/require"
-    "github.com/yourorg/salve_agent/internal/dispatch"
-    "github.com/yourorg/salve_agent/internal/executor"
-    "github.com/yourorg/salve_agent/internal/store"
+    "github.com/yourorg/slave_agent/internal/dispatch"
+    "github.com/yourorg/slave_agent/internal/executor"
+    "github.com/yourorg/slave_agent/internal/store"
 )
 
 type echoExec struct{}
@@ -2488,9 +2488,9 @@ import (
     "net/http"
     "time"
 
-    "github.com/yourorg/salve_agent/internal/dispatch"
-    "github.com/yourorg/salve_agent/internal/executor"
-    "github.com/yourorg/salve_agent/internal/store"
+    "github.com/yourorg/slave_agent/internal/dispatch"
+    "github.com/yourorg/slave_agent/internal/executor"
+    "github.com/yourorg/slave_agent/internal/store"
 )
 
 type Config struct {
@@ -2662,8 +2662,8 @@ func (p *Poller) drainPendingAcks(ctx context.Context) {
 - [ ] **Step 5: Commit**
 
 ```bash
-git add salve_agent/internal/poller/
-git commit -m "feat(salve_agent/poller): polling loop + retries + pending acks"
+git add slave_agent/internal/poller/
+git commit -m "feat(slave_agent/poller): polling loop + retries + pending acks"
 ```
 
 ---
@@ -2671,8 +2671,8 @@ git commit -m "feat(salve_agent/poller): polling loop + retries + pending acks"
 ## Task 18: `tunnel` — agentsdk wrapper + device flow
 
 **Files:**
-- Create: `salve_agent/internal/tunnel/tunnel.go`
-- Create: `salve_agent/internal/tunnel/tunnel_test.go`
+- Create: `slave_agent/internal/tunnel/tunnel.go`
+- Create: `slave_agent/internal/tunnel/tunnel_test.go`
 
 The agentsdk gives us `RequestDeviceCode`, `PollForToken`, `NewClient`, `Register`, `SetRegistration`, `Connect`. We thinly wrap so we can swap them in tests.
 
@@ -2691,7 +2691,7 @@ import (
     "testing"
 
     "github.com/stretchr/testify/require"
-    "github.com/yourorg/salve_agent/internal/config"
+    "github.com/yourorg/slave_agent/internal/config"
 )
 
 func TestEnsureRegistered_PersistsCredentials(t *testing.T) {
@@ -2755,7 +2755,7 @@ import (
     "time"
 
     "github.com/agentserver/agentserver/pkg/agentsdk"
-    "github.com/yourorg/salve_agent/internal/config"
+    "github.com/yourorg/slave_agent/internal/config"
 )
 
 type Deps struct {
@@ -2859,8 +2859,8 @@ If the SDK refuses to point at `httptest` (e.g., hardcodes `https://`), wrap the
 - [ ] **Step 5: Commit**
 
 ```bash
-git add salve_agent/internal/tunnel/
-git commit -m "feat(salve_agent/tunnel): device flow + register + publish card"
+git add slave_agent/internal/tunnel/
+git commit -m "feat(slave_agent/tunnel): device flow + register + publish card"
 ```
 
 ---
@@ -2868,9 +2868,9 @@ git commit -m "feat(salve_agent/tunnel): device flow + register + publish card"
 ## Task 19: `webui` — handlers
 
 **Files:**
-- Create: `salve_agent/internal/webui/server.go`
-- Create: `salve_agent/internal/webui/templates/dashboard.html`
-- Create: `salve_agent/internal/webui/server_test.go`
+- Create: `slave_agent/internal/webui/server.go`
+- Create: `slave_agent/internal/webui/templates/dashboard.html`
+- Create: `slave_agent/internal/webui/server_test.go`
 
 - [ ] **Step 1: Failing tests**
 
@@ -2890,8 +2890,8 @@ import (
     "time"
 
     "github.com/stretchr/testify/require"
-    "github.com/yourorg/salve_agent/internal/config"
-    "github.com/yourorg/salve_agent/internal/store"
+    "github.com/yourorg/slave_agent/internal/config"
+    "github.com/yourorg/slave_agent/internal/store"
 )
 
 func openStore(t *testing.T) *store.Store {
@@ -2985,8 +2985,8 @@ import (
     "strings"
     "time"
 
-    "github.com/yourorg/salve_agent/internal/config"
-    "github.com/yourorg/salve_agent/internal/store"
+    "github.com/yourorg/slave_agent/internal/config"
+    "github.com/yourorg/slave_agent/internal/store"
 )
 
 type Handler struct {
@@ -3143,16 +3143,16 @@ func htmlEscape(s string) string {
 - [ ] **Step 5: Commit**
 
 ```bash
-git add salve_agent/internal/webui/
-git commit -m "feat(salve_agent/webui): handlers + SSE stream"
+git add slave_agent/internal/webui/
+git commit -m "feat(slave_agent/webui): handlers + SSE stream"
 ```
 
 ---
 
-## Task 20: `cmd/salve-agent/main.go` — wire it all up
+## Task 20: `cmd/slave-agent/main.go` — wire it all up
 
 **Files:**
-- Modify: `salve_agent/cmd/salve-agent/main.go`
+- Modify: `slave_agent/cmd/slave-agent/main.go`
 
 - [ ] **Step 1: Replace placeholder**
 
@@ -3170,14 +3170,14 @@ import (
 
     "golang.org/x/sync/errgroup"
 
-    "github.com/yourorg/salve_agent/internal/config"
-    "github.com/yourorg/salve_agent/internal/dispatch"
-    "github.com/yourorg/salve_agent/internal/executor"
-    "github.com/yourorg/salve_agent/internal/journal"
-    "github.com/yourorg/salve_agent/internal/poller"
-    "github.com/yourorg/salve_agent/internal/store"
-    "github.com/yourorg/salve_agent/internal/tunnel"
-    "github.com/yourorg/salve_agent/internal/webui"
+    "github.com/yourorg/slave_agent/internal/config"
+    "github.com/yourorg/slave_agent/internal/dispatch"
+    "github.com/yourorg/slave_agent/internal/executor"
+    "github.com/yourorg/slave_agent/internal/journal"
+    "github.com/yourorg/slave_agent/internal/poller"
+    "github.com/yourorg/slave_agent/internal/store"
+    "github.com/yourorg/slave_agent/internal/tunnel"
+    "github.com/yourorg/slave_agent/internal/webui"
 )
 
 func main() {
@@ -3186,7 +3186,7 @@ func main() {
         cfgPath = os.Args[1]
     }
     if err := run(cfgPath); err != nil {
-        log.Fatalf("salve_agent: %v", err)
+        log.Fatalf("slave_agent: %v", err)
     }
 }
 
@@ -3262,7 +3262,7 @@ func run(cfgPath string) error {
 - [ ] **Step 2: Add dependency**
 
 ```bash
-cd salve_agent && go get golang.org/x/sync@latest
+cd slave_agent && go get golang.org/x/sync@latest
 ```
 
 - [ ] **Step 3: Build**
@@ -3275,8 +3275,8 @@ Expected: clean build.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add salve_agent/cmd salve_agent/go.mod salve_agent/go.sum
-git commit -m "feat(salve_agent): wire main"
+git add slave_agent/cmd slave_agent/go.mod slave_agent/go.sum
+git commit -m "feat(slave_agent): wire main"
 ```
 
 ---
@@ -3284,8 +3284,8 @@ git commit -m "feat(salve_agent): wire main"
 ## Task 21: Smoke test — real claude
 
 **Files:**
-- Create: `salve_agent/tests/smoke/doc.go`
-- Create: `salve_agent/tests/smoke/claude_smoke_test.go`
+- Create: `slave_agent/tests/smoke/doc.go`
+- Create: `slave_agent/tests/smoke/claude_smoke_test.go`
 
 - [ ] **Step 1: Build tag file**
 
@@ -3312,7 +3312,7 @@ import (
     "time"
 
     "github.com/stretchr/testify/require"
-    "github.com/yourorg/salve_agent/internal/executor"
+    "github.com/yourorg/slave_agent/internal/executor"
 )
 
 type captureSink struct{ data strings.Builder; closed bool }
@@ -3349,8 +3349,8 @@ ANTHROPIC_API_KEY=... go test -tags=smoke ./tests/smoke/... -run TestSmoke_RealC
 - [ ] **Step 4: Commit**
 
 ```bash
-git add salve_agent/tests/smoke/
-git commit -m "test(salve_agent): smoke test for real claude"
+git add slave_agent/tests/smoke/
+git commit -m "test(slave_agent): smoke test for real claude"
 ```
 
 ---
@@ -3358,7 +3358,7 @@ git commit -m "test(salve_agent): smoke test for real claude"
 ## Task 22: Smoke test — real MCP
 
 **Files:**
-- Create: `salve_agent/tests/smoke/mcp_smoke_test.go`
+- Create: `slave_agent/tests/smoke/mcp_smoke_test.go`
 
 - [ ] **Step 1: Test using `@modelcontextprotocol/server-everything`**
 
@@ -3376,7 +3376,7 @@ import (
     "time"
 
     "github.com/stretchr/testify/require"
-    "github.com/yourorg/salve_agent/internal/executor"
+    "github.com/yourorg/slave_agent/internal/executor"
 )
 
 func TestSmoke_RealMCPStdio(t *testing.T) {
@@ -3412,8 +3412,8 @@ go test -tags=smoke ./tests/smoke/... -run TestSmoke_RealMCPStdio -v
 - [ ] **Step 3: Commit**
 
 ```bash
-git add salve_agent/tests/smoke/mcp_smoke_test.go
-git commit -m "test(salve_agent): smoke test for real stdio MCP"
+git add slave_agent/tests/smoke/mcp_smoke_test.go
+git commit -m "test(slave_agent): smoke test for real stdio MCP"
 ```
 
 ---
@@ -3421,8 +3421,8 @@ git commit -m "test(salve_agent): smoke test for real stdio MCP"
 ## Task 23: Contract tests — agentserver protocol
 
 **Files:**
-- Create: `salve_agent/tests/contract/doc.go`
-- Create: `salve_agent/tests/contract/agentserver_contract_test.go`
+- Create: `slave_agent/tests/contract/doc.go`
+- Create: `slave_agent/tests/contract/agentserver_contract_test.go`
 
 - [ ] **Step 1: Build tag**
 
@@ -3453,10 +3453,10 @@ import (
     "time"
 
     "github.com/stretchr/testify/require"
-    "github.com/yourorg/salve_agent/internal/dispatch"
-    "github.com/yourorg/salve_agent/internal/executor"
-    "github.com/yourorg/salve_agent/internal/poller"
-    "github.com/yourorg/salve_agent/internal/store"
+    "github.com/yourorg/slave_agent/internal/dispatch"
+    "github.com/yourorg/slave_agent/internal/executor"
+    "github.com/yourorg/slave_agent/internal/poller"
+    "github.com/yourorg/slave_agent/internal/store"
 )
 
 type noopExec struct{}
@@ -3576,8 +3576,8 @@ go test -tags=contract ./tests/contract/... -v
 - [ ] **Step 4: Commit**
 
 ```bash
-git add salve_agent/tests/contract/
-git commit -m "test(salve_agent): contract tests for poller/status protocol"
+git add slave_agent/tests/contract/
+git commit -m "test(slave_agent): contract tests for poller/status protocol"
 ```
 
 ---
@@ -3585,8 +3585,8 @@ git commit -m "test(salve_agent): contract tests for poller/status protocol"
 ## Task 24: E2E script
 
 **Files:**
-- Create: `salve_agent/scripts/e2e.sh`
-- Modify: `salve_agent/README.md`
+- Create: `slave_agent/scripts/e2e.sh`
+- Modify: `slave_agent/README.md`
 
 - [ ] **Step 1: Write `scripts/e2e.sh`**
 
@@ -3605,7 +3605,7 @@ trap 'rm -rf "$work"' EXIT
 cat > "$work/config.yaml" <<EOF
 server:
   url: $AGENTSERVER_URL
-  name: salve-e2e
+  name: slave-e2e
 claude:
   bin: claude
 mcp_servers:
@@ -3614,13 +3614,13 @@ mcp_servers:
     command: npx
     args: ["-y", "@modelcontextprotocol/server-everything"]
 discovery:
-  display_name: salve-e2e
+  display_name: slave-e2e
   description: e2e
   skills: [chat, mcp]
 EOF
 
-go build -o "$work/salve-agent" ./cmd/salve-agent
-( cd "$work" && ./salve-agent config.yaml ) &
+go build -o "$work/slave-agent" ./cmd/slave-agent
+( cd "$work" && ./slave-agent config.yaml ) &
 agent_pid=$!
 trap 'kill "$agent_pid" 2>/dev/null || true; rm -rf "$work"' EXIT
 
@@ -3637,11 +3637,11 @@ echo "Press Ctrl-C to stop the agent."
 wait "$agent_pid"
 ```
 
-`chmod +x salve_agent/scripts/e2e.sh`
+`chmod +x slave_agent/scripts/e2e.sh`
 
 - [ ] **Step 2: Append to README**
 
-Append to `salve_agent/README.md`:
+Append to `slave_agent/README.md`:
 
 ```markdown
 ## Tests
@@ -3658,8 +3658,8 @@ Append to `salve_agent/README.md`:
 - [ ] **Step 3: Commit**
 
 ```bash
-git add salve_agent/scripts salve_agent/README.md
-git commit -m "docs(salve_agent): e2e script + tests doc"
+git add slave_agent/scripts slave_agent/README.md
+git commit -m "docs(slave_agent): e2e script + tests doc"
 ```
 
 ---
@@ -3667,24 +3667,24 @@ git commit -m "docs(salve_agent): e2e script + tests doc"
 ## Task 25: CI workflow (optional but recommended)
 
 **Files:**
-- Create: `.github/workflows/salve_agent.yml`
+- Create: `.github/workflows/slave_agent.yml`
 
 - [ ] **Step 1: Workflow**
 
 ```yaml
-name: salve_agent CI
+name: slave_agent CI
 on:
   push:
-    paths: [salve_agent/**]
+    paths: [slave_agent/**]
   pull_request:
-    paths: [salve_agent/**]
+    paths: [slave_agent/**]
 
 jobs:
   test:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: salve_agent
+        working-directory: slave_agent
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -3698,8 +3698,8 @@ jobs:
 - [ ] **Step 2: Commit**
 
 ```bash
-git add .github/workflows/salve_agent.yml
-git commit -m "ci: salve_agent vet + race tests + contract tests"
+git add .github/workflows/slave_agent.yml
+git commit -m "ci: slave_agent vet + race tests + contract tests"
 ```
 
 ---
@@ -3709,7 +3709,7 @@ git commit -m "ci: salve_agent vet + race tests + contract tests"
 - [ ] **Run the full test matrix locally**
 
 ```bash
-cd salve_agent
+cd slave_agent
 go vet ./...
 go test ./... -race -count=1
 go test -tags=contract ./tests/contract/...
@@ -3725,7 +3725,7 @@ Run a real agent against staging agentserver per Task 24 e2e script.
 
 - [ ] **Verify spec coverage**
 
-Skim each section of `docs/superpowers/specs/2026-04-27-salve-agent-design.md` and confirm a task implements it. Specifically:
+Skim each section of `docs/superpowers/specs/2026-04-27-slave-agent-design.md` and confirm a task implements it. Specifically:
 
 | Spec section | Implemented in |
 |---|---|

@@ -1,6 +1,6 @@
 server:
   url: https://agent.example.com
-  name: salve-agent
+  name: slave-agent
 
 credentials:
   sandbox_id: ""
@@ -27,7 +27,7 @@ mcp_servers:
       Authorization: Bearer XXX
 
 discovery:
-  display_name: salve_agent
+  display_name: slave_agent
   description: General-purpose task executor with claude + MCP
   skills:
     - chat

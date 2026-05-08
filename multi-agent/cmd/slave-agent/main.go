@@ -27,7 +27,7 @@ func main() {
 		cfgPath = os.Args[1]
 	}
 	if err := run(cfgPath); err != nil {
-		log.Fatalf("salve_agent: %v", err)
+		log.Fatalf("slave_agent: %v", err)
 	}
 }
 

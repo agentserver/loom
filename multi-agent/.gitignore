@@ -4,6 +4,6 @@ journal/CURRENT_STATE.md
 journal/history.md
 config.yaml
 *.tmp
-cmd/salve-agent/salve-agent
+cmd/slave-agent/slave-agent
 cmd/master-agent/master-agent
 testdata/fake-mcp-stdio/fake-mcp-stdio

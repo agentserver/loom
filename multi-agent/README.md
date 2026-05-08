@@ -4,7 +4,7 @@ Two custom agents for the agentserver platform, sharing one Go module and a comm
 
 | Binary | Role | Docs |
 |---|---|---|
-| `cmd/salve-agent` | Subordinate worker — accepts tasks and runs them via claude or MCP | [cmd/salve-agent/README.md](cmd/salve-agent/README.md) |
+| `cmd/slave-agent` | Subordinate worker — accepts tasks and runs them via claude or MCP | [cmd/slave-agent/README.md](cmd/slave-agent/README.md) |
 | `cmd/master-agent` | Orchestrator — uses claude as planner/router/reducer to delegate work to other agents | [cmd/master-agent/README.md](cmd/master-agent/README.md) |
 
 ## Layout
@@ -13,12 +13,12 @@ Two custom agents for the agentserver platform, sharing one Go module and a comm
 multi-agent/
 ├── go.mod                 (module github.com/yourorg/multi-agent)
 ├── cmd/
-│   ├── salve-agent/       binary + per-binary docs/config/scripts
+│   ├── slave-agent/       binary + per-binary docs/config/scripts
 │   └── master-agent/      binary + per-binary docs/config/scripts
 ├── internal/
 │   ├── config, store, webui, tunnel, poller   shared by both
-│   ├── executor, journal, dispatch            salve-only (master does not import)
-│   └── orchestrator, planner                  master-only (salve does not import)
+│   ├── executor, journal, dispatch            slave-only (master does not import)
+│   └── orchestrator, planner                  master-only (slave does not import)
 ├── testdata/              fake-claude.sh, fake-planner.sh, fake-mcp-stdio/
 └── tests/
     ├── contract/          build tag: contract
@@ -44,9 +44,9 @@ go test -tags=smoke ./tests/smoke/...        # manual only
 
 Living at the repo root (one level up):
 
-- `../docs/superpowers/specs/2026-04-27-salve-agent-design.md`
-- `../docs/superpowers/plans/2026-04-28-salve-agent.md`
+- `../docs/superpowers/specs/2026-04-27-slave-agent-design.md`
+- `../docs/superpowers/plans/2026-04-28-slave-agent.md`
 - `../docs/superpowers/specs/2026-04-28-master-agent-design.md`
 - `../docs/superpowers/plans/2026-04-28-master-agent.md`
 
-Note: spec/plan documents reference earlier path layouts (`salve_agent/...`); they are historical and not auto-updated by the rename refactor.
+Note: spec/plan documents reference earlier path layouts (`slave_agent/...`); they are historical and not auto-updated by the rename refactor.

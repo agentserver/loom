@@ -2,23 +2,23 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build `master_agent`, a Go custom-agent (same module as salve_agent) that polls tasks from agentserver, and instead of executing them itself, uses claude as planner/router/reducer to delegate work to other agents in the workspace via `SDK.DelegateTask`. Supports two skills: `route` (1→1 LLM-routed) and `fanout` (1→N DAG with `{{nX.output}}` template substitution).
+**Goal:** Build `master_agent`, a Go custom-agent (same module as slave_agent) that polls tasks from agentserver, and instead of executing them itself, uses claude as planner/router/reducer to delegate work to other agents in the workspace via `SDK.DelegateTask`. Supports two skills: `route` (1→1 LLM-routed) and `fanout` (1→N DAG with `{{nX.output}}` template substitution).
 
-**Architecture:** Shares `internal/{config,store,webui,tunnel,poller}` with salve_agent (compatible cross-module additions only). New packages: `internal/planner` (claude-as-decision wrapper, single-shot, no streaming) and `internal/orchestrator` (skill routing + DAG scheduler + SDK delegation). New cmd binary `cmd/master-agent`. New docs/scripts under `master_agent/`.
+**Architecture:** Shares `internal/{config,store,webui,tunnel,poller}` with slave_agent (compatible cross-module additions only). New packages: `internal/planner` (claude-as-decision wrapper, single-shot, no streaming) and `internal/orchestrator` (skill routing + DAG scheduler + SDK delegation). New cmd binary `cmd/master-agent`. New docs/scripts under `master_agent/`.
 
-**Tech Stack:** Go 1.22+, `github.com/agentserver/agentserver/pkg/agentsdk` (uses `DelegateTask`/`WaitForTask`/`DiscoverAgents`/`AgentCard`), `modernc.org/sqlite`, stdlib `os/exec`/`net/http`, `testify` for assertions. Reuses `internal/{config,store,tunnel,poller,webui}` from salve_agent (this plan adds backward-compatible fields/methods to those packages).
+**Tech Stack:** Go 1.22+, `github.com/agentserver/agentserver/pkg/agentsdk` (uses `DelegateTask`/`WaitForTask`/`DiscoverAgents`/`AgentCard`), `modernc.org/sqlite`, stdlib `os/exec`/`net/http`, `testify` for assertions. Reuses `internal/{config,store,tunnel,poller,webui}` from slave_agent (this plan adds backward-compatible fields/methods to those packages).
 
 **Spec:** `docs/superpowers/specs/2026-04-28-master-agent-design.md`  
-**Salve baseline:** branch `feat/salve-agent` already exists with 27+ commits. This plan creates a new branch `feat/master-agent` from `feat/salve-agent`, so master work stacks on top without entangling salve's PR.
+**slave baseline:** branch `feat/slave-agent` already exists with 27+ commits. This plan creates a new branch `feat/master-agent` from `feat/slave-agent`, so master work stacks on top without entangling slave's PR.
 
 ---
 
 ## File Structure
 
 ```
-salve_agent/                                      ← module root (name retained)
+slave_agent/                                      ← module root (name retained)
 ├── cmd/
-│   ├── salve-agent/main.go                       ← existing
+│   ├── slave-agent/main.go                       ← existing
 │   └── master-agent/main.go                      ← NEW (Task 14)
 ├── internal/
 │   ├── config/
@@ -58,7 +58,7 @@ salve_agent/                                      ← module root (name retained
 **Boundary rules:**
 - `planner` depends on stdlib + `os/exec` + `agentsdk` (for AgentCard type only).
 - `orchestrator` depends on `planner`, `store`, `agentsdk` types, and the `executor` package's `Task`/`Result`/`Sink` types only (does NOT instantiate executors).
-- `internal/{executor,journal,dispatch}` are salve-private; master must NOT import them.
+- `internal/{executor,journal,dispatch}` are slave-private; master must NOT import them.
 - `cmd/master-agent/main.go` is the only file that imports everything.
 
 ---
@@ -68,16 +68,16 @@ salve_agent/                                      ← module root (name retained
 - [ ] **Verify worktree state**
 
 ```bash
-cd /mnt/c/Users/DELL/multi-agent/.claude/worktrees/salve-agent-impl
+cd /mnt/c/Users/DELL/multi-agent/.claude/worktrees/slave-agent-impl
 git status
 git log --oneline -3
 ```
-Expected: clean working tree, on `feat/salve-agent` branch, salve commits visible.
+Expected: clean working tree, on `feat/slave-agent` branch, slave commits visible.
 
-- [ ] **Create new branch from feat/salve-agent**
+- [ ] **Create new branch from feat/slave-agent**
 
 ```bash
-cd /mnt/c/Users/DELL/multi-agent/.claude/worktrees/salve-agent-impl
+cd /mnt/c/Users/DELL/multi-agent/.claude/worktrees/slave-agent-impl
 git checkout -b feat/master-agent
 ```
 
@@ -90,8 +90,8 @@ All subsequent tasks commit to `feat/master-agent`.
 ## Task 1: Extend `config` with Planner + Fanout
 
 **Files:**
-- Modify: `salve_agent/internal/config/config.go`
-- Modify: `salve_agent/internal/config/config_test.go`
+- Modify: `slave_agent/internal/config/config.go`
+- Modify: `slave_agent/internal/config/config_test.go`
 
 - [ ] **Step 1: Failing test**
 
@@ -216,8 +216,8 @@ Add to `Validate()` (after existing checks):
 - [ ] **Step 5: Commit**
 
 ```bash
-git add salve_agent/internal/config/
-git commit -m "feat(salve_agent/config): add Planner + Fanout master fields"
+git add slave_agent/internal/config/
+git commit -m "feat(slave_agent/config): add Planner + Fanout master fields"
 ```
 
 ---
@@ -225,9 +225,9 @@ git commit -m "feat(salve_agent/config): add Planner + Fanout master fields"
 ## Task 2: Extend `store` schema with `sub_tasks` table
 
 **Files:**
-- Modify: `salve_agent/internal/store/schema.sql`
-- Modify: `salve_agent/internal/store/store.go`
-- Modify: `salve_agent/internal/store/store_test.go`
+- Modify: `slave_agent/internal/store/schema.sql`
+- Modify: `slave_agent/internal/store/store.go`
+- Modify: `slave_agent/internal/store/store_test.go`
 
 - [ ] **Step 1: Append to `schema.sql`**
 
@@ -407,8 +407,8 @@ Add `"encoding/json"` and `"strings"` to the existing import block if not alread
 - [ ] **Step 6: Commit**
 
 ```bash
-git add salve_agent/internal/store/
-git commit -m "feat(salve_agent/store): add sub_tasks table + CRUD"
+git add slave_agent/internal/store/
+git commit -m "feat(slave_agent/store): add sub_tasks table + CRUD"
 ```
 
 ---
@@ -416,8 +416,8 @@ git commit -m "feat(salve_agent/store): add sub_tasks table + CRUD"
 ## Task 3: Extend `store.Recover` to cancel in-flight sub_tasks
 
 **Files:**
-- Modify: `salve_agent/internal/store/store.go`
-- Modify: `salve_agent/internal/store/store_test.go`
+- Modify: `slave_agent/internal/store/store.go`
+- Modify: `slave_agent/internal/store/store_test.go`
 
 - [ ] **Step 1: Failing test**
 
@@ -477,8 +477,8 @@ Find the existing `func (s *Store) Recover() error` body. Inside the same transa
 - [ ] **Step 5: Commit**
 
 ```bash
-git add salve_agent/internal/store/
-git commit -m "feat(salve_agent/store): Recover also cancels in-flight sub_tasks"
+git add slave_agent/internal/store/
+git commit -m "feat(slave_agent/store): Recover also cancels in-flight sub_tasks"
 ```
 
 ---
@@ -486,8 +486,8 @@ git commit -m "feat(salve_agent/store): Recover also cancels in-flight sub_tasks
 ## Task 4: Make `poller` accept Dispatcher interface
 
 **Files:**
-- Modify: `salve_agent/internal/poller/poller.go`
-- Modify: `salve_agent/internal/poller/poller_test.go`
+- Modify: `slave_agent/internal/poller/poller.go`
+- Modify: `slave_agent/internal/poller/poller_test.go`
 
 - [ ] **Step 1: Define interface and switch poller to it**
 
@@ -495,7 +495,7 @@ Edit `poller.go`. Add at the top of the file (after imports):
 
 ```go
 // Dispatcher is the contract poller uses to hand a task off for execution.
-// salve's *dispatch.Dispatcher and master's *orchestrator.Orchestrator both satisfy this.
+// slave's *dispatch.Dispatcher and master's *orchestrator.Orchestrator both satisfy this.
 type Dispatcher interface {
     Run(ctx context.Context, t executor.Task) (executor.Result, error)
 }
@@ -503,7 +503,7 @@ type Dispatcher interface {
 
 Change the `Poller.disp` field type from `*dispatch.Dispatcher` to `Dispatcher`. Change `New`'s 2nd parameter type the same way.
 
-Remove the `"github.com/yourorg/salve_agent/internal/dispatch"` import if it's no longer needed.
+Remove the `"github.com/yourorg/slave_agent/internal/dispatch"` import if it's no longer needed.
 
 - [ ] **Step 2: Run all tests**
 
@@ -516,8 +516,8 @@ If `poller_test.go` directly constructs `dispatch.Dispatcher` and passes it: tha
 - [ ] **Step 3: Commit**
 
 ```bash
-git add salve_agent/internal/poller/
-git commit -m "refactor(salve_agent/poller): accept Dispatcher interface"
+git add slave_agent/internal/poller/
+git commit -m "refactor(slave_agent/poller): accept Dispatcher interface"
 ```
 
 ---
@@ -525,7 +525,7 @@ git commit -m "refactor(salve_agent/poller): accept Dispatcher interface"
 ## Task 5: Add `tunnel.SDKClient()` getter
 
 **Files:**
-- Modify: `salve_agent/internal/tunnel/tunnel.go`
+- Modify: `slave_agent/internal/tunnel/tunnel.go`
 
 - [ ] **Step 1: Add getter**
 
@@ -549,8 +549,8 @@ func (t *Tunnel) SDKClient() *agentsdk.Client {
 - [ ] **Step 3: Commit**
 
 ```bash
-git add salve_agent/internal/tunnel/
-git commit -m "feat(salve_agent/tunnel): expose SDKClient() getter"
+git add slave_agent/internal/tunnel/
+git commit -m "feat(slave_agent/tunnel): expose SDKClient() getter"
 ```
 
 ---
@@ -558,10 +558,10 @@ git commit -m "feat(salve_agent/tunnel): expose SDKClient() getter"
 ## Task 6: `planner` package — types, prompts, fake binary
 
 **Files:**
-- Create: `salve_agent/internal/planner/planner.go`
-- Create: `salve_agent/internal/planner/prompts.go`
-- Create: `salve_agent/internal/planner/planner_test.go`
-- Create: `salve_agent/testdata/fake-planner.sh`
+- Create: `slave_agent/internal/planner/planner.go`
+- Create: `slave_agent/internal/planner/prompts.go`
+- Create: `slave_agent/internal/planner/planner_test.go`
+- Create: `slave_agent/testdata/fake-planner.sh`
 
 - [ ] **Step 1: Write `testdata/fake-planner.sh`**
 
@@ -610,7 +610,7 @@ EOF
 esac
 ```
 
-`chmod +x salve_agent/testdata/fake-planner.sh`
+`chmod +x slave_agent/testdata/fake-planner.sh`
 
 - [ ] **Step 2: Write `planner.go`**
 
@@ -626,7 +626,7 @@ import (
     "time"
 
     "github.com/agentserver/agentserver/pkg/agentsdk"
-    "github.com/yourorg/salve_agent/internal/config"
+    "github.com/yourorg/slave_agent/internal/config"
 )
 
 type Planner struct{ cfg config.Planner }
@@ -805,7 +805,7 @@ import (
 
     "github.com/stretchr/testify/require"
     "github.com/agentserver/agentserver/pkg/agentsdk"
-    "github.com/yourorg/salve_agent/internal/config"
+    "github.com/yourorg/slave_agent/internal/config"
 )
 
 func fakePlanner(t *testing.T) string {
@@ -911,8 +911,8 @@ func TestRunClaude_Timeout(t *testing.T) {
 - [ ] **Step 6: Commit**
 
 ```bash
-git add salve_agent/internal/planner/ salve_agent/testdata/fake-planner.sh
-git commit -m "feat(salve_agent/planner): claude-as-decision wrapper (Route/Plan/Reduce)"
+git add slave_agent/internal/planner/ slave_agent/testdata/fake-planner.sh
+git commit -m "feat(slave_agent/planner): claude-as-decision wrapper (Route/Plan/Reduce)"
 ```
 
 ---
@@ -920,8 +920,8 @@ git commit -m "feat(salve_agent/planner): claude-as-decision wrapper (Route/Plan
 ## Task 7: `orchestrator/dag` — Validate
 
 **Files:**
-- Create: `salve_agent/internal/orchestrator/dag.go`
-- Create: `salve_agent/internal/orchestrator/dag_test.go`
+- Create: `slave_agent/internal/orchestrator/dag.go`
+- Create: `slave_agent/internal/orchestrator/dag_test.go`
 
 - [ ] **Step 1: Failing test**
 
@@ -933,7 +933,7 @@ import (
     "testing"
 
     "github.com/stretchr/testify/require"
-    "github.com/yourorg/salve_agent/internal/planner"
+    "github.com/yourorg/slave_agent/internal/planner"
 )
 
 func TestValidate_OK(t *testing.T) {
@@ -991,7 +991,7 @@ package orchestrator
 import (
     "fmt"
 
-    "github.com/yourorg/salve_agent/internal/planner"
+    "github.com/yourorg/slave_agent/internal/planner"
 )
 
 const MaxNodes = 100
@@ -1077,8 +1077,8 @@ func detectCycle(nodes []planner.Node) error {
 - [ ] **Step 5: Commit**
 
 ```bash
-git add salve_agent/internal/orchestrator/
-git commit -m "feat(salve_agent/orchestrator): DAG Validate (cycle/duplicate/dangling/size)"
+git add slave_agent/internal/orchestrator/
+git commit -m "feat(slave_agent/orchestrator): DAG Validate (cycle/duplicate/dangling/size)"
 ```
 
 ---
@@ -1086,8 +1086,8 @@ git commit -m "feat(salve_agent/orchestrator): DAG Validate (cycle/duplicate/dan
 ## Task 8: `orchestrator/dag` — Render template
 
 **Files:**
-- Modify: `salve_agent/internal/orchestrator/dag.go`
-- Modify: `salve_agent/internal/orchestrator/dag_test.go`
+- Modify: `slave_agent/internal/orchestrator/dag.go`
+- Modify: `slave_agent/internal/orchestrator/dag_test.go`
 
 - [ ] **Step 1: Failing tests**
 
@@ -1157,8 +1157,8 @@ Move the existing `import "fmt"` line into a grouped import block with `"regexp"
 - [ ] **Step 5: Commit**
 
 ```bash
-git add salve_agent/internal/orchestrator/
-git commit -m "feat(salve_agent/orchestrator): DAG Render template substitution"
+git add slave_agent/internal/orchestrator/
+git commit -m "feat(slave_agent/orchestrator): DAG Render template substitution"
 ```
 
 ---
@@ -1166,8 +1166,8 @@ git commit -m "feat(salve_agent/orchestrator): DAG Render template substitution"
 ## Task 9: `orchestrator/dag` — Scheduler
 
 **Files:**
-- Modify: `salve_agent/internal/orchestrator/dag.go`
-- Modify: `salve_agent/internal/orchestrator/dag_test.go`
+- Modify: `slave_agent/internal/orchestrator/dag.go`
+- Modify: `slave_agent/internal/orchestrator/dag_test.go`
 
 - [ ] **Step 1: Failing tests**
 
@@ -1400,8 +1400,8 @@ func (s *Scheduler) AllFinished() []FinishedNode {
 - [ ] **Step 5: Commit**
 
 ```bash
-git add salve_agent/internal/orchestrator/
-git commit -m "feat(salve_agent/orchestrator): DAG Scheduler with Ready/Report/Skip"
+git add slave_agent/internal/orchestrator/
+git commit -m "feat(slave_agent/orchestrator): DAG Scheduler with Ready/Report/Skip"
 ```
 
 ---
@@ -1409,7 +1409,7 @@ git commit -m "feat(salve_agent/orchestrator): DAG Scheduler with Ready/Report/S
 ## Task 10: `orchestrator` types + base + SDKDelegator interface
 
 **Files:**
-- Create: `salve_agent/internal/orchestrator/orchestrator.go`
+- Create: `slave_agent/internal/orchestrator/orchestrator.go`
 
 - [ ] **Step 1: Write base types**
 
@@ -1422,10 +1422,10 @@ import (
     "time"
 
     "github.com/agentserver/agentserver/pkg/agentsdk"
-    "github.com/yourorg/salve_agent/internal/config"
-    "github.com/yourorg/salve_agent/internal/executor"
-    "github.com/yourorg/salve_agent/internal/planner"
-    "github.com/yourorg/salve_agent/internal/store"
+    "github.com/yourorg/slave_agent/internal/config"
+    "github.com/yourorg/slave_agent/internal/executor"
+    "github.com/yourorg/slave_agent/internal/planner"
+    "github.com/yourorg/slave_agent/internal/store"
 )
 
 // SDKDelegator is the slice of agentsdk.Client we use, expressed as an interface
@@ -1527,8 +1527,8 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 - [ ] **Step 3: Commit**
 
 ```bash
-git add salve_agent/internal/orchestrator/
-git commit -m "feat(salve_agent/orchestrator): base types + SDKDelegator interface"
+git add slave_agent/internal/orchestrator/
+git commit -m "feat(slave_agent/orchestrator): base types + SDKDelegator interface"
 ```
 
 ---
@@ -1536,9 +1536,9 @@ git commit -m "feat(salve_agent/orchestrator): base types + SDKDelegator interfa
 ## Task 11: `orchestrator.runRoute` (1→1 path)
 
 **Files:**
-- Create: `salve_agent/internal/orchestrator/route.go` (move stub out of orchestrator.go)
-- Create: `salve_agent/internal/orchestrator/route_test.go`
-- Modify: `salve_agent/internal/orchestrator/orchestrator.go` (delete the stub)
+- Create: `slave_agent/internal/orchestrator/route.go` (move stub out of orchestrator.go)
+- Create: `slave_agent/internal/orchestrator/route_test.go`
+- Modify: `slave_agent/internal/orchestrator/orchestrator.go` (delete the stub)
 
 - [ ] **Step 1: Failing test (use a fake SDK)**
 
@@ -1555,10 +1555,10 @@ import (
 
     "github.com/stretchr/testify/require"
     "github.com/agentserver/agentserver/pkg/agentsdk"
-    "github.com/yourorg/salve_agent/internal/config"
-    "github.com/yourorg/salve_agent/internal/executor"
-    "github.com/yourorg/salve_agent/internal/planner"
-    "github.com/yourorg/salve_agent/internal/store"
+    "github.com/yourorg/slave_agent/internal/config"
+    "github.com/yourorg/slave_agent/internal/executor"
+    "github.com/yourorg/slave_agent/internal/planner"
+    "github.com/yourorg/slave_agent/internal/store"
 )
 
 type fakeSDK struct {
@@ -1682,8 +1682,8 @@ import (
     "time"
 
     "github.com/agentserver/agentserver/pkg/agentsdk"
-    "github.com/yourorg/salve_agent/internal/executor"
-    "github.com/yourorg/salve_agent/internal/store"
+    "github.com/yourorg/slave_agent/internal/executor"
+    "github.com/yourorg/slave_agent/internal/store"
 )
 
 func (o *Orchestrator) runRoute(ctx context.Context, t executor.Task) (executor.Result, error) {
@@ -1749,8 +1749,8 @@ Note: the spec says `TaskInfo` has an `Output` field — confirm by checking `/r
 - [ ] **Step 5: Commit**
 
 ```bash
-git add salve_agent/internal/orchestrator/
-git commit -m "feat(salve_agent/orchestrator): runRoute (1→1 LLM-routed delegation)"
+git add slave_agent/internal/orchestrator/
+git commit -m "feat(slave_agent/orchestrator): runRoute (1→1 LLM-routed delegation)"
 ```
 
 ---
@@ -1758,9 +1758,9 @@ git commit -m "feat(salve_agent/orchestrator): runRoute (1→1 LLM-routed delega
 ## Task 12: `orchestrator.runFanout` (DAG path)
 
 **Files:**
-- Create: `salve_agent/internal/orchestrator/fanout.go`
-- Create: `salve_agent/internal/orchestrator/fanout_test.go`
-- Modify: `salve_agent/internal/orchestrator/orchestrator.go` (delete the runFanout stub)
+- Create: `slave_agent/internal/orchestrator/fanout.go`
+- Create: `slave_agent/internal/orchestrator/fanout_test.go`
+- Modify: `slave_agent/internal/orchestrator/orchestrator.go` (delete the runFanout stub)
 
 - [ ] **Step 1: Failing test**
 
@@ -1776,7 +1776,7 @@ import (
 
     "github.com/stretchr/testify/require"
     "github.com/agentserver/agentserver/pkg/agentsdk"
-    "github.com/yourorg/salve_agent/internal/executor"
+    "github.com/yourorg/slave_agent/internal/executor"
 )
 
 // fakeSDKQueue lets each child task return a queued (status, output) pair keyed by request order.
@@ -1895,9 +1895,9 @@ import (
     "time"
 
     "github.com/agentserver/agentserver/pkg/agentsdk"
-    "github.com/yourorg/salve_agent/internal/executor"
-    "github.com/yourorg/salve_agent/internal/planner"
-    "github.com/yourorg/salve_agent/internal/store"
+    "github.com/yourorg/slave_agent/internal/executor"
+    "github.com/yourorg/slave_agent/internal/planner"
+    "github.com/yourorg/slave_agent/internal/store"
 )
 
 func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor.Result, error) {
@@ -2064,8 +2064,8 @@ Delete the `runFanout` stub from `orchestrator.go`.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add salve_agent/internal/orchestrator/
-git commit -m "feat(salve_agent/orchestrator): runFanout (DAG executor with policy)"
+git add slave_agent/internal/orchestrator/
+git commit -m "feat(slave_agent/orchestrator): runFanout (DAG executor with policy)"
 ```
 
 ---
@@ -2073,8 +2073,8 @@ git commit -m "feat(salve_agent/orchestrator): runFanout (DAG executor with poli
 ## Task 13: Extend `webui` with sub-task routes and SSE event types
 
 **Files:**
-- Modify: `salve_agent/internal/webui/server.go`
-- Modify: `salve_agent/internal/webui/server_test.go`
+- Modify: `slave_agent/internal/webui/server.go`
+- Modify: `slave_agent/internal/webui/server_test.go`
 
 - [ ] **Step 1: Failing tests**
 
@@ -2168,7 +2168,7 @@ func (h *Handler) taskDetail(w http.ResponseWriter, r *http.Request, id string) 
         http.Error(w, `{"error":"not found"}`, 404)
         return
     }
-    children, _ := h.s.ListSubTasks(id) // may be nil/empty for salve tasks
+    children, _ := h.s.ListSubTasks(id) // may be nil/empty for slave tasks
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(map[string]interface{}{
         "task": row, "chunks": chunks, "children": children,
@@ -2183,8 +2183,8 @@ func (h *Handler) taskDetail(w http.ResponseWriter, r *http.Request, id string) 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add salve_agent/internal/webui/
-git commit -m "feat(salve_agent/webui): /tasks/{id}/children + include children in detail"
+git add slave_agent/internal/webui/
+git commit -m "feat(slave_agent/webui): /tasks/{id}/children + include children in detail"
 ```
 
 ---
@@ -2192,7 +2192,7 @@ git commit -m "feat(salve_agent/webui): /tasks/{id}/children + include children 
 ## Task 14: `cmd/master-agent/main.go`
 
 **Files:**
-- Create: `salve_agent/cmd/master-agent/main.go`
+- Create: `slave_agent/cmd/master-agent/main.go`
 
 - [ ] **Step 1: Write main.go**
 
@@ -2209,13 +2209,13 @@ import (
 
     "golang.org/x/sync/errgroup"
 
-    "github.com/yourorg/salve_agent/internal/config"
-    "github.com/yourorg/salve_agent/internal/orchestrator"
-    "github.com/yourorg/salve_agent/internal/planner"
-    "github.com/yourorg/salve_agent/internal/poller"
-    "github.com/yourorg/salve_agent/internal/store"
-    "github.com/yourorg/salve_agent/internal/tunnel"
-    "github.com/yourorg/salve_agent/internal/webui"
+    "github.com/yourorg/slave_agent/internal/config"
+    "github.com/yourorg/slave_agent/internal/orchestrator"
+    "github.com/yourorg/slave_agent/internal/planner"
+    "github.com/yourorg/slave_agent/internal/poller"
+    "github.com/yourorg/slave_agent/internal/store"
+    "github.com/yourorg/slave_agent/internal/tunnel"
+    "github.com/yourorg/slave_agent/internal/webui"
 )
 
 func main() {
@@ -2283,7 +2283,7 @@ func run(cfgPath string) error {
 - [ ] **Step 2: Build and verify all tests still pass**
 
 ```bash
-cd salve_agent
+cd slave_agent
 go build ./...
 go test ./... -race -count=1
 ```
@@ -2292,7 +2292,7 @@ Expected: clean build, all packages pass.
 
 - [ ] **Step 3: Update `.gitignore` to ignore the new built binary**
 
-`salve_agent/.gitignore` already ignores `salve-agent`. Append `master-agent`:
+`slave_agent/.gitignore` already ignores `slave-agent`. Append `master-agent`:
 
 ```
 master-agent
@@ -2301,8 +2301,8 @@ master-agent
 - [ ] **Step 4: Commit**
 
 ```bash
-git add salve_agent/cmd/master-agent/ salve_agent/.gitignore
-git commit -m "feat(salve_agent): cmd/master-agent main wiring"
+git add slave_agent/cmd/master-agent/ slave_agent/.gitignore
+git commit -m "feat(slave_agent): cmd/master-agent main wiring"
 ```
 
 ---
@@ -2310,7 +2310,7 @@ git commit -m "feat(salve_agent): cmd/master-agent main wiring"
 ## Task 15: Contract test for DelegateTask / WaitForTask
 
 **Files:**
-- Create: `salve_agent/tests/contract/master_contract_test.go`
+- Create: `slave_agent/tests/contract/master_contract_test.go`
 
 - [ ] **Step 1: Write contract test**
 
@@ -2333,10 +2333,10 @@ import (
 
     "github.com/stretchr/testify/require"
     "github.com/agentserver/agentserver/pkg/agentsdk"
-    "github.com/yourorg/salve_agent/internal/config"
-    "github.com/yourorg/salve_agent/internal/orchestrator"
-    "github.com/yourorg/salve_agent/internal/planner"
-    "github.com/yourorg/salve_agent/internal/store"
+    "github.com/yourorg/slave_agent/internal/config"
+    "github.com/yourorg/slave_agent/internal/orchestrator"
+    "github.com/yourorg/slave_agent/internal/planner"
+    "github.com/yourorg/slave_agent/internal/store"
 )
 
 func TestContract_DelegateTaskShape(t *testing.T) {
@@ -2416,7 +2416,7 @@ The exact endpoint URLs the SDK uses for `DiscoverAgents`/`DelegateTask`/`WaitFo
 - [ ] **Step 2: Run**
 
 ```bash
-cd salve_agent && go test -tags=contract ./tests/contract/... -v -run TestContract_DelegateTaskShape
+cd slave_agent && go test -tags=contract ./tests/contract/... -v -run TestContract_DelegateTaskShape
 ```
 
 If the test fails because the SDK uses different routes, either:
@@ -2426,8 +2426,8 @@ If the test fails because the SDK uses different routes, either:
 - [ ] **Step 3: Commit**
 
 ```bash
-git add salve_agent/tests/contract/master_contract_test.go
-git commit -m "test(salve_agent): contract test for DelegateTask/WaitForTask"
+git add slave_agent/tests/contract/master_contract_test.go
+git commit -m "test(slave_agent): contract test for DelegateTask/WaitForTask"
 ```
 
 ---
@@ -2439,7 +2439,7 @@ git commit -m "test(salve_agent): contract test for DelegateTask/WaitForTask"
 - Create: `master_agent/config.example.yaml`
 - Create: `master_agent/scripts/e2e.sh`
 
-These live OUTSIDE `salve_agent/` (the Go module), at the repo root. They are pure docs / scripts.
+These live OUTSIDE `slave_agent/` (the Go module), at the repo root. They are pure docs / scripts.
 
 - [ ] **Step 1: `master_agent/README.md`**
 
@@ -2449,11 +2449,11 @@ These live OUTSIDE `salve_agent/` (the Go module), at the repo root. They are pu
 Pure-orchestration agent for agentserver. See
 `docs/superpowers/specs/2026-04-28-master-agent-design.md`.
 
-Built from the same Go module as salve_agent.
+Built from the same Go module as slave_agent.
 
 ## Build
 
-    cd salve_agent
+    cd slave_agent
     go build -o ../master_agent/master-agent ./cmd/master-agent
 
 ## Configure
@@ -2515,7 +2515,7 @@ discovery:
 # Manual end-to-end check. Requires:
 #   - agentserver reachable at $AGENTSERVER_URL
 #   - claude on PATH and ANTHROPIC_API_KEY set
-#   - at least 2 salve_agents already running and registered to the same workspace
+#   - at least 2 slave_agents already running and registered to the same workspace
 set -euo pipefail
 : "${AGENTSERVER_URL:?must set AGENTSERVER_URL}"
 
@@ -2538,13 +2538,13 @@ discovery:
   skills: [route, fanout]
 EOF
 
-(cd salve_agent && go build -o "$work/master-agent" ./cmd/master-agent)
+(cd slave_agent && go build -o "$work/master-agent" ./cmd/master-agent)
 ( cd "$work" && ./master-agent config.yaml ) &
 
 echo "master agent running in $work (pid $!)"
 echo "manually:"
 echo "  1. visit https://code-<shortID>.<base> to confirm dashboard"
-echo "  2. POST a route task: skill=route, prompt='do X' → should pick a salve and return its output"
+echo "  2. POST a route task: skill=route, prompt='do X' → should pick a slave and return its output"
 echo "  3. POST a fanout task: skill=fanout, prompt='research and summarize Y'"
 echo "     → planner emits DAG; check /tasks/<id>/children for sub-task rows"
 echo "     → SSE /tasks/<id>/stream shows subtask_dispatched + subtask_done events"
@@ -2570,7 +2570,7 @@ git commit -m "docs(master_agent): README + example config + e2e script"
 - [ ] **Run the full test matrix locally**
 
 ```bash
-cd salve_agent
+cd slave_agent
 go vet ./...
 go test ./... -race -count=1
 go test -tags=contract ./tests/contract/...
@@ -2582,7 +2582,7 @@ All non-smoke tests must pass; smoke must compile.
 - [ ] **Inspect commits**
 
 ```bash
-git log --oneline feat/master-agent ^feat/salve-agent
+git log --oneline feat/master-agent ^feat/slave-agent
 ```
 
 Expected: roughly 16 new commits (one per task above).
@@ -2614,4 +2614,4 @@ Expected: roughly 16 new commits (one per task above).
 | §6.5 not tested | n/a |
 | §6.6 CI reuse | No new workflow needed |
 
-**SSE coverage**: Task 12 emits `subtask_dispatched`, `subtask_done`, and `subtask_skipped` events through `store.ChunkSink(parentID)`. The existing webui SSE handler (Task 19 of the salve plan) forwards any event type by name, so no changes needed in webui.
+**SSE coverage**: Task 12 emits `subtask_dispatched`, `subtask_done`, and `subtask_skipped` events through `store.ChunkSink(parentID)`. The existing webui SSE handler (Task 19 of the slave plan) forwards any event type by name, so no changes needed in webui.
