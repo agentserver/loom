@@ -183,6 +183,10 @@ func (h *FilesHandler) handleDirBlob(w http.ResponseWriter, r *http.Request, pee
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if filepath.Clean(rel) == "." {
+		http.Error(w, "path cannot be the root itself", http.StatusBadRequest)
+		return
+	}
 	target := filepath.Join(root, rel)
 	if !strings.HasPrefix(target+string(filepath.Separator), root+string(filepath.Separator)) &&
 		target != root {

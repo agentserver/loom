@@ -228,3 +228,39 @@ func TestFilesHandler_Put_MissingParent(t *testing.T) {
 		t.Errorf("missing parent: status %d", w.Code)
 	}
 }
+
+func TestFilesHandler_DirBlob_RejectsRootPath(t *testing.T) {
+	h, r, _ := newTestHandler(t)
+	dir := t.TempDir()
+	tok := r.RegisterDir(dir)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, reqWithPeer("GET", "/files/dir/"+tok+"/blob?path=.", nil))
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("path=. should return 400, got %d (body=%s)", w.Code, w.Body.String())
+	}
+}
+
+func TestFilesHandler_Blob_RejectsSymlinkLeaf(t *testing.T) {
+	h, r, _ := newTestHandler(t)
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.txt")
+	os.WriteFile(real, []byte("contents"), 0o644)
+	link := filepath.Join(dir, "link.txt")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip("symlinks unsupported on this fs")
+	}
+
+	// Register the symlink path. RegisterFile dereferences via os.Open, so
+	// sha is computed from the target's contents. The blob path stored in
+	// the registry is the symlink path itself.
+	sha, _, _, err := r.RegisterFile(link)
+	if err != nil {
+		t.Fatalf("RegisterFile: %v", err)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, reqWithPeer("GET", "/files/blob/"+sha, nil))
+	if w.Code != http.StatusForbidden {
+		t.Errorf("symlink leaf: status %d (body=%s, want 403)", w.Code, w.Body.String())
+	}
+}
