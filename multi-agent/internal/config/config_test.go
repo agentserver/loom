@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -108,4 +109,63 @@ func TestLoad_MasterDefaults(t *testing.T) {
 	require.Equal(t, 4, c.Fanout.MaxConcurrency)
 	require.Equal(t, "best_effort", c.Fanout.DefaultPolicy)
 	require.Equal(t, 600, c.Fanout.SubTaskDefaults.TimeoutSec)
+}
+
+func TestLoad_ResourcesRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	src := `
+server: {url: "http://x", name: "s"}
+resources:
+  cpu:
+    cores: 8
+    arch: x86_64
+  gpu:
+    count: 1
+    model: "RTX 4090"
+    vram_gb: 24
+  memory_gb: 32
+  devices: [camera, gpio]
+  tags: [photogrammetry]
+`
+	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Resources == nil {
+		t.Fatal("Resources nil")
+	}
+	if c.Resources.CPU == nil || c.Resources.CPU.Cores != 8 || c.Resources.CPU.Arch != "x86_64" {
+		t.Fatalf("CPU mismatch: %+v", c.Resources.CPU)
+	}
+	if c.Resources.GPU == nil || c.Resources.GPU.Count != 1 || c.Resources.GPU.Model != "RTX 4090" || c.Resources.GPU.VRAMGB != 24 {
+		t.Fatalf("GPU mismatch: %+v", c.Resources.GPU)
+	}
+	if c.Resources.MemoryGB != 32 {
+		t.Fatalf("MemoryGB = %d", c.Resources.MemoryGB)
+	}
+	if !reflect.DeepEqual(c.Resources.Devices, []string{"camera", "gpio"}) {
+		t.Fatalf("Devices = %v", c.Resources.Devices)
+	}
+	if !reflect.DeepEqual(c.Resources.Tags, []string{"photogrammetry"}) {
+		t.Fatalf("Tags = %v", c.Resources.Tags)
+	}
+}
+
+func TestLoad_ResourcesAbsentIsNil(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	if err := os.WriteFile(path, []byte(`server: {url: "u", name: "n"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Resources != nil {
+		t.Fatalf("expected nil Resources when not declared, got %+v", c.Resources)
+	}
 }
