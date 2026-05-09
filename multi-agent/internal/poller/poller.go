@@ -99,12 +99,48 @@ func (p *Poller) poll(ctx context.Context) (pollTask, bool, error) {
 	if resp.StatusCode != 200 {
 		return pollTask{}, false, fmt.Errorf("poll status %d", resp.StatusCode)
 	}
-	var t pollTask
 	body, _ := io.ReadAll(resp.Body)
-	if err := json.Unmarshal(body, &t); err != nil {
-		return pollTask{}, false, err
+	// agentserver returns a JSON array of pending tasks (possibly empty).
+	// Older versions of this code (and the SDK at agentserver/pkg/agentsdk/task.go)
+	// expected a single object; that decoder silently fails today, leaving the
+	// task atomically marked `assigned` server-side with no agent processing it.
+	var arr []pollTask
+	if err := json.Unmarshal(body, &arr); err != nil {
+		return pollTask{}, false, fmt.Errorf("decode poll: %w (body=%q)", err, string(body))
+	}
+	if len(arr) == 0 {
+		return pollTask{}, false, nil
+	}
+	t := arr[0]
+	// Skill is omitted from the poll response (agentserver/internal/server/agent_tasks.go
+	// pollResponse struct has no Skill field). Fall back to GET /api/agent/tasks/{id}
+	// which does include it; otherwise master can't dispatch the task.
+	if t.Skill == "" {
+		if skill, err := p.fetchSkill(ctx, t.TaskID); err == nil {
+			t.Skill = skill
+		}
 	}
 	return t, true, nil
+}
+
+func (p *Poller) fetchSkill(ctx context.Context, id string) (string, error) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", p.cfg.ServerURL+"/api/agent/tasks/"+id, nil)
+	req.Header.Set("Authorization", "Bearer "+p.cfg.ProxyToken)
+	resp, err := p.cli.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("fetch skill status %d", resp.StatusCode)
+	}
+	var info struct {
+		Skill string `json:"skill"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return "", err
+	}
+	return info.Skill, nil
 }
 
 func (p *Poller) execute(ctx context.Context, t pollTask) {
@@ -121,8 +157,12 @@ func (p *Poller) execute(ctx context.Context, t pollTask) {
 		}
 		return
 	}
+	// agentserver's handleUpdateTaskStatus only persists `result` (json.RawMessage),
+	// not `output` — same field-name mismatch the SDK works around in Complete().
+	// JSON-encode the summary string and send it as `result` so it round-trips.
+	enc, _ := json.Marshal(res.Summary)
 	if !p.putStatusRetry(ctx, t.TaskID, map[string]interface{}{
-		"status": "completed", "output": res.Summary,
+		"status": "completed", "result": json.RawMessage(enc),
 	}) {
 		_ = p.s.EnqueuePendingAck(t.TaskID, "completed")
 	}
@@ -172,7 +212,8 @@ func (p *Poller) drainPendingAcks(ctx context.Context) {
 		if a.Status == "failed" {
 			body["failure_reason"] = a.Reason
 		} else {
-			body["output"] = a.Reason
+			enc, _ := json.Marshal(a.Reason)
+			body["result"] = json.RawMessage(enc)
 		}
 		if p.putStatus(ctx, a.TaskID, body) == nil {
 			_ = p.s.DeletePendingAck(a.TaskID)
