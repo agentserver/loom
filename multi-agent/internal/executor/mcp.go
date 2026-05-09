@@ -327,6 +327,10 @@ func (e *MCPExecutor) ListTools(ctx context.Context, name string) ([]string, err
 		return nil, fmt.Errorf("timeout")
 	case d := <-ch:
 		if d.err != nil {
+			c.kill()
+			e.mu.Lock()
+			delete(e.stdios, name)
+			e.mu.Unlock()
 			return nil, fmt.Errorf("mcp stdio read: %w", d.err)
 		}
 		var raw struct {
