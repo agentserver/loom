@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,6 +47,41 @@ func appendSubTaskRows(s *store.Store, parentID string, nodes []planner.Node) {
 		}
 	}
 	_ = s.InsertSubTasks(parentID, rows)
+}
+
+// renamePlanIDs rewrites every node id in a freshly-planned slice to a
+// unique form (parentNodeID + "_" + originalID) and updates intra-plan
+// DependsOn references to match. Used by runFanout's phase-boundary
+// handler so a re-called planner that emits "n1" again doesn't collide
+// with already-running nodes in the scheduler. References to ids OUTSIDE
+// this plan (e.g., the parent build node) are left unchanged.
+func renamePlanIDs(nodes []planner.Node, parentNodeID string) []planner.Node {
+	rename := make(map[string]string, len(nodes))
+	for _, n := range nodes {
+		rename[n.ID] = parentNodeID + "_" + n.ID
+	}
+	out := make([]planner.Node, len(nodes))
+	for i, n := range nodes {
+		n.ID = rename[n.ID]
+		newDeps := make([]string, len(n.DependsOn))
+		for j, d := range n.DependsOn {
+			if newD, ok := rename[d]; ok {
+				newDeps[j] = newD
+			} else {
+				newDeps[j] = d // refers to a pre-existing node
+			}
+		}
+		n.DependsOn = newDeps
+		// Also rewrite {{X.output}} template references in the prompt
+		// for the same reason.
+		for orig, renamed := range rename {
+			n.Prompt = strings.ReplaceAll(n.Prompt,
+				"{{"+orig+".output}}",
+				"{{"+renamed+".output}}")
+		}
+		out[i] = n
+	}
+	return out
 }
 
 func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor.Result, error) {
@@ -201,6 +237,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("invalid replan: %w", err)
 					}
+					newPlan = renamePlanIDs(newPlan, d.NodeID)
 					if err := sched.Append(newPlan); err != nil {
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("append replan: %w", err)
@@ -213,7 +250,15 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 					if derr == nil {
 						agents = freshAgents
 					}
-					ctx2 := t.Prompt + "\n\nBUILT: " + d.Output
+					// Spell out the server/tool relationship explicitly so
+					// the planner doesn't have to infer it from the raw
+					// handle JSON. mcpExec routes by server name; the tools
+					// list is what's INSIDE that server.
+					builtMsg := fmt.Sprintf(
+						"BUILT a new MCP server. Now use it via skill='mcp' with "+
+							"prompt JSON {\"server\":%q,\"tool\":\"<one of: %s>\",\"args\":{...}}.",
+						hMeta["name"], hMeta["tools"])
+					ctx2 := t.Prompt + "\n\n" + builtMsg
 					newPlan, perr := o.planner.Plan(fanoutCtx, ctx2, agents)
 					if perr != nil {
 						cancelAll()
@@ -223,6 +268,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("invalid post-build plan: %w", err)
 					}
+					newPlan = renamePlanIDs(newPlan, d.NodeID)
 					if err := sched.Append(newPlan); err != nil {
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("append post-build plan: %w", err)

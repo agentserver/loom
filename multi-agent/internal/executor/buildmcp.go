@@ -220,7 +220,7 @@ func (h handleJSON) Marshal() string {
 }
 
 func (e *BuildMCPExecutor) invokeClaude(ctx context.Context, spec buildSpec, priorCode string) (string, error) {
-	args := []string{"--print", "--output-format=stream-json"}
+	args := []string{"--print", "--output-format=stream-json", "--verbose"}
 	cmd := exec.CommandContext(ctx, e.cfg.ClaudeBin, args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

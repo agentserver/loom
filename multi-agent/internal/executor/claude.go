@@ -24,7 +24,7 @@ func NewClaudeExecutor(cfg ClaudeConfig) *ClaudeExecutor { return &ClaudeExecuto
 const capEpilogue = "\n\nWhen you finish, append a line `=== CAPABILITY ===` then 1-3 lines describing any persistent capability change to yourself. If none, write `NO_CAPABILITY_CHANGE`."
 
 func (e *ClaudeExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, error) {
-	args := append([]string{"--print", "--output-format=stream-json", "--append-system-prompt", capEpilogue}, e.cfg.Args...)
+	args := append([]string{"--print", "--output-format=stream-json", "--verbose", "--append-system-prompt", capEpilogue}, e.cfg.Args...)
 	cmd := exec.CommandContext(ctx, e.cfg.Bin, args...)
 	cmd.Dir = e.cfg.WorkDir
 	cmd.Env = append(cmd.Environ(), e.cfg.Env...)

@@ -121,20 +121,33 @@ func main() {
 	}
 
 	if *builderDir != "" {
-		genFile := filepath.Join(*builderDir, "generated_mcp", "image_hash", "v1.py")
-		b, err := os.ReadFile(genFile)
+		// dynamic_mcp.yaml is the source of truth for what got built; the
+		// planner picks the tool name based on its understanding of the
+		// task, so we don't hardcode it here.
+		dyPath := filepath.Join(*builderDir, "dynamic_mcp.yaml")
+		dy, err := os.ReadFile(dyPath)
 		if err != nil {
-			log.Fatalf("driver: expected generated file %s: %v", genFile, err)
+			log.Fatalf("driver: expected %s: %v", dyPath, err)
 		}
-		if !strings.HasPrefix(string(b), "# -*- coding: utf-8 -*-\n# AUTO-GENERATED") {
-			log.Fatalf("driver: %s missing AUTO-GENERATED header", genFile)
+		if !strings.Contains(string(dy), "servers:") {
+			log.Fatalf("driver: %s has no servers entries:\n%s", dyPath, string(dy))
 		}
-		dy, err := os.ReadFile(filepath.Join(*builderDir, "dynamic_mcp.yaml"))
-		if err != nil {
-			log.Fatalf("driver: expected dynamic_mcp.yaml: %v", err)
+		// Find at least one generated python file with the AUTO-GENERATED header.
+		matches, _ := filepath.Glob(filepath.Join(*builderDir, "generated_mcp", "*", "v*.py"))
+		if len(matches) == 0 {
+			log.Fatalf("driver: no generated_mcp/*/v*.py files found in %s", *builderDir)
 		}
-		if !strings.Contains(string(dy), "image_hash:") {
-			log.Fatalf("driver: dynamic_mcp.yaml missing image_hash entry")
+		ok := false
+		for _, m := range matches {
+			b, err := os.ReadFile(m)
+			if err == nil && strings.HasPrefix(string(b), "# -*- coding: utf-8 -*-\n# AUTO-GENERATED") {
+				fmt.Printf("driver: found generated file %s with AUTO-GENERATED header\n", m)
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			log.Fatalf("driver: no generated_mcp/*/v*.py file has the AUTO-GENERATED header")
 		}
 	}
 
