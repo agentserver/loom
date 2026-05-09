@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -23,6 +24,19 @@ func buildFakeMCP(t *testing.T) string {
 	cmd := exec.Command("go", "build", "-o", out, ".")
 	cmd.Dir = src
 	require.NoError(t, cmd.Run())
+	return out
+}
+
+func buildFakeMCPStdio(t *testing.T) string {
+	t.Helper()
+	_, file, _, _ := runtime.Caller(0)
+	src, _ := filepath.Abs(filepath.Join(filepath.Dir(file), "../../testdata/fake-mcp-stdio"))
+	out := filepath.Join(t.TempDir(), "fake-mcp-stdio")
+	cmd := exec.Command("go", "build", "-o", out, ".")
+	cmd.Dir = src
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build fake-mcp-stdio: %v: %s", err, out)
+	}
 	return out
 }
 
@@ -119,4 +133,45 @@ func TestMCP_HTTP_EchoCapability(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "http-cap", res.CapabilityChange)
 	require.Equal(t, "raised", res.Summary)
+}
+
+func TestMCPExecutor_ListTools(t *testing.T) {
+	bin := buildFakeMCPStdio(t)
+	cfg := MCPServerCfg{Transport: "stdio", Command: bin}
+	e := NewMCPExecutor(map[string]MCPServerCfg{"x": cfg})
+	defer e.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tools, err := e.ListTools(ctx, "x")
+	require.NoError(t, err)
+	want := map[string]bool{"echo": true, "raise": true, "boom": true}
+	require.Equal(t, 3, len(tools), "got %v", tools)
+	for _, n := range tools {
+		require.True(t, want[n], "unexpected tool name %q", n)
+	}
+}
+
+func TestMCPExecutor_RegisterStdioReplaces(t *testing.T) {
+	bin := buildFakeMCPStdio(t)
+	e := NewMCPExecutor(map[string]MCPServerCfg{})
+	defer e.Close()
+
+	require.NoError(t, e.RegisterStdio("x", MCPServerCfg{Transport: "stdio", Command: bin}))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := e.ListTools(ctx, "x")
+	require.NoError(t, err)
+
+	// Re-register with the same command (forces process replace).
+	require.NoError(t, e.RegisterStdio("x", MCPServerCfg{Transport: "stdio", Command: bin}))
+	_, err = e.ListTools(ctx, "x")
+	require.NoError(t, err, "post-reregister ListTools: %v", err)
+}
+
+func TestMCPExecutor_RegisterStdioRejectsHTTP(t *testing.T) {
+	e := NewMCPExecutor(map[string]MCPServerCfg{})
+	defer e.Close()
+	err := e.RegisterStdio("x", MCPServerCfg{Transport: "http", URL: "http://x"})
+	require.Error(t, err, "expected error for non-stdio transport")
 }

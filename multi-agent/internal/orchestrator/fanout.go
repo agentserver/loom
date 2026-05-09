@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -11,6 +12,41 @@ import (
 	"github.com/yourorg/multi-agent/internal/planner"
 	"github.com/yourorg/multi-agent/internal/store"
 )
+
+// maxBuildIterations bounds how many build_mcp_blocked → replan cycles the
+// orchestrator will tolerate per spec name before failing the master task.
+// Hardcoded for v1; documented as a future-extension in
+// docs/superpowers/specs/2026-05-09-dynamic-mcp-design.md.
+const maxBuildIterations = 3
+
+// parseOutputHandle attempts to interpret s as a phase-boundary handle JSON
+// document. Unlike transport.ParseHandle, it does not require a non-empty URL
+// field — build_mcp_blocked outputs have url:"" by convention.
+func parseOutputHandle(s string) (typ string, meta map[string]string, ok bool) {
+	var h struct {
+		Type string            `json:"type"`
+		Meta map[string]string `json:"meta,omitempty"`
+	}
+	if err := json.Unmarshal([]byte(s), &h); err != nil {
+		return "", nil, false
+	}
+	if h.Type == "" {
+		return "", nil, false
+	}
+	return h.Type, h.Meta, true
+}
+
+// appendSubTaskRows persists newly-appended nodes to the store.
+func appendSubTaskRows(s *store.Store, parentID string, nodes []planner.Node) {
+	rows := make([]store.SubTaskRow, len(nodes))
+	for i, n := range nodes {
+		rows[i] = store.SubTaskRow{
+			ParentID: parentID, NodeID: n.ID, TargetID: n.TargetID,
+			Prompt: n.Prompt, DependsOn: n.DependsOn, Status: "pending",
+		}
+	}
+	_ = s.InsertSubTasks(parentID, rows)
+}
 
 func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor.Result, error) {
 	agents, err := o.discoverFiltered(ctx)
@@ -40,9 +76,18 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 	sched := NewScheduler(plan, o.cfg.MaxConcurrency)
 	outputs := map[string]string{}
 	var outputsMu sync.Mutex
+	iterCount := map[string]int{}
+	// allNodes tracks every node ever scheduled, including ones added via Append.
+	allNodes := make([]planner.Node, len(plan))
+	copy(allNodes, plan)
 
 	type done struct{ FinishedNode }
-	doneCh := make(chan done, len(plan))
+	// Sized for: initial plan (≤ MaxNodes) + up to maxBuildIterations replans
+	// after build_mcp_blocked + one phase-2 replan after mcp_tool_set, each up
+	// to MaxNodes. Bounded so the goroutine sends never block the main loop
+	// even under deep negotiation; otherwise a slow drain could spuriously
+	// trip the 60s no-progress guard.
+	doneCh := make(chan done, MaxNodes*(maxBuildIterations+2))
 	fanoutCtx, cancelAll := context.WithCancel(ctx)
 	defer cancelAll()
 
@@ -62,6 +107,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 		go func(n planner.Node, prompt string) {
 			resp, err := o.sdk.DelegateTask(fanoutCtx, agentsdk.DelegateTaskRequest{
 				TargetID:       n.TargetID,
+				Skill:          n.Skill,
 				Prompt:         prompt,
 				TimeoutSeconds: o.cfg.SubTaskDefaults.TimeoutSec,
 			})
@@ -132,6 +178,59 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 				"finished_at": time.Now().UTC().Format(time.RFC3339Nano),
 			})
 			sseSink.Write("subtask_done", fmt.Sprintf(`{"node_id":%q,"status":"completed","output_len":%d}`, d.NodeID, len(d.Output)))
+
+			if hType, hMeta, hOk := parseOutputHandle(d.Output); hOk {
+				switch hType {
+				case "build_mcp_blocked":
+					specName := hMeta["spec_name"]
+					iterCount[specName]++
+					if iterCount[specName] >= maxBuildIterations {
+						cancelAll()
+						return executor.Result{}, fmt.Errorf(
+							"build_mcp '%s' exhausted %d iterations; last need=%q reason=%q",
+							specName, maxBuildIterations,
+							hMeta["needed_packages"], hMeta["reason"])
+					}
+					ctx2 := t.Prompt + "\n\nBUILD_MCP_BLOCKED: " + d.Output
+					newPlan, perr := o.planner.Plan(fanoutCtx, ctx2, agents)
+					if perr != nil {
+						cancelAll()
+						return executor.Result{}, fmt.Errorf("replan after blocked: %w", perr)
+					}
+					if err := Validate(newPlan); err != nil {
+						cancelAll()
+						return executor.Result{}, fmt.Errorf("invalid replan: %w", err)
+					}
+					if err := sched.Append(newPlan); err != nil {
+						cancelAll()
+						return executor.Result{}, fmt.Errorf("append replan: %w", err)
+					}
+					allNodes = append(allNodes, newPlan...)
+					appendSubTaskRows(o.store, t.ID, newPlan)
+
+				case "mcp_tool_set":
+					freshAgents, derr := o.discoverFiltered(fanoutCtx)
+					if derr == nil {
+						agents = freshAgents
+					}
+					ctx2 := t.Prompt + "\n\nBUILT: " + d.Output
+					newPlan, perr := o.planner.Plan(fanoutCtx, ctx2, agents)
+					if perr != nil {
+						cancelAll()
+						return executor.Result{}, fmt.Errorf("replan after build: %w", perr)
+					}
+					if err := Validate(newPlan); err != nil {
+						cancelAll()
+						return executor.Result{}, fmt.Errorf("invalid post-build plan: %w", err)
+					}
+					if err := sched.Append(newPlan); err != nil {
+						cancelAll()
+						return executor.Result{}, fmt.Errorf("append post-build plan: %w", err)
+					}
+					allNodes = append(allNodes, newPlan...)
+					appendSubTaskRows(o.store, t.ID, newPlan)
+				}
+			}
 		} else {
 			_ = o.store.UpdateSubTask(t.ID, d.NodeID, map[string]interface{}{
 				"status": d.Status, "error": d.Error,
@@ -161,7 +260,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 
 	fins := sched.AllFinished()
 	nodeByID := map[string]planner.Node{}
-	for _, n := range plan {
+	for _, n := range allNodes {
 		nodeByID[n.ID] = n
 	}
 	results := make([]planner.SubResult, len(fins))

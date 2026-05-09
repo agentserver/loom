@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Behavior knobs:
 #   FAKE_PLANNER_MODE = route_a | route_empty | plan_diamond | plan_chain | plan_invalid_cycle |
-#                       plan_invalid_json | reduce_ok | exit1 | sleep
+#                       plan_invalid_json | plan_with_skill | reduce_ok | exit1 | sleep
 #   FAKE_PLANNER_SLEEP = seconds
 set -euo pipefail
 mode="${FAKE_PLANNER_MODE:-reduce_ok}"
@@ -35,6 +35,41 @@ EOF
 EOF
     ;;
   plan_invalid_json) echo "this is not json at all";;
+  plan_with_skill)
+    cat <<'EOF'
+[
+  {"id":"n0","target_id":"agent-a","prompt":"{\"server\":\"x\",\"tool\":\"y\"}","skill":"mcp"}
+]
+EOF
+    ;;
+  negotiate_then_succeed)
+    rf="${FAKE_PLANNER_ROUND_FILE:-/tmp/_fpround}"
+    r=$(cat "$rf" 2>/dev/null || echo 0)
+    case "$r" in
+      0) cat <<'EOF'
+[{"id":"n0","target_id":"agent-a","kind":"build_mcp","skill":"build_mcp","prompt":"{\"name\":\"foo\",\"iteration\":1}"}]
+EOF
+         ;;
+      1) cat <<'EOF'
+[{"id":"n1","target_id":"agent-a","kind":"build_mcp","skill":"build_mcp","prompt":"{\"name\":\"foo\",\"iteration\":2}"}]
+EOF
+         ;;
+      2) cat <<'EOF'
+[{"id":"n2","target_id":"agent-a","skill":"mcp","prompt":"call"}]
+EOF
+         ;;
+      *) echo "REDUCED";;
+    esac
+    echo $((r+1)) > "$rf"
+    ;;
+  negotiate_forever)
+    rf="${FAKE_PLANNER_ROUND_FILE:-/tmp/_fpround}"
+    r=$(cat "$rf" 2>/dev/null || echo 0)
+    cat <<EOF
+[{"id":"n${r}","target_id":"agent-a","kind":"build_mcp","skill":"build_mcp","prompt":"{\"name\":\"foo\",\"iteration\":${r}}"}]
+EOF
+    echo $((r+1)) > "$rf"
+    ;;
   reduce_ok)         echo "REDUCED OUTPUT";;
   exit1)             echo "boom" 1>&2; exit 1;;
   sleep)             sleep "${FAKE_PLANNER_SLEEP:-30}";;

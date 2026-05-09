@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -21,6 +22,28 @@ type Handler struct {
 	started    time.Time
 }
 
+// MCPBridge is implemented by *executor.MCPExecutor (and fakes in tests).
+// The webui's /bridge/call handler calls CallTool to forward generated-
+// MCP-server requests back into the slave's existing MCP executor.
+type MCPBridge interface {
+	CallTool(ctx context.Context, server, tool string, args map[string]interface{}) (json.RawMessage, error)
+}
+
+// muxWithBridge wraps an http.Handler and carries an injectable MCPBridge.
+type muxWithBridge struct {
+	http.Handler
+	bridge MCPBridge
+	cfg    *config.Config
+}
+
+// SetMCPBridge attaches an MCP dispatcher to a Handler returned by NewHandler.
+// Slave-agent main calls this after constructing the handler.
+func SetMCPBridge(h http.Handler, b MCPBridge) {
+	if hh, ok := h.(*muxWithBridge); ok {
+		hh.bridge = b
+	}
+}
+
 func NewHandler(s *store.Store, journalDir string, cfg *config.Config) http.Handler {
 	h := &Handler{s: s, journalDir: journalDir, cfg: cfg, started: time.Now()}
 	mux := http.NewServeMux()
@@ -29,7 +52,42 @@ func NewHandler(s *store.Store, journalDir string, cfg *config.Config) http.Hand
 	mux.HandleFunc("/tasks", h.listTasks)
 	mux.HandleFunc("/tasks/", h.taskRouter)
 	mux.HandleFunc("/", h.dashboard)
-	return mux
+
+	wrap := &muxWithBridge{Handler: mux, cfg: cfg}
+	mux.HandleFunc("/bridge/call", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method", http.StatusMethodNotAllowed)
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		if auth != "Bearer "+cfg.Credentials.ProxyToken {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		var req struct {
+			Server string                 `json:"server"`
+			Tool   string                 `json:"tool"`
+			Args   map[string]interface{} `json:"args"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if wrap.bridge == nil {
+			http.Error(w, "bridge not configured", http.StatusInternalServerError)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		defer cancel()
+		raw, err := wrap.bridge.CallTool(ctx, req.Server, req.Tool, req.Args)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(raw)
+	})
+	return wrap
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {

@@ -15,6 +15,7 @@ type Config struct {
 	Discovery   Discovery            `yaml:"discovery"`
 	Planner     Planner              `yaml:"planner"`
 	Fanout      Fanout               `yaml:"fanout"`
+	Resources   *Resources           `yaml:"resources,omitempty"`
 }
 
 type Server struct {
@@ -124,4 +125,23 @@ func (c *Config) Save(path string) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+type Resources struct {
+	CPU      *CPUSpec `yaml:"cpu,omitempty"       json:"cpu,omitempty"`
+	GPU      *GPUSpec `yaml:"gpu,omitempty"       json:"gpu,omitempty"`
+	MemoryGB int      `yaml:"memory_gb,omitempty" json:"memory_gb,omitempty"`
+	Devices  []string `yaml:"devices,omitempty"   json:"devices,omitempty"`
+	Tags     []string `yaml:"tags,omitempty"      json:"tags,omitempty"`
+}
+
+type CPUSpec struct {
+	Cores int    `yaml:"cores"          json:"cores"`
+	Arch  string `yaml:"arch,omitempty" json:"arch,omitempty"`
+}
+
+type GPUSpec struct {
+	Count  int    `yaml:"count"             json:"count"`
+	Model  string `yaml:"model,omitempty"   json:"model,omitempty"`
+	VRAMGB int    `yaml:"vram_gb,omitempty" json:"vram_gb,omitempty"`
 }

@@ -1,0 +1,30 @@
+server:
+  url: https://agent.example.com
+  name: agent-dynmcp-builder
+
+credentials:
+  sandbox_id: ""
+  tunnel_token: ""
+  proxy_token: ""
+  short_id: ""
+
+claude:
+  bin: claude
+
+mcp_servers: {}
+
+discovery:
+  display_name: dynmcp-builder
+  description: |
+    Builder agent. Has skill build_mcp; can author Python MCP servers
+    on demand. Resources tagged "crypto" and python3-capable.
+  skills:
+    - chat
+    - mcp
+    - build_mcp
+
+resources:
+  cpu:
+    cores: 4
+  memory_gb: 8
+  tags: [crypto, python3]

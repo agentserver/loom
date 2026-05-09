@@ -3,6 +3,7 @@ package tunnel
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -114,4 +115,42 @@ func TestEnsureRegistered_SkipsWhenAlreadyRegistered(t *testing.T) {
 	})
 	require.NoError(t, tn.EnsureRegistered(context.Background()))
 	require.Equal(t, 0, callCount, "should make no HTTP requests when already registered")
+}
+
+func TestPublishCard_IncludesToolsAndResources(t *testing.T) {
+	var got map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &got)
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Server:      config.Server{URL: srv.URL, Name: "n"},
+		Credentials: config.Credentials{ProxyToken: "ptoken"},
+		Discovery:   config.Discovery{DisplayName: "dn", Description: "d", Skills: []string{"chat", "build_mcp"}},
+		Resources:   &config.Resources{Devices: []string{"camera"}, Tags: []string{"x"}},
+	}
+	tn := NewWithDeps(cfg, "/tmp/none", nil, Deps{})
+	tn.SetTools([]string{"echo", "raise"})
+	if err := tn.PublishCard(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	card, _ := got["card"].(map[string]interface{})
+	if card == nil {
+		t.Fatalf("missing card: %v", got)
+	}
+	tools, _ := card["tools"].([]interface{})
+	if len(tools) != 2 || tools[0] != "echo" || tools[1] != "raise" {
+		t.Fatalf("tools = %v", tools)
+	}
+	res, _ := card["resources"].(map[string]interface{})
+	if res == nil {
+		t.Fatalf("missing resources")
+	}
+	devs, _ := res["devices"].([]interface{})
+	if len(devs) != 1 || devs[0] != "camera" {
+		t.Fatalf("devices = %v", devs)
+	}
 }

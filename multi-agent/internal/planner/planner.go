@@ -21,6 +21,8 @@ type Node struct {
 	TargetID  string   `json:"target_id"`
 	Prompt    string   `json:"prompt"`
 	DependsOn []string `json:"depends_on,omitempty"`
+	Kind      string   `json:"kind,omitempty"`  // "" or "build_mcp"
+	Skill     string   `json:"skill,omitempty"` // "" → slave's default exec; "mcp" → mcpExec; "build_mcp" → BuildMCPExecutor
 }
 
 type SubResult struct {

@@ -32,3 +32,17 @@ discovery:
   skills:
     - chat
     - mcp
+
+# Optional: hardware / runtime resources advertised on the agent card.
+# All fields optional. The planner uses these literally to pick a slave for
+# build_mcp tasks (e.g., a "needs camera" tool goes to a slave that
+# advertises devices: [camera]).
+resources:
+  cpu:
+    cores: 8
+    arch: x86_64
+  gpu:
+    count: 0
+  memory_gb: 16
+  devices: []
+  tags: []

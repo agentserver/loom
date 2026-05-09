@@ -40,18 +40,31 @@ func main() {
 		if err := json.Unmarshal(sc.Bytes(), &r); err != nil {
 			continue
 		}
-		var p toolCallParams
-		_ = json.Unmarshal(r.Params, &p)
 		out := resp{JSONRPC: "2.0", ID: r.ID}
-		switch p.Name {
-		case "echo":
-			out.Result = toolResult{Result: p.Arguments, CapabilityChanged: false}
-		case "raise":
-			out.Result = toolResult{Result: "raised", CapabilityChanged: true, ChangeHint: "did the thing"}
-		case "boom":
-			out.Error = map[string]string{"message": "intentional failure"}
+		switch r.Method {
+		case "tools/list":
+			out.Result = map[string]interface{}{
+				"tools": []map[string]string{
+					{"name": "echo"},
+					{"name": "raise"},
+					{"name": "boom"},
+				},
+			}
+		case "tools/call":
+			var p toolCallParams
+			_ = json.Unmarshal(r.Params, &p)
+			switch p.Name {
+			case "echo":
+				out.Result = toolResult{Result: p.Arguments, CapabilityChanged: false}
+			case "raise":
+				out.Result = toolResult{Result: "raised", CapabilityChanged: true, ChangeHint: "did the thing"}
+			case "boom":
+				out.Error = map[string]string{"message": "intentional failure"}
+			default:
+				out.Error = map[string]string{"message": "unknown tool"}
+			}
 		default:
-			out.Error = map[string]string{"message": "unknown tool"}
+			out.Error = map[string]string{"message": "unknown method"}
 		}
 		b, _ := json.Marshal(out)
 		fmt.Println(string(b))
