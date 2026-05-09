@@ -82,7 +82,12 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 	copy(allNodes, plan)
 
 	type done struct{ FinishedNode }
-	doneCh := make(chan done, MaxNodes) // large enough for all possible appended nodes
+	// Sized for: initial plan (≤ MaxNodes) + up to maxBuildIterations replans
+	// after build_mcp_blocked + one phase-2 replan after mcp_tool_set, each up
+	// to MaxNodes. Bounded so the goroutine sends never block the main loop
+	// even under deep negotiation; otherwise a slow drain could spuriously
+	// trip the 60s no-progress guard.
+	doneCh := make(chan done, MaxNodes*(maxBuildIterations+2))
 	fanoutCtx, cancelAll := context.WithCancel(ctx)
 	defer cancelAll()
 

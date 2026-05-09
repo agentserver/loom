@@ -98,6 +98,7 @@ func agentsJSON(agents []agentsdk.AgentCard) string {
 		DisplayName string                 `json:"display_name"`
 		Description string                 `json:"description"`
 		Status      string                 `json:"status"`
+		Skills      []string               `json:"skills,omitempty"`
 		Tools       []string               `json:"tools,omitempty"`
 		Resources   map[string]interface{} `json:"resources,omitempty"`
 	}
@@ -111,10 +112,12 @@ func agentsJSON(agents []agentsdk.AgentCard) string {
 		}
 		if len(a.Card) > 0 {
 			var inner struct {
+				Skills    []string               `json:"skills"`
 				Tools     []string               `json:"tools"`
 				Resources map[string]interface{} `json:"resources"`
 			}
 			_ = json.Unmarshal(a.Card, &inner)
+			out[i].Skills = inner.Skills
 			out[i].Tools = inner.Tools
 			out[i].Resources = inner.Resources
 		}
