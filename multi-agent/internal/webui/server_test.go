@@ -201,3 +201,27 @@ func TestBridgeCall_RejectsBadAuth(t *testing.T) {
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
 	}
 }
+
+func TestSetDriverFiles_RoutesFilesPathToDriverHandler(t *testing.T) {
+	base := http.NewServeMux()
+	base.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte("base-healthz"))
+	})
+	files := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte("files-hit:" + r.URL.Path))
+	})
+	composed := SetDriverFiles(base, files)
+
+	w1 := httptest.NewRecorder()
+	composed.ServeHTTP(w1, httptest.NewRequest("GET", "/healthz", nil))
+	if w1.Body.String() != "base-healthz" {
+		t.Errorf("non-files path: %q", w1.Body.String())
+	}
+	w2 := httptest.NewRecorder()
+	composed.ServeHTTP(w2, httptest.NewRequest("GET", "/files/blob/abc", nil))
+	if w2.Body.String() != "files-hit:/files/blob/abc" {
+		t.Errorf("files path: %q", w2.Body.String())
+	}
+}
