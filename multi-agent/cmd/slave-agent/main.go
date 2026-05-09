@@ -8,8 +8,10 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"golang.org/x/sync/errgroup"
+	"gopkg.in/yaml.v3"
 
 	"github.com/yourorg/multi-agent/internal/config"
 	"github.com/yourorg/multi-agent/internal/dispatch"
@@ -59,27 +61,67 @@ func run(cfgPath string) error {
 			URL: m.URL, Headers: m.Headers,
 		}
 	}
+	if df, err := loadDynamicMCP("dynamic_mcp.yaml"); err == nil {
+		for name, entry := range df.Servers {
+			mcpCfg[name] = executor.MCPServerCfg{
+				Transport: entry.Transport, Command: entry.Command, Args: entry.Args,
+			}
+		}
+	}
 	mcpExec := executor.NewMCPExecutor(mcpCfg)
 	defer mcpExec.Close()
 	claudeExec := executor.NewClaudeExecutor(executor.ClaudeConfig{
 		Bin: cfg.Claude.Bin, WorkDir: cfg.Claude.WorkDir, Args: cfg.Claude.Args,
 	})
 
-	routes := map[string]executor.Executor{
-		"mcp": mcpExec,
-		"":    claudeExec,
-	}
-	d := dispatch.New(routes, j, s)
-
 	ui := webui.NewHandler(s, journalDir, cfg)
+	webui.SetMCPBridge(ui, mcpExec)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	tn := tunnel.New(cfg, cfgPath, ui)
+
+	routes := map[string]executor.Executor{
+		"mcp": mcpExec,
+		"":    claudeExec,
+	}
+	hasBuildMCP := false
+	for _, skill := range cfg.Discovery.Skills {
+		if skill == "build_mcp" {
+			hasBuildMCP = true
+			break
+		}
+	}
+	if hasBuildMCP {
+		workdir, _ := os.Getwd()
+		buildExec := executor.NewBuildMCPExecutor(executor.BuildMCPConfig{
+			WorkDir:   workdir,
+			ClaudeBin: cfg.Claude.Bin,
+			MCPExec:   mcpExec,
+			Republish: func(ctx context.Context) error { return tn.PublishCard(ctx) },
+		})
+		routes["build_mcp"] = buildExec
+	}
+	d := dispatch.New(routes, j, s)
+
 	if err := tn.EnsureRegistered(ctx); err != nil {
 		return err
 	}
+
+	initTools := []string{}
+	enumCtx, enumCancel := context.WithTimeout(ctx, 10*time.Second)
+	for name, sc := range mcpCfg {
+		if sc.Transport != "stdio" {
+			continue
+		}
+		if names, err := mcpExec.ListTools(enumCtx, name); err == nil {
+			initTools = append(initTools, names...)
+		}
+	}
+	enumCancel()
+	tn.SetTools(initTools)
+
 	if err := tn.PublishCard(ctx); err != nil {
 		log.Printf("publish card: %v (continuing)", err)
 	}
@@ -97,4 +139,31 @@ func run(cfgPath string) error {
 		return fmt.Errorf("run: %w", err)
 	}
 	return nil
+}
+
+type dynamicMCPFile struct {
+	Servers map[string]struct {
+		Transport string   `yaml:"transport"`
+		Command   string   `yaml:"command"`
+		Args      []string `yaml:"args"`
+	} `yaml:"servers"`
+}
+
+func loadDynamicMCP(path string) (*dynamicMCPFile, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var df dynamicMCPFile
+	if err := yaml.Unmarshal(b, &df); err != nil {
+		return nil, err
+	}
+	if df.Servers == nil {
+		df.Servers = map[string]struct {
+			Transport string   `yaml:"transport"`
+			Command   string   `yaml:"command"`
+			Args      []string `yaml:"args"`
+		}{}
+	}
+	return &df, nil
 }
