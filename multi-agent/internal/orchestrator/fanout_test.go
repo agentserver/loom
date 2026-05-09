@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -110,4 +111,50 @@ func TestFanout_PassesNodeSkillToDelegateTask(t *testing.T) {
 	require.Len(t, sdk.dispatched, 1)
 	require.Equal(t, "mcp", sdk.dispatched[0].Skill,
 		"orchestrator must thread Node.Skill into DelegateTask")
+}
+
+func TestFanout_BuildMCPBlocked_TriggersReplan(t *testing.T) {
+	// negotiate_then_succeed: round 0 emits build n0; round 1 emits build n1;
+	// round 2 emits use n2. SDK returns blocked, then tool_set, then ok.
+	rf := filepath.Join(t.TempDir(), "round")
+	t.Setenv("FAKE_PLANNER_ROUND_FILE", rf)
+
+	blocked := `{"type":"build_mcp_blocked","url":"","meta":{"spec_name":"foo","iteration":"1","needed_packages":"requests","reason":"r"}}`
+	toolSet := `{"type":"mcp_tool_set","url":"file:///x","meta":{"name":"foo","version":"1","tools":"a","iteration":"2"}}`
+
+	sdk := &fakeSDKQueue{
+		agents: []agentsdk.AgentCard{{AgentID: "agent-a", Status: "available"}},
+		queue: []agentsdk.TaskInfo{
+			{Status: "completed", Output: blocked}, // n0
+			{Status: "completed", Output: toolSet}, // n1
+			{Status: "completed", Output: "ok"},    // n2 (use)
+		},
+	}
+	o := newOrch(t, sdk, "negotiate_then_succeed")
+	_, err := o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: "do"})
+	require.NoError(t, err)
+	require.Len(t, sdk.dispatched, 3, "n0 build, n1 build, n2 use")
+}
+
+func TestFanout_BuildMCPBlocked_HitsIterationCap(t *testing.T) {
+	rf := filepath.Join(t.TempDir(), "round")
+	t.Setenv("FAKE_PLANNER_ROUND_FILE", rf)
+
+	blocked := `{"type":"build_mcp_blocked","url":"","meta":{"spec_name":"foo","iteration":"X","needed_packages":"y","reason":"r"}}`
+
+	sdk := &fakeSDKQueue{
+		agents: []agentsdk.AgentCard{{AgentID: "agent-a", Status: "available"}},
+		queue: []agentsdk.TaskInfo{
+			{Status: "completed", Output: blocked},
+			{Status: "completed", Output: blocked},
+			{Status: "completed", Output: blocked},
+			{Status: "completed", Output: blocked},
+		},
+	}
+	o := newOrch(t, sdk, "negotiate_forever")
+	_, err := o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: "do"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exhausted")
+	// 3 build_mcp dispatches before giving up.
+	require.Len(t, sdk.dispatched, 3)
 }

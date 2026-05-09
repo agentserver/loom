@@ -42,6 +42,34 @@ EOF
 ]
 EOF
     ;;
+  negotiate_then_succeed)
+    rf="${FAKE_PLANNER_ROUND_FILE:-/tmp/_fpround}"
+    r=$(cat "$rf" 2>/dev/null || echo 0)
+    case "$r" in
+      0) cat <<'EOF'
+[{"id":"n0","target_id":"agent-a","kind":"build_mcp","skill":"build_mcp","prompt":"{\"name\":\"foo\",\"iteration\":1}"}]
+EOF
+         ;;
+      1) cat <<'EOF'
+[{"id":"n1","target_id":"agent-a","kind":"build_mcp","skill":"build_mcp","prompt":"{\"name\":\"foo\",\"iteration\":2}"}]
+EOF
+         ;;
+      2) cat <<'EOF'
+[{"id":"n2","target_id":"agent-a","skill":"mcp","prompt":"call"}]
+EOF
+         ;;
+      *) echo "REDUCED";;
+    esac
+    echo $((r+1)) > "$rf"
+    ;;
+  negotiate_forever)
+    rf="${FAKE_PLANNER_ROUND_FILE:-/tmp/_fpround}"
+    r=$(cat "$rf" 2>/dev/null || echo 0)
+    cat <<EOF
+[{"id":"n${r}","target_id":"agent-a","kind":"build_mcp","skill":"build_mcp","prompt":"{\"name\":\"foo\",\"iteration\":${r}}"}]
+EOF
+    echo $((r+1)) > "$rf"
+    ;;
   reduce_ok)         echo "REDUCED OUTPUT";;
   exit1)             echo "boom" 1>&2; exit 1;;
   sleep)             sleep "${FAKE_PLANNER_SLEEP:-30}";;
