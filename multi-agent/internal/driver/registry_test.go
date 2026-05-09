@@ -3,6 +3,7 @@ package driver
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -104,5 +105,20 @@ func TestRegistry_RebindWriteTokenTaskID(t *testing.T) {
 	got, ok := r.ConsumeWriteToken(tok)
 	if !ok || got.TaskID != "task-x" {
 		t.Errorf("rebind: ok=%v got=%+v", ok, got)
+	}
+}
+
+func TestRegistry_TaskWritten_BoundedEviction(t *testing.T) {
+	r := NewFileRegistry(50000)
+	for i := 0; i < 300; i++ {
+		r.TrackTask(fmt.Sprintf("t-%d", i), nil)
+	}
+	// first 44 should be evicted (300 - 256 = 44)
+	if w := r.WrittenFiles("t-0"); w != nil {
+		t.Errorf("t-0 should be evicted: %+v", w)
+	}
+	// t-299 should still be present (empty slice for key that exists)
+	if w := r.WrittenFiles("t-299"); len(w) != 0 {
+		t.Errorf("t-299 unexpected written files: %+v", w)
 	}
 }

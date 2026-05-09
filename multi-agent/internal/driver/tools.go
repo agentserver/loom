@@ -419,14 +419,16 @@ func (ts *tailSubtasksTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{
         "task_id":{"type":"string"},
         "since_seq":{"type":"integer"},
-        "max_wait_sec":{"type":"integer"}
+        "max_wait_sec":{"type":"integer"},
+        "master_display_name":{"type":"string"}
     },"required":["task_id"]}`)
 }
 func (ts *tailSubtasksTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
 	var args struct {
-		TaskID     string `json:"task_id"`
-		SinceSeq   int    `json:"since_seq"`
-		MaxWaitSec int    `json:"max_wait_sec"`
+		TaskID            string `json:"task_id"`
+		SinceSeq          int    `json:"since_seq"`
+		MaxWaitSec        int    `json:"max_wait_sec"`
+		MasterDisplayName string `json:"master_display_name"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return nil, &MCPToolError{Message: err.Error()}
@@ -441,15 +443,44 @@ func (ts *tailSubtasksTool) Call(ctx context.Context, raw json.RawMessage) (json
 	if err != nil {
 		return nil, &MCPToolError{Message: err.Error()}
 	}
-	masterShort := ""
-	for _, c := range cards {
-		if hasSkill(c, "fanout") {
-			masterShort = cardShortID(c)
-			break
-		}
+
+	// Resolve master with the same auto-pick / ambiguity rules as submit_task.
+	override := args.MasterDisplayName
+	if override == "" {
+		override = ts.t.cfg.DriverDefaults.TargetDisplayName
 	}
-	if masterShort == "" {
-		return nil, &MCPToolError{Message: "no fanout-skilled agent visible"}
+	masterShort := ""
+	if override != "" {
+		for _, c := range cards {
+			if c.DisplayName == override && c.AgentID != ts.t.cfg.Credentials.SandboxID {
+				masterShort = cardShortID(c)
+				break
+			}
+		}
+		if masterShort == "" {
+			return nil, &MCPToolError{Message: "no agent named: " + override}
+		}
+	} else {
+		var matches []agentsdk.AgentCard
+		for _, c := range cards {
+			if c.AgentID == ts.t.cfg.Credentials.SandboxID {
+				continue
+			}
+			if hasSkill(c, "fanout") {
+				matches = append(matches, c)
+			}
+		}
+		if len(matches) == 0 {
+			return nil, &MCPToolError{Message: "no fanout-skilled agent visible; pass master_display_name"}
+		}
+		if len(matches) > 1 {
+			names := []string{}
+			for _, m := range matches {
+				names = append(names, m.DisplayName)
+			}
+			return nil, &MCPToolError{Message: "ambiguous master: " + strings.Join(names, ", ") + " (pass master_display_name)"}
+		}
+		masterShort = cardShortID(matches[0])
 	}
 
 	deadline := time.Now().Add(time.Duration(args.MaxWaitSec) * time.Second)

@@ -41,6 +41,7 @@ type FileRegistry struct {
 
 	taskMu      sync.Mutex
 	taskWritten map[string][]WrittenFile // task_id -> appended writes
+	taskOrder   []string                 // insertion order for bounded eviction
 }
 
 type blobMeta struct {
@@ -197,11 +198,20 @@ func (r *FileRegistry) RebindWriteTokenTaskID(tok, taskID string) {
 
 // TrackTask records a task_id -> write tokens association. Used by tools.go to
 // later look up "what writes belong to this task" for wait_task reporting.
+// Evicts oldest entry when the map exceeds 256 tasks.
 func (r *FileRegistry) TrackTask(taskID string, writeTokens []string) {
 	r.taskMu.Lock()
 	defer r.taskMu.Unlock()
-	if _, ok := r.taskWritten[taskID]; !ok {
-		r.taskWritten[taskID] = nil
+	if _, ok := r.taskWritten[taskID]; ok {
+		return // already tracked
+	}
+	r.taskWritten[taskID] = nil
+	r.taskOrder = append(r.taskOrder, taskID)
+	const maxTasks = 256
+	if len(r.taskOrder) > maxTasks {
+		evict := r.taskOrder[0]
+		r.taskOrder = r.taskOrder[1:]
+		delete(r.taskWritten, evict)
 	}
 }
 
@@ -213,11 +223,18 @@ func (r *FileRegistry) RecordWritten(taskID string, w WrittenFile) {
 	r.taskWritten[taskID] = append(r.taskWritten[taskID], w)
 }
 
+// WrittenFiles returns the files written for a task, or nil if the task is
+// not tracked (e.g. evicted or forgotten). An empty non-nil slice means the
+// task is tracked but no files have been written yet.
 func (r *FileRegistry) WrittenFiles(taskID string) []WrittenFile {
 	r.taskMu.Lock()
 	defer r.taskMu.Unlock()
-	out := make([]WrittenFile, len(r.taskWritten[taskID]))
-	copy(out, r.taskWritten[taskID])
+	v, ok := r.taskWritten[taskID]
+	if !ok {
+		return nil
+	}
+	out := make([]WrittenFile, len(v))
+	copy(out, v)
 	return out
 }
 
@@ -225,6 +242,12 @@ func (r *FileRegistry) ForgetTask(taskID string) {
 	r.taskMu.Lock()
 	defer r.taskMu.Unlock()
 	delete(r.taskWritten, taskID)
+	for i, id := range r.taskOrder {
+		if id == taskID {
+			r.taskOrder = append(r.taskOrder[:i], r.taskOrder[i+1:]...)
+			return
+		}
+	}
 }
 
 func newToken() string {
