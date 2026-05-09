@@ -24,6 +24,7 @@ type Tunnel struct {
 	http    http.Handler
 	deps    Deps
 	sdk     *agentsdk.Client
+	tools   []string
 }
 
 func New(cfg *config.Config, cfgPath string, h http.Handler) *Tunnel {
@@ -36,7 +37,13 @@ func New(cfg *config.Config, cfgPath string, h http.Handler) *Tunnel {
 }
 
 func NewWithDeps(cfg *config.Config, cfgPath string, h http.Handler, deps Deps) *Tunnel {
-	return &Tunnel{cfg: cfg, cfgPath: cfgPath, http: h, deps: deps}
+	return &Tunnel{cfg: cfg, cfgPath: cfgPath, http: h, deps: deps, tools: []string{}}
+}
+
+// SetTools sets the flattened MCP tool name list to include in the next
+// PublishCard call. Safe to call before or after EnsureRegistered.
+func (t *Tunnel) SetTools(tools []string) {
+	t.tools = append([]string{}, tools...)
 }
 
 func (t *Tunnel) EnsureRegistered(ctx context.Context) error {
@@ -79,16 +86,21 @@ func (t *Tunnel) EnsureRegistered(ctx context.Context) error {
 // PublishCard posts the discovery card via raw HTTP (SDK has no helper).
 // Best-effort: caller may log+ignore failure.
 func (t *Tunnel) PublishCard(ctx context.Context) error {
+	cardBody := map[string]interface{}{
+		"skills":        t.cfg.Discovery.Skills,
+		"tools":         t.tools,
+		"accepts_tasks": true,
+		"has_web_ui":    true,
+		"version":       "0.1.0",
+	}
+	if t.cfg.Resources != nil {
+		cardBody["resources"] = t.cfg.Resources
+	}
 	body, _ := json.Marshal(map[string]interface{}{
 		"display_name": t.cfg.Discovery.DisplayName,
 		"description":  t.cfg.Discovery.Description,
 		"agent_type":   "custom",
-		"card": map[string]interface{}{
-			"skills":        t.cfg.Discovery.Skills,
-			"accepts_tasks": true,
-			"has_web_ui":    true,
-			"version":       "0.1.0",
-		},
+		"card":         cardBody,
 	})
 	req, err := http.NewRequestWithContext(ctx, "POST", t.cfg.Server.URL+"/api/agent/discovery/cards", bytes.NewReader(body))
 	if err != nil {
