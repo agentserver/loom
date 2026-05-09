@@ -98,3 +98,16 @@ func TestFanout_AllOrNothingFailsImmediately(t *testing.T) {
 	_, err := o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: "x"})
 	require.Error(t, err)
 }
+
+func TestFanout_PassesNodeSkillToDelegateTask(t *testing.T) {
+	sdk := &fakeSDKQueue{
+		agents: []agentsdk.AgentCard{{AgentID: "agent-a", Status: "available"}},
+		queue:  []agentsdk.TaskInfo{{Status: "completed", Output: "ok"}},
+	}
+	o := newOrch(t, sdk, "plan_with_skill")
+	_, err := o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: "do"})
+	require.NoError(t, err)
+	require.Len(t, sdk.dispatched, 1)
+	require.Equal(t, "mcp", sdk.dispatched[0].Skill,
+		"orchestrator must thread Node.Skill into DelegateTask")
+}

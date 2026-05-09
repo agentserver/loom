@@ -62,6 +62,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 		go func(n planner.Node, prompt string) {
 			resp, err := o.sdk.DelegateTask(fanoutCtx, agentsdk.DelegateTaskRequest{
 				TargetID:       n.TargetID,
+				Skill:          n.Skill,
 				Prompt:         prompt,
 				TimeoutSeconds: o.cfg.SubTaskDefaults.TimeoutSec,
 			})

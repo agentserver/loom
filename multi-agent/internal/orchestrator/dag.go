@@ -199,6 +199,40 @@ func (s *Scheduler) AllFinished() []FinishedNode {
 	return out
 }
 
+// Append adds new nodes to a running scheduler. Used by runFanout's
+// phase-boundary handler when re-planning after a build_mcp completes.
+//
+// Caller is responsible for unique node ids; Append errors if any new node
+// shares an id with an existing one. depends_on may reference either
+// already-appended ids or pre-existing ids (including completed ones).
+func (s *Scheduler) Append(nodes []planner.Node) error {
+	for _, n := range nodes {
+		if _, exists := s.nodeByID[n.ID]; exists {
+			return fmt.Errorf("Scheduler.Append: duplicate id %q", n.ID)
+		}
+	}
+	for _, n := range nodes {
+		s.nodes = append(s.nodes, n)
+		s.nodeByID[n.ID] = n
+		for _, d := range n.DependsOn {
+			s.rev[d] = append(s.rev[d], n.ID)
+		}
+		// Only add to pending if all dependencies are already complete
+		ready := true
+		for _, dep := range n.DependsOn {
+			f, ok := s.finished[dep]
+			if !ok || f.Status != "completed" {
+				ready = false
+				break
+			}
+		}
+		if ready {
+			s.pending[n.ID] = true
+		}
+	}
+	return nil
+}
+
 var renderRe = regexp.MustCompile(`\{\{\s*([A-Za-z0-9_-]+)\.output\s*\}\}`)
 
 func Render(template string, outputs map[string]string) (string, error) {

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Behavior knobs:
 #   FAKE_PLANNER_MODE = route_a | route_empty | plan_diamond | plan_chain | plan_invalid_cycle |
-#                       plan_invalid_json | reduce_ok | exit1 | sleep
+#                       plan_invalid_json | plan_with_skill | reduce_ok | exit1 | sleep
 #   FAKE_PLANNER_SLEEP = seconds
 set -euo pipefail
 mode="${FAKE_PLANNER_MODE:-reduce_ok}"
@@ -35,6 +35,13 @@ EOF
 EOF
     ;;
   plan_invalid_json) echo "this is not json at all";;
+  plan_with_skill)
+    cat <<'EOF'
+[
+  {"id":"n0","target_id":"agent-a","prompt":"{\"server\":\"x\",\"tool\":\"y\"}","skill":"mcp"}
+]
+EOF
+    ;;
   reduce_ok)         echo "REDUCED OUTPUT";;
   exit1)             echo "boom" 1>&2; exit 1;;
   sleep)             sleep "${FAKE_PLANNER_SLEEP:-30}";;

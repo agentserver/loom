@@ -161,3 +161,37 @@ func idsOf(ns []planner.Node) []string {
 	}
 	return out
 }
+
+func TestScheduler_Append(t *testing.T) {
+	initial := []planner.Node{
+		{ID: "n0", TargetID: "a", Prompt: "p0"},
+	}
+	s := NewScheduler(initial, 4)
+	r := s.Ready()
+	if len(r) != 1 || r[0].ID != "n0" {
+		t.Fatalf("initial Ready = %v", r)
+	}
+	s.MarkDispatched("n0")
+	s.Report("n0", "completed", "out0", "")
+
+	// Append two new nodes; n1 depends on n0 (already complete), n2 on n1.
+	more := []planner.Node{
+		{ID: "n1", TargetID: "b", Prompt: "p1", DependsOn: []string{"n0"}},
+		{ID: "n2", TargetID: "c", Prompt: "p2", DependsOn: []string{"n1"}},
+	}
+	if err := s.Append(more); err != nil {
+		t.Fatal(err)
+	}
+	r = s.Ready()
+	if len(r) != 1 || r[0].ID != "n1" {
+		t.Fatalf("after append Ready = %v", r)
+	}
+}
+
+func TestScheduler_Append_RejectsDuplicateID(t *testing.T) {
+	s := NewScheduler([]planner.Node{{ID: "n0", TargetID: "a", Prompt: "p"}}, 4)
+	err := s.Append([]planner.Node{{ID: "n0", TargetID: "b", Prompt: "p"}})
+	if err == nil {
+		t.Fatal("expected duplicate id error")
+	}
+}
