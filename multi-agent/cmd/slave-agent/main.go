@@ -99,7 +99,18 @@ func run(cfgPath string) error {
 			WorkDir:   workdir,
 			ClaudeBin: cfg.Claude.Bin,
 			MCPExec:   mcpExec,
-			Republish: func(ctx context.Context) error { return tn.PublishCard(ctx) },
+			Republish: func(ctx context.Context) error {
+				enumCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				defer cancel()
+				all := []string{}
+				for _, name := range mcpExec.Servers() {
+					if names, err := mcpExec.ListTools(enumCtx, name); err == nil {
+						all = append(all, names...)
+					}
+				}
+				tn.SetTools(all)
+				return tn.PublishCard(ctx)
+			},
 		})
 		routes["build_mcp"] = buildExec
 	}
@@ -111,10 +122,7 @@ func run(cfgPath string) error {
 
 	initTools := []string{}
 	enumCtx, enumCancel := context.WithTimeout(ctx, 10*time.Second)
-	for name, sc := range mcpCfg {
-		if sc.Transport != "stdio" {
-			continue
-		}
+	for _, name := range mcpExec.Servers() {
 		if names, err := mcpExec.ListTools(enumCtx, name); err == nil {
 			initTools = append(initTools, names...)
 		}

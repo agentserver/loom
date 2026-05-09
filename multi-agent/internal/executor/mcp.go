@@ -298,6 +298,20 @@ func (e *MCPExecutor) RegisterStdio(name string, cfg MCPServerCfg) error {
 	return nil
 }
 
+// Servers returns the names of all currently-registered MCP servers (both
+// static config + any RegisterStdio'd at runtime). Used by the slave-agent
+// main's Republish callback to re-enumerate tools after build_mcp adds a
+// new server.
+func (e *MCPExecutor) Servers() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, 0, len(e.cfg))
+	for name := range e.cfg {
+		out = append(out, name)
+	}
+	return out
+}
+
 // ListTools returns the tool names exposed by the named server, by issuing
 // one tools/list JSON-RPC call. The server must be registered (in cfg) at
 // call time. Spawns the subprocess if it is not yet running.
