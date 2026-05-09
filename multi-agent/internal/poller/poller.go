@@ -111,7 +111,36 @@ func (p *Poller) poll(ctx context.Context) (pollTask, bool, error) {
 	if len(arr) == 0 {
 		return pollTask{}, false, nil
 	}
-	return arr[0], true, nil
+	t := arr[0]
+	// Skill is omitted from the poll response (agentserver/internal/server/agent_tasks.go
+	// pollResponse struct has no Skill field). Fall back to GET /api/agent/tasks/{id}
+	// which does include it; otherwise master can't dispatch the task.
+	if t.Skill == "" {
+		if skill, err := p.fetchSkill(ctx, t.TaskID); err == nil {
+			t.Skill = skill
+		}
+	}
+	return t, true, nil
+}
+
+func (p *Poller) fetchSkill(ctx context.Context, id string) (string, error) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", p.cfg.ServerURL+"/api/agent/tasks/"+id, nil)
+	req.Header.Set("Authorization", "Bearer "+p.cfg.ProxyToken)
+	resp, err := p.cli.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("fetch skill status %d", resp.StatusCode)
+	}
+	var info struct {
+		Skill string `json:"skill"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return "", err
+	}
+	return info.Skill, nil
 }
 
 func (p *Poller) execute(ctx context.Context, t pollTask) {
