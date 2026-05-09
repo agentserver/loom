@@ -2,7 +2,10 @@ package webui
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -128,4 +131,73 @@ func TestTaskDetail_IncludesChildren(t *testing.T) {
 	require.Contains(t, rr.Body.String(), `"NodeID":"n1"`)
 }
 
-var _ = context.Background
+type fakeMCPDispatcher struct {
+	lastServer, lastTool string
+	lastArgs             map[string]interface{}
+	response             json.RawMessage
+	err                  error
+}
+
+func (f *fakeMCPDispatcher) CallTool(ctx context.Context, server, tool string, args map[string]interface{}) (json.RawMessage, error) {
+	f.lastServer, f.lastTool, f.lastArgs = server, tool, args
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.response, nil
+}
+
+func TestBridgeCall_DispatchesToMCPExecutor(t *testing.T) {
+	fake := &fakeMCPDispatcher{response: json.RawMessage(`{"result":"hello","capability_changed":false}`)}
+	cfg := &config.Config{Credentials: config.Credentials{ProxyToken: "tok"}}
+	s, _ := store.Open(filepath.Join(t.TempDir(), "x.db"))
+	defer s.Close()
+	h := NewHandler(s, t.TempDir(), cfg)
+	SetMCPBridge(h, fake)
+
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"server": "x", "tool": "echo", "args": map[string]interface{}{"a": 1},
+	})
+	req, _ := http.NewRequest("POST", srv.URL+"/bridge/call", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		got, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, got)
+	}
+	var got map[string]interface{}
+	_ = json.NewDecoder(resp.Body).Decode(&got)
+	if got["result"] != "hello" {
+		t.Fatalf("got %+v", got)
+	}
+	if fake.lastServer != "x" || fake.lastTool != "echo" {
+		t.Fatalf("dispatcher saw server=%q tool=%q", fake.lastServer, fake.lastTool)
+	}
+}
+
+func TestBridgeCall_RejectsBadAuth(t *testing.T) {
+	cfg := &config.Config{Credentials: config.Credentials{ProxyToken: "tok"}}
+	s, _ := store.Open(filepath.Join(t.TempDir(), "x.db"))
+	defer s.Close()
+	h := NewHandler(s, t.TempDir(), cfg)
+	SetMCPBridge(h, &fakeMCPDispatcher{})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	req, _ := http.NewRequest("POST", srv.URL+"/bridge/call", bytes.NewReader([]byte(`{"server":"x","tool":"y"}`)))
+	req.Header.Set("Authorization", "Bearer wrong")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+}
