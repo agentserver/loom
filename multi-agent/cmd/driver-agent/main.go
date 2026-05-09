@@ -130,7 +130,7 @@ func runServe(args []string) {
 	composed := webui.SetDriverFiles(base, files)
 
 	if err := publishCard(cfg); err != nil {
-		die("publish card: " + err.Error())
+		fmt.Fprintln(os.Stderr, "driver: publish card warning:", err)
 	}
 
 	tools := driver.NewTools(reg, audit, cli, cfg)
