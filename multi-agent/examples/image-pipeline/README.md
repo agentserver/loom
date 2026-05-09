@@ -62,7 +62,9 @@ Once you have four configs with credentials:
 
 ```bash
 export AGENTSERVER_URL=https://your-agentserver
-export ANTHROPIC_API_KEY=sk-...
+# No ANTHROPIC_API_KEY needed if your local `claude` CLI is already
+# logged in — the master shells out to that binary, which picks up its
+# own session.
 export MASTER_CONFIG=/tmp/master.yaml
 export CAPTURE_CONFIG=/tmp/capture.yaml
 export COMPRESS_CONFIG=/tmp/compress.yaml

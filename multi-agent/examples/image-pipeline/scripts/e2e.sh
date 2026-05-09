@@ -3,7 +3,8 @@
 #
 # Prerequisites (one-time):
 #   - AGENTSERVER_URL set, agentserver reachable
-#   - ANTHROPIC_API_KEY set, claude on PATH
+#   - claude on PATH (claude CLI auth already configured locally — no
+#     ANTHROPIC_API_KEY env var needed; the binary picks up its own session)
 #   - go and sqlite3 on PATH
 #   - Four pre-registered config files (with credentials filled by prior
 #     interactive device-flow registration), paths supplied via env:
@@ -16,7 +17,7 @@
 set -euo pipefail
 
 require_env() {
-  for v in AGENTSERVER_URL ANTHROPIC_API_KEY MASTER_CONFIG CAPTURE_CONFIG COMPRESS_CONFIG DRIVER_CONFIG; do
+  for v in AGENTSERVER_URL MASTER_CONFIG CAPTURE_CONFIG COMPRESS_CONFIG DRIVER_CONFIG; do
     if [ -z "${!v:-}" ]; then
       echo "missing required env: $v" >&2
       exit 2
