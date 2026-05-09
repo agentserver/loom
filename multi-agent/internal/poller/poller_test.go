@@ -41,7 +41,7 @@ func TestPoller_PollsAndCompletes(t *testing.T) {
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"task_id":"t1","skill":"chat","prompt":"hi","timeout_seconds":30}`))
+			w.Write([]byte(`[{"task_id":"t1","skill":"chat","prompt":"hi","timeout_seconds":30}]`))
 			return
 		}
 		// /api/agent/tasks/{id}/status

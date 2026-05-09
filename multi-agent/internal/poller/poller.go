@@ -99,12 +99,19 @@ func (p *Poller) poll(ctx context.Context) (pollTask, bool, error) {
 	if resp.StatusCode != 200 {
 		return pollTask{}, false, fmt.Errorf("poll status %d", resp.StatusCode)
 	}
-	var t pollTask
 	body, _ := io.ReadAll(resp.Body)
-	if err := json.Unmarshal(body, &t); err != nil {
-		return pollTask{}, false, err
+	// agentserver returns a JSON array of pending tasks (possibly empty).
+	// Older versions of this code (and the SDK at agentserver/pkg/agentsdk/task.go)
+	// expected a single object; that decoder silently fails today, leaving the
+	// task atomically marked `assigned` server-side with no agent processing it.
+	var arr []pollTask
+	if err := json.Unmarshal(body, &arr); err != nil {
+		return pollTask{}, false, fmt.Errorf("decode poll: %w (body=%q)", err, string(body))
 	}
-	return t, true, nil
+	if len(arr) == 0 {
+		return pollTask{}, false, nil
+	}
+	return arr[0], true, nil
 }
 
 func (p *Poller) execute(ctx context.Context, t pollTask) {
