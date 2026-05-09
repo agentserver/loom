@@ -157,8 +157,12 @@ func (p *Poller) execute(ctx context.Context, t pollTask) {
 		}
 		return
 	}
+	// agentserver's handleUpdateTaskStatus only persists `result` (json.RawMessage),
+	// not `output` — same field-name mismatch the SDK works around in Complete().
+	// JSON-encode the summary string and send it as `result` so it round-trips.
+	enc, _ := json.Marshal(res.Summary)
 	if !p.putStatusRetry(ctx, t.TaskID, map[string]interface{}{
-		"status": "completed", "output": res.Summary,
+		"status": "completed", "result": json.RawMessage(enc),
 	}) {
 		_ = p.s.EnqueuePendingAck(t.TaskID, "completed")
 	}
@@ -208,7 +212,8 @@ func (p *Poller) drainPendingAcks(ctx context.Context) {
 		if a.Status == "failed" {
 			body["failure_reason"] = a.Reason
 		} else {
-			body["output"] = a.Reason
+			enc, _ := json.Marshal(a.Reason)
+			body["result"] = json.RawMessage(enc)
 		}
 		if p.putStatus(ctx, a.TaskID, body) == nil {
 			_ = p.s.DeletePendingAck(a.TaskID)

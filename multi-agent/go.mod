@@ -25,3 +25,5 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 	nhooyr.io/websocket v1.8.17 // indirect
 )
+
+replace github.com/agentserver/agentserver => ../agentserver
