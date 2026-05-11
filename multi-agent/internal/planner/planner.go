@@ -23,6 +23,7 @@ type Node struct {
 	DependsOn []string `json:"depends_on,omitempty"`
 	Kind      string   `json:"kind,omitempty"`  // "" or "build_mcp"
 	Skill     string   `json:"skill,omitempty"` // "" → slave's default exec; "mcp" → mcpExec; "build_mcp" → BuildMCPExecutor
+	Optional  bool     `json:"optional,omitempty"`
 }
 
 type SubResult struct {

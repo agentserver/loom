@@ -112,7 +112,7 @@ func TestRunClaude_Timeout(t *testing.T) {
 func TestPlan_DecodeNodeKindAndSkill(t *testing.T) {
 	jsonSrc := `[
 	  {"id":"n0","target_id":"a","kind":"build_mcp","skill":"build_mcp","prompt":"spec"},
-	  {"id":"n1","target_id":"b","skill":"mcp","prompt":"call","depends_on":["n0"]},
+	  {"id":"n1","target_id":"b","skill":"mcp","prompt":"call","depends_on":["n0"],"optional":true},
 	  {"id":"n2","target_id":"c","prompt":"chat","depends_on":["n1"]}
 	]`
 	var nodes []Node
@@ -125,6 +125,9 @@ func TestPlan_DecodeNodeKindAndSkill(t *testing.T) {
 	if nodes[1].Kind != "" || nodes[1].Skill != "mcp" {
 		t.Fatalf("n1 = %+v", nodes[1])
 	}
+	if !nodes[1].Optional {
+		t.Fatalf("n1 optional = false, want true")
+	}
 	if nodes[2].Kind != "" || nodes[2].Skill != "" {
 		t.Fatalf("n2 = %+v", nodes[2])
 	}
@@ -135,12 +138,12 @@ func TestPlanPrompt_MentionsBuildMCPAndKindSkill(t *testing.T) {
 		{AgentID: "a1", DisplayName: "x", Description: "y"},
 	})
 	for _, want := range []string{
-		"build_mcp",          // skill name appears
-		`kind: "build_mcp"`,  // node attribute documented
-		`skill: "mcp"`,       // phase-2 use-node guidance
-		"BUILD_MCP_BLOCKED",  // negotiation marker
-		"resources",          // resources keyword referenced
-		"tools",              // tools field referenced
+		"build_mcp",         // skill name appears
+		`kind: "build_mcp"`, // node attribute documented
+		`skill: "mcp"`,      // phase-2 use-node guidance
+		"BUILD_MCP_BLOCKED", // negotiation marker
+		"resources",         // resources keyword referenced
+		"tools",             // tools field referenced
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("planPrompt missing %q", want)
@@ -159,6 +162,39 @@ func TestAgentsJSON_IncludesToolsAndResources(t *testing.T) {
 	}
 	out := agentsJSON(cards)
 	for _, want := range []string{"echo", "raise", "camera"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("agentsJSON missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestAgentsJSON_IncludesStructuredMCPTools(t *testing.T) {
+	cards := []agentsdk.AgentCard{
+		{
+			AgentID:     "a1",
+			DisplayName: "n1",
+			Description: "d",
+			Card: []byte(`{
+				"tools":["render"],
+				"mcp_tools":[{
+					"server":"vision",
+					"name":"render",
+					"description":"Render an image",
+					"input_schema":{"type":"object","properties":{"prompt":{"type":"string"}},"required":["prompt"]},
+					"result_description":"image url"
+				}]
+			}`),
+		},
+	}
+
+	out := agentsJSON(cards)
+	for _, want := range []string{
+		`"mcp_tools"`,
+		`"server": "vision"`,
+		`"name": "render"`,
+		`"input_schema"`,
+		`"prompt"`,
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("agentsJSON missing %q in:\n%s", want, out)
 		}

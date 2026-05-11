@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
+	"github.com/yourorg/multi-agent/internal/capability"
 )
 
 func routePrompt(taskPrompt string, agents []agentsdk.AgentCard) string {
@@ -30,6 +31,7 @@ func planPrompt(taskPrompt string, agents []agentsdk.AgentCard) string {
   - "kind": optional special node kind (currently only "build_mcp")
   - "prompt": the sub-task text. May reference an upstream node's output via {{X.output}}, where X must appear in depends_on.
   - "depends_on": array of upstream node ids; empty for root nodes.
+  - "optional": optional boolean. Nodes are required by default; set optional:true only when the original user request can still succeed without that node.
 
 Constraints: no cycles. At least one root. Prefer a clear convergence (one or few sink nodes).
 
@@ -38,9 +40,9 @@ Example node with kind: "build_mcp" (first phase):
 Example node with skill: "mcp" (use existing tool):
   {skill: "mcp", ...tool call...}
 
-Each agent card lists "skills", "tools" (a flattened list of MCP tool names the agent currently exposes), and "resources" (free-form hardware/runtime info: cpu, gpu, memory_gb, devices, tags). When deciding the DAG:
+Each agent card lists "skills", "tools" (a flattened legacy list of MCP tool names), "mcp_tools" (structured MCP tools with server, name, description, input_schema, and result_description), and "resources" (free-form hardware/runtime info: cpu, gpu, memory_gb, devices, tags). When deciding the DAG:
 
-1. If the work needs a tool that some agent already lists in "tools", emit a node targeting that agent. Set "skill": "mcp" and write the prompt as JSON {"server":"<server-name>","tool":"<tool-name>","args":{...}} so the slave's mcp executor handles it directly. Omit "kind".
+1. If the work needs a tool that some agent already lists in "mcp_tools", prefer/use "mcp_tools" for MCP planning and emit a node targeting that agent. Set "skill": "mcp" and write the prompt as JSON {"server":"<server>","tool":"<tool>","args":{...}} so the slave's mcp executor handles it directly. Omit "kind". The args object MUST conform to that tool's input_schema. You must not invent arguments outside input_schema. If a needed argument is absent from input_schema, evolve/build MCP instead of calling the existing tool with extra args. Use legacy "tools" only as a fallback when structured "mcp_tools" are unavailable.
 
 2. If no agent lists the needed tool but at least one agent has skill "build_mcp" and resources matching the requirement, you MAY emit a sub-task with "kind": "build_mcp" AND "skill": "build_mcp". The prompt MUST be a JSON spec:
        {"name":"<lower_snake>", "description":"...",
@@ -59,6 +61,8 @@ Each agent card lists "skills", "tools" (a flattened list of MCP tool names the 
 4. Match resources sensibly. A camera-required tool goes to a slave with devices:[camera]. Heavy compute goes to one with gpu. Use the resource fields literally — they are not a fixed schema.
 
 5. For ordinary chat sub-tasks, omit "skill" (or set it to ""); the slave dispatches to its claude executor.
+
+6. Nodes are required by default. Set "optional": true only when the original user request can still succeed without that node.
 
 The user's request may begin with a <USER_FILES_MANIFEST version=1> block
 followed by a JSON object. The "files" array names files the user has
@@ -107,13 +111,14 @@ Original task:
 
 func agentsJSON(agents []agentsdk.AgentCard) string {
 	type lite struct {
-		AgentID     string                 `json:"agent_id"`
-		DisplayName string                 `json:"display_name"`
-		Description string                 `json:"description"`
-		Status      string                 `json:"status"`
-		Skills      []string               `json:"skills,omitempty"`
-		Tools       []string               `json:"tools,omitempty"`
-		Resources   map[string]interface{} `json:"resources,omitempty"`
+		AgentID     string                         `json:"agent_id"`
+		DisplayName string                         `json:"display_name"`
+		Description string                         `json:"description"`
+		Status      string                         `json:"status"`
+		Skills      []string                       `json:"skills,omitempty"`
+		Tools       []string                       `json:"tools,omitempty"`
+		MCPTools    []capability.MCPToolDescriptor `json:"mcp_tools,omitempty"`
+		Resources   map[string]interface{}         `json:"resources,omitempty"`
 	}
 	out := make([]lite, len(agents))
 	for i, a := range agents {
@@ -125,13 +130,15 @@ func agentsJSON(agents []agentsdk.AgentCard) string {
 		}
 		if len(a.Card) > 0 {
 			var inner struct {
-				Skills    []string               `json:"skills"`
-				Tools     []string               `json:"tools"`
-				Resources map[string]interface{} `json:"resources"`
+				Skills    []string                       `json:"skills"`
+				Tools     []string                       `json:"tools"`
+				MCPTools  []capability.MCPToolDescriptor `json:"mcp_tools"`
+				Resources map[string]interface{}         `json:"resources"`
 			}
 			_ = json.Unmarshal(a.Card, &inner)
 			out[i].Skills = inner.Skills
 			out[i].Tools = inner.Tools
+			out[i].MCPTools = inner.MCPTools
 			out[i].Resources = inner.Resources
 		}
 	}
