@@ -60,6 +60,19 @@ Each agent card lists "skills", "tools" (a flattened list of MCP tool names the 
 
 5. For ordinary chat sub-tasks, omit "skill" (or set it to ""); the slave dispatches to its claude executor.
 
+The user's request may begin with a <USER_FILES_MANIFEST version=1> block
+followed by a JSON object. The "files" array names files the user has
+referenced; each entry has either a "url" (for a file) or "list_url" +
+"blob_url" (for a directory). When you assign work to a slave that needs
+to read a referenced file, include the relevant url in that node's prompt
+so the slave can GET it. The "writes" array lists local paths the user
+wants results written to; when a slave produces a result that should land
+at one of those paths, include the matching "put_url" in the slave's
+prompt and instruct the slave to PUT the resulting bytes to that URL
+(the URL accepts a single PUT and returns 200 on success). The block
+itself is metadata; do not echo it back, and do not invent additional
+fields.
+
 Output ONLY the JSON array, no commentary.
 
 Task:

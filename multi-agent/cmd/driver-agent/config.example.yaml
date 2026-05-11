@@ -1,0 +1,25 @@
+server:
+  url: https://agent.example.com
+  name: driver-yuzishu
+
+# Filled by `driver-agent register`. Leave blank for first run.
+credentials:
+  sandbox_id: ""
+  tunnel_token: ""
+  proxy_token: ""
+  workspace_id: ""
+  short_id: ""
+
+discovery:
+  display_name: driver-yuzishu
+  description: "Local driver agent. Bridges Claude Code to the workspace; serves the user's local files."
+  skills: []  # driver does not accept tasks
+
+listen_addr: "127.0.0.1:0"
+
+driver_defaults:
+  target_display_name: ""        # blank = auto-pick the unique fanout-skilled agent
+  task_timeout_sec: 600
+  audit_log_dir: ""              # blank = ~/.cache/multi-agent/<short_id>/
+  disable_uid_check: false
+  max_dir_cache_entries: 50000

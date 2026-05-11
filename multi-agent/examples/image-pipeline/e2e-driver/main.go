@@ -29,7 +29,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
-	"github.com/yourorg/multi-agent/examples/image-pipeline/internal/agentboot"
+	"github.com/yourorg/multi-agent/examples/internal/agentboot"
 	"github.com/yourorg/multi-agent/examples/image-pipeline/internal/handlepick"
 	"github.com/yourorg/multi-agent/pkg/transport"
 )

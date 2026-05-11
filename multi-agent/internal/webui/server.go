@@ -44,6 +44,23 @@ func SetMCPBridge(h http.Handler, b MCPBridge) {
 	}
 }
 
+// SetDriverFiles composes a base handler with a driver /files/* handler.
+// The returned http.Handler routes any request whose path begins with
+// "/files/" to filesHandler; all other requests fall through to base.
+// Both handlers are responsible for their own auth/middleware.
+//
+// The driver-agent uses this to mount its FilesHandler alongside a tiny
+// healthz-only base mux behind the agentserver tunnel.
+func SetDriverFiles(base http.Handler, filesHandler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/files/") {
+			filesHandler.ServeHTTP(w, r)
+			return
+		}
+		base.ServeHTTP(w, r)
+	})
+}
+
 func NewHandler(s *store.Store, journalDir string, cfg *config.Config) http.Handler {
 	h := &Handler{s: s, journalDir: journalDir, cfg: cfg, started: time.Now()}
 	mux := http.NewServeMux()

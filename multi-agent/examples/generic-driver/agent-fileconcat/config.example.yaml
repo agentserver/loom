@@ -1,0 +1,14 @@
+server:
+  url: https://agent.example.com
+  name: fileconcat-1
+credentials:
+  sandbox_id: ""
+  tunnel_token: ""
+  proxy_token: ""
+  workspace_id: ""
+  short_id: ""
+discovery:
+  display_name: fileconcat-1
+  description: "Concatenates files referenced in a USER_FILES_MANIFEST."
+  skills: ["fanout"]
+listen_addr: "127.0.0.1:0"
