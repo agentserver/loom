@@ -135,11 +135,13 @@ func TestPublishCard_IncludesToolsAndResources(t *testing.T) {
 	}
 	tn := NewWithDeps(cfg, "/tmp/none", nil, Deps{})
 	tn.SetTools([]string{"echo", "raise"})
+	inputSchema := json.RawMessage(`{"type":"object"}`)
 	tn.SetMCPTools([]capability.MCPToolDescriptor{{
 		Server:      "local",
 		Name:        "echo",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"msg":{"type":"string"}}}`),
+		InputSchema: inputSchema,
 	}})
+	copy(inputSchema, `{"type":"string"}`)
 	if err := tn.PublishCard(context.Background()); err != nil {
 		t.Fatal(err)
 	}

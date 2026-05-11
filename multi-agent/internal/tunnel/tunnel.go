@@ -58,7 +58,11 @@ func (t *Tunnel) SetTools(tools []string) {
 // SetMCPTools sets the structured MCP tool descriptors to include in the next
 // PublishCard call. Safe to call before or after EnsureRegistered.
 func (t *Tunnel) SetMCPTools(tools []capability.MCPToolDescriptor) {
-	t.mcpTools = append([]capability.MCPToolDescriptor{}, tools...)
+	t.mcpTools = make([]capability.MCPToolDescriptor, len(tools))
+	for i, tool := range tools {
+		t.mcpTools[i] = tool
+		t.mcpTools[i].InputSchema = append([]byte(nil), tool.InputSchema...)
+	}
 }
 
 func (t *Tunnel) EnsureRegistered(ctx context.Context) error {

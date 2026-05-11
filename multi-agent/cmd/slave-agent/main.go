@@ -87,6 +87,18 @@ func run(cfgPath string) error {
 		"mcp": mcpExec,
 		"":    claudeExec,
 	}
+	enumerateMCPTools := func(ctx context.Context) []capability.MCPToolDescriptor {
+		allDesc := []capability.MCPToolDescriptor{}
+		for _, name := range mcpExec.Servers() {
+			enumCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			descriptors, err := mcpExec.ListTools(enumCtx, name)
+			cancel()
+			if err == nil {
+				allDesc = append(allDesc, descriptors...)
+			}
+		}
+		return allDesc
+	}
 	hasBuildMCP := false
 	for _, skill := range cfg.Discovery.Skills {
 		if skill == "build_mcp" {
@@ -101,14 +113,7 @@ func run(cfgPath string) error {
 			ClaudeBin: cfg.Claude.Bin,
 			MCPExec:   mcpExec,
 			Republish: func(ctx context.Context) error {
-				enumCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-				defer cancel()
-				allDesc := []capability.MCPToolDescriptor{}
-				for _, name := range mcpExec.Servers() {
-					if descriptors, err := mcpExec.ListTools(enumCtx, name); err == nil {
-						allDesc = append(allDesc, descriptors...)
-					}
-				}
+				allDesc := enumerateMCPTools(ctx)
 				tn.SetMCPTools(allDesc)
 				tn.SetTools(capability.FlatNames(allDesc))
 				return tn.PublishCard(ctx)
@@ -122,14 +127,7 @@ func run(cfgPath string) error {
 		return err
 	}
 
-	initDesc := []capability.MCPToolDescriptor{}
-	enumCtx, enumCancel := context.WithTimeout(ctx, 10*time.Second)
-	for _, name := range mcpExec.Servers() {
-		if descriptors, err := mcpExec.ListTools(enumCtx, name); err == nil {
-			initDesc = append(initDesc, descriptors...)
-		}
-	}
-	enumCancel()
+	initDesc := enumerateMCPTools(ctx)
 	tn.SetMCPTools(initDesc)
 	tn.SetTools(capability.FlatNames(initDesc))
 
