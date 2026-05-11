@@ -100,22 +100,38 @@ func TestValidateArgsRejectsWrongPrimitiveType(t *testing.T) {
 }
 
 func TestValidateArgsEnforcesNumberObjectAndArrayTypes(t *testing.T) {
-	schema := raw(`{"type":"object","properties":{"score":{"type":"number"},"metadata":{"type":"object"},"items":{"type":"array"}},"required":["score","metadata","items"],"additionalProperties":false}`)
+	schema := raw(`{"type":"object","properties":{"score":{"type":"number"},"meta":{"type":"object"},"items":{"type":"array"}},"required":["score","meta","items"],"additionalProperties":false}`)
 
 	err := ValidateArgs(schema, map[string]interface{}{
-		"score":    float64(9.5),
-		"metadata": map[string]interface{}{"kind": "demo"},
-		"items":    []interface{}{"a", "b"},
+		"score": float64(9.5),
+		"meta":  map[string]interface{}{"kind": "demo"},
+		"items": []interface{}{"a", "b"},
 	})
 	require.NoError(t, err)
 
 	err = ValidateArgs(schema, map[string]interface{}{
-		"score":    "9.5",
-		"metadata": []interface{}{"not-object"},
-		"items":    "not-array",
+		"score": "9.5",
+		"meta":  map[string]interface{}{"kind": "demo"},
+		"items": []interface{}{"a", "b"},
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "argument score must be number")
+
+	err = ValidateArgs(schema, map[string]interface{}{
+		"score": float64(9.5),
+		"meta":  []interface{}{"not-object"},
+		"items": []interface{}{"a", "b"},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "argument meta must be object")
+
+	err = ValidateArgs(schema, map[string]interface{}{
+		"score": float64(9.5),
+		"meta":  map[string]interface{}{"kind": "demo"},
+		"items": "not-array",
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "argument items must be array")
 }
 
 func TestValidateArgsAcceptsTopLevelTypeArray(t *testing.T) {
