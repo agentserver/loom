@@ -2,8 +2,10 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/yourorg/multi-agent/internal/config"
 	"github.com/yourorg/multi-agent/internal/executor"
+	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/planner"
 	"github.com/yourorg/multi-agent/internal/store"
 )
@@ -25,6 +28,17 @@ type fakeSDK struct {
 	delegatedReqs []agentsdk.DelegateTaskRequest
 }
 
+type fakeObserver struct {
+	mu     sync.Mutex
+	events []observer.Event
+}
+
+func (f *fakeObserver) Emit(ev observer.Event) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, ev)
+}
+
 func (f *fakeSDK) DiscoverAgents(ctx context.Context) ([]agentsdk.AgentCard, error) {
 	return f.agents, nil
 }
@@ -37,13 +51,17 @@ func (f *fakeSDK) WaitForTask(ctx context.Context, id string, _ time.Duration) (
 }
 
 func newOrch(t *testing.T, sdk SDKDelegator, mode string) *Orchestrator {
+	return newOrchWithObserver(t, sdk, mode, nil)
+}
+
+func newOrchWithObserver(t *testing.T, sdk SDKDelegator, mode string, obs ObserverSink) *Orchestrator {
 	t.Helper()
 	t.Setenv("FAKE_PLANNER_MODE", mode)
 	p := planner.New(config.Planner{Bin: fakePlannerForOrch(t), TimeoutSec: 5})
 	s, err := store.Open(filepath.Join(t.TempDir(), "x.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { s.Close() })
-	return New(s, p, sdk, config.Fanout{MaxConcurrency: 4, DefaultPolicy: "best_effort"}, "self-id")
+	return New(s, p, sdk, config.Fanout{MaxConcurrency: 4, DefaultPolicy: "best_effort"}, "self-id", obs)
 }
 
 func fakePlannerForOrch(t *testing.T) string {
@@ -116,4 +134,51 @@ func TestRoute_FiltersSelf(t *testing.T) {
 	for _, r := range sdk.delegatedReqs {
 		require.NotEqual(t, "self-id", r.TargetID)
 	}
+}
+
+func TestRun_EmitsMasterTaskLifecycleEvents(t *testing.T) {
+	sdk := &fakeSDK{
+		agents:       []agentsdk.AgentCard{{AgentID: "agent-a", Status: "available"}},
+		delegateResp: &agentsdk.DelegateTaskResponse{TaskID: "child-1"},
+		waitInfo:     &agentsdk.TaskInfo{TaskID: "child-1", Status: "completed", Output: "child output"},
+	}
+	obs := &fakeObserver{}
+	o := newOrchWithObserver(t, sdk, "route_a", obs)
+
+	_, err := o.Run(context.Background(), executor.Task{ID: "p6", Skill: "route", Prompt: "do a useful thing"})
+	require.NoError(t, err)
+
+	require.GreaterOrEqual(t, len(obs.events), 2)
+	require.Equal(t, observer.EventMasterTaskReceived, obs.events[0].Type)
+	require.Equal(t, "p6", obs.events[0].TaskID)
+	require.Equal(t, "do a useful thing", obs.events[0].Summary)
+	require.Equal(t, "running", obs.events[0].Status)
+
+	last := obs.events[len(obs.events)-1]
+	require.Equal(t, observer.EventMasterTaskCompleted, last.Type)
+	require.Equal(t, "p6", last.TaskID)
+	require.Equal(t, "completed", last.Status)
+	require.Equal(t, "do a useful thing", last.Summary)
+}
+
+func TestRun_EmitsMasterTaskFailedWithErrorPayload(t *testing.T) {
+	sdk := &fakeSDK{
+		agents:      []agentsdk.AgentCard{{AgentID: "agent-a", Status: "available"}},
+		delegateErr: errors.New("boom"),
+	}
+	obs := &fakeObserver{}
+	o := newOrchWithObserver(t, sdk, "route_a", obs)
+
+	_, err := o.Run(context.Background(), executor.Task{ID: "p7", Skill: "route", Prompt: "do a failing thing"})
+	require.ErrorContains(t, err, "boom")
+
+	last := obs.events[len(obs.events)-1]
+	require.Equal(t, observer.EventMasterTaskFailed, last.Type)
+	require.Equal(t, "p7", last.TaskID)
+	require.Equal(t, "failed", last.Status)
+	require.Equal(t, "do a failing thing", last.Summary)
+
+	var payload map[string]string
+	require.NoError(t, json.Unmarshal(last.Payload, &payload))
+	require.Contains(t, payload["error"], "boom")
 }
