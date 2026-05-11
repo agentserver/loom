@@ -7,7 +7,7 @@ import (
 )
 
 type liteSchema struct {
-	Type                 string                     `json:"type"`
+	Type                 interface{}                `json:"type"`
 	Properties           map[string]json.RawMessage `json:"properties"`
 	Required             []string                   `json:"required"`
 	AdditionalProperties interface{}                `json:"additionalProperties"`
@@ -22,10 +22,11 @@ func ValidateArgs(schema json.RawMessage, args map[string]interface{}) error {
 	if err := json.Unmarshal(schema, &root); err != nil {
 		return fmt.Errorf("invalid schema: %w", err)
 	}
-	if root.Type != "" && root.Type != "object" {
+	rootTypes := schemaTypes(root.Type)
+	if len(rootTypes) > 0 && !containsType(rootTypes, "object") {
 		return fmt.Errorf("schema top-level type must be object")
 	}
-	if root.Type == "" && len(root.Properties) == 0 && len(root.Required) == 0 && root.AdditionalProperties == nil {
+	if len(rootTypes) == 0 && len(root.Properties) == 0 && len(root.Required) == 0 && root.AdditionalProperties == nil {
 		return nil
 	}
 
@@ -108,6 +109,8 @@ func schemaTypes(value interface{}) []string {
 
 func matchesType(schemaType string, value interface{}) bool {
 	switch schemaType {
+	case "null":
+		return value == nil
 	case "string":
 		_, ok := value.(string)
 		return ok
@@ -123,8 +126,17 @@ func matchesType(schemaType string, value interface{}) bool {
 	case "array":
 		return isArray(value)
 	default:
-		return true
+		return false
 	}
+}
+
+func containsType(types []string, schemaType string) bool {
+	for _, t := range types {
+		if t == schemaType {
+			return true
+		}
+	}
+	return false
 }
 
 func isNumber(value interface{}) bool {

@@ -42,6 +42,30 @@ func TestValidateArgsRejectsWrongPrimitiveType(t *testing.T) {
 	require.Contains(t, err.Error(), "argument n must be integer")
 }
 
+func TestValidateArgsAcceptsTopLevelTypeArray(t *testing.T) {
+	schema := raw(`{"type":["object"],"properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}`)
+	err := ValidateArgs(schema, map[string]interface{}{"name": "render"})
+	require.NoError(t, err)
+}
+
+func TestValidateArgsPropertyStringOrNullRejectsNumberAndAcceptsNil(t *testing.T) {
+	schema := raw(`{"type":"object","properties":{"name":{"type":["string","null"]}},"required":["name"],"additionalProperties":false}`)
+
+	err := ValidateArgs(schema, map[string]interface{}{"name": float64(123)})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "argument name must be string")
+
+	err = ValidateArgs(schema, map[string]interface{}{"name": nil})
+	require.NoError(t, err)
+}
+
+func TestValidateArgsRejectsUnsupportedPropertyType(t *testing.T) {
+	schema := raw(`{"type":"object","properties":{"name":{"type":"strng"}},"required":["name"],"additionalProperties":false}`)
+	err := ValidateArgs(schema, map[string]interface{}{"name": "render"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "argument name must be strng")
+}
+
 func TestExtractFromAgentCardSupportsStructuredAndFlatTools(t *testing.T) {
 	card := json.RawMessage(`{
         "tools":["legacy"],
