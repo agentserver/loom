@@ -13,6 +13,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"gopkg.in/yaml.v3"
 
+	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/config"
 	"github.com/yourorg/multi-agent/internal/dispatch"
 	"github.com/yourorg/multi-agent/internal/executor"
@@ -104,8 +105,8 @@ func run(cfgPath string) error {
 				defer cancel()
 				all := []string{}
 				for _, name := range mcpExec.Servers() {
-					if names, err := mcpExec.ListTools(enumCtx, name); err == nil {
-						all = append(all, names...)
+					if descriptors, err := mcpExec.ListTools(enumCtx, name); err == nil {
+						all = append(all, capability.FlatNames(descriptors)...)
 					}
 				}
 				tn.SetTools(all)
@@ -123,8 +124,8 @@ func run(cfgPath string) error {
 	initTools := []string{}
 	enumCtx, enumCancel := context.WithTimeout(ctx, 10*time.Second)
 	for _, name := range mcpExec.Servers() {
-		if names, err := mcpExec.ListTools(enumCtx, name); err == nil {
-			initTools = append(initTools, names...)
+		if descriptors, err := mcpExec.ListTools(enumCtx, name); err == nil {
+			initTools = append(initTools, capability.FlatNames(descriptors)...)
 		}
 	}
 	enumCancel()
