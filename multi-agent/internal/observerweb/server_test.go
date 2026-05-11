@@ -96,6 +96,48 @@ func TestPostEventRejectsTrailingJSONValue(t *testing.T) {
 	require.Zero(t, count)
 }
 
+func TestAPITasksExposesMCPToolDescriptors(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "master", Role: observer.RoleMaster, DisplayName: "Master"}, "master-token"))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"}, "slave-token"))
+
+	require.NoError(t, st.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "mt1", Summary: "build thing",
+		TargetAgentID: "master", Status: "assigned",
+	}))
+	require.NoError(t, st.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterSubtaskDispatched, TaskID: "mt1", SubtaskID: "n1",
+		ChildTaskID: "st1", SubtaskSummary: "make calculator", TargetAgentID: "slave",
+		Status: "assigned",
+	}))
+	require.NoError(t, st.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave", AgentRole: observer.RoleSlave,
+		Type: observer.EventMCPServerCreated, TaskID: "st1", ParentTaskID: "mt1",
+		MCPServerName: "calc", MCPTools: []string{"add"},
+		Payload: json.RawMessage(`{"mcp_tool_descriptors":[{"server":"calc","name":"add","input_schema":{"type":"object","properties":{"a":{"type":"number"}}}}]}`),
+	}))
+
+	rr := httptest.NewRecorder()
+	New(st).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/tasks", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var tasks []struct {
+		MCPServers []struct {
+			ToolDescriptors json.RawMessage `json:"tool_descriptors"`
+		} `json:"mcp_servers"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &tasks))
+	require.Len(t, tasks, 1)
+	require.Len(t, tasks[0].MCPServers, 1)
+	require.JSONEq(t, `[{"server":"calc","name":"add","input_schema":{"type":"object","properties":{"a":{"type":"number"}}}}]`, string(tasks[0].MCPServers[0].ToolDescriptors))
+}
+
 func TestRolePagesRenderDistinctViewsAndMCPStatus(t *testing.T) {
 	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
 	require.NoError(t, err)
