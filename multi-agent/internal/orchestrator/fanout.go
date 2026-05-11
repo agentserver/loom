@@ -205,6 +205,38 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 	var inFlight int
 	childTaskIDs := map[string]string{}
 	recordedSkipped := map[string]bool{}
+	nodeByID := func(id string) planner.Node {
+		for _, n := range allNodes {
+			if n.ID == id {
+				return n
+			}
+		}
+		return planner.Node{ID: id}
+	}
+	emitRequiredNodeFailed := func(fn FinishedNode, parentFailureReason string) {
+		n := nodeByID(fn.NodeID)
+		payload := map[string]interface{}{
+			"required": true,
+			"node_id":  fn.NodeID,
+			"status":   fn.Status,
+		}
+		if fn.Error != "" {
+			payload["error"] = fn.Error
+		}
+		if parentFailureReason != "" {
+			payload["parent_failure_reason"] = parentFailureReason
+		}
+		o.emit(observer.Event{
+			Type:          observer.EventMasterRequiredNodeFailed,
+			TaskID:        t.ID,
+			SubtaskID:     fn.NodeID,
+			ChildTaskID:   childTaskIDs[fn.NodeID],
+			Status:        fn.Status,
+			TargetAgentID: n.TargetID,
+			TargetRole:    observer.RoleSlave,
+			Payload:       observerPayload(payload),
+		})
+	}
 	recordTerminalDone := func(d done) {
 		if d.ChildTaskID != "" {
 			childTaskIDs[d.NodeID] = d.ChildTaskID
@@ -366,6 +398,19 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 				continue
 			}
 			if verr := validateMCPNode(n, agents, prompt); verr != nil {
+				o.emit(observer.Event{
+					Type:          observer.EventMasterMCPCallValidationFailed,
+					TaskID:        t.ID,
+					SubtaskID:     n.ID,
+					Status:        "failed",
+					TargetAgentID: n.TargetID,
+					TargetRole:    observer.RoleSlave,
+					Payload: observerPayload(map[string]interface{}{
+						"validation_error": verr.Error(),
+						"required":         !n.Optional,
+						"prompt":           prompt,
+					}),
+				})
 				sched.MarkDispatched(n.ID)
 				inFlight++
 				go func(n planner.Node, e error) {
@@ -492,9 +537,14 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 				requiredSkipped := recordSkippedFinished()
 				drainInFlight()
 				if !optionalByID[d.NodeID] {
+					emitRequiredNodeFailed(d.FinishedNode, "")
+					if requiredSkipped != nil {
+						emitRequiredNodeFailed(*requiredSkipped, d.Error)
+					}
 					return executor.Result{}, fmt.Errorf("required node %s %s: %s", d.NodeID, d.Status, d.Error)
 				}
 				if requiredSkipped != nil {
+					emitRequiredNodeFailed(*requiredSkipped, d.Error)
 					return executor.Result{}, fmt.Errorf("required node %s %s: %s", requiredSkipped.NodeID, requiredSkipped.Status, requiredSkipped.Error)
 				}
 				return executor.Result{}, fmt.Errorf("node %s %s: %s", d.NodeID, d.Status, d.Error)
@@ -503,19 +553,20 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 			if requiredSkipped := recordSkippedFinished(); requiredSkipped != nil {
 				cancelAll()
 				drainInFlight()
+				emitRequiredNodeFailed(*requiredSkipped, d.Error)
 				return executor.Result{}, fmt.Errorf("required node %s %s: %s", requiredSkipped.NodeID, requiredSkipped.Status, requiredSkipped.Error)
 			}
 		}
 	}
 
 	fins := sched.AllFinished()
-	nodeByID := map[string]planner.Node{}
+	resultNodeByID := map[string]planner.Node{}
 	for _, n := range allNodes {
-		nodeByID[n.ID] = n
+		resultNodeByID[n.ID] = n
 	}
 	results := make([]planner.SubResult, len(fins))
 	for i, f := range fins {
-		n := nodeByID[f.NodeID]
+		n := resultNodeByID[f.NodeID]
 		results[i] = planner.SubResult{
 			NodeID: f.NodeID, TargetID: n.TargetID, Prompt: n.Prompt,
 			Status: f.Status, Output: f.Output, Error: f.Error,

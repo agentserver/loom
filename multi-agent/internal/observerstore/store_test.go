@@ -1,0 +1,461 @@
+package observerstore
+
+import (
+	"encoding/json"
+	"path/filepath"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	"github.com/yourorg/multi-agent/internal/capability"
+	"github.com/yourorg/multi-agent/internal/observer"
+)
+
+func testStore(t *testing.T) *Store {
+	t.Helper()
+
+	s, err := Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	require.NoError(t, s.UpsertWorkspace(Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, s.UpsertAgent(Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
+	require.NoError(t, s.UpsertAgent(Agent{WorkspaceID: "ws1", ID: "master", Role: observer.RoleMaster, DisplayName: "Master"}, "master-token"))
+	require.NoError(t, s.UpsertAgent(Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"}, "slave-token"))
+	return s
+}
+
+func mustJSON(t *testing.T, v interface{}) []byte {
+	t.Helper()
+	out, err := json.Marshal(v)
+	require.NoError(t, err)
+	return out
+}
+
+func TestValidateToken(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	a, ok, err := s.ValidateToken("master-token")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "ws1", a.WorkspaceID)
+	require.Equal(t, "master", a.ID)
+	require.Equal(t, observer.RoleMaster, a.Role)
+	require.Equal(t, "Master", a.DisplayName)
+
+	_, ok, err = s.ValidateToken("unknown-token")
+	require.NoError(t, err)
+	require.False(t, ok)
+
+	require.Error(t, s.UpsertAgent(Agent{WorkspaceID: "ws1", ID: "empty", Role: observer.RoleSlave, DisplayName: "Empty"}, ""))
+
+	_, ok, err = s.ValidateToken("")
+	require.NoError(t, err)
+	require.False(t, ok)
+
+	err = s.UpsertAgent(Agent{WorkspaceID: "ws1", ID: "dupe", Role: observer.RoleSlave, DisplayName: "Duplicate"}, "master-token")
+	require.Error(t, err)
+}
+
+func TestIngestDriverMasterSlaveAndMCP(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "mt1", Summary: "build thing",
+		TargetAgentID: "master", TargetRole: observer.RoleMaster, Status: "assigned",
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterSubtaskDispatched, TaskID: "mt1", SubtaskID: "n1",
+		ChildTaskID: "st1", SubtaskSummary: "make tool", TargetAgentID: "slave", Status: "assigned",
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave", AgentRole: observer.RoleSlave,
+		Type: observer.EventMCPServerCreated, TaskID: "st1", ParentTaskID: "mt1",
+		MCPServerName: "calc", MCPTools: []string{"add", "sub"},
+	}))
+
+	tasks, err := s.ListTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, "build thing", tasks[0].Summary)
+	require.Equal(t, "assigned", tasks[0].Status)
+	require.Equal(t, "driver", tasks[0].DriverID)
+	require.Equal(t, "master", tasks[0].MasterID)
+	require.True(t, tasks[0].HasMCP)
+	require.Equal(t, "created", tasks[0].MCPStatus)
+	require.Len(t, tasks[0].Subtasks, 1)
+	require.Equal(t, "n1", tasks[0].Subtasks[0].SubtaskID)
+	require.Equal(t, "st1", tasks[0].Subtasks[0].ChildTaskID)
+	require.Equal(t, "master", tasks[0].Subtasks[0].MasterID)
+	require.Equal(t, "slave", tasks[0].Subtasks[0].SlaveID)
+	require.Equal(t, "build thing - make tool", tasks[0].Subtasks[0].DisplayLabel)
+	require.Equal(t, "created", tasks[0].Subtasks[0].MCPStatus)
+}
+
+func TestIngestMCPCreatedStoresPayloadDescriptorsInTaskView(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	descriptors := []capability.MCPToolDescriptor{{
+		Server:      "calc",
+		Name:        "add",
+		Description: "add two numbers",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"a":{"type":"number"}}}`),
+	}}
+	payload, err := json.Marshal(map[string]interface{}{"mcp_tool_descriptors": descriptors})
+	require.NoError(t, err)
+
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "mt1", Summary: "build thing",
+		TargetAgentID: "master", TargetRole: observer.RoleMaster, Status: "assigned",
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterSubtaskDispatched, TaskID: "mt1", SubtaskID: "n1",
+		ChildTaskID: "st1", SubtaskSummary: "make tool", TargetAgentID: "slave", Status: "assigned",
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave", AgentRole: observer.RoleSlave,
+		Type: observer.EventMCPServerCreated, TaskID: "st1", ParentTaskID: "mt1",
+		MCPServerName: "calc", MCPTools: []string{"add"}, Payload: payload,
+	}))
+
+	tasks, err := s.ListTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Len(t, tasks[0].MCPServers, 1)
+	require.Equal(t, "calc", tasks[0].MCPServers[0].Name)
+	require.JSONEq(t, string(mustJSON(t, descriptors)), string(tasks[0].MCPServers[0].ToolDescriptors))
+}
+
+func TestIngestValidationFailurePersistsPayload(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	payload := json.RawMessage(`{"validation_error":"unknown argument put_url_128","required":true,"prompt":"{}"}`)
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterMCPCallValidationFailed, TaskID: "mt1", SubtaskID: "n1",
+		TargetAgentID: "slave", TargetRole: observer.RoleSlave, Status: "failed", Payload: payload,
+	}))
+
+	count, err := s.EventCount()
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+
+	var storedType, storedPayload string
+	require.NoError(t, s.db.QueryRow(`SELECT type, payload FROM events WHERE task_id=? AND subtask_id=?`, "mt1", "n1").Scan(&storedType, &storedPayload))
+	require.Equal(t, observer.EventMasterMCPCallValidationFailed, storedType)
+	require.JSONEq(t, string(payload), storedPayload)
+}
+
+func TestIngestIsIdempotentByEventID(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	ev := observer.Event{
+		EventID: "e1", WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "mt1", Summary: "build thing",
+	}
+	require.NoError(t, s.Ingest(ev))
+	require.NoError(t, s.Ingest(ev))
+
+	count, err := s.EventCount()
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+}
+
+func TestGeneratedEventIDsDoNotCollideForRepeatedEvents(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	ev := observer.Event{
+		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "mt1", Summary: "build thing",
+	}
+	require.NoError(t, s.Ingest(ev))
+	require.NoError(t, s.Ingest(ev))
+
+	count, err := s.EventCount()
+	require.NoError(t, err)
+	require.Equal(t, 2, count)
+}
+
+func TestGeneratedEventIDsDoNotDeduplicateSameContentAndTimestamp(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	ev := observer.Event{
+		TS: "2026-05-11T00:00:00Z", WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "mt1", Summary: "build thing",
+	}
+	require.NoError(t, s.Ingest(ev))
+	require.NoError(t, s.Ingest(ev))
+
+	count, err := s.EventCount()
+	require.NoError(t, err)
+	require.Equal(t, 2, count)
+}
+
+func TestGeneratedEventIDsDoNotCollideWhenFieldsContainNUL(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	ev1 := observer.Event{
+		TS: "2026-05-11T00:00:00Z", WorkspaceID: "ws1", AgentID: "driver\x00x", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskStatus, TaskID: "mt1", Status: "running",
+	}
+	ev2 := observer.Event{
+		TS: "2026-05-11T00:00:00Z", WorkspaceID: "ws1\x00driver", AgentID: "x", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskStatus, TaskID: "mt1", Status: "running",
+	}
+	require.NoError(t, s.Ingest(ev1))
+	require.NoError(t, s.Ingest(ev2))
+
+	count, err := s.EventCount()
+	require.NoError(t, err)
+	require.Equal(t, 2, count)
+}
+
+func TestIngestAggregateStatusAndFallbacks(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterTaskReceived, TaskID: "mt1",
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterSubtaskDispatched, TaskID: "mt1",
+		ChildTaskID: "st1", SubtaskSummary: "make tool", TargetAgentID: "slave",
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterTaskCompleted, TaskID: "mt1", Status: "completed",
+	}))
+
+	tasks, err := s.ListTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, "mt1", tasks[0].Summary)
+	require.Equal(t, "completed", tasks[0].Status)
+	require.Equal(t, "master", tasks[0].MasterID)
+	require.Len(t, tasks[0].Subtasks, 1)
+	require.Equal(t, "st1", tasks[0].Subtasks[0].SubtaskID)
+	require.Equal(t, "assigned", tasks[0].Subtasks[0].Status)
+	require.Equal(t, "mt1 - make tool", tasks[0].Subtasks[0].DisplayLabel)
+}
+
+func TestSubtaskDonePreservesSparseMetadata(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "mt1", Summary: "build thing",
+		TargetAgentID: "master",
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterSubtaskDispatched, TaskID: "mt1", SubtaskID: "n1",
+		ChildTaskID: "st1", SubtaskSummary: "make tool", TargetAgentID: "slave",
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterSubtaskDone, ParentTaskID: "mt1", SubtaskID: "n1",
+		Status: "completed", Payload: json.RawMessage(`{"output":"built","error":"warning"}`),
+	}))
+
+	tasks, err := s.ListTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Len(t, tasks[0].Subtasks, 1)
+	require.Equal(t, "st1", tasks[0].Subtasks[0].ChildTaskID)
+	require.Equal(t, "slave", tasks[0].Subtasks[0].SlaveID)
+	require.Equal(t, "make tool", tasks[0].Subtasks[0].Summary)
+	require.Equal(t, "build thing - make tool", tasks[0].Subtasks[0].DisplayLabel)
+	require.Equal(t, "completed", tasks[0].Subtasks[0].Status)
+	require.Equal(t, "built", tasks[0].Subtasks[0].Output)
+	require.Equal(t, "warning", tasks[0].Subtasks[0].Error)
+}
+
+func TestMCPBeforeTaskStillMarksCreatedTask(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave", AgentRole: observer.RoleSlave,
+		Type: observer.EventMCPServerCreated, TaskID: "st1", ParentTaskID: "mt1",
+		MCPServerName: "calc", MCPTools: []string{"add"},
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "mt1", Summary: "build thing",
+		TargetAgentID: "master",
+	}))
+
+	tasks, err := s.ListTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.True(t, tasks[0].HasMCP)
+	require.Equal(t, "created", tasks[0].MCPStatus)
+}
+
+func TestMCPCreatedLinksToParentByChildTaskID(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "mt1", Summary: "build thing",
+		TargetAgentID: "master",
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterSubtaskDispatched, TaskID: "mt1", SubtaskID: "n1",
+		ChildTaskID: "st1", SubtaskSummary: "make tool", TargetAgentID: "slave",
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave", AgentRole: observer.RoleSlave,
+		Type: observer.EventMCPServerCreated, TaskID: "st1",
+		MCPServerName: "calc", MCPTools: []string{"add"},
+	}))
+
+	tasks, err := s.ListTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.True(t, tasks[0].HasMCP)
+	require.Equal(t, "created", tasks[0].MCPStatus)
+	require.Equal(t, "created", tasks[0].Subtasks[0].MCPStatus)
+}
+
+func TestMCPBlockedLinksToParentByChildTaskID(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "mt1", Summary: "build thing",
+		TargetAgentID: "master",
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterSubtaskDispatched, TaskID: "mt1", SubtaskID: "n1",
+		ChildTaskID: "st1", SubtaskSummary: "make tool", TargetAgentID: "slave",
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave", AgentRole: observer.RoleSlave,
+		Type: observer.EventMCPServerBlocked, TaskID: "st1", MCPServerName: "calc",
+		Status: "blocked", Payload: json.RawMessage(`{"stage":"validate_imports","reason":"missing dep"}`),
+	}))
+
+	tasks, err := s.ListTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.False(t, tasks[0].HasMCP)
+	require.Equal(t, "blocked", tasks[0].MCPStatus)
+	require.Equal(t, "blocked", tasks[0].Subtasks[0].MCPStatus)
+}
+
+func TestSlaveLifecycleUpdatesLinkedSubtask(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "mt1", Summary: "build thing",
+		TargetAgentID: "master",
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterSubtaskDispatched, TaskID: "mt1", SubtaskID: "n1",
+		ChildTaskID: "st1", SubtaskSummary: "make tool", TargetAgentID: "slave",
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave", AgentRole: observer.RoleSlave,
+		Type: observer.EventSlaveTaskStarted, TaskID: "st1", Status: "running",
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave", AgentRole: observer.RoleSlave,
+		Type: observer.EventSlaveTaskCompleted, TaskID: "st1", Status: "completed",
+		Payload: json.RawMessage(`{"output":"done"}`),
+	}))
+
+	tasks, err := s.ListTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, "completed", tasks[0].Subtasks[0].Status)
+	require.Equal(t, "done", tasks[0].Subtasks[0].Output)
+	require.Equal(t, "slave", tasks[0].Subtasks[0].SlaveID)
+}
+
+func TestSlaveLifecycleUpdatesDirectDriverTask(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "task-direct", Summary: "run benchmark",
+		TargetAgentID: "agentserver-slave-id", Status: "assigned",
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave", AgentRole: observer.RoleSlave,
+		Type: observer.EventSlaveTaskStarted, TaskID: "task-direct", Status: "running",
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave", AgentRole: observer.RoleSlave,
+		Type: observer.EventSlaveTaskCompleted, TaskID: "task-direct", Status: "completed",
+		Payload: json.RawMessage(`{"output":"done"}`),
+	}))
+
+	tasks, err := s.ListTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, "slave", tasks[0].SlaveID)
+	require.Equal(t, "completed", tasks[0].Status)
+	require.Equal(t, "done", tasks[0].Output)
+}
+
+func TestDriverSubmittedToSlaveDoesNotSetMasterID(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "task-direct", Summary: "run benchmark",
+		TargetAgentID: "slave", TargetRole: observer.RoleSlave, Status: "assigned",
+	}))
+
+	tasks, err := s.ListTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Empty(t, tasks[0].MasterID)
+	require.Equal(t, "slave", tasks[0].SlaveID)
+}
+
+func TestSchemaRequiresUniqueTokenHashes(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	rows, err := s.db.Query(`PRAGMA index_list(agents)`)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	foundUnique := false
+	for rows.Next() {
+		var seq int
+		var name string
+		var unique bool
+		var origin string
+		var partial bool
+		require.NoError(t, rows.Scan(&seq, &name, &unique, &origin, &partial))
+		if name == "idx_agents_token_hash" && unique {
+			foundUnique = true
+		}
+	}
+	require.NoError(t, rows.Err())
+	require.True(t, foundUnique)
+}

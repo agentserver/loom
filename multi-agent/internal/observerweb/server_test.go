@@ -1,0 +1,198 @@
+package observerweb
+
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	"github.com/yourorg/multi-agent/internal/observer"
+	"github.com/yourorg/multi-agent/internal/observerstore"
+)
+
+func TestPostEventAuthAndViews(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "tok"))
+
+	h := New(st)
+	body, _ := json.Marshal(observer.Event{
+		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "t1", Summary: "build thing", Status: "assigned",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusAccepted, rr.Code)
+
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/drivers", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Contains(t, rr.Body.String(), "build thing")
+}
+
+func TestPostEventRejectsWrongAgent(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "tok"))
+
+	h := New(st)
+	body, _ := json.Marshal(observer.Event{
+		WorkspaceID: "ws1", AgentID: "other", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "t1",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code)
+}
+
+func TestPostEventRejectsOversizedBody(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "tok"))
+
+	h := New(st)
+	body := io.LimitReader(bytes.NewReader(append([]byte(`{"summary":"`), bytes.Repeat([]byte("x"), maxEventBodyBytes)...)), maxEventBodyBytes+1)
+	req := httptest.NewRequest(http.MethodPost, "/api/events", body)
+	req.Header.Set("Authorization", "Bearer tok")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusRequestEntityTooLarge, rr.Code)
+}
+
+func TestPostEventRejectsTrailingJSONValue(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "tok"))
+
+	h := New(st)
+	body, _ := json.Marshal(observer.Event{
+		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "t1", Summary: "build thing", Status: "assigned",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(append(body, []byte(` {}`)...)))
+	req.Header.Set("Authorization", "Bearer tok")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+
+	count, err := st.EventCount()
+	require.NoError(t, err)
+	require.Zero(t, count)
+}
+
+func TestRolePagesRenderDistinctViewsAndMCPStatus(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "master", Role: observer.RoleMaster, DisplayName: "Master"}, "master-token"))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"}, "slave-token"))
+	require.NoError(t, st.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "mt1", Summary: "build thing",
+		TargetAgentID: "master", Status: "assigned",
+	}))
+	require.NoError(t, st.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterSubtaskDispatched, TaskID: "mt1", SubtaskID: "n1",
+		ChildTaskID: "st1", SubtaskSummary: "make tool", TargetAgentID: "slave",
+		Status: "assigned",
+	}))
+	require.NoError(t, st.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave", AgentRole: observer.RoleSlave,
+		Type: observer.EventMCPServerBlocked, TaskID: "st1", MCPServerName: "calc",
+		Status: "blocked",
+	}))
+
+	h := New(st)
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{path: "/drivers", want: "Slaves"},
+		{path: "/masters", want: "Decomposition"},
+		{path: "/slaves", want: "Task / Subtask"},
+		{path: "/slaves", want: "blocked"},
+	} {
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, tc.path, nil))
+		require.Equal(t, http.StatusOK, rr.Code)
+		require.Contains(t, rr.Body.String(), tc.want)
+	}
+}
+
+func TestSlavesPageFiltersOutDriverOnlyTasks(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "master", Role: observer.RoleMaster, DisplayName: "Master"}, "master-token"))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"}, "slave-token"))
+	require.NoError(t, st.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "driver-only", Summary: "driver only",
+		TargetAgentID: "master", Status: "assigned",
+	}))
+	require.NoError(t, st.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "with-slave", Summary: "with slave",
+		TargetAgentID: "master", Status: "assigned",
+	}))
+	require.NoError(t, st.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterSubtaskDispatched, TaskID: "with-slave", SubtaskID: "n1",
+		ChildTaskID: "st1", SubtaskSummary: "make tool", TargetAgentID: "slave",
+		Status: "assigned",
+	}))
+
+	rr := httptest.NewRecorder()
+	New(st).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/slaves", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.NotContains(t, rr.Body.String(), "driver only")
+	require.Contains(t, rr.Body.String(), "with slave")
+}
+
+func TestSlavesPageShowsDirectSlaveTask(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"}, "slave-token"))
+	require.NoError(t, st.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "task-direct", Summary: "run benchmark",
+		TargetAgentID: "agentserver-slave-id", Status: "assigned",
+	}))
+	require.NoError(t, st.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave", AgentRole: observer.RoleSlave,
+		Type: observer.EventSlaveTaskCompleted, TaskID: "task-direct", Status: "completed",
+		Payload: json.RawMessage(`{"output":"done"}`),
+	}))
+
+	rr := httptest.NewRecorder()
+	New(st).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/slaves", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Contains(t, rr.Body.String(), "run benchmark")
+	require.Contains(t, rr.Body.String(), "slave")
+	require.Contains(t, rr.Body.String(), "completed")
+	require.Contains(t, rr.Body.String(), "done")
+}

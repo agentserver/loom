@@ -222,13 +222,25 @@ func TestFanout_InvalidMCPArgsRejectedBeforeDispatch(t *testing.T) {
 	sdk := &fakeSDKQueue{
 		agents: []agentsdk.AgentCard{agentWithRenderTool(t)},
 	}
-	o := newOrch(t, sdk, "plan_mcp_invalid_arg")
+	obs := &fakeObserver{}
+	o := newOrchWithObserver(t, sdk, "plan_mcp_invalid_arg", obs)
 
 	_, err := o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: "do"})
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unknown argument put_url_128")
 	require.Len(t, sdk.dispatched, 0)
+
+	validationFailed := firstEventOfType(t, obs.events, observer.EventMasterMCPCallValidationFailed)
+	require.Equal(t, "p", validationFailed.TaskID)
+	require.Equal(t, "n0", validationFailed.SubtaskID)
+	require.Equal(t, "agent-a", validationFailed.TargetAgentID)
+	require.Equal(t, observer.RoleSlave, validationFailed.TargetRole)
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(validationFailed.Payload, &payload))
+	require.Contains(t, payload["validation_error"], "unknown argument put_url_128")
+	require.Equal(t, true, payload["required"])
+	require.NotEmpty(t, payload["prompt"])
 }
 
 func TestFanout_ValidMCPArgsDispatchesOnce(t *testing.T) {
@@ -287,6 +299,16 @@ func TestFanout_RequiredFailureMarksDownstreamSkipped(t *testing.T) {
 	}
 	require.Equal(t, "failed", statusByNode["a"])
 	require.Equal(t, "skipped", statusByNode["b"])
+
+	requiredFailed := eventsOfType(obs.events, observer.EventMasterRequiredNodeFailed)
+	require.Len(t, requiredFailed, 2)
+	require.Equal(t, "a", requiredFailed[0].SubtaskID)
+	require.Equal(t, "b", requiredFailed[1].SubtaskID)
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(requiredFailed[1].Payload, &payload))
+	require.Equal(t, true, payload["required"])
+	require.Equal(t, "b", payload["node_id"])
+	require.Equal(t, "skipped", payload["status"])
 }
 
 func TestFanout_OptionalFailureReducedUnderBestEffort(t *testing.T) {
