@@ -72,6 +72,30 @@ func (f *cancelAwareSDK) WaitForTask(ctx context.Context, id string, _ time.Dura
 	return nil, ctx.Err()
 }
 
+type nonCooperativeSDK struct {
+	mu         sync.Mutex
+	agents     []agentsdk.AgentCard
+	dispatched []agentsdk.DelegateTaskRequest
+}
+
+func (f *nonCooperativeSDK) DiscoverAgents(_ context.Context) ([]agentsdk.AgentCard, error) {
+	return f.agents, nil
+}
+
+func (f *nonCooperativeSDK) DelegateTask(_ context.Context, req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dispatched = append(f.dispatched, req)
+	return &agentsdk.DelegateTaskResponse{TaskID: req.Prompt}, nil
+}
+
+func (f *nonCooperativeSDK) WaitForTask(_ context.Context, id string, _ time.Duration) (*agentsdk.TaskInfo, error) {
+	if id == "fail" {
+		return &agentsdk.TaskInfo{TaskID: id, Status: "failed", FailureReason: "boom"}, nil
+	}
+	select {}
+}
+
 func TestFanout_HappyDiamond(t *testing.T) {
 	sdk := &fakeSDKQueue{
 		agents: []agentsdk.AgentCard{
@@ -154,6 +178,33 @@ func TestFanout_AllOrNothingEmitsTerminalEventsForInFlightSiblings(t *testing.T)
 	require.Equal(t, "failed", seen["slow"])
 }
 
+func TestFanout_RequiredFailureDrainBoundedForNonCooperativeSibling(t *testing.T) {
+	sdk := &nonCooperativeSDK{
+		agents: []agentsdk.AgentCard{
+			{AgentID: "agent-a", Status: "available"},
+			{AgentID: "agent-b", Status: "available"},
+		},
+	}
+	o := newOrch(t, sdk, "plan_parallel")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := o.Run(ctx, executor.Task{ID: "p", Skill: "fanout", Prompt: "x"})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "required node fail failed")
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("Run did not return after required failure and context cancellation")
+	}
+}
+
 func TestFanout_PassesNodeSkillToDelegateTask(t *testing.T) {
 	sdk := &fakeSDKQueue{
 		agents: []agentsdk.AgentCard{agentWithTool(t, "x", "y")},
@@ -211,6 +262,31 @@ func TestFanout_RequiredFailureFailsParentUnderBestEffort(t *testing.T) {
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "required node")
+}
+
+func TestFanout_RequiredFailureMarksDownstreamSkipped(t *testing.T) {
+	sdk := &fakeSDKQueue{
+		agents: []agentsdk.AgentCard{
+			{AgentID: "agent-a", Status: "available"},
+			{AgentID: "agent-b", Status: "available"},
+		},
+		queue: []agentsdk.TaskInfo{
+			{Status: "failed", FailureReason: "boom"},
+		},
+	}
+	obs := &fakeObserver{}
+	o := newOrchWithObserver(t, sdk, "plan_chain", obs)
+
+	_, err := o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: "do"})
+
+	require.Error(t, err)
+	done := eventsOfType(obs.events, observer.EventMasterSubtaskDone)
+	statusByNode := map[string]string{}
+	for _, ev := range done {
+		statusByNode[ev.SubtaskID] = ev.Status
+	}
+	require.Equal(t, "failed", statusByNode["a"])
+	require.Equal(t, "skipped", statusByNode["b"])
 }
 
 func TestFanout_OptionalFailureReducedUnderBestEffort(t *testing.T) {

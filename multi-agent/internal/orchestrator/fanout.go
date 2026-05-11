@@ -22,6 +22,8 @@ import (
 // docs/superpowers/specs/2026-05-09-dynamic-mcp-design.md.
 const maxBuildIterations = 3
 
+const fanoutFailureDrainTimeout = 5 * time.Second
+
 // parseOutputHandle attempts to interpret s as a phase-boundary handle JSON
 // document. Unlike transport.ParseHandle, it does not require a non-empty URL
 // field — build_mcp_blocked outputs have url:"" by convention.
@@ -202,6 +204,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 
 	var inFlight int
 	childTaskIDs := map[string]string{}
+	recordedSkipped := map[string]bool{}
 	recordTerminalDone := func(d done) {
 		if d.ChildTaskID != "" {
 			childTaskIDs[d.NodeID] = d.ChildTaskID
@@ -238,6 +241,58 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 			Status:      d.Status,
 			Payload:     observerPayload(map[string]string{"error": d.Error}),
 		})
+	}
+	recordSkippedDone := func(fn FinishedNode) {
+		if recordedSkipped[fn.NodeID] {
+			return
+		}
+		recordedSkipped[fn.NodeID] = true
+		_ = o.store.UpdateSubTask(t.ID, fn.NodeID, map[string]interface{}{
+			"status": "skipped", "error": fn.Error,
+			"finished_at": time.Now().UTC().Format(time.RFC3339Nano),
+		})
+		sseSink.Write("subtask_skipped", fmt.Sprintf(`{"node_id":%q,"reason":%q}`, fn.NodeID, fn.Error))
+		o.emit(observer.Event{
+			Type:        observer.EventMasterSubtaskDone,
+			TaskID:      t.ID,
+			SubtaskID:   fn.NodeID,
+			ChildTaskID: childTaskIDs[fn.NodeID],
+			Status:      "skipped",
+			Payload:     observerPayload(map[string]string{"error": fn.Error}),
+		})
+	}
+	recordSkippedFinished := func() *FinishedNode {
+		var requiredSkipped *FinishedNode
+		for _, fn := range sched.AllFinished() {
+			if fn.Status != "skipped" {
+				continue
+			}
+			recordSkippedDone(fn)
+			if !optionalByID[fn.NodeID] && requiredSkipped == nil {
+				fnCopy := fn
+				requiredSkipped = &fnCopy
+			}
+		}
+		return requiredSkipped
+	}
+	drainInFlight := func() {
+		if inFlight == 0 {
+			return
+		}
+		drainDeadline := time.After(fanoutFailureDrainTimeout)
+		for inFlight > 0 {
+			select {
+			case drained := <-doneCh:
+				inFlight--
+				sched.Report(drained.NodeID, drained.Status, drained.Output, drained.Error)
+				recordTerminalDone(drained)
+				recordSkippedFinished()
+			case <-ctx.Done():
+				return
+			case <-drainDeadline:
+				return
+			}
+		}
 	}
 	dispatched := func(n planner.Node, prompt string) {
 		sched.MarkDispatched(n.ID)
@@ -433,44 +488,22 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 		} else {
 			if !optionalByID[d.NodeID] || policy == "all_or_nothing" {
 				cancelAll()
-				for inFlight > 0 {
-					drained := <-doneCh
-					inFlight--
-					sched.Report(drained.NodeID, drained.Status, drained.Output, drained.Error)
-					recordTerminalDone(drained)
-				}
+				sched.MarkDownstreamSkipped(d.NodeID)
+				requiredSkipped := recordSkippedFinished()
+				drainInFlight()
 				if !optionalByID[d.NodeID] {
 					return executor.Result{}, fmt.Errorf("required node %s %s: %s", d.NodeID, d.Status, d.Error)
+				}
+				if requiredSkipped != nil {
+					return executor.Result{}, fmt.Errorf("required node %s %s: %s", requiredSkipped.NodeID, requiredSkipped.Status, requiredSkipped.Error)
 				}
 				return executor.Result{}, fmt.Errorf("node %s %s: %s", d.NodeID, d.Status, d.Error)
 			}
 			sched.MarkDownstreamSkipped(d.NodeID)
-			for _, fn := range sched.AllFinished() {
-				if fn.Status == "skipped" {
-					_ = o.store.UpdateSubTask(t.ID, fn.NodeID, map[string]interface{}{
-						"status": "skipped", "error": fn.Error,
-						"finished_at": time.Now().UTC().Format(time.RFC3339Nano),
-					})
-					sseSink.Write("subtask_skipped", fmt.Sprintf(`{"node_id":%q,"reason":%q}`, fn.NodeID, fn.Error))
-					o.emit(observer.Event{
-						Type:        observer.EventMasterSubtaskDone,
-						TaskID:      t.ID,
-						SubtaskID:   fn.NodeID,
-						ChildTaskID: childTaskIDs[fn.NodeID],
-						Status:      "skipped",
-						Payload:     observerPayload(map[string]string{"error": fn.Error}),
-					})
-					if !optionalByID[fn.NodeID] {
-						cancelAll()
-						for inFlight > 0 {
-							drained := <-doneCh
-							inFlight--
-							sched.Report(drained.NodeID, drained.Status, drained.Output, drained.Error)
-							recordTerminalDone(drained)
-						}
-						return executor.Result{}, fmt.Errorf("required node %s %s: %s", fn.NodeID, fn.Status, fn.Error)
-					}
-				}
+			if requiredSkipped := recordSkippedFinished(); requiredSkipped != nil {
+				cancelAll()
+				drainInFlight()
+				return executor.Result{}, fmt.Errorf("required node %s %s: %s", requiredSkipped.NodeID, requiredSkipped.Status, requiredSkipped.Error)
 			}
 		}
 	}
