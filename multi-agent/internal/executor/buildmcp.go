@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yourorg/multi-agent/internal/capability"
 	"gopkg.in/yaml.v3"
 )
 
@@ -144,6 +145,7 @@ func (e *BuildMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, 
 		_ = os.Remove(absPath)
 		return Result{Summary: blockedHandle(spec, "", err.Error(), "smoke_launch", "")}, nil
 	}
+	toolNames := capability.FlatNames(tools)
 	// Register.
 	mcpCfg := MCPServerCfg{Transport: "stdio", Command: "python3", Args: []string{absPath}}
 	if err := e.cfg.MCPExec.RegisterStdio(spec.Name, mcpCfg); err != nil {
@@ -154,7 +156,7 @@ func (e *BuildMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, 
 		Name: spec.Name, Transport: "stdio", Command: "python3",
 		Args: []string{relPath}, Version: spec.Version,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
-		SpecHash:  specHash, Tools: tools,
+		SpecHash:  specHash, Tools: toolNames,
 	}); err != nil {
 		return Result{}, fmt.Errorf("buildmcp: persist yaml: %w", err)
 	}
@@ -164,7 +166,7 @@ func (e *BuildMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, 
 			sink.Write("warn", fmt.Sprintf("republish card: %v", err))
 		}
 	}
-	return Result{Summary: e.successHandle(spec, relPath, tools, len(strings.Split(src, "\n"))).Marshal()}, nil
+	return Result{Summary: e.successHandle(spec, relPath, toolNames, len(strings.Split(src, "\n"))).Marshal()}, nil
 }
 
 func (e *BuildMCPExecutor) successHandle(spec buildSpec, relPath string, tools []string, lineCount int) handleJSON {
