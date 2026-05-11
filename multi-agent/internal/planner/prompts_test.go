@@ -46,6 +46,8 @@ func TestPlanPrompt_IncludesStructuredMCPGuidance(t *testing.T) {
 		`"server": "vision"`,
 		`"name": "render"`,
 		`{"server":"<server>","tool":"<tool>","args":{...}}`,
+		`Use legacy "tools" only when a valid server and argument contract is otherwise known from the task context`,
+		"instead of inventing server names or args",
 	}
 	for _, w := range wantPhrases {
 		if !strings.Contains(out, w) {
