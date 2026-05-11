@@ -130,6 +130,30 @@ func TestIngestMCPCreatedStoresPayloadDescriptorsInTaskView(t *testing.T) {
 	require.JSONEq(t, string(mustJSON(t, descriptors)), string(tasks[0].MCPServers[0].ToolDescriptors))
 }
 
+func TestIngestMCPCreatedRejectsWrongShapePayloadDescriptors(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload json.RawMessage
+	}{
+		{name: "string", payload: json.RawMessage(`{"mcp_tool_descriptors":"bad"}`)},
+		{name: "object", payload: json.RawMessage(`{"mcp_tool_descriptors":{}}`)},
+		{name: "number", payload: json.RawMessage(`{"mcp_tool_descriptors":123}`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := testStore(t)
+			defer s.Close()
+
+			err := s.Ingest(observer.Event{
+				WorkspaceID: "ws1", AgentID: "slave", AgentRole: observer.RoleSlave,
+				Type: observer.EventMCPServerCreated, TaskID: "st1",
+				MCPServerName: "calc", MCPTools: []string{"add"}, Payload: tc.payload,
+			})
+			require.Error(t, err)
+			require.ErrorContains(t, err, "mcp_tool_descriptors")
+		})
+	}
+}
+
 func TestIngestValidationFailurePersistsPayload(t *testing.T) {
 	s := testStore(t)
 	defer s.Close()

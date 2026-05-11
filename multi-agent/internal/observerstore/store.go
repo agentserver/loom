@@ -13,6 +13,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/observer"
 )
 
@@ -244,7 +245,7 @@ func (s *Store) listSubtasks(workspaceID, taskID string) ([]SubtaskView, error) 
 	}
 	defer rows.Close()
 
-	var subtasks []SubtaskView
+	subtasks := []SubtaskView{}
 	for rows.Next() {
 		var subtask SubtaskView
 		if err := rows.Scan(&subtask.ParentTaskID, &subtask.SubtaskID, &subtask.ChildTaskID, &subtask.MasterID, &subtask.SlaveID, &subtask.Summary, &subtask.DisplayLabel, &subtask.Status, &subtask.MCPStatus, &subtask.Output, &subtask.Error); err != nil {
@@ -266,7 +267,7 @@ func (s *Store) listMCPServers(workspaceID, taskID string) ([]MCPServerView, err
 	}
 	defer rows.Close()
 
-	var servers []MCPServerView
+	servers := []MCPServerView{}
 	for rows.Next() {
 		var server MCPServerView
 		var tools, descriptors string
@@ -507,19 +508,22 @@ func mcpToolDescriptorsJSON(ev observer.Event) ([]byte, error) {
 	if len(ev.Payload) == 0 {
 		return nil, nil
 	}
-	var payload struct {
-		MCPToolDescriptors json.RawMessage `json:"mcp_tool_descriptors"`
-	}
+	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(ev.Payload, &payload); err != nil {
 		return nil, err
 	}
-	if len(payload.MCPToolDescriptors) == 0 || string(payload.MCPToolDescriptors) == "null" {
+	raw, ok := payload["mcp_tool_descriptors"]
+	if !ok || len(raw) == 0 {
 		return nil, nil
 	}
-	if !json.Valid(payload.MCPToolDescriptors) {
-		return nil, errors.New("observerstore: invalid mcp_tool_descriptors payload")
+	if string(raw) == "null" {
+		return nil, errors.New("observerstore: mcp_tool_descriptors must be an array")
 	}
-	return payload.MCPToolDescriptors, nil
+	var descriptors []capability.MCPToolDescriptor
+	if err := json.Unmarshal(raw, &descriptors); err != nil {
+		return nil, errors.New("observerstore: mcp_tool_descriptors must be an array of descriptor objects")
+	}
+	return json.Marshal(descriptors)
 }
 
 func applyMCPStatus(tx *sql.Tx, ev observer.Event) error {
