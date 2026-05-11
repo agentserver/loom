@@ -394,16 +394,15 @@ func TestFanout_EmitsPlanDispatchAndDoneEvents(t *testing.T) {
 	require.Equal(t, []string{"n0"}, planPayload["node_ids"])
 
 	dispatched := eventsOfType(obs.events, observer.EventMasterSubtaskDispatched)
-	require.Len(t, dispatched, 2)
+	require.Len(t, dispatched, 1)
 	require.Equal(t, "p", dispatched[0].TaskID)
 	require.Equal(t, "n0", dispatched[0].SubtaskID)
-	require.Empty(t, dispatched[0].ChildTaskID)
+	require.Equal(t, "c1", dispatched[0].ChildTaskID)
 	require.Equal(t, "agent-a", dispatched[0].TargetAgentID)
 	require.Equal(t, observer.RoleSlave, dispatched[0].TargetRole)
 	require.Equal(t, "assigned", dispatched[0].Status)
 	require.Equal(t, "build something", dispatched[0].Summary)
 	require.Equal(t, "y", dispatched[0].SubtaskSummary)
-	require.Equal(t, "c1", dispatched[1].ChildTaskID)
 
 	done := firstEventOfType(t, obs.events, observer.EventMasterSubtaskDone)
 	require.Equal(t, "p", done.TaskID)

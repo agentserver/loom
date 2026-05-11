@@ -335,16 +335,6 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 			"started_at": time.Now().UTC().Format(time.RFC3339Nano),
 		})
 		sseSink.Write("subtask_dispatched", fmt.Sprintf(`{"node_id":%q,"target_id":%q}`, n.ID, n.TargetID))
-		o.emit(observer.Event{
-			Type:           observer.EventMasterSubtaskDispatched,
-			TaskID:         t.ID,
-			Summary:        observer.SummarizePrompt(t.Prompt, 80),
-			SubtaskID:      n.ID,
-			SubtaskSummary: observer.SummarizePrompt(prompt, 80),
-			Status:         "assigned",
-			TargetAgentID:  n.TargetID,
-			TargetRole:     observer.RoleSlave,
-		})
 		go func(n planner.Node, prompt string) {
 			resp, err := o.sdk.DelegateTask(fanoutCtx, agentsdk.DelegateTaskRequest{
 				TargetID:       n.TargetID,
