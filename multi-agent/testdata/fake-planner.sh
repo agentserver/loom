@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Behavior knobs:
-#   FAKE_PLANNER_MODE = route_a | route_empty | plan_diamond | plan_chain | plan_invalid_cycle |
+#   FAKE_PLANNER_MODE = route_a | route_empty | plan_diamond | plan_chain | plan_parallel |
+#                       plan_mcp_valid | plan_mcp_invalid_arg | plan_optional_failure |
+#                       plan_invalid_cycle |
 #                       plan_invalid_json | plan_with_skill | reduce_ok | exit1 | sleep
 #   FAKE_PLANNER_SLEEP = seconds
 set -euo pipefail
@@ -23,6 +25,36 @@ EOF
 [
   {"id":"a","target_id":"agent-a","prompt":"first"},
   {"id":"b","target_id":"agent-b","prompt":"second using {{a.output}}","depends_on":["a"]}
+]
+EOF
+    ;;
+  plan_parallel)
+    cat <<'EOF'
+[
+  {"id":"fail","target_id":"agent-a","prompt":"fail"},
+  {"id":"slow","target_id":"agent-b","prompt":"slow"}
+]
+EOF
+    ;;
+  plan_mcp_valid)
+    cat <<'EOF'
+[
+  {"id":"n0","target_id":"agent-a","skill":"mcp","prompt":"{\"server\":\"srv\",\"tool\":\"render\",\"args\":{\"n\":7}}"}
+]
+EOF
+    ;;
+  plan_mcp_invalid_arg)
+    cat <<'EOF'
+[
+  {"id":"n0","target_id":"agent-a","skill":"mcp","prompt":"{\"server\":\"srv\",\"tool\":\"render\",\"args\":{\"n\":7,\"put_url_128\":\"http://x\"}}"}
+]
+EOF
+    ;;
+  plan_optional_failure)
+    cat <<'EOF'
+[
+  {"id":"required","target_id":"agent-a","prompt":"required"},
+  {"id":"optional","target_id":"agent-b","prompt":"optional","depends_on":["required"],"optional":true}
 ]
 EOF
     ;;
@@ -55,7 +87,7 @@ EOF
 EOF
          ;;
       2) cat <<'EOF'
-[{"id":"n2","target_id":"agent-a","skill":"mcp","prompt":"call"}]
+[{"id":"n2","target_id":"agent-a","skill":"mcp","prompt":"{\"server\":\"foo\",\"tool\":\"a\",\"args\":{}}"}]
 EOF
          ;;
       *) echo "REDUCED";;

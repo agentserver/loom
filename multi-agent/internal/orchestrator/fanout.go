@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
+	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/executor"
+	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/planner"
 	"github.com/yourorg/multi-agent/internal/store"
 )
@@ -84,6 +86,56 @@ func renamePlanIDs(nodes []planner.Node, parentNodeID string) []planner.Node {
 	return out
 }
 
+func validateMCPNode(n planner.Node, agents []agentsdk.AgentCard, prompt string) error {
+	if n.Skill != "mcp" {
+		return nil
+	}
+
+	var call struct {
+		Server string                 `json:"server"`
+		Tool   string                 `json:"tool"`
+		Args   map[string]interface{} `json:"args"`
+	}
+	if err := json.Unmarshal([]byte(prompt), &call); err != nil {
+		return fmt.Errorf("mcp node %s prompt must be JSON with server/tool/args: %w", n.ID, err)
+	}
+	if call.Server == "" {
+		return fmt.Errorf("mcp node %s missing server", n.ID)
+	}
+	if call.Tool == "" {
+		return fmt.Errorf("mcp node %s missing tool", n.ID)
+	}
+	if call.Args == nil {
+		call.Args = map[string]interface{}{}
+	}
+
+	var target *agentsdk.AgentCard
+	for i := range agents {
+		if agents[i].AgentID == n.TargetID {
+			target = &agents[i]
+			break
+		}
+	}
+	if target == nil {
+		return fmt.Errorf("mcp node %s target agent %q not found", n.ID, n.TargetID)
+	}
+
+	mcpTools, flatTools := capability.ExtractFromAgentCard(target.Card)
+	if desc, ok := capability.FindTool(mcpTools, call.Server, call.Tool); ok {
+		if err := capability.ValidateArgs(desc.InputSchema, call.Args); err != nil {
+			return fmt.Errorf("mcp node %s invalid args for %s/%s: %w", n.ID, call.Server, call.Tool, err)
+		}
+		return nil
+	}
+	for _, tool := range flatTools {
+		if tool == call.Tool {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("mcp node %s target agent %q does not advertise tool %s/%s", n.ID, n.TargetID, call.Server, call.Tool)
+}
+
 func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor.Result, error) {
 	agents, err := o.discoverFiltered(ctx)
 	if err != nil {
@@ -96,6 +148,17 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 	if err := Validate(plan); err != nil {
 		return executor.Result{}, fmt.Errorf("invalid plan: %w", err)
 	}
+	nodeIDs := make([]string, len(plan))
+	for i, n := range plan {
+		nodeIDs[i] = n.ID
+	}
+	o.emit(observer.Event{
+		Type:    observer.EventMasterPlanCreated,
+		TaskID:  t.ID,
+		Summary: observer.SummarizePrompt(t.Prompt, 80),
+		Status:  "created",
+		Payload: observerPayload(map[string][]string{"node_ids": nodeIDs}),
+	})
 
 	rows := make([]store.SubTaskRow, len(plan))
 	for i, n := range plan {
@@ -116,8 +179,15 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 	// allNodes tracks every node ever scheduled, including ones added via Append.
 	allNodes := make([]planner.Node, len(plan))
 	copy(allNodes, plan)
+	optionalByID := make(map[string]bool, len(plan))
+	for _, n := range plan {
+		optionalByID[n.ID] = n.Optional
+	}
 
-	type done struct{ FinishedNode }
+	type done struct {
+		FinishedNode
+		ChildTaskID string
+	}
 	// Sized for: initial plan (≤ MaxNodes) + up to maxBuildIterations replans
 	// after build_mcp_blocked + one phase-2 replan after mcp_tool_set, each up
 	// to MaxNodes. Bounded so the goroutine sends never block the main loop
@@ -131,6 +201,44 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 	defer sseSink.Close()
 
 	var inFlight int
+	childTaskIDs := map[string]string{}
+	recordTerminalDone := func(d done) {
+		if d.ChildTaskID != "" {
+			childTaskIDs[d.NodeID] = d.ChildTaskID
+		}
+		if d.Status == "completed" {
+			outputsMu.Lock()
+			outputs[d.NodeID] = d.Output
+			outputsMu.Unlock()
+			_ = o.store.UpdateSubTask(t.ID, d.NodeID, map[string]interface{}{
+				"status": "completed", "output": d.Output,
+				"finished_at": time.Now().UTC().Format(time.RFC3339Nano),
+			})
+			sseSink.Write("subtask_done", fmt.Sprintf(`{"node_id":%q,"status":"completed","output_len":%d}`, d.NodeID, len(d.Output)))
+			o.emit(observer.Event{
+				Type:        observer.EventMasterSubtaskDone,
+				TaskID:      t.ID,
+				SubtaskID:   d.NodeID,
+				ChildTaskID: d.ChildTaskID,
+				Status:      "completed",
+				Payload:     observerPayload(map[string]string{"output": d.Output}),
+			})
+			return
+		}
+		_ = o.store.UpdateSubTask(t.ID, d.NodeID, map[string]interface{}{
+			"status": d.Status, "error": d.Error,
+			"finished_at": time.Now().UTC().Format(time.RFC3339Nano),
+		})
+		sseSink.Write("subtask_done", fmt.Sprintf(`{"node_id":%q,"status":%q}`, d.NodeID, d.Status))
+		o.emit(observer.Event{
+			Type:        observer.EventMasterSubtaskDone,
+			TaskID:      t.ID,
+			SubtaskID:   d.NodeID,
+			ChildTaskID: d.ChildTaskID,
+			Status:      d.Status,
+			Payload:     observerPayload(map[string]string{"error": d.Error}),
+		})
+	}
 	dispatched := func(n planner.Node, prompt string) {
 		sched.MarkDispatched(n.ID)
 		inFlight++
@@ -140,6 +248,16 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 			"started_at": time.Now().UTC().Format(time.RFC3339Nano),
 		})
 		sseSink.Write("subtask_dispatched", fmt.Sprintf(`{"node_id":%q,"target_id":%q}`, n.ID, n.TargetID))
+		o.emit(observer.Event{
+			Type:           observer.EventMasterSubtaskDispatched,
+			TaskID:         t.ID,
+			Summary:        observer.SummarizePrompt(t.Prompt, 80),
+			SubtaskID:      n.ID,
+			SubtaskSummary: observer.SummarizePrompt(prompt, 80),
+			Status:         "assigned",
+			TargetAgentID:  n.TargetID,
+			TargetRole:     observer.RoleSlave,
+		})
 		go func(n planner.Node, prompt string) {
 			resp, err := o.sdk.DelegateTask(fanoutCtx, agentsdk.DelegateTaskRequest{
 				TargetID:       n.TargetID,
@@ -148,13 +266,24 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 				TimeoutSeconds: o.cfg.SubTaskDefaults.TimeoutSec,
 			})
 			if err != nil {
-				doneCh <- done{FinishedNode{NodeID: n.ID, Status: "failed", Error: err.Error()}}
+				doneCh <- done{FinishedNode: FinishedNode{NodeID: n.ID, Status: "failed", Error: err.Error()}}
 				return
 			}
 			_ = o.store.UpdateSubTask(t.ID, n.ID, map[string]interface{}{"child_task_id": resp.TaskID})
+			o.emit(observer.Event{
+				Type:           observer.EventMasterSubtaskDispatched,
+				TaskID:         t.ID,
+				Summary:        observer.SummarizePrompt(t.Prompt, 80),
+				SubtaskID:      n.ID,
+				ChildTaskID:    resp.TaskID,
+				SubtaskSummary: observer.SummarizePrompt(prompt, 80),
+				Status:         "assigned",
+				TargetAgentID:  n.TargetID,
+				TargetRole:     observer.RoleSlave,
+			})
 			info, err := o.sdk.WaitForTask(fanoutCtx, resp.TaskID, 5*time.Second)
 			if err != nil {
-				doneCh <- done{FinishedNode{NodeID: n.ID, Status: "failed", Error: err.Error()}}
+				doneCh <- done{FinishedNode: FinishedNode{NodeID: n.ID, Status: "failed", Error: err.Error()}, ChildTaskID: resp.TaskID}
 				return
 			}
 			f := FinishedNode{NodeID: n.ID, Status: info.Status, Output: info.Output}
@@ -164,7 +293,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 					f.Error = info.Status
 				}
 			}
-			doneCh <- done{f}
+			doneCh <- done{FinishedNode: f, ChildTaskID: resp.TaskID}
 		}(n, prompt)
 	}
 
@@ -177,8 +306,16 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 				sched.MarkDispatched(n.ID)
 				inFlight++
 				go func(n planner.Node, e error) {
-					doneCh <- done{FinishedNode{NodeID: n.ID, Status: "failed", Error: e.Error()}}
+					doneCh <- done{FinishedNode: FinishedNode{NodeID: n.ID, Status: "failed", Error: e.Error()}}
 				}(n, rerr)
+				continue
+			}
+			if verr := validateMCPNode(n, agents, prompt); verr != nil {
+				sched.MarkDispatched(n.ID)
+				inFlight++
+				go func(n planner.Node, e error) {
+					doneCh <- done{FinishedNode: FinishedNode{NodeID: n.ID, Status: "failed", Error: e.Error()}}
+				}(n, verr)
 				continue
 			}
 			dispatched(n, prompt)
@@ -205,19 +342,20 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 		}
 		inFlight--
 		sched.Report(d.NodeID, d.Status, d.Output, d.Error)
+		recordTerminalDone(d)
 		if d.Status == "completed" {
-			outputsMu.Lock()
-			outputs[d.NodeID] = d.Output
-			outputsMu.Unlock()
-			_ = o.store.UpdateSubTask(t.ID, d.NodeID, map[string]interface{}{
-				"status": "completed", "output": d.Output,
-				"finished_at": time.Now().UTC().Format(time.RFC3339Nano),
-			})
-			sseSink.Write("subtask_done", fmt.Sprintf(`{"node_id":%q,"status":"completed","output_len":%d}`, d.NodeID, len(d.Output)))
-
 			if hType, hMeta, hOk := parseOutputHandle(d.Output); hOk {
 				switch hType {
 				case "build_mcp_blocked":
+					o.emit(observer.Event{
+						Type:          observer.EventMasterMCPReplan,
+						TaskID:        t.ID,
+						SubtaskID:     d.NodeID,
+						ChildTaskID:   d.ChildTaskID,
+						Status:        hType,
+						MCPServerName: hMeta["spec_name"],
+						Payload:       observerPayload(map[string]interface{}{"type": hType, "meta": hMeta}),
+					})
 					specName := hMeta["spec_name"]
 					iterCount[specName]++
 					if iterCount[specName] >= maxBuildIterations {
@@ -243,9 +381,21 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 						return executor.Result{}, fmt.Errorf("append replan: %w", err)
 					}
 					allNodes = append(allNodes, newPlan...)
+					for _, n := range newPlan {
+						optionalByID[n.ID] = n.Optional
+					}
 					appendSubTaskRows(o.store, t.ID, newPlan)
 
 				case "mcp_tool_set":
+					o.emit(observer.Event{
+						Type:          observer.EventMasterMCPReplan,
+						TaskID:        t.ID,
+						SubtaskID:     d.NodeID,
+						ChildTaskID:   d.ChildTaskID,
+						Status:        hType,
+						MCPServerName: hMeta["name"],
+						Payload:       observerPayload(map[string]interface{}{"type": hType, "meta": hMeta}),
+					})
 					freshAgents, derr := o.discoverFiltered(fanoutCtx)
 					if derr == nil {
 						agents = freshAgents
@@ -274,20 +424,23 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 						return executor.Result{}, fmt.Errorf("append post-build plan: %w", err)
 					}
 					allNodes = append(allNodes, newPlan...)
+					for _, n := range newPlan {
+						optionalByID[n.ID] = n.Optional
+					}
 					appendSubTaskRows(o.store, t.ID, newPlan)
 				}
 			}
 		} else {
-			_ = o.store.UpdateSubTask(t.ID, d.NodeID, map[string]interface{}{
-				"status": d.Status, "error": d.Error,
-				"finished_at": time.Now().UTC().Format(time.RFC3339Nano),
-			})
-			sseSink.Write("subtask_done", fmt.Sprintf(`{"node_id":%q,"status":%q}`, d.NodeID, d.Status))
-			if policy == "all_or_nothing" {
+			if !optionalByID[d.NodeID] || policy == "all_or_nothing" {
 				cancelAll()
 				for inFlight > 0 {
-					<-doneCh
+					drained := <-doneCh
 					inFlight--
+					sched.Report(drained.NodeID, drained.Status, drained.Output, drained.Error)
+					recordTerminalDone(drained)
+				}
+				if !optionalByID[d.NodeID] {
+					return executor.Result{}, fmt.Errorf("required node %s %s: %s", d.NodeID, d.Status, d.Error)
 				}
 				return executor.Result{}, fmt.Errorf("node %s %s: %s", d.NodeID, d.Status, d.Error)
 			}
@@ -299,6 +452,24 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 						"finished_at": time.Now().UTC().Format(time.RFC3339Nano),
 					})
 					sseSink.Write("subtask_skipped", fmt.Sprintf(`{"node_id":%q,"reason":%q}`, fn.NodeID, fn.Error))
+					o.emit(observer.Event{
+						Type:        observer.EventMasterSubtaskDone,
+						TaskID:      t.ID,
+						SubtaskID:   fn.NodeID,
+						ChildTaskID: childTaskIDs[fn.NodeID],
+						Status:      "skipped",
+						Payload:     observerPayload(map[string]string{"error": fn.Error}),
+					})
+					if !optionalByID[fn.NodeID] {
+						cancelAll()
+						for inFlight > 0 {
+							drained := <-doneCh
+							inFlight--
+							sched.Report(drained.NodeID, drained.Status, drained.Output, drained.Error)
+							recordTerminalDone(drained)
+						}
+						return executor.Result{}, fmt.Errorf("required node %s %s: %s", fn.NodeID, fn.Status, fn.Error)
+					}
 				}
 			}
 		}
