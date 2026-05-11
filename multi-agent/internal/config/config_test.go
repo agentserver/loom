@@ -111,6 +111,26 @@ func TestLoad_MasterDefaults(t *testing.T) {
 	require.Equal(t, 600, c.Fanout.SubTaskDefaults.TimeoutSec)
 }
 
+func TestLoad_ObserverURLWithEnabledFalseKeepsDisabledAndDefaultsAgentID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+server:
+  url: https://example.com
+  name: m
+discovery:
+  display_name: master-display
+observer:
+  url: https://observer.example
+  enabled: false
+`), 0o600))
+
+	c, err := Load(path)
+	require.NoError(t, err)
+	require.False(t, c.Observer.Enabled)
+	require.Equal(t, "master-display", c.Observer.AgentID)
+}
+
 func TestLoad_ResourcesRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "c.yaml")

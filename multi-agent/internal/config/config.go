@@ -16,6 +16,7 @@ type Config struct {
 	Planner     Planner              `yaml:"planner"`
 	Fanout      Fanout               `yaml:"fanout"`
 	Resources   *Resources           `yaml:"resources,omitempty"`
+	Observer    Observer             `yaml:"observer,omitempty"`
 }
 
 type Server struct {
@@ -58,10 +59,18 @@ type Planner struct {
 }
 
 type Fanout struct {
-	MaxConcurrency  int                 `yaml:"max_concurrency"`
-	DefaultPolicy   string              `yaml:"default_policy"`
-	PolicyBySkill   map[string]string   `yaml:"policy_by_skill"`
-	SubTaskDefaults SubTaskDefaults     `yaml:"subtask_defaults"`
+	MaxConcurrency  int               `yaml:"max_concurrency"`
+	DefaultPolicy   string            `yaml:"default_policy"`
+	PolicyBySkill   map[string]string `yaml:"policy_by_skill"`
+	SubTaskDefaults SubTaskDefaults   `yaml:"subtask_defaults"`
+}
+
+type Observer struct {
+	Enabled     bool   `yaml:"enabled"`
+	URL         string `yaml:"url"`
+	WorkspaceID string `yaml:"workspace_id"`
+	AgentID     string `yaml:"agent_id"`
+	Token       string `yaml:"token"`
 }
 
 type SubTaskDefaults struct {
@@ -98,6 +107,11 @@ func Load(path string) (*Config, error) {
 	}
 	if c.Fanout.SubTaskDefaults.TimeoutSec == 0 {
 		c.Fanout.SubTaskDefaults.TimeoutSec = 600
+	}
+	if c.Observer.URL != "" {
+		if c.Observer.AgentID == "" {
+			c.Observer.AgentID = c.Discovery.DisplayName
+		}
 	}
 	return &c, nil
 }

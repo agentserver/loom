@@ -57,7 +57,7 @@ func TestPoller_PollsAndCompletes(t *testing.T) {
 
 	s, _ := store.Open(filepath.Join(t.TempDir(), "x.db"))
 	defer s.Close()
-	d := dispatch.New(map[string]executor.Executor{"": echoExec{}}, stubJ{}, s)
+	d := dispatch.New(map[string]executor.Executor{"": echoExec{}}, stubJ{}, s, nil)
 
 	p := New(Config{ServerURL: srv.URL, ProxyToken: "ptoken", IdlePoll: 50 * time.Millisecond, ActivePoll: 10 * time.Millisecond}, d, s)
 

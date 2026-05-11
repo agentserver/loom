@@ -18,6 +18,8 @@ import (
 	"github.com/yourorg/multi-agent/internal/dispatch"
 	"github.com/yourorg/multi-agent/internal/executor"
 	"github.com/yourorg/multi-agent/internal/journal"
+	"github.com/yourorg/multi-agent/internal/observer"
+	"github.com/yourorg/multi-agent/internal/observerclient"
 	"github.com/yourorg/multi-agent/internal/poller"
 	"github.com/yourorg/multi-agent/internal/store"
 	"github.com/yourorg/multi-agent/internal/tunnel"
@@ -82,6 +84,15 @@ func run(cfgPath string) error {
 	defer cancel()
 
 	tn := tunnel.New(cfg, cfgPath, ui)
+	obs := observerclient.New(observerclient.Config{
+		Enabled:     cfg.Observer.Enabled,
+		URL:         cfg.Observer.URL,
+		WorkspaceID: cfg.Observer.WorkspaceID,
+		AgentID:     cfg.Observer.AgentID,
+		AgentRole:   observer.RoleSlave,
+		Token:       cfg.Observer.Token,
+	})
+	defer obs.Close()
 
 	routes := map[string]executor.Executor{
 		"mcp": mcpExec,
@@ -112,6 +123,7 @@ func run(cfgPath string) error {
 			WorkDir:   workdir,
 			ClaudeBin: cfg.Claude.Bin,
 			MCPExec:   mcpExec,
+			Observer:  obs,
 			Republish: func(ctx context.Context) error {
 				allDesc := enumerateMCPTools(ctx)
 				tn.SetMCPTools(allDesc)
@@ -121,7 +133,7 @@ func run(cfgPath string) error {
 		})
 		routes["build_mcp"] = buildExec
 	}
-	d := dispatch.New(routes, j, s)
+	d := dispatch.New(routes, j, s, obs)
 
 	if err := tn.EnsureRegistered(ctx); err != nil {
 		return err

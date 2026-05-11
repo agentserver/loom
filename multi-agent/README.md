@@ -4,8 +4,10 @@ Two custom agents for the agentserver platform, sharing one Go module and a comm
 
 | Binary | Role | Docs |
 |---|---|---|
+| `cmd/driver-agent` | Local driver — submits tasks and serves local workspace context | [cmd/driver-agent/README.md](cmd/driver-agent/README.md) |
 | `cmd/slave-agent` | Subordinate worker — accepts tasks and runs them via claude or MCP | [cmd/slave-agent/README.md](cmd/slave-agent/README.md) |
 | `cmd/master-agent` | Orchestrator — uses claude as planner/router/reducer to delegate work to other agents | [cmd/master-agent/README.md](cmd/master-agent/README.md) |
+| `cmd/observer-server` | Standalone HTTP observer — stores and displays driver/master/slave telemetry | [cmd/observer-server/config.example.yaml](cmd/observer-server/config.example.yaml) |
 
 ## Layout
 
@@ -30,6 +32,42 @@ multi-agent/
 ```bash
 go build ./...
 ```
+
+## Observer Server
+
+The observer is a separate HTTP service. It does not call `agent.cs.ac.cn`; driver, master, and slave push best-effort telemetry to it with bearer tokens.
+
+Build:
+
+```bash
+go build -o bin/observer-server ./cmd/observer-server
+```
+
+Run:
+
+```bash
+cp cmd/observer-server/config.example.yaml observer.yaml
+./bin/observer-server --config observer.yaml
+```
+
+For a public deployment, run it on a host with persistent storage for `observer.db` and put HTTPS in front of the listen address. Then configure each agent with a matching `observer:` block:
+
+```yaml
+observer:
+  enabled: true
+  url: https://observer.example.com
+  workspace_id: ws-local
+  agent_id: driver-local
+  token: driver-token
+```
+
+Use `master-local` / `master-token` for the master and `slave-local` / `slave-token` for the slave, matching `cmd/observer-server/config.example.yaml`. Agent task execution is not failed if observer delivery fails.
+
+Views:
+
+- `http://localhost:8090/drivers`
+- `http://localhost:8090/masters`
+- `http://localhost:8090/slaves`
 
 ## Test everything
 

@@ -11,6 +11,8 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/yourorg/multi-agent/internal/config"
+	"github.com/yourorg/multi-agent/internal/observer"
+	"github.com/yourorg/multi-agent/internal/observerclient"
 	"github.com/yourorg/multi-agent/internal/orchestrator"
 	"github.com/yourorg/multi-agent/internal/planner"
 	"github.com/yourorg/multi-agent/internal/poller"
@@ -62,7 +64,16 @@ func run(cfgPath string) error {
 		return fmt.Errorf("tunnel.SDKClient returned nil after EnsureRegistered")
 	}
 	p := planner.New(cfg.Planner)
-	orch := orchestrator.New(s, p, sdk, cfg.Fanout, cfg.Credentials.SandboxID)
+	obs := observerclient.New(observerclient.Config{
+		Enabled:     cfg.Observer.Enabled,
+		URL:         cfg.Observer.URL,
+		WorkspaceID: cfg.Observer.WorkspaceID,
+		AgentID:     cfg.Observer.AgentID,
+		AgentRole:   observer.RoleMaster,
+		Token:       cfg.Observer.Token,
+	})
+	defer obs.Close()
+	orch := orchestrator.New(s, p, sdk, cfg.Fanout, cfg.Credentials.SandboxID, obs)
 
 	pollCfg := poller.Config{
 		ServerURL:  cfg.Server.URL,

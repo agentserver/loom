@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
+	"github.com/yourorg/multi-agent/internal/observer"
 )
 
 // SDKClient is the narrow agentserver SDK surface the driver tools use.
@@ -23,17 +24,28 @@ type SDKClient interface {
 	PeerProxy(ctx context.Context, method, targetShortID, path string, body io.Reader) (*http.Response, error)
 }
 
+type ObserverSink interface {
+	Emit(observer.Event)
+}
+
 // Tools holds shared state and exposes the six MCP tools as a slice.
 type Tools struct {
-	reg   *FileRegistry
-	audit *AuditLog
-	sdk   SDKClient
-	cfg   *Config
+	reg      *FileRegistry
+	audit    *AuditLog
+	sdk      SDKClient
+	cfg      *Config
+	observer ObserverSink
 }
 
 // NewTools constructs a Tools bundle.
-func NewTools(reg *FileRegistry, audit *AuditLog, sdk SDKClient, cfg *Config) *Tools {
-	return &Tools{reg: reg, audit: audit, sdk: sdk, cfg: cfg}
+func NewTools(reg *FileRegistry, audit *AuditLog, sdk SDKClient, cfg *Config, obs ObserverSink) *Tools {
+	return &Tools{reg: reg, audit: audit, sdk: sdk, cfg: cfg, observer: obs}
+}
+
+func (t *Tools) emit(ev observer.Event) {
+	if t.observer != nil {
+		t.observer.Emit(ev)
+	}
 }
 
 // All returns the six tools in stable order.
@@ -56,10 +68,10 @@ func (t *Tools) peerProxyURL(suffix string) string {
 
 // resolveTarget picks a target agent by display_name override, config default,
 // or auto-pick of the unique fanout-skilled agent.
-func (t *Tools) resolveTarget(ctx context.Context, override string) (id, displayName, shortID string, err error) {
+func (t *Tools) resolveTarget(ctx context.Context, override string) (id, displayName, shortID, role string, err error) {
 	cards, err := t.sdk.DiscoverAgents(ctx)
 	if err != nil {
-		return "", "", "", &MCPToolError{Message: "discover agents: " + err.Error()}
+		return "", "", "", "", &MCPToolError{Message: "discover agents: " + err.Error()}
 	}
 	if override == "" {
 		override = t.cfg.DriverDefaults.TargetDisplayName
@@ -67,10 +79,10 @@ func (t *Tools) resolveTarget(ctx context.Context, override string) (id, display
 	if override != "" {
 		for _, c := range cards {
 			if c.DisplayName == override && c.AgentID != t.cfg.Credentials.SandboxID {
-				return c.AgentID, c.DisplayName, cardShortID(c), nil
+				return c.AgentID, c.DisplayName, cardShortID(c), observerRoleForCard(c), nil
 			}
 		}
-		return "", "", "", &MCPToolError{Message: "no agent named: " + override}
+		return "", "", "", "", &MCPToolError{Message: "no agent named: " + override}
 	}
 	var matches []agentsdk.AgentCard
 	for _, c := range cards {
@@ -82,16 +94,16 @@ func (t *Tools) resolveTarget(ctx context.Context, override string) (id, display
 		}
 	}
 	if len(matches) == 0 {
-		return "", "", "", &MCPToolError{Message: "no fanout-skilled agent available; pass target_display_name"}
+		return "", "", "", "", &MCPToolError{Message: "no fanout-skilled agent available; pass target_display_name"}
 	}
 	if len(matches) > 1 {
 		names := []string{}
 		for _, m := range matches {
 			names = append(names, m.DisplayName)
 		}
-		return "", "", "", &MCPToolError{Message: "ambiguous target: " + strings.Join(names, ", ") + " (pass target_display_name)"}
+		return "", "", "", "", &MCPToolError{Message: "ambiguous target: " + strings.Join(names, ", ") + " (pass target_display_name)"}
 	}
-	return matches[0].AgentID, matches[0].DisplayName, cardShortID(matches[0]), nil
+	return matches[0].AgentID, matches[0].DisplayName, cardShortID(matches[0]), observerRoleForCard(matches[0]), nil
 }
 
 func hasSkill(c agentsdk.AgentCard, want string) bool {
@@ -105,6 +117,13 @@ func hasSkill(c agentsdk.AgentCard, want string) bool {
 		}
 	}
 	return false
+}
+
+func observerRoleForCard(c agentsdk.AgentCard) string {
+	if hasSkill(c, "fanout") || hasSkill(c, "route") || hasSkill(c, "fanout_strict") {
+		return observer.RoleMaster
+	}
+	return observer.RoleSlave
 }
 
 func cardShortID(c agentsdk.AgentCard) string {
@@ -126,8 +145,10 @@ func cardShortID(c agentsdk.AgentCard) string {
 
 type listAgentsTool struct{ t *Tools }
 
-func (l *listAgentsTool) Name() string        { return "list_agents" }
-func (l *listAgentsTool) Description() string { return "List agents in the workspace (driver-self filtered out)." }
+func (l *listAgentsTool) Name() string { return "list_agents" }
+func (l *listAgentsTool) Description() string {
+	return "List agents in the workspace (driver-self filtered out)."
+}
 func (l *listAgentsTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`)
 }
@@ -198,9 +219,9 @@ func (s *submitTaskTool) InputSchema() json.RawMessage {
 }
 func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
 	var args struct {
-		Prompt            string `json:"prompt"`
-		ReadPaths         []string `json:"read_paths"`
-		WritePaths        []struct {
+		Prompt     string   `json:"prompt"`
+		ReadPaths  []string `json:"read_paths"`
+		WritePaths []struct {
 			Path      string `json:"path"`
 			Overwrite bool   `json:"overwrite"`
 		} `json:"write_paths"`
@@ -274,7 +295,7 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		})
 	}
 
-	targetID, targetName, _, err := s.t.resolveTarget(ctx, args.TargetDisplayName)
+	targetID, targetName, _, targetRole, err := s.t.resolveTarget(ctx, args.TargetDisplayName)
 	if err != nil {
 		return nil, err
 	}
@@ -298,6 +319,14 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	if err != nil {
 		return nil, &MCPToolError{Message: "delegate: " + err.Error()}
 	}
+	s.t.emit(observer.Event{
+		Type:          observer.EventDriverTaskSubmitted,
+		TaskID:        resp.TaskID,
+		Summary:       observer.SummarizePrompt(args.Prompt, 80),
+		Status:        "assigned",
+		TargetAgentID: targetID,
+		TargetRole:    targetRole,
+	})
 
 	for _, tok := range writeTokens {
 		s.t.reg.RebindWriteTokenTaskID(tok, resp.TaskID)
@@ -338,6 +367,15 @@ func (g *getTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMe
 	if err != nil {
 		return nil, &MCPToolError{Message: err.Error()}
 	}
+	taskID := info.TaskID
+	if taskID == "" {
+		taskID = args.TaskID
+	}
+	g.t.emit(observer.Event{
+		Type:   observer.EventDriverTaskStatus,
+		TaskID: taskID,
+		Status: info.Status,
+	})
 	return json.Marshal(map[string]interface{}{
 		"status":         info.Status,
 		"output":         info.Output,
@@ -385,6 +423,15 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 		}
 		switch info.Status {
 		case "completed", "failed", "cancelled":
+			taskID := info.TaskID
+			if taskID == "" {
+				taskID = args.TaskID
+			}
+			w.t.emit(observer.Event{
+				Type:   observer.EventDriverTaskStatus,
+				TaskID: taskID,
+				Status: info.Status,
+			})
 			written := w.t.reg.WrittenFiles(args.TaskID)
 			w.t.reg.ForgetTask(args.TaskID)
 			return json.Marshal(map[string]interface{}{

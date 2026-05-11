@@ -71,7 +71,7 @@ func TestContract_PollUsesProxyTokenAndStatusUpdateShape(t *testing.T) {
 
 	s, _ := store.Open(filepath.Join(t.TempDir(), "x.db"))
 	defer s.Close()
-	d := dispatch.New(map[string]executor.Executor{"": noopExec{}}, noopJ{}, s)
+	d := dispatch.New(map[string]executor.Executor{"": noopExec{}}, noopJ{}, s, nil)
 	p := poller.New(poller.Config{
 		ServerURL: srv.URL, ProxyToken: "ptoken",
 		IdlePoll: 50 * time.Millisecond,
@@ -122,7 +122,7 @@ func TestContract_FailedHasFailureReason(t *testing.T) {
 
 	s, _ := store.Open(filepath.Join(t.TempDir(), "x.db"))
 	defer s.Close()
-	d := dispatch.New(map[string]executor.Executor{"": failingExec{}}, noopJ{}, s)
+	d := dispatch.New(map[string]executor.Executor{"": failingExec{}}, noopJ{}, s, nil)
 	p := poller.New(poller.Config{ServerURL: srv.URL, ProxyToken: "p", IdlePoll: 50 * time.Millisecond}, d, s)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

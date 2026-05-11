@@ -25,6 +25,13 @@ fanout:
     timeout_sec: 600
     max_budget_usd: 0
 
+observer:
+  enabled: false
+  url: https://observer.example.com
+  workspace_id: ws-local
+  agent_id: master-local
+  token: master-token
+
 discovery:
   display_name: master_agent
   description: Orchestrator (route + fanout)

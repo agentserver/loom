@@ -1,4 +1,5 @@
 agentserver/
+agentserver
 env
 cmd.md
 .claude/

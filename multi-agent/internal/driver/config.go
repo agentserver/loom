@@ -17,6 +17,7 @@ type Config struct {
 	Discovery      Discovery      `yaml:"discovery"`
 	ListenAddr     string         `yaml:"listen_addr"`
 	DriverDefaults DriverDefaults `yaml:"driver_defaults"`
+	Observer       Observer       `yaml:"observer,omitempty"`
 }
 
 type ServerConfig struct {
@@ -46,6 +47,14 @@ type DriverDefaults struct {
 	MaxDirCacheEntries int    `yaml:"max_dir_cache_entries"`
 }
 
+type Observer struct {
+	Enabled     bool   `yaml:"enabled"`
+	URL         string `yaml:"url"`
+	WorkspaceID string `yaml:"workspace_id"`
+	AgentID     string `yaml:"agent_id"`
+	Token       string `yaml:"token"`
+}
+
 // LoadConfig reads + validates the yaml at path and applies DriverDefaults defaults.
 func LoadConfig(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
@@ -70,6 +79,11 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if c.DriverDefaults.MaxDirCacheEntries == 0 {
 		c.DriverDefaults.MaxDirCacheEntries = 50000
+	}
+	if c.Observer.URL != "" {
+		if c.Observer.AgentID == "" {
+			c.Observer.AgentID = c.Discovery.DisplayName
+		}
 	}
 	return &c, nil
 }

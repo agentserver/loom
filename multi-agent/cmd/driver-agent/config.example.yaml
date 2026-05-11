@@ -17,6 +17,13 @@ discovery:
 
 listen_addr: "127.0.0.1:0"
 
+observer:
+  enabled: false
+  url: https://observer.example.com
+  workspace_id: ws-local
+  agent_id: driver-local
+  token: driver-token
+
 driver_defaults:
   target_display_name: ""        # blank = auto-pick the unique fanout-skilled agent
   task_timeout_sec: 600

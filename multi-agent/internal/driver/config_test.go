@@ -78,6 +78,30 @@ discovery: {display_name: drv}
 	}
 }
 
+func TestLoadConfig_ObserverURLWithEnabledFalseKeepsDisabledAndDefaultsAgentID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "driver.yaml")
+	if err := os.WriteFile(path, []byte(`
+server: {url: https://x, name: drv}
+discovery: {display_name: driver-display}
+observer:
+  url: https://observer.example
+  enabled: false
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if c.Observer.Enabled {
+		t.Fatal("observer should remain disabled when enabled: false is set")
+	}
+	if c.Observer.AgentID != "driver-display" {
+		t.Fatalf("observer agent_id: want driver-display, got %q", c.Observer.AgentID)
+	}
+}
+
 func TestLoadConfig_RejectsMissingRequired(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bad.yaml")

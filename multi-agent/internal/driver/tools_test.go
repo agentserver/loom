@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
+	"github.com/yourorg/multi-agent/internal/observer"
 )
 
 // fakeSDK satisfies SDKClient for tests.
@@ -35,7 +36,19 @@ func (f *fakeSDK) PeerProxy(ctx context.Context, method, target, path string, bo
 	return f.peerProxyFunc(method, target, path, body)
 }
 
+type fakeObserver struct {
+	events []observer.Event
+}
+
+func (f *fakeObserver) Emit(ev observer.Event) {
+	f.events = append(f.events, ev)
+}
+
 func newTestTools(t *testing.T, sdk SDKClient) *Tools {
+	return newTestToolsWithObserver(t, sdk, nil)
+}
+
+func newTestToolsWithObserver(t *testing.T, sdk SDKClient, obs ObserverSink) *Tools {
 	t.Helper()
 	dir := t.TempDir()
 	a, err := NewAuditLog(filepath.Join(dir, "audit.log"))
@@ -48,7 +61,7 @@ func newTestTools(t *testing.T, sdk SDKClient) *Tools {
 	cfg.Credentials.ShortID = "drv-001"
 	cfg.Credentials.SandboxID = "sbx-driver"
 	cfg.DriverDefaults.TaskTimeoutSec = 600
-	return NewTools(NewFileRegistry(50000), a, sdk, cfg)
+	return NewTools(NewFileRegistry(50000), a, sdk, cfg, obs)
 }
 
 func TestTool_ListAgents_FiltersSelf(t *testing.T) {
@@ -110,7 +123,8 @@ func TestTool_SubmitTask_RegistersFilesAndDelegates(t *testing.T) {
 			return &agentsdk.DelegateTaskResponse{TaskID: "t-1"}, nil
 		},
 	}
-	tools := newTestTools(t, sdk)
+	obs := &fakeObserver{}
+	tools := newTestToolsWithObserver(t, sdk, obs)
 	args := json.RawMessage(`{
         "prompt": "merge these",
         "read_paths": ["` + in1 + `", "` + in2 + `"],
@@ -144,6 +158,60 @@ func TestTool_SubmitTask_RegistersFilesAndDelegates(t *testing.T) {
 			}
 			if !strings.Contains(gotPrompt, "merge these") {
 				t.Errorf("user prompt not preserved: %s", gotPrompt)
+			}
+			if len(obs.events) != 1 {
+				t.Fatalf("observer events: %+v", obs.events)
+			}
+			ev := obs.events[0]
+			if ev.Type != observer.EventDriverTaskSubmitted {
+				t.Errorf("event type: %s", ev.Type)
+			}
+			if ev.TaskID != "t-1" {
+				t.Errorf("event task_id: %s", ev.TaskID)
+			}
+			if ev.Summary != "merge these" {
+				t.Errorf("event summary: %q", ev.Summary)
+			}
+			if ev.Status != "assigned" {
+				t.Errorf("event status: %s", ev.Status)
+			}
+			if ev.TargetAgentID != "sbx-master" {
+				t.Errorf("event target_agent_id: %s", ev.TargetAgentID)
+			}
+			if ev.TargetRole != observer.RoleMaster {
+				t.Errorf("event target_role: %s", ev.TargetRole)
+			}
+			return
+		}
+	}
+	t.Fatal("submit_task tool not registered")
+}
+
+func TestTool_SubmitTask_EmitsSlaveTargetRoleForNonMasterTarget(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "sbx-slave", DisplayName: "slave-prod",
+					Card: json.RawMessage(`{"skills":["chat","mcp"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			return &agentsdk.DelegateTaskResponse{TaskID: "t-1"}, nil
+		},
+	}
+	obs := &fakeObserver{}
+	tools := newTestToolsWithObserver(t, sdk, obs)
+	for _, tt := range tools.All() {
+		if tt.Name() == "submit_task" {
+			_, err := tt.Call(context.Background(), json.RawMessage(`{"prompt":"run it","target_display_name":"slave-prod"}`))
+			if err != nil {
+				t.Fatalf("submit_task: %v", err)
+			}
+			if len(obs.events) != 1 {
+				t.Fatalf("observer events: %+v", obs.events)
+			}
+			if obs.events[0].TargetRole != observer.RoleSlave {
+				t.Fatalf("target_role: %s", obs.events[0].TargetRole)
 			}
 			return
 		}
@@ -229,7 +297,7 @@ func TestTool_TailSubtasks_PeerProxiesMaster(t *testing.T) {
 			return []agentsdk.AgentCard{
 				{AgentID: "sbx-master", DisplayName: "master-prod",
 					ShortID: "m-short",
-					Card: json.RawMessage(`{"skills":["fanout"]}`)},
+					Card:    json.RawMessage(`{"skills":["fanout"]}`)},
 			}, nil
 		},
 		peerProxyFunc: func(method, target, path string, body io.Reader) (*http.Response, error) {

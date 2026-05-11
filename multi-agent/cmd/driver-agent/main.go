@@ -15,6 +15,8 @@ import (
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/yourorg/multi-agent/internal/driver"
+	"github.com/yourorg/multi-agent/internal/observer"
+	"github.com/yourorg/multi-agent/internal/observerclient"
 	"github.com/yourorg/multi-agent/internal/webui"
 )
 
@@ -133,7 +135,17 @@ func runServe(args []string) {
 		fmt.Fprintln(os.Stderr, "driver: publish card warning:", err)
 	}
 
-	tools := driver.NewTools(reg, audit, cli, cfg)
+	obs := observerclient.New(observerclient.Config{
+		Enabled:     cfg.Observer.Enabled,
+		URL:         cfg.Observer.URL,
+		WorkspaceID: cfg.Observer.WorkspaceID,
+		AgentID:     cfg.Observer.AgentID,
+		AgentRole:   observer.RoleDriver,
+		Token:       cfg.Observer.Token,
+	})
+	defer obs.Close()
+
+	tools := driver.NewTools(reg, audit, cli, cfg, obs)
 	mcpSrv := driver.NewMCPServer(tools.All())
 
 	ctx, cancel := context.WithCancel(context.Background())
