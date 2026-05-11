@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
+	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/config"
 )
 
@@ -19,12 +20,13 @@ type Deps struct {
 }
 
 type Tunnel struct {
-	cfg     *config.Config
-	cfgPath string
-	http    http.Handler
-	deps    Deps
-	sdk     *agentsdk.Client
-	tools   []string
+	cfg      *config.Config
+	cfgPath  string
+	http     http.Handler
+	deps     Deps
+	sdk      *agentsdk.Client
+	tools    []string
+	mcpTools []capability.MCPToolDescriptor
 }
 
 func New(cfg *config.Config, cfgPath string, h http.Handler) *Tunnel {
@@ -37,13 +39,26 @@ func New(cfg *config.Config, cfgPath string, h http.Handler) *Tunnel {
 }
 
 func NewWithDeps(cfg *config.Config, cfgPath string, h http.Handler, deps Deps) *Tunnel {
-	return &Tunnel{cfg: cfg, cfgPath: cfgPath, http: h, deps: deps, tools: []string{}}
+	return &Tunnel{
+		cfg:      cfg,
+		cfgPath:  cfgPath,
+		http:     h,
+		deps:     deps,
+		tools:    []string{},
+		mcpTools: []capability.MCPToolDescriptor{},
+	}
 }
 
 // SetTools sets the flattened MCP tool name list to include in the next
 // PublishCard call. Safe to call before or after EnsureRegistered.
 func (t *Tunnel) SetTools(tools []string) {
 	t.tools = append([]string{}, tools...)
+}
+
+// SetMCPTools sets the structured MCP tool descriptors to include in the next
+// PublishCard call. Safe to call before or after EnsureRegistered.
+func (t *Tunnel) SetMCPTools(tools []capability.MCPToolDescriptor) {
+	t.mcpTools = append([]capability.MCPToolDescriptor{}, tools...)
 }
 
 func (t *Tunnel) EnsureRegistered(ctx context.Context) error {
@@ -89,6 +104,7 @@ func (t *Tunnel) PublishCard(ctx context.Context) error {
 	cardBody := map[string]interface{}{
 		"skills":        t.cfg.Discovery.Skills,
 		"tools":         t.tools,
+		"mcp_tools":     t.mcpTools,
 		"accepts_tasks": true,
 		"has_web_ui":    true,
 		"version":       "0.1.0",

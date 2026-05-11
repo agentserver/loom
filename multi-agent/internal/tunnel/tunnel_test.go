@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/config"
 )
 
@@ -134,6 +135,11 @@ func TestPublishCard_IncludesToolsAndResources(t *testing.T) {
 	}
 	tn := NewWithDeps(cfg, "/tmp/none", nil, Deps{})
 	tn.SetTools([]string{"echo", "raise"})
+	tn.SetMCPTools([]capability.MCPToolDescriptor{{
+		Server:      "local",
+		Name:        "echo",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"msg":{"type":"string"}}}`),
+	}})
 	if err := tn.PublishCard(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -144,6 +150,18 @@ func TestPublishCard_IncludesToolsAndResources(t *testing.T) {
 	tools, _ := card["tools"].([]interface{})
 	if len(tools) != 2 || tools[0] != "echo" || tools[1] != "raise" {
 		t.Fatalf("tools = %v", tools)
+	}
+	mcpTools, _ := card["mcp_tools"].([]interface{})
+	if len(mcpTools) != 1 {
+		t.Fatalf("mcp_tools = %v", mcpTools)
+	}
+	mcpTool, _ := mcpTools[0].(map[string]interface{})
+	if mcpTool["server"] != "local" || mcpTool["name"] != "echo" {
+		t.Fatalf("mcp_tool = %v", mcpTool)
+	}
+	schema, _ := mcpTool["input_schema"].(map[string]interface{})
+	if schema["type"] != "object" {
+		t.Fatalf("input_schema = %v", schema)
 	}
 	res, _ := card["resources"].(map[string]interface{})
 	if res == nil {

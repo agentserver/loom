@@ -103,13 +103,14 @@ func run(cfgPath string) error {
 			Republish: func(ctx context.Context) error {
 				enumCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 				defer cancel()
-				all := []string{}
+				allDesc := []capability.MCPToolDescriptor{}
 				for _, name := range mcpExec.Servers() {
 					if descriptors, err := mcpExec.ListTools(enumCtx, name); err == nil {
-						all = append(all, capability.FlatNames(descriptors)...)
+						allDesc = append(allDesc, descriptors...)
 					}
 				}
-				tn.SetTools(all)
+				tn.SetMCPTools(allDesc)
+				tn.SetTools(capability.FlatNames(allDesc))
 				return tn.PublishCard(ctx)
 			},
 		})
@@ -121,15 +122,16 @@ func run(cfgPath string) error {
 		return err
 	}
 
-	initTools := []string{}
+	initDesc := []capability.MCPToolDescriptor{}
 	enumCtx, enumCancel := context.WithTimeout(ctx, 10*time.Second)
 	for _, name := range mcpExec.Servers() {
 		if descriptors, err := mcpExec.ListTools(enumCtx, name); err == nil {
-			initTools = append(initTools, capability.FlatNames(descriptors)...)
+			initDesc = append(initDesc, descriptors...)
 		}
 	}
 	enumCancel()
-	tn.SetTools(initTools)
+	tn.SetMCPTools(initDesc)
+	tn.SetTools(capability.FlatNames(initDesc))
 
 	if err := tn.PublishCard(ctx); err != nil {
 		log.Printf("publish card: %v (continuing)", err)
