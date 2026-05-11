@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/yourorg/multi-agent/internal/capability"
 )
 
 type MCPServerCfg struct {
@@ -247,7 +249,7 @@ func (e *MCPExecutor) callHTTP(ctx context.Context, cfg MCPServerCfg, tool strin
 		return nil, fmt.Errorf("mcp http %d: %s", resp.StatusCode, string(raw))
 	}
 	var rpc struct {
-		Result json.RawMessage `json:"result"`
+		Result json.RawMessage           `json:"result"`
 		Error  *struct{ Message string } `json:"error"`
 	}
 	if err := json.Unmarshal(raw, &rpc); err != nil {
@@ -312,10 +314,50 @@ func (e *MCPExecutor) Servers() []string {
 	return out
 }
 
-// ListTools returns the tool names exposed by the named server, by issuing
+type mcpToolListResponse struct {
+	Result struct {
+		Tools []struct {
+			Name              string          `json:"name"`
+			Description       string          `json:"description"`
+			InputSchema       json.RawMessage `json:"inputSchema"`
+			InputSchemaSnake  json.RawMessage `json:"input_schema"`
+			ResultDescription string          `json:"result_description"`
+		} `json:"tools"`
+	} `json:"result"`
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+func parseMCPToolListResponse(body []byte, server string) ([]capability.MCPToolDescriptor, *string, error) {
+	var raw mcpToolListResponse
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, nil, err
+	}
+	if raw.Error != nil {
+		return nil, &raw.Error.Message, nil
+	}
+	out := make([]capability.MCPToolDescriptor, 0, len(raw.Result.Tools))
+	for _, t := range raw.Result.Tools {
+		schema := t.InputSchema
+		if len(schema) == 0 {
+			schema = t.InputSchemaSnake
+		}
+		out = append(out, capability.MCPToolDescriptor{
+			Server:            server,
+			Name:              t.Name,
+			Description:       t.Description,
+			InputSchema:       schema,
+			ResultDescription: t.ResultDescription,
+		})
+	}
+	return out, nil, nil
+}
+
+// ListTools returns the tool descriptors exposed by the named server, by issuing
 // one tools/list JSON-RPC call. The server must be registered (in cfg) at
 // call time. Spawns the subprocess if it is not yet running.
-func (e *MCPExecutor) ListTools(ctx context.Context, name string) ([]string, error) {
+func (e *MCPExecutor) ListTools(ctx context.Context, name string) ([]capability.MCPToolDescriptor, error) {
 	e.mu.Lock()
 	cfg, ok := e.cfg[name]
 	e.mu.Unlock()
@@ -368,25 +410,12 @@ func (e *MCPExecutor) ListTools(ctx context.Context, name string) ([]string, err
 			e.mu.Unlock()
 			return nil, fmt.Errorf("mcp stdio read: %w", d.err)
 		}
-		var raw struct {
-			Result struct {
-				Tools []struct {
-					Name string `json:"name"`
-				} `json:"tools"`
-			} `json:"result"`
-			Error *struct {
-				Message string `json:"message"`
-			} `json:"error"`
-		}
-		if err := json.Unmarshal(d.b, &raw); err != nil {
+		out, rpcErr, err := parseMCPToolListResponse(d.b, name)
+		if err != nil {
 			return nil, fmt.Errorf("mcp parse: %w", err)
 		}
-		if raw.Error != nil {
-			return nil, fmt.Errorf("%s", raw.Error.Message)
-		}
-		out := make([]string, 0, len(raw.Result.Tools))
-		for _, t := range raw.Result.Tools {
-			out = append(out, t.Name)
+		if rpcErr != nil {
+			return nil, fmt.Errorf("%s", *rpcErr)
 		}
 		return out, nil
 	}

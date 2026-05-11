@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -136,20 +138,40 @@ func TestMCP_HTTP_EchoCapability(t *testing.T) {
 }
 
 func TestMCPExecutor_ListTools(t *testing.T) {
-	bin := buildFakeMCPStdio(t)
-	cfg := MCPServerCfg{Transport: "stdio", Command: bin}
-	e := NewMCPExecutor(map[string]MCPServerCfg{"x": cfg})
+	dir := t.TempDir()
+	src := `
+import sys, json
+for line in sys.stdin:
+    req = json.loads(line)
+    if req.get("method") == "tools/list":
+        print(json.dumps({"jsonrpc":"2.0","id":req["id"],"result":{"tools":[
+            {"name":"echo","description":"Echo input","inputSchema":{"type":"object","properties":{"msg":{"type":"string"}}},"result_description":"Echoed payload"},
+            {"name":"raise","description":"Raise capability","input_schema":{"type":"object","properties":{"flag":{"type":"boolean"}}}},
+            {"name":"boom"}
+        ]}}), flush=True)
+`
+	path := filepath.Join(dir, "list-tools.py")
+	require.NoError(t, os.WriteFile(path, []byte(src), 0o600))
+	e := NewMCPExecutor(map[string]MCPServerCfg{"x": {Transport: "stdio", Command: "python3", Args: []string{path}}})
 	defer e.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	tools, err := e.ListTools(ctx, "x")
 	require.NoError(t, err)
-	want := map[string]bool{"echo": true, "raise": true, "boom": true}
-	require.Equal(t, 3, len(tools), "got %v", tools)
-	for _, n := range tools {
-		require.True(t, want[n], "unexpected tool name %q", n)
-	}
+	require.Len(t, tools, 3, "got %v", tools)
+	assert.Equal(t, "x", tools[0].Server)
+	assert.Equal(t, "echo", tools[0].Name)
+	assert.Equal(t, "Echo input", tools[0].Description)
+	assert.JSONEq(t, `{"type":"object","properties":{"msg":{"type":"string"}}}`, string(tools[0].InputSchema))
+	assert.Equal(t, "Echoed payload", tools[0].ResultDescription)
+	assert.Equal(t, "x", tools[1].Server)
+	assert.Equal(t, "raise", tools[1].Name)
+	assert.Equal(t, "Raise capability", tools[1].Description)
+	assert.JSONEq(t, `{"type":"object","properties":{"flag":{"type":"boolean"}}}`, string(tools[1].InputSchema))
+	assert.Equal(t, "x", tools[2].Server)
+	assert.Equal(t, "boom", tools[2].Name)
+	assert.Empty(t, tools[2].InputSchema)
 }
 
 func TestMCPExecutor_RegisterStdioReplaces(t *testing.T) {

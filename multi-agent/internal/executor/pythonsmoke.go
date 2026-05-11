@@ -3,17 +3,18 @@ package executor
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os/exec"
 	"time"
+
+	"github.com/yourorg/multi-agent/internal/capability"
 )
 
 // SmokeLaunchPython spawns `python3 path`, sends one tools/list JSON-RPC
 // request to its stdin, and waits up to timeout for a single line of stdout
-// that decodes as a valid response. Returns the tool name list. Always
+// that decodes as a valid response. Returns the tool descriptors. Always
 // kills the subprocess before returning.
-func SmokeLaunchPython(ctx context.Context, path string, timeout time.Duration) ([]string, error) {
+func SmokeLaunchPython(ctx context.Context, path string, timeout time.Duration) ([]capability.MCPToolDescriptor, error) {
 	subCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(subCtx, "python3", path)
@@ -56,25 +57,12 @@ func SmokeLaunchPython(ctx context.Context, path string, timeout time.Duration) 
 		if d.err != nil {
 			return nil, fmt.Errorf("smoke read: %w", d.err)
 		}
-		var resp struct {
-			Result struct {
-				Tools []struct {
-					Name string `json:"name"`
-				} `json:"tools"`
-			} `json:"result"`
-			Error *struct {
-				Message string `json:"message"`
-			} `json:"error"`
-		}
-		if err := json.Unmarshal(d.line, &resp); err != nil {
+		out, rpcErr, err := parseMCPToolListResponse(d.line, "")
+		if err != nil {
 			return nil, fmt.Errorf("smoke parse: %w (body=%q)", err, string(d.line))
 		}
-		if resp.Error != nil {
-			return nil, fmt.Errorf("smoke server error: %s", resp.Error.Message)
-		}
-		out := make([]string, 0, len(resp.Result.Tools))
-		for _, t := range resp.Result.Tools {
-			out = append(out, t.Name)
+		if rpcErr != nil {
+			return nil, fmt.Errorf("smoke server error: %s", *rpcErr)
 		}
 		return out, nil
 	}
