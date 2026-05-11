@@ -1,0 +1,2 @@
+master 任务分解之后，如果slave 没有对应的mcp server 以供调用，可以要求slave 使用python代码（基于已有agent的能力，包括agent上的mcp server）实现一个mcp server，并接入到slave agent中。然后就按照之前的流程，构建dag图。
+构建一个通用的 driver agent，交互界面就使用claude code + vscode; 用户 使用driver agent时， 其描述的任务可以包含任意的文件或文件夹地址，然后master 和  slave在需要的时候可以获取到这些文件。也就是说用户相当于使用driver agent 统一的使用分布式的、自接入的agent（功能不一的）集群 
