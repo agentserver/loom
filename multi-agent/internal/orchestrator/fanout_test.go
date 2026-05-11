@@ -243,6 +243,36 @@ func TestFanout_InvalidMCPArgsRejectedBeforeDispatch(t *testing.T) {
 	require.NotEmpty(t, payload["prompt"])
 }
 
+func TestFanout_InvalidMCPArgsTriggersBoundedReplan(t *testing.T) {
+	rf := filepath.Join(t.TempDir(), "round")
+	t.Setenv("FAKE_PLANNER_ROUND_FILE", rf)
+
+	sdk := &fakeSDKQueue{
+		agents: []agentsdk.AgentCard{agentWithRenderTool(t)},
+		queue:  []agentsdk.TaskInfo{{Status: "completed", Output: "ok"}},
+	}
+	obs := &fakeObserver{}
+	o := newOrchWithObserver(t, sdk, "plan_mcp_validation_replan", obs)
+
+	_, err := o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: "do"})
+
+	require.NoError(t, err)
+	require.Len(t, sdk.dispatched, 1)
+	require.Equal(t, "mcp", sdk.dispatched[0].Skill)
+	require.JSONEq(t, `{"server":"srv","tool":"render","args":{"n":7}}`, sdk.dispatched[0].Prompt)
+
+	validationFailed := eventsOfType(obs.events, observer.EventMasterMCPCallValidationFailed)
+	require.Len(t, validationFailed, 1)
+	require.Equal(t, "n0", validationFailed[0].SubtaskID)
+	done := eventsOfType(obs.events, observer.EventMasterSubtaskDone)
+	statusByNode := map[string]string{}
+	for _, ev := range done {
+		statusByNode[ev.SubtaskID] = ev.Status
+	}
+	require.Equal(t, "skipped", statusByNode["n0"])
+	require.Equal(t, "completed", statusByNode["n0_n1"])
+}
+
 func TestFanout_ValidMCPArgsDispatchesOnce(t *testing.T) {
 	sdk := &fakeSDKQueue{
 		agents: []agentsdk.AgentCard{agentWithRenderTool(t)},

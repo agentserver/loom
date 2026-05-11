@@ -18,6 +18,7 @@ type Store interface {
 	ValidateToken(token string) (observerstore.Agent, bool, error)
 	Ingest(ev observer.Event) error
 	ListTasks() ([]observerstore.TaskView, error)
+	ListEvents(taskID string) ([]observer.Event, error)
 }
 
 func New(s Store) http.Handler {
@@ -37,6 +38,10 @@ type handler struct {
 }
 
 func (h *handler) postEvent(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		h.apiEvents(w, r)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -88,6 +93,18 @@ func (h *handler) postEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)
+}
+
+func (h *handler) apiEvents(w http.ResponseWriter, r *http.Request) {
+	events, err := h.s.ListEvents(r.URL.Query().Get("task_id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(events); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func bearerToken(auth string) (string, bool) {

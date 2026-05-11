@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Behavior knobs:
 #   FAKE_PLANNER_MODE = route_a | route_empty | plan_diamond | plan_chain | plan_parallel |
-#                       plan_mcp_valid | plan_mcp_invalid_arg | plan_optional_failure |
+#                       plan_mcp_valid | plan_mcp_invalid_arg | plan_mcp_validation_replan |
+#                       plan_optional_failure |
 #                       plan_invalid_cycle |
 #                       plan_invalid_json | plan_with_skill | reduce_ok | exit1 | sleep
 #   FAKE_PLANNER_SLEEP = seconds
@@ -49,6 +50,26 @@ EOF
   {"id":"n0","target_id":"agent-a","skill":"mcp","prompt":"{\"server\":\"srv\",\"tool\":\"render\",\"args\":{\"n\":7,\"put_url_128\":\"http://x\"}}"}
 ]
 EOF
+    ;;
+  plan_mcp_validation_replan)
+    rf="${FAKE_PLANNER_ROUND_FILE:-/tmp/_fpround}"
+    r=$(cat "$rf" 2>/dev/null || echo 0)
+    case "$r" in
+      0) cat <<'EOF'
+[
+  {"id":"n0","target_id":"agent-a","skill":"mcp","prompt":"{\"server\":\"srv\",\"tool\":\"render\",\"args\":{\"n\":7,\"put_url_128\":\"http://x\"}}"}
+]
+EOF
+         ;;
+      1) cat <<'EOF'
+[
+  {"id":"n1","target_id":"agent-a","skill":"mcp","prompt":"{\"server\":\"srv\",\"tool\":\"render\",\"args\":{\"n\":7}}"}
+]
+EOF
+         ;;
+      *) echo "REDUCED";;
+    esac
+    echo $((r+1)) > "$rf"
     ;;
   plan_optional_failure)
     cat <<'EOF'

@@ -173,6 +173,16 @@ func TestIngestValidationFailurePersistsPayload(t *testing.T) {
 	require.NoError(t, s.db.QueryRow(`SELECT type, payload FROM events WHERE task_id=? AND subtask_id=?`, "mt1", "n1").Scan(&storedType, &storedPayload))
 	require.Equal(t, observer.EventMasterMCPCallValidationFailed, storedType)
 	require.JSONEq(t, string(payload), storedPayload)
+
+	tasks, err := s.ListTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 0)
+
+	events, err := s.ListEvents("mt1")
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	require.Equal(t, observer.EventMasterMCPCallValidationFailed, events[0].Type)
+	require.JSONEq(t, string(payload), string(events[0].Payload))
 }
 
 func TestIngestIsIdempotentByEventID(t *testing.T) {
@@ -353,6 +363,36 @@ func TestMCPCreatedLinksToParentByChildTaskID(t *testing.T) {
 	require.Len(t, tasks, 1)
 	require.True(t, tasks[0].HasMCP)
 	require.Equal(t, "created", tasks[0].MCPStatus)
+	require.Equal(t, "created", tasks[0].Subtasks[0].MCPStatus)
+}
+
+func TestMCPCreatedBeforeDispatchReconcilesWhenChildTaskIDArrives(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "mt1", Summary: "build thing",
+		TargetAgentID: "master",
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave", AgentRole: observer.RoleSlave,
+		Type: observer.EventMCPServerCreated, TaskID: "st1",
+		MCPServerName: "calc", MCPTools: []string{"add"},
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterSubtaskDispatched, TaskID: "mt1", SubtaskID: "n1",
+		ChildTaskID: "st1", SubtaskSummary: "make tool", TargetAgentID: "slave",
+	}))
+
+	tasks, err := s.ListTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.True(t, tasks[0].HasMCP)
+	require.Equal(t, "created", tasks[0].MCPStatus)
+	require.Len(t, tasks[0].MCPServers, 1)
+	require.Equal(t, "mt1", tasks[0].MCPServers[0].ParentTaskID)
 	require.Equal(t, "created", tasks[0].Subtasks[0].MCPStatus)
 }
 

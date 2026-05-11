@@ -138,6 +138,36 @@ func validateMCPNode(n planner.Node, agents []agentsdk.AgentCard, prompt string)
 	return fmt.Errorf("mcp node %s target agent %q does not advertise tool %s/%s", n.ID, n.TargetID, call.Server, call.Tool)
 }
 
+func mcpValidationReplanContext(n planner.Node, agents []agentsdk.AgentCard, prompt string, validationErr error) string {
+	var call struct {
+		Server string                 `json:"server"`
+		Tool   string                 `json:"tool"`
+		Args   map[string]interface{} `json:"args"`
+	}
+	_ = json.Unmarshal([]byte(prompt), &call)
+
+	schema := ""
+	for i := range agents {
+		if agents[i].AgentID != n.TargetID {
+			continue
+		}
+		tools, _ := capability.ExtractFromAgentCard(agents[i].Card)
+		if desc, ok := capability.FindTool(tools, call.Server, call.Tool); ok && len(desc.InputSchema) > 0 {
+			schema = string(desc.InputSchema)
+		}
+		break
+	}
+	if schema == "" {
+		schema = "unavailable"
+	}
+	argsJSON, _ := json.Marshal(call.Args)
+
+	return fmt.Sprintf(
+		"MCP_CALL_VALIDATION_FAILED:\nnode_id=%s\nserver=%s\ntool=%s\nargs=%s\nerror=%s\ninput_schema=%s\n"+
+			"Replan with schema-conformant arguments, or add/evolve a build_mcp node if the needed argument is not in the schema.",
+		n.ID, call.Server, call.Tool, string(argsJSON), validationErr.Error(), schema)
+}
+
 func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor.Result, error) {
 	agents, err := o.discoverFiltered(ctx)
 	if err != nil {
@@ -178,6 +208,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 	outputs := map[string]string{}
 	var outputsMu sync.Mutex
 	iterCount := map[string]int{}
+	validationReplans := 0
 	// allNodes tracks every node ever scheduled, including ones added via Append.
 	allNodes := make([]planner.Node, len(plan))
 	copy(allNodes, plan)
@@ -401,16 +432,48 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 						"prompt":           prompt,
 					}),
 				})
-				sched.MarkDispatched(n.ID)
-				inFlight++
-				go func(n planner.Node, e error) {
-					doneCh <- done{FinishedNode: FinishedNode{NodeID: n.ID, Status: "failed", Error: e.Error()}}
-				}(n, verr)
+				validationReplans++
+				if validationReplans >= maxBuildIterations {
+					sched.MarkDispatched(n.ID)
+					inFlight++
+					go func(n planner.Node, e error) {
+						doneCh <- done{FinishedNode: FinishedNode{NodeID: n.ID, Status: "failed", Error: e.Error()}}
+					}(n, verr)
+					continue
+				}
+
+				ctx2 := t.Prompt + "\n\n" + mcpValidationReplanContext(n, agents, prompt, verr)
+				newPlan, perr := o.planner.Plan(fanoutCtx, ctx2, agents)
+				if perr != nil {
+					cancelAll()
+					return executor.Result{}, fmt.Errorf("replan after mcp validation failure: %w", perr)
+				}
+				if err := Validate(newPlan); err != nil {
+					cancelAll()
+					return executor.Result{}, fmt.Errorf("invalid mcp validation replan: %w", err)
+				}
+				newPlan = renamePlanIDs(newPlan, n.ID)
+				if err := sched.Append(newPlan); err != nil {
+					cancelAll()
+					return executor.Result{}, fmt.Errorf("append mcp validation replan: %w", err)
+				}
+				allNodes = append(allNodes, newPlan...)
+				for _, appended := range newPlan {
+					optionalByID[appended.ID] = appended.Optional
+				}
+				appendSubTaskRows(o.store, t.ID, newPlan)
+				for _, skipped := range sched.MarkSuperseded(n.ID, "superseded by mcp validation replan") {
+					optionalByID[skipped.NodeID] = true
+					recordSkippedDone(skipped)
+				}
 				continue
 			}
 			dispatched(n, prompt)
 		}
 		if inFlight == 0 {
+			if !sched.Done() {
+				continue
+			}
 			break
 		}
 		var d done

@@ -85,6 +85,20 @@ func LoadConfig(path string) (*Config, error) {
 			c.Observer.AgentID = c.Discovery.DisplayName
 		}
 	}
+	if c.Observer.Enabled {
+		if c.Observer.URL == "" {
+			return nil, fmt.Errorf("observer.url is required when observer.enabled is true")
+		}
+		if c.Observer.WorkspaceID == "" {
+			return nil, fmt.Errorf("observer.workspace_id is required when observer.enabled is true")
+		}
+		if c.Observer.AgentID == "" {
+			return nil, fmt.Errorf("observer.agent_id is required when observer.enabled is true")
+		}
+		if c.Observer.Token == "" {
+			return nil, fmt.Errorf("observer.token is required when observer.enabled is true")
+		}
+	}
 	return &c, nil
 }
 

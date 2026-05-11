@@ -185,6 +185,30 @@ func (s *Scheduler) MarkDownstreamSkipped(failedID string) {
 	}
 }
 
+func (s *Scheduler) MarkSuperseded(nodeID, reason string) []FinishedNode {
+	var out []FinishedNode
+	mark := func(id string) {
+		if _, done := s.finished[id]; done {
+			return
+		}
+		delete(s.pending, id)
+		delete(s.inFlight, id)
+		fn := FinishedNode{NodeID: id, Status: "skipped", Error: reason}
+		s.finished[id] = fn
+		out = append(out, fn)
+	}
+
+	mark(nodeID)
+	stack := append([]string{}, s.rev[nodeID]...)
+	for len(stack) > 0 {
+		id := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		mark(id)
+		stack = append(stack, s.rev[id]...)
+	}
+	return out
+}
+
 func (s *Scheduler) Done() bool {
 	return len(s.pending) == 0 && len(s.inFlight) == 0
 }

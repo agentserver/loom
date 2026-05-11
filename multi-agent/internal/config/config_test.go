@@ -131,6 +131,25 @@ observer:
 	require.Equal(t, "master-display", c.Observer.AgentID)
 }
 
+func TestLoad_ObserverEnabledRequiresDeliveryFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+server:
+  url: https://example.com
+  name: m
+discovery:
+  display_name: master-display
+observer:
+  enabled: true
+  url: https://observer.example
+`), 0o600))
+
+	_, err := Load(path)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "observer.workspace_id")
+}
+
 func TestLoad_ResourcesRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "c.yaml")

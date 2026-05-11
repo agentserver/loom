@@ -37,19 +37,20 @@ type Agent struct {
 }
 
 type TaskView struct {
-	WorkspaceID string          `json:"workspace_id"`
-	TaskID      string          `json:"task_id"`
-	DriverID    string          `json:"driver_id"`
-	MasterID    string          `json:"master_id"`
-	SlaveID     string          `json:"slave_id"`
-	Summary     string          `json:"summary"`
-	Status      string          `json:"status"`
-	HasMCP      bool            `json:"has_mcp"`
-	MCPStatus   string          `json:"mcp_status"`
-	Output      string          `json:"output"`
-	Error       string          `json:"error"`
-	Subtasks    []SubtaskView   `json:"subtasks"`
-	MCPServers  []MCPServerView `json:"mcp_servers"`
+	WorkspaceID string           `json:"workspace_id"`
+	TaskID      string           `json:"task_id"`
+	DriverID    string           `json:"driver_id"`
+	MasterID    string           `json:"master_id"`
+	SlaveID     string           `json:"slave_id"`
+	Summary     string           `json:"summary"`
+	Status      string           `json:"status"`
+	HasMCP      bool             `json:"has_mcp"`
+	MCPStatus   string           `json:"mcp_status"`
+	Output      string           `json:"output"`
+	Error       string           `json:"error"`
+	Subtasks    []SubtaskView    `json:"subtasks"`
+	MCPServers  []MCPServerView  `json:"mcp_servers"`
+	Events      []observer.Event `json:"events,omitempty"`
 }
 
 type SubtaskView struct {
@@ -229,12 +230,52 @@ func (s *Store) ListTasks() ([]TaskView, error) {
 		if err != nil {
 			return nil, err
 		}
+		task.Events, err = s.ListEvents(task.TaskID)
+		if err != nil {
+			return nil, err
+		}
 		tasks = append(tasks, task)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	return tasks, nil
+}
+
+func (s *Store) ListEvents(taskID string) ([]observer.Event, error) {
+	query := `SELECT event_id, ts, workspace_id, agent_id, agent_role, type, task_id, COALESCE(parent_task_id, ''), COALESCE(subtask_id, ''), COALESCE(child_task_id, ''), COALESCE(summary, ''), COALESCE(subtask_summary, ''), COALESCE(status, ''), COALESCE(target_agent_id, ''), COALESCE(target_role, ''), COALESCE(mcp_server_name, ''), COALESCE(mcp_tools, '[]'), COALESCE(payload, '')
+		FROM events`
+	var args []interface{}
+	if taskID != "" {
+		query += ` WHERE task_id=? OR parent_task_id=? OR task_id IN (SELECT child_task_id FROM subtasks WHERE parent_task_id=? AND child_task_id IS NOT NULL)`
+		args = append(args, taskID, taskID, taskID)
+	}
+	query += ` ORDER BY ts ASC, event_id ASC`
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	events := []observer.Event{}
+	for rows.Next() {
+		var ev observer.Event
+		var tools, payload string
+		if err := rows.Scan(&ev.EventID, &ev.TS, &ev.WorkspaceID, &ev.AgentID, &ev.AgentRole, &ev.Type, &ev.TaskID, &ev.ParentTaskID, &ev.SubtaskID, &ev.ChildTaskID, &ev.Summary, &ev.SubtaskSummary, &ev.Status, &ev.TargetAgentID, &ev.TargetRole, &ev.MCPServerName, &tools, &payload); err != nil {
+			return nil, err
+		}
+		if tools != "" && tools != "null" {
+			_ = json.Unmarshal([]byte(tools), &ev.MCPTools)
+		}
+		if payload != "" {
+			ev.Payload = json.RawMessage(payload)
+		}
+		events = append(events, ev)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return events, nil
 }
 
 func (s *Store) listSubtasks(workspaceID, taskID string) ([]SubtaskView, error) {
@@ -394,7 +435,10 @@ func upsertSubtask(tx *sql.Tx, ev observer.Event) error {
 			updated_at=excluded.updated_at`,
 		ev.WorkspaceID, parentTaskID, subtaskID, nullString(ev.ChildTaskID), ev.AgentID, nullString(ev.TargetAgentID),
 		subtaskSummary, displayLabel, valueOr(ev.Status, "assigned"), ev.TS, ev.TS)
-	return err
+	if err != nil {
+		return err
+	}
+	return reconcileMCPServersForSubtask(tx, ev.WorkspaceID, parentTaskID, subtaskID, ev.ChildTaskID, ev.TS)
 }
 
 func upsertSlaveTask(tx *sql.Tx, ev observer.Event) error {
@@ -498,6 +542,31 @@ func upsertMCPServer(tx *sql.Tx, ev observer.Event) error {
 		_, err = tx.Exec(`UPDATE subtasks SET mcp_status='created', updated_at=? WHERE workspace_id=? AND parent_task_id=? AND subtask_id=?`,
 			ev.TS, ev.WorkspaceID, parentTaskID, subtaskID)
 	}
+	return err
+}
+
+func reconcileMCPServersForSubtask(tx *sql.Tx, workspaceID, parentTaskID, subtaskID, childTaskID, ts string) error {
+	if childTaskID == "" {
+		return nil
+	}
+	result, err := tx.Exec(`UPDATE mcp_servers SET parent_task_id=? WHERE workspace_id=? AND task_id=? AND parent_task_id IS NULL`,
+		parentTaskID, workspaceID, childTaskID)
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(`UPDATE tasks SET has_mcp=1, mcp_status='created', updated_at=? WHERE workspace_id=? AND task_id=?`,
+		ts, workspaceID, parentTaskID); err != nil {
+		return err
+	}
+	_, err = tx.Exec(`UPDATE subtasks SET mcp_status='created', updated_at=? WHERE workspace_id=? AND parent_task_id=? AND subtask_id=?`,
+		ts, workspaceID, parentTaskID, subtaskID)
 	return err
 }
 

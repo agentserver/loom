@@ -138,6 +138,47 @@ func TestAPITasksExposesMCPToolDescriptors(t *testing.T) {
 	require.JSONEq(t, `[{"server":"calc","name":"add","input_schema":{"type":"object","properties":{"a":{"type":"number"}}}}]`, string(tasks[0].MCPServers[0].ToolDescriptors))
 }
 
+func TestAPITasksAndEventsExposeValidationFailureEvidence(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "master", Role: observer.RoleMaster, DisplayName: "Master"}, "master-token"))
+	require.NoError(t, st.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "mt1", Summary: "build thing",
+		TargetAgentID: "master", TargetRole: observer.RoleMaster, Status: "assigned",
+	}))
+	require.NoError(t, st.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterMCPCallValidationFailed, TaskID: "mt1", SubtaskID: "n1",
+		Status:  "failed",
+		Payload: json.RawMessage(`{"validation_error":"unknown argument put_url_128","required":true}`),
+	}))
+
+	h := New(st)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/tasks", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	var tasks []struct {
+		Events []observer.Event `json:"events"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &tasks))
+	require.Len(t, tasks, 1)
+	require.Len(t, tasks[0].Events, 2)
+	require.Equal(t, observer.EventMasterMCPCallValidationFailed, tasks[0].Events[1].Type)
+	require.JSONEq(t, `{"validation_error":"unknown argument put_url_128","required":true}`, string(tasks[0].Events[1].Payload))
+
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/events?task_id=mt1", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	var events []observer.Event
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &events))
+	require.Len(t, events, 2)
+	require.Equal(t, observer.EventMasterMCPCallValidationFailed, events[1].Type)
+}
+
 func TestAPITasksEncodesEmptyCollectionsAsArrays(t *testing.T) {
 	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
 	require.NoError(t, err)
