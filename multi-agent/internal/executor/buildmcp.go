@@ -18,8 +18,13 @@ import (
 	"time"
 
 	"github.com/yourorg/multi-agent/internal/capability"
+	"github.com/yourorg/multi-agent/internal/observer"
 	"gopkg.in/yaml.v3"
 )
+
+type Observer interface {
+	Emit(observer.Event)
+}
 
 // BuildMCPConfig wires BuildMCPExecutor to its slave-side dependencies.
 type BuildMCPConfig struct {
@@ -27,6 +32,7 @@ type BuildMCPConfig struct {
 	ClaudeBin string                          // path to claude CLI (or fake during tests)
 	MCPExec   *MCPExecutor                    // for RegisterStdio after a successful build
 	Republish func(ctx context.Context) error // tunnel.PublishCard hook; called after successful register
+	Observer  Observer
 }
 
 type BuildMCPExecutor struct {
@@ -38,6 +44,22 @@ type BuildMCPExecutor struct {
 
 func NewBuildMCPExecutor(cfg BuildMCPConfig) *BuildMCPExecutor {
 	return &BuildMCPExecutor{cfg: cfg, MCPExec: cfg.MCPExec}
+}
+
+func (e *BuildMCPExecutor) emit(ev observer.Event) {
+	if e.cfg.Observer == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	e.cfg.Observer.Emit(ev)
+}
+
+func buildMCPObserverPayload(v interface{}) json.RawMessage {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	return b
 }
 
 type buildSpec struct {
@@ -103,18 +125,18 @@ func (e *BuildMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, 
 
 	src, err := e.invokeClaude(ctx, spec, priorCode)
 	if err != nil {
-		return Result{Summary: blockedHandle(spec, "", "", "claude_invocation", err.Error())}, nil
+		return Result{Summary: e.blockedHandle(t.ID, spec, "", "", "claude_invocation", err.Error())}, nil
 	}
 	src = stripFencesAndJunk(src)
 
 	// Validate syntax.
 	if err := validatePythonSyntax(src); err != nil {
-		return Result{Summary: blockedHandle(spec, "", "", "validate_syntax", err.Error())}, nil
+		return Result{Summary: e.blockedHandle(t.ID, spec, "", "", "validate_syntax", err.Error())}, nil
 	}
 	// Validate imports.
 	bad, _ := ValidateImports(src, spec.AllowedPackages)
 	if len(bad) > 0 {
-		return Result{Summary: blockedHandle(spec, strings.Join(bad, ","),
+		return Result{Summary: e.blockedHandle(t.ID, spec, strings.Join(bad, ","),
 			"claude used "+strings.Join(bad, ", ")+" not in allowed_packages",
 			"validate_imports", "")}, nil
 	}
@@ -143,8 +165,9 @@ func (e *BuildMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, 
 	tools, err := SmokeLaunchPython(ctx, absPath, 3*time.Second)
 	if err != nil {
 		_ = os.Remove(absPath)
-		return Result{Summary: blockedHandle(spec, "", err.Error(), "smoke_launch", "")}, nil
+		return Result{Summary: e.blockedHandle(t.ID, spec, "", err.Error(), "smoke_launch", "")}, nil
 	}
+	tools = mergeMCPToolDescriptors(spec, tools)
 	toolNames := capability.FlatNames(tools)
 	// Register.
 	mcpCfg := MCPServerCfg{Transport: "stdio", Command: "python3", Args: []string{absPath}}
@@ -156,27 +179,37 @@ func (e *BuildMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, 
 		Name: spec.Name, Transport: "stdio", Command: "python3",
 		Args: []string{relPath}, Version: spec.Version,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
-		SpecHash:  specHash, Tools: toolNames,
+		SpecHash:  specHash, Tools: tools,
 	}); err != nil {
 		return Result{}, fmt.Errorf("buildmcp: persist yaml: %w", err)
 	}
+	e.emit(observer.Event{
+		Type:          observer.EventMCPServerCreated,
+		TaskID:        t.ID,
+		MCPServerName: spec.Name,
+		MCPTools:      toolNames,
+		Status:        "completed",
+		Payload: buildMCPObserverPayload(map[string]interface{}{
+			"mcp_tool_descriptors": tools,
+		}),
+	})
 	// Re-publish card.
 	if e.cfg.Republish != nil {
 		if err := e.cfg.Republish(ctx); err != nil {
 			sink.Write("warn", fmt.Sprintf("republish card: %v", err))
 		}
 	}
-	return Result{Summary: e.successHandle(spec, relPath, toolNames, len(strings.Split(src, "\n"))).Marshal()}, nil
+	return Result{Summary: e.successHandle(spec, relPath, tools, len(strings.Split(src, "\n"))).Marshal()}, nil
 }
 
-func (e *BuildMCPExecutor) successHandle(spec buildSpec, relPath string, tools []string, lineCount int) handleJSON {
+func (e *BuildMCPExecutor) successHandle(spec buildSpec, relPath string, tools []capability.MCPToolDescriptor, lineCount int) handleJSON {
 	return handleJSON{
 		Type: "mcp_tool_set",
 		URL:  "file://" + filepath.Join(e.cfg.WorkDir, relPath),
 		Meta: map[string]string{
 			"name":      spec.Name,
 			"version":   strconv.Itoa(spec.Version),
-			"tools":     strings.Join(tools, ","),
+			"tools":     strings.Join(capability.FlatNames(tools), ","),
 			"slave_id":  os.Getenv("SLAVE_SANDBOX_ID"),
 			"lines":     strconv.Itoa(lineCount),
 			"deps":      strings.Join(spec.AllowedPackages, ","),
@@ -185,13 +218,80 @@ func (e *BuildMCPExecutor) successHandle(spec buildSpec, relPath string, tools [
 	}
 }
 
-func blockedHandle(spec buildSpec, neededPackages, reason, stage, claudeErr string) string {
+func mergeMCPToolDescriptors(spec buildSpec, observed []capability.MCPToolDescriptor) []capability.MCPToolDescriptor {
+	merged := make([]capability.MCPToolDescriptor, 0, len(spec.Tools)+len(observed))
+	byName := make(map[string]int, len(spec.Tools)+len(observed))
+
+	for _, tool := range spec.Tools {
+		if tool.Name == "" {
+			continue
+		}
+		descriptor := capability.MCPToolDescriptor{
+			Server:            spec.Name,
+			Name:              tool.Name,
+			Description:       tool.Description,
+			InputSchema:       tool.ArgsSchema,
+			ResultDescription: tool.ResultDescription,
+		}
+		byName[descriptor.Name] = len(merged)
+		merged = append(merged, descriptor)
+	}
+
+	for _, tool := range observed {
+		if tool.Name == "" {
+			continue
+		}
+		if tool.Server == "" {
+			tool.Server = spec.Name
+		}
+		if idx, ok := byName[tool.Name]; ok {
+			existing := merged[idx]
+			if existing.Server == "" {
+				existing.Server = tool.Server
+			}
+			if existing.Description == "" {
+				existing.Description = tool.Description
+			}
+			if len(existing.InputSchema) == 0 {
+				existing.InputSchema = tool.InputSchema
+			}
+			if existing.ResultDescription == "" {
+				existing.ResultDescription = tool.ResultDescription
+			}
+			merged[idx] = existing
+			continue
+		}
+		byName[tool.Name] = len(merged)
+		merged = append(merged, tool)
+	}
+
+	for i := range merged {
+		if merged[i].Server == "" {
+			merged[i].Server = spec.Name
+		}
+	}
+	return merged
+}
+
+func (e *BuildMCPExecutor) blockedHandle(taskID string, spec buildSpec, neededPackages, reason, stage, claudeErr string) string {
 	if reason == "" && claudeErr != "" {
 		reason = claudeErr
 	}
 	if len(reason) > 200 {
 		reason = reason[:200]
 	}
+	e.emit(observer.Event{
+		Type:          observer.EventMCPServerBlocked,
+		TaskID:        taskID,
+		MCPServerName: spec.Name,
+		Status:        "blocked",
+		Payload: buildMCPObserverPayload(map[string]interface{}{
+			"stage":           stage,
+			"reason":          reason,
+			"needed_packages": neededPackages,
+			"iteration":       spec.Iteration,
+		}),
+	})
 	h := handleJSON{
 		Type: "build_mcp_blocked",
 		URL:  "",
@@ -284,7 +384,7 @@ const buildSystemPrompt = `You are generating a Python MCP (Model Context Protoc
 Wire format:
 - Read JSON-RPC requests one per line on stdin: {"jsonrpc":"2.0","id":<int>,"method":"tools/list" | "tools/call","params":{...}}
 - Write JSON responses one per line to stdout: {"jsonrpc":"2.0","id":<int>,"result":{...}} or {"jsonrpc":"2.0","id":<int>,"error":{"message":"..."}}
-- For "tools/list" return {"result":{"tools":[{"name":"X"},...]}}
+- For "tools/list" return full tool descriptors for every spec.tools entry: {"result":{"tools":[{"name":"X","description":"...","inputSchema":{...},"result_description":"..."}]}}. Each inputSchema must match the corresponding spec.tools[].args_schema exactly.
 - For "tools/call" with params {"name":"X","arguments":{...}}, dispatch on name; return {"result":{"result":<your value>,"capability_changed":false}}
 - Flush after every response.
 
@@ -324,14 +424,55 @@ func computeSpecHash(spec buildSpec) string {
 }
 
 type dynamicEntry struct {
-	Name      string   `yaml:"-"`
-	Transport string   `yaml:"transport"`
-	Command   string   `yaml:"command"`
-	Args      []string `yaml:"args"`
-	Version   int      `yaml:"version"`
-	CreatedAt string   `yaml:"created_at"`
-	SpecHash  string   `yaml:"spec_hash"`
-	Tools     []string `yaml:"tools,omitempty"`
+	Name      string                         `yaml:"-"`
+	Transport string                         `yaml:"transport"`
+	Command   string                         `yaml:"command"`
+	Args      []string                       `yaml:"args"`
+	Version   int                            `yaml:"version"`
+	CreatedAt string                         `yaml:"created_at"`
+	SpecHash  string                         `yaml:"spec_hash"`
+	Tools     []capability.MCPToolDescriptor `yaml:"tools,omitempty"`
+}
+
+func (d *dynamicEntry) UnmarshalYAML(value *yaml.Node) error {
+	var raw struct {
+		Transport string    `yaml:"transport"`
+		Command   string    `yaml:"command"`
+		Args      []string  `yaml:"args"`
+		Version   int       `yaml:"version"`
+		CreatedAt string    `yaml:"created_at"`
+		SpecHash  string    `yaml:"spec_hash"`
+		Tools     yaml.Node `yaml:"tools"`
+	}
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	d.Transport = raw.Transport
+	d.Command = raw.Command
+	d.Args = raw.Args
+	d.Version = raw.Version
+	d.CreatedAt = raw.CreatedAt
+	d.SpecHash = raw.SpecHash
+	if raw.Tools.Kind == 0 {
+		return nil
+	}
+	var descriptors []capability.MCPToolDescriptor
+	if err := raw.Tools.Decode(&descriptors); err == nil {
+		d.Tools = descriptors
+		return nil
+	}
+	var names []string
+	if err := raw.Tools.Decode(&names); err != nil {
+		return err
+	}
+	d.Tools = make([]capability.MCPToolDescriptor, 0, len(names))
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		d.Tools = append(d.Tools, capability.MCPToolDescriptor{Name: name})
+	}
+	return nil
 }
 
 type dynamicFile struct {
@@ -365,6 +506,11 @@ func (e *BuildMCPExecutor) readDynamicYAML() (dynamicFile, error) {
 	}
 	if df.Servers == nil {
 		df.Servers = map[string]dynamicEntry{}
+	}
+	for name, entry := range df.Servers {
+		entry.Name = name
+		entry.Tools = capability.WithServer(name, entry.Tools)
+		df.Servers[name] = entry
 	}
 	return df, nil
 }

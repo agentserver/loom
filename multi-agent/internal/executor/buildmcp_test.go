@@ -10,7 +10,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yourorg/multi-agent/internal/capability"
+	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/store"
+	"gopkg.in/yaml.v3"
 )
 
 func projectRoot(t *testing.T) string {
@@ -31,7 +34,19 @@ func fakeBuildClaude(t *testing.T) string {
 	return filepath.Join(root, "testdata", "fake-build-claude.sh")
 }
 
+type fakeObserver struct {
+	events []observer.Event
+}
+
+func (f *fakeObserver) Emit(ev observer.Event) {
+	f.events = append(f.events, ev)
+}
+
 func newBuildMCPForTest(t *testing.T) (*BuildMCPExecutor, string) {
+	return newBuildMCPForTestWithObserver(t, nil)
+}
+
+func newBuildMCPForTestWithObserver(t *testing.T, obs Observer) (*BuildMCPExecutor, string) {
 	t.Helper()
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not on PATH")
@@ -44,6 +59,7 @@ func newBuildMCPForTest(t *testing.T) (*BuildMCPExecutor, string) {
 		ClaudeBin: fakeBuildClaude(t),
 		MCPExec:   mcpExec,
 		Republish: cardRepub,
+		Observer:  obs,
 	})
 	return be, work
 }
@@ -85,6 +101,111 @@ func TestBuildMCP_HappyPath(t *testing.T) {
 	if !strings.Contains(string(dy), "foo:") {
 		t.Fatalf("dynamic_mcp.yaml missing entry:\n%s", string(dy))
 	}
+	var df dynamicFile
+	if err := yaml.Unmarshal(dy, &df); err != nil {
+		t.Fatalf("dynamic_mcp.yaml unmarshal: %v", err)
+	}
+	entry := df.Servers["foo"]
+	if len(entry.Tools) != 1 {
+		t.Fatalf("tools = %+v", entry.Tools)
+	}
+	tool := entry.Tools[0]
+	if tool.Server != "foo" || tool.Name != "foo" || tool.Description != "d" || tool.ResultDescription != "r" {
+		t.Fatalf("unexpected tool descriptor: %+v", tool)
+	}
+	if string(tool.InputSchema) != `{"type":"object"}` {
+		t.Fatalf("input schema = %s", tool.InputSchema)
+	}
+	var handle handleJSON
+	if err := json.Unmarshal([]byte(res.Summary), &handle); err != nil {
+		t.Fatalf("summary unmarshal: %v", err)
+	}
+	if handle.Meta["tools"] != "foo" {
+		t.Fatalf("success handle tools meta = %q", handle.Meta["tools"])
+	}
+}
+
+func TestBuildMCP_EmitsObserverCreatedAfterPersist(t *testing.T) {
+	os.Setenv("FAKE_BUILD_CLAUDE_MODE", "ok")
+	defer os.Unsetenv("FAKE_BUILD_CLAUDE_MODE")
+	obs := &fakeObserver{}
+	be, _ := newBuildMCPForTestWithObserver(t, obs)
+	defer be.MCPExec.Close()
+
+	spec := map[string]interface{}{
+		"name": "foo", "description": "d",
+		"tools": []map[string]interface{}{
+			{"name": "foo", "description": "d", "args_schema": map[string]interface{}{"type": "object"}, "result_description": "r"},
+		},
+		"allowed_packages": []string{},
+		"version":          1,
+		"iteration":        1,
+		"max_iterations":   3,
+	}
+	specBytes, _ := json.Marshal(spec)
+
+	_, err := be.Run(context.Background(), Task{ID: "tx", Skill: "build_mcp", Prompt: string(specBytes), TimeoutSec: 30}, &nopSink{})
+
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(obs.events) != 1 {
+		t.Fatalf("observer events: %+v", obs.events)
+	}
+	ev := obs.events[0]
+	if ev.Type != observer.EventMCPServerCreated {
+		t.Fatalf("event type: got %q", ev.Type)
+	}
+	if ev.TaskID != "tx" || ev.MCPServerName != "foo" || ev.Status != "completed" {
+		t.Fatalf("unexpected event: %+v", ev)
+	}
+	if len(ev.MCPTools) == 0 || ev.MCPTools[0] != "foo" {
+		t.Fatalf("unexpected mcp tools: %+v", ev.MCPTools)
+	}
+	var payload struct {
+		MCPToolDescriptors []capability.MCPToolDescriptor `json:"mcp_tool_descriptors"`
+	}
+	if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+		t.Fatalf("payload unmarshal: %v", err)
+	}
+	if len(payload.MCPToolDescriptors) != 1 {
+		t.Fatalf("payload descriptors: %+v", payload.MCPToolDescriptors)
+	}
+	tool := payload.MCPToolDescriptors[0]
+	if tool.Server != "foo" || tool.Name != "foo" || tool.Description != "d" || string(tool.InputSchema) != `{"type":"object"}` {
+		t.Fatalf("unexpected payload descriptor: %+v", tool)
+	}
+}
+
+func TestBuildMCP_ReadDynamicYAMLConvertsOldToolNamesToDescriptors(t *testing.T) {
+	be, work := newBuildMCPForTest(t)
+	defer be.MCPExec.Close()
+	oldYAML := []byte(`servers:
+  legacy:
+    transport: stdio
+    command: python3
+    args:
+      - generated_mcp/legacy/v1.py
+    version: 1
+    tools:
+      - echo
+`)
+	if err := os.WriteFile(filepath.Join(work, "dynamic_mcp.yaml"), oldYAML, 0o600); err != nil {
+		t.Fatalf("write old yaml: %v", err)
+	}
+
+	df, err := be.readDynamicYAML()
+
+	if err != nil {
+		t.Fatalf("readDynamicYAML: %v", err)
+	}
+	tools := df.Servers["legacy"].Tools
+	if len(tools) != 1 {
+		t.Fatalf("tools = %+v", tools)
+	}
+	if tools[0].Server != "legacy" || tools[0].Name != "echo" {
+		t.Fatalf("converted tool = %+v", tools[0])
+	}
 }
 
 func TestBuildMCP_BadImport_ReturnsBlocked(t *testing.T) {
@@ -107,6 +228,46 @@ func TestBuildMCP_BadImport_ReturnsBlocked(t *testing.T) {
 	}
 	if !strings.Contains(res.Summary, "requests_html") {
 		t.Fatalf("expected blocked handle to mention requests_html, got %q", res.Summary)
+	}
+}
+
+func TestBuildMCP_EmitsObserverBlockedWithPayload(t *testing.T) {
+	os.Setenv("FAKE_BUILD_CLAUDE_MODE", "bad_import")
+	defer os.Unsetenv("FAKE_BUILD_CLAUDE_MODE")
+	obs := &fakeObserver{}
+	be, _ := newBuildMCPForTestWithObserver(t, obs)
+	defer be.MCPExec.Close()
+
+	specBytes, _ := json.Marshal(map[string]interface{}{
+		"name": "foo", "description": "d",
+		"tools":            []map[string]interface{}{{"name": "x", "description": "d", "args_schema": map[string]interface{}{"type": "object"}, "result_description": "r"}},
+		"allowed_packages": []string{}, "version": 1, "iteration": 2, "max_iterations": 3,
+	})
+
+	_, err := be.Run(context.Background(), Task{ID: "tx", Skill: "build_mcp", Prompt: string(specBytes), TimeoutSec: 30}, &nopSink{})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(obs.events) != 1 {
+		t.Fatalf("observer events: %+v", obs.events)
+	}
+	ev := obs.events[0]
+	if ev.Type != observer.EventMCPServerBlocked {
+		t.Fatalf("event type: got %q", ev.Type)
+	}
+	if ev.TaskID != "tx" || ev.MCPServerName != "foo" || ev.Status != "blocked" {
+		t.Fatalf("unexpected event: %+v", ev)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+		t.Fatalf("payload unmarshal: %v", err)
+	}
+	if payload["stage"] != "validate_imports" || payload["needed_packages"] != "requests_html" || payload["iteration"].(float64) != 2 {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	if !strings.Contains(payload["reason"].(string), "not in allowed_packages") {
+		t.Fatalf("unexpected reason: %+v", payload)
 	}
 }
 
