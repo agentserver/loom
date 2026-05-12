@@ -10,6 +10,7 @@ cmd/slave-agent/dynamic_mcp.yaml
 cmd/slave-agent/generated_mcp/
 *.tmp
 /bin/
+/.run/
 /driver-agent
 /master-agent
 /observer-server
