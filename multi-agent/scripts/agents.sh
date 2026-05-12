@@ -123,6 +123,11 @@ start_daemon() {
   pid_path="$(pid_file "$name")"
   log_path="$(log_file "$name")"
 
+  if [[ "$DRY_RUN" == "1" ]]; then
+    say_cmd "$cmd" ">" "$(rel "$log_path")" "2>&1" "& echo \$! >" "$(rel "$pid_path")"
+    return
+  fi
+
   if [[ -f "$pid_path" ]]; then
     local existing
     existing="$(cat "$pid_path" 2>/dev/null || true)"
@@ -130,11 +135,6 @@ start_daemon() {
       printf '%s already running pid=%s log=%s\n' "$name" "$existing" "$(rel "$log_path")"
       return
     fi
-  fi
-
-  if [[ "$DRY_RUN" == "1" ]]; then
-    say_cmd "$cmd" ">" "$(rel "$log_path")" "2>&1" "& echo \$! >" "$(rel "$pid_path")"
-    return
   fi
 
   rm -f "$pid_path"

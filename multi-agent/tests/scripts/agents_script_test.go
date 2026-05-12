@@ -16,15 +16,20 @@ func repoRoot(t *testing.T) string {
 	return root
 }
 
-func runScript(t *testing.T, args ...string) string {
+func runNamedScript(t *testing.T, script string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("bash", append([]string{"scripts/agents.sh"}, args...)...)
+	cmd := exec.Command("bash", append([]string{script}, args...)...)
 	cmd.Dir = repoRoot(t)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("agents.sh %v failed: %v\n%s", args, err, out)
+		t.Fatalf("%s %v failed: %v\n%s", script, args, err, out)
 	}
 	return string(out)
+}
+
+func runScript(t *testing.T, args ...string) string {
+	t.Helper()
+	return runNamedScript(t, "scripts/agents.sh", args...)
 }
 
 func TestAgentsScriptDryRunStartBuildsRegistersAndStartsAgents(t *testing.T) {
@@ -80,4 +85,3 @@ func TestAgentsScriptDryRunStatusMentionsLogsAndPids(t *testing.T) {
 		}
 	}
 }
-
