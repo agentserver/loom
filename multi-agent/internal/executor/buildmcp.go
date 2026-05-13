@@ -19,6 +19,7 @@ import (
 	"github.com/yourorg/multi-agent/internal/buildspec"
 	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/observer"
+	"github.com/yourorg/multi-agent/internal/progress"
 	"gopkg.in/yaml.v3"
 )
 
@@ -52,6 +53,23 @@ func (e *BuildMCPExecutor) emit(ev observer.Event) {
 	}
 	defer func() { _ = recover() }()
 	e.cfg.Observer.Emit(ev)
+}
+
+func (e *BuildMCPExecutor) progress(t Task, phase, message string, extra map[string]interface{}) {
+	payload := map[string]interface{}{
+		"phase":    phase,
+		"message":  message,
+		"is_final": false,
+	}
+	for k, v := range extra {
+		payload[k] = v
+	}
+	e.emit(observer.Event{
+		Type:    observer.EventSlaveBuildMCPProgress,
+		TaskID:  t.ID,
+		Status:  "running",
+		Payload: buildMCPObserverPayload(payload),
+	})
 }
 
 func buildMCPObserverPayload(v interface{}) json.RawMessage {
@@ -92,6 +110,7 @@ func (e *BuildMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, 
 	if err != nil {
 		return Result{}, fmt.Errorf("buildmcp: malformed spec: %w", err)
 	}
+	e.progress(t, "parse_spec", "parsed build_mcp spec", map[string]interface{}{"name": spec.Name})
 	canonical, err := buildspec.MarshalCanonical(spec)
 	if err != nil {
 		return Result{}, fmt.Errorf("buildmcp: invalid spec: %w", err)
@@ -103,6 +122,7 @@ func (e *BuildMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, 
 	// existing file, short-circuit.
 	if existing, ok := e.lookupExistingEntry(spec.Name); ok && existing.Version == spec.Version && specHashMatches(existing.SpecHash, specHash, legacySpecHash) {
 		if _, err := os.Stat(filepath.Join(e.cfg.WorkDir, existing.Args[0])); err == nil {
+			e.progress(t, "reuse", "reusing existing generated MCP server", map[string]interface{}{"name": spec.Name})
 			return Result{Summary: e.successHandle(spec, existing.Args[0], existing.Tools, 0).Marshal()}, nil
 		}
 	}
@@ -116,13 +136,15 @@ func (e *BuildMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, 
 		priorCode = string(b)
 	}
 
-	src, err := e.invokeClaude(ctx, spec, priorCode)
+	e.progress(t, "generate", "generating MCP server source", map[string]interface{}{"name": spec.Name})
+	src, err := e.invokeClaude(ctx, t, spec, priorCode)
 	if err != nil {
 		return Result{Summary: e.blockedHandle(t.ID, spec, "", "", "claude_invocation", err.Error())}, nil
 	}
 	src = stripFencesAndJunk(src)
 
 	// Validate syntax.
+	e.progress(t, "validate", "validating generated source", map[string]interface{}{"name": spec.Name})
 	if err := validatePythonSyntax(src); err != nil {
 		return Result{Summary: e.blockedHandle(t.ID, spec, "", "", "validate_syntax", err.Error())}, nil
 	}
@@ -155,6 +177,7 @@ func (e *BuildMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, 
 		return Result{}, err
 	}
 	// Smoke launch.
+	e.progress(t, "smoke_launch", "smoke launching generated MCP server", map[string]interface{}{"name": spec.Name})
 	tools, err := SmokeLaunchPython(ctx, absPath, 3*time.Second)
 	if err != nil {
 		_ = os.Remove(absPath)
@@ -163,6 +186,7 @@ func (e *BuildMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, 
 	tools = mergeMCPToolDescriptors(spec, tools)
 	toolNames := capability.FlatNames(tools)
 	// Register.
+	e.progress(t, "register", "registering generated MCP server", map[string]interface{}{"name": spec.Name})
 	mcpCfg := MCPServerCfg{Transport: "stdio", Command: "python3", Args: []string{absPath}}
 	if err := e.cfg.MCPExec.RegisterStdio(spec.Name, mcpCfg); err != nil {
 		return Result{}, fmt.Errorf("buildmcp: register: %w", err)
@@ -188,6 +212,7 @@ func (e *BuildMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, 
 	})
 	// Re-publish card.
 	if e.cfg.Republish != nil {
+		e.progress(t, "republish", "republishing slave capability card", map[string]interface{}{"name": spec.Name})
 		if err := e.cfg.Republish(ctx); err != nil {
 			sink.Write("warn", fmt.Sprintf("republish card: %v", err))
 		}
@@ -314,7 +339,32 @@ func (h handleJSON) Marshal() string {
 	return string(b)
 }
 
-func (e *BuildMCPExecutor) invokeClaude(ctx context.Context, spec buildSpec, priorCode string) (string, error) {
+func (e *BuildMCPExecutor) invokeClaude(ctx context.Context, t Task, spec buildSpec, priorCode string) (string, error) {
+	var src string
+	err := progress.RunWithHeartbeat(ctx, progress.Config{
+		Interval:    20 * time.Second,
+		HardTimeout: 0,
+		Emit: func(ctx context.Context, elapsed time.Duration) {
+			e.progress(t, "generate", "generating MCP server source", map[string]interface{}{
+				"name":       spec.Name,
+				"elapsed_ms": elapsed.Milliseconds(),
+			})
+		},
+	}, func(ctx context.Context) error {
+		out, err := e.invokeClaudeOnce(ctx, spec, priorCode)
+		if err != nil {
+			return err
+		}
+		src = out
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return src, nil
+}
+
+func (e *BuildMCPExecutor) invokeClaudeOnce(ctx context.Context, spec buildSpec, priorCode string) (string, error) {
 	args := []string{"--print", "--output-format=stream-json", "--verbose"}
 	cmd := exec.CommandContext(ctx, e.cfg.ClaudeBin, args...)
 	stdin, err := cmd.StdinPipe()

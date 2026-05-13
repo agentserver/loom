@@ -42,6 +42,15 @@ func (f *fakeObserver) Emit(ev observer.Event) {
 	f.events = append(f.events, ev)
 }
 
+func observerEventOfType(events []observer.Event, eventType string) (observer.Event, bool) {
+	for _, ev := range events {
+		if ev.Type == eventType {
+			return ev, true
+		}
+	}
+	return observer.Event{}, false
+}
+
 func newBuildMCPForTest(t *testing.T) (*BuildMCPExecutor, string) {
 	return newBuildMCPForTestWithObserver(t, nil)
 }
@@ -149,12 +158,9 @@ func TestBuildMCP_EmitsObserverCreatedAfterPersist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(obs.events) != 1 {
-		t.Fatalf("observer events: %+v", obs.events)
-	}
-	ev := obs.events[0]
-	if ev.Type != observer.EventMCPServerCreated {
-		t.Fatalf("event type: got %q", ev.Type)
+	ev, ok := observerEventOfType(obs.events, observer.EventMCPServerCreated)
+	if !ok {
+		t.Fatalf("expected created event, got %+v", obs.events)
 	}
 	if ev.TaskID != "tx" || ev.MCPServerName != "foo" || ev.Status != "completed" {
 		t.Fatalf("unexpected event: %+v", ev)
@@ -174,6 +180,36 @@ func TestBuildMCP_EmitsObserverCreatedAfterPersist(t *testing.T) {
 	tool := payload.MCPToolDescriptors[0]
 	if tool.Server != "foo" || tool.Name != "foo" || tool.Description != "d" || string(tool.InputSchema) != `{"type":"object"}` {
 		t.Fatalf("unexpected payload descriptor: %+v", tool)
+	}
+}
+
+func TestBuildMCP_EmitsProgressEvents(t *testing.T) {
+	os.Setenv("FAKE_BUILD_CLAUDE_MODE", "ok")
+	defer os.Unsetenv("FAKE_BUILD_CLAUDE_MODE")
+	obs := &fakeObserver{}
+	be, _ := newBuildMCPForTestWithObserver(t, obs)
+	defer be.MCPExec.Close()
+
+	spec := map[string]interface{}{
+		"name": "foo", "description": "d",
+		"tools":            []map[string]interface{}{{"name": "foo", "description": "d", "args_schema": map[string]interface{}{"type": "object"}, "result_description": "r"}},
+		"allowed_packages": []string{}, "version": 1, "iteration": 1, "max_iterations": 3,
+	}
+	specBytes, _ := json.Marshal(spec)
+
+	_, err := be.Run(context.Background(), Task{ID: "tx", Skill: "build_mcp", Prompt: string(specBytes), TimeoutSec: 30}, &nopSink{})
+
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	progress := []observer.Event{}
+	for _, ev := range obs.events {
+		if ev.Type == observer.EventSlaveBuildMCPProgress {
+			progress = append(progress, ev)
+		}
+	}
+	if len(progress) == 0 {
+		t.Fatalf("expected build progress events, got %+v", obs.events)
 	}
 }
 
@@ -304,12 +340,9 @@ func TestBuildMCP_EmitsObserverBlockedWithPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(obs.events) != 1 {
-		t.Fatalf("observer events: %+v", obs.events)
-	}
-	ev := obs.events[0]
-	if ev.Type != observer.EventMCPServerBlocked {
-		t.Fatalf("event type: got %q", ev.Type)
+	ev, ok := observerEventOfType(obs.events, observer.EventMCPServerBlocked)
+	if !ok {
+		t.Fatalf("expected blocked event, got %+v", obs.events)
 	}
 	if ev.TaskID != "tx" || ev.MCPServerName != "foo" || ev.Status != "blocked" {
 		t.Fatalf("unexpected event: %+v", ev)
