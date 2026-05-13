@@ -287,6 +287,20 @@ func TestFanout_ValidMCPArgsDispatchesOnce(t *testing.T) {
 	require.Equal(t, "mcp", sdk.dispatched[0].Skill)
 }
 
+func TestFanout_BuildMCPSpecPreflightRejectsBeforeDispatch(t *testing.T) {
+	sdk := &fakeSDKQueue{
+		agents: []agentsdk.AgentCard{{AgentID: "agent-a", Status: "available", Card: json.RawMessage(`{"skills":["build_mcp"]}`)}},
+	}
+	obs := &fakeObserver{}
+	o := newOrchWithObserver(t, sdk, "plan_build_mcp_bad_text", obs)
+
+	_, err := o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: "build reusable server"})
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "build_mcp")
+	require.Empty(t, sdk.dispatched)
+}
+
 func TestFanout_RequiredFailureFailsParentUnderBestEffort(t *testing.T) {
 	sdk := &fakeSDKQueue{
 		agents: []agentsdk.AgentCard{

@@ -407,6 +407,18 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 
 	for !sched.Done() {
 		for _, n := range sched.Ready() {
+			if n.Kind == "build_mcp" || n.Skill == "build_mcp" {
+				prepared, err := prepareBuildMCPNode(n)
+				if err != nil {
+					sched.MarkDispatched(n.ID)
+					inFlight++
+					go func(n planner.Node, err error) {
+						doneCh <- done{FinishedNode: FinishedNode{NodeID: n.ID, Status: "failed", Error: "build_mcp spec preflight: " + err.Error()}}
+					}(n, err)
+					continue
+				}
+				n = prepared
+			}
 			outputsMu.Lock()
 			prompt, rerr := Render(n.Prompt, outputs)
 			outputsMu.Unlock()
