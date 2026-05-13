@@ -46,6 +46,19 @@ func TestParseJSON_RejectsNaturalLanguage(t *testing.T) {
 	require.ErrorContains(t, err, "malformed build_mcp spec")
 }
 
+func TestParseJSON_RejectsTrailingProse(t *testing.T) {
+	raw := `{
+		"name":"lesson_builder",
+		"description":"build lesson docs",
+		"tools":[{"name":"render","description":"render doc","args_schema":{"type":"object"},"result_description":"doc path"}]
+	}
+	extra prose`
+
+	_, err := ParseJSON(raw)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "malformed build_mcp spec")
+}
+
 func TestValidate_RejectsInvalidNameAndMissingTools(t *testing.T) {
 	err := Validate(Spec{Name: "Bad-Name", Version: 1, Iteration: 1, MaxIterations: 3})
 	require.ErrorContains(t, err, "invalid name")
