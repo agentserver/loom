@@ -410,11 +410,50 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 			if n.Kind == "build_mcp" || n.Skill == "build_mcp" {
 				prepared, err := prepareBuildMCPNode(n)
 				if err != nil {
-					sched.MarkDispatched(n.ID)
-					inFlight++
-					go func(n planner.Node, err error) {
-						doneCh <- done{FinishedNode: FinishedNode{NodeID: n.ID, Status: "failed", Error: "build_mcp spec preflight: " + err.Error()}}
-					}(n, err)
+					o.emit(observer.Event{
+						Type:      observer.EventMasterBuildMCPValidationFailed,
+						TaskID:    t.ID,
+						SubtaskID: n.ID,
+						Status:    "failed",
+						Payload: observerPayload(map[string]interface{}{
+							"error":    err.Error(),
+							"required": !n.Optional,
+							"prompt":   n.Prompt,
+						}),
+					})
+					validationReplans++
+					if validationReplans >= maxBuildIterations {
+						sched.MarkDispatched(n.ID)
+						inFlight++
+						go func(n planner.Node, err error) {
+							doneCh <- done{FinishedNode: FinishedNode{NodeID: n.ID, Status: "failed", Error: "build_mcp spec preflight: " + err.Error()}}
+						}(n, err)
+						continue
+					}
+					ctx2 := t.Prompt + "\n\n" + buildMCPSpecInvalidReplanContext(n, err)
+					newPlan, perr := o.planner.Plan(fanoutCtx, ctx2, agents)
+					if perr != nil {
+						cancelAll()
+						return executor.Result{}, fmt.Errorf("replan after build_mcp spec validation failure: %w", perr)
+					}
+					if err := Validate(newPlan); err != nil {
+						cancelAll()
+						return executor.Result{}, fmt.Errorf("invalid build_mcp spec validation replan: %w", err)
+					}
+					newPlan = renamePlanIDs(newPlan, n.ID)
+					if err := sched.Append(newPlan); err != nil {
+						cancelAll()
+						return executor.Result{}, fmt.Errorf("append build_mcp spec validation replan: %w", err)
+					}
+					allNodes = append(allNodes, newPlan...)
+					for _, appended := range newPlan {
+						optionalByID[appended.ID] = appended.Optional
+					}
+					appendSubTaskRows(o.store, t.ID, newPlan)
+					for _, skipped := range sched.MarkSuperseded(n.ID, "superseded by build_mcp spec validation replan") {
+						optionalByID[skipped.NodeID] = true
+						recordSkippedDone(skipped)
+					}
 					continue
 				}
 				n = prepared
@@ -578,6 +617,9 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 					if perr != nil {
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("replan after build: %w", perr)
+					}
+					if len(newPlan) == 0 {
+						continue
 					}
 					if err := Validate(newPlan); err != nil {
 						cancelAll()

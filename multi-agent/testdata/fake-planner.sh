@@ -94,6 +94,27 @@ EOF
 ]
 EOF
     ;;
+  plan_build_mcp_repair)
+    rf="${FAKE_PLANNER_ROUND_FILE:-/tmp/_fpround}"
+    r=$(cat "$rf" 2>/dev/null || echo 0)
+    case "$r" in
+      0) cat <<'EOF'
+[
+  {"id":"n0","target_id":"agent-a","kind":"build_mcp","skill":"build_mcp","prompt":"build a reusable server"}
+]
+EOF
+         ;;
+      1) cat <<'EOF'
+[
+  {"id":"n1","target_id":"agent-a","kind":"build_mcp","skill":"build_mcp","build_spec":{"name":"foo","description":"d","tools":[{"name":"render","description":"d","args_schema":{"type":"object"},"result_description":"r"}]}}
+]
+EOF
+         ;;
+      2) echo "[]";;
+      *) echo "REDUCED";;
+    esac
+    echo $((r+1)) > "$rf"
+    ;;
   plan_invalid_cycle)
     cat <<'EOF'
 [

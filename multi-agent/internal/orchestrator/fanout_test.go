@@ -420,6 +420,23 @@ func TestFanout_BuildMCPBlocked_HitsIterationCap(t *testing.T) {
 	require.Len(t, sdk.dispatched, 3)
 }
 
+func TestFanout_BuildMCPSpecValidationReplans(t *testing.T) {
+	t.Setenv("FAKE_PLANNER_ROUND_FILE", filepath.Join(t.TempDir(), "round"))
+	sdk := &fakeSDKQueue{
+		agents: []agentsdk.AgentCard{{AgentID: "agent-a", Status: "available", Card: json.RawMessage(`{"skills":["build_mcp"]}`)}},
+		queue:  []agentsdk.TaskInfo{{Status: "completed", Output: `{"type":"mcp_tool_set","meta":{"name":"foo","tools":"render"}}`}},
+	}
+	obs := &fakeObserver{}
+	o := newOrchWithObserver(t, sdk, "plan_build_mcp_repair", obs)
+
+	_, err := o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: "build reusable server"})
+
+	require.NoError(t, err)
+	require.Len(t, sdk.dispatched, 1)
+	require.JSONEq(t, `{"name":"foo","description":"d","tools":[{"name":"render","description":"d","args_schema":{"type":"object"},"result_description":"r"}],"hints":"","allowed_packages":[],"compose_servers":[],"version":1,"iteration":1,"max_iterations":3}`, sdk.dispatched[0].Prompt)
+	require.NotEmpty(t, eventsOfType(obs.events, observer.EventMasterBuildMCPValidationFailed))
+}
+
 func TestFanout_EmitsPlanDispatchAndDoneEvents(t *testing.T) {
 	sdk := &fakeSDKQueue{
 		agents: []agentsdk.AgentCard{agentWithTool(t, "x", "y")},
