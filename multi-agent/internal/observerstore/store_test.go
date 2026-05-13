@@ -283,6 +283,70 @@ func TestIngestAggregateStatusAndFallbacks(t *testing.T) {
 	require.Equal(t, "mt1 - make tool", tasks[0].Subtasks[0].DisplayLabel)
 }
 
+func TestProgressEventsUpdateLatestProgressWithoutTerminalState(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	require.NoError(t, s.Ingest(observer.Event{
+		TS: "2026-05-11T00:00:00Z", WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "mt1", Summary: "build thing",
+		TargetAgentID: "master", TargetRole: observer.RoleMaster, Status: "assigned",
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		TS: "2026-05-11T00:00:01Z", WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterPlanningCompleted, TaskID: "mt1", Status: "completed",
+		Summary: "plan ready", Payload: json.RawMessage(`{"phase":"planning","message":"planned 2 subtasks"}`),
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		TS: "2026-05-11T00:00:02Z", WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterSubtaskDispatched, TaskID: "mt1", SubtaskID: "n1",
+		ChildTaskID: "st1", SubtaskSummary: "make tool", TargetAgentID: "slave",
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		TS: "2026-05-11T00:00:03Z", WorkspaceID: "ws1", AgentID: "slave", AgentRole: observer.RoleSlave,
+		Type: observer.EventSlaveTaskProgress, TaskID: "st1", Summary: "half done",
+	}))
+
+	tasks, err := s.ListTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, "assigned", tasks[0].Status)
+	require.False(t, tasks[0].IsFinal)
+	require.Empty(t, tasks[0].FinalOutput)
+	require.Equal(t, "planned 2 subtasks", tasks[0].LatestProgress)
+	require.Equal(t, "planning", tasks[0].LatestProgressPhase)
+	require.Equal(t, "2026-05-11T00:00:01Z", tasks[0].LatestProgressAt)
+	require.Len(t, tasks[0].Subtasks, 1)
+	require.Equal(t, "half done", tasks[0].Subtasks[0].LatestProgress)
+	require.Equal(t, observer.EventSlaveTaskProgress, tasks[0].Subtasks[0].LatestProgressPhase)
+	require.Equal(t, "2026-05-11T00:00:03Z", tasks[0].Subtasks[0].LatestProgressAt)
+}
+
+func TestTerminalEventSetsIsFinalAndFinalOutput(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	require.NoError(t, s.Ingest(observer.Event{
+		TS: "2026-05-11T00:00:00Z", WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "mt1", Summary: "build thing",
+		TargetAgentID: "master", TargetRole: observer.RoleMaster, Status: "assigned",
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		TS: "2026-05-11T00:00:01Z", WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterTaskCompleted, TaskID: "mt1", Status: "completed",
+		Payload: json.RawMessage(`{"output":"final answer"}`),
+	}))
+
+	tasks, err := s.ListTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, "completed", tasks[0].Status)
+	require.True(t, tasks[0].IsFinal)
+	require.Equal(t, "final answer", tasks[0].FinalOutput)
+	require.Empty(t, tasks[0].Output)
+	require.Empty(t, tasks[0].Error)
+}
+
 func TestSubtaskDonePreservesSparseMetadata(t *testing.T) {
 	s := testStore(t)
 	defer s.Close()

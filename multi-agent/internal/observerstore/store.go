@@ -37,34 +37,42 @@ type Agent struct {
 }
 
 type TaskView struct {
-	WorkspaceID string           `json:"workspace_id"`
-	TaskID      string           `json:"task_id"`
-	DriverID    string           `json:"driver_id"`
-	MasterID    string           `json:"master_id"`
-	SlaveID     string           `json:"slave_id"`
-	Summary     string           `json:"summary"`
-	Status      string           `json:"status"`
-	HasMCP      bool             `json:"has_mcp"`
-	MCPStatus   string           `json:"mcp_status"`
-	Output      string           `json:"output"`
-	Error       string           `json:"error"`
-	Subtasks    []SubtaskView    `json:"subtasks"`
-	MCPServers  []MCPServerView  `json:"mcp_servers"`
-	Events      []observer.Event `json:"events,omitempty"`
+	WorkspaceID         string           `json:"workspace_id"`
+	TaskID              string           `json:"task_id"`
+	DriverID            string           `json:"driver_id"`
+	MasterID            string           `json:"master_id"`
+	SlaveID             string           `json:"slave_id"`
+	Summary             string           `json:"summary"`
+	Status              string           `json:"status"`
+	HasMCP              bool             `json:"has_mcp"`
+	MCPStatus           string           `json:"mcp_status"`
+	LatestProgress      string           `json:"latest_progress"`
+	LatestProgressPhase string           `json:"latest_progress_phase"`
+	LatestProgressAt    string           `json:"latest_progress_at"`
+	FinalOutput         string           `json:"final_output"`
+	IsFinal             bool             `json:"is_final"`
+	Output              string           `json:"output"`
+	Error               string           `json:"error"`
+	Subtasks            []SubtaskView    `json:"subtasks"`
+	MCPServers          []MCPServerView  `json:"mcp_servers"`
+	Events              []observer.Event `json:"events,omitempty"`
 }
 
 type SubtaskView struct {
-	ParentTaskID string `json:"parent_task_id"`
-	SubtaskID    string `json:"subtask_id"`
-	ChildTaskID  string `json:"child_task_id"`
-	MasterID     string `json:"master_id"`
-	SlaveID      string `json:"slave_id"`
-	Summary      string `json:"summary"`
-	DisplayLabel string `json:"display_label"`
-	Status       string `json:"status"`
-	MCPStatus    string `json:"mcp_status"`
-	Output       string `json:"output"`
-	Error        string `json:"error"`
+	ParentTaskID        string `json:"parent_task_id"`
+	SubtaskID           string `json:"subtask_id"`
+	ChildTaskID         string `json:"child_task_id"`
+	MasterID            string `json:"master_id"`
+	SlaveID             string `json:"slave_id"`
+	Summary             string `json:"summary"`
+	DisplayLabel        string `json:"display_label"`
+	Status              string `json:"status"`
+	MCPStatus           string `json:"mcp_status"`
+	LatestProgress      string `json:"latest_progress"`
+	LatestProgressPhase string `json:"latest_progress_phase"`
+	LatestProgressAt    string `json:"latest_progress_at"`
+	Output              string `json:"output"`
+	Error               string `json:"error"`
 }
 
 type MCPServerView struct {
@@ -97,7 +105,31 @@ func ensureColumns(db *sql.DB) error {
 	if _, err := db.Exec(`ALTER TABLE tasks ADD COLUMN mcp_status TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
 		return err
 	}
+	if _, err := db.Exec(`ALTER TABLE tasks ADD COLUMN latest_progress TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE tasks ADD COLUMN latest_progress_phase TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE tasks ADD COLUMN latest_progress_at TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE tasks ADD COLUMN final_output TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE tasks ADD COLUMN is_final INTEGER NOT NULL DEFAULT 0`); err != nil && !isDuplicateColumn(err) {
+		return err
+	}
 	if _, err := db.Exec(`ALTER TABLE subtasks ADD COLUMN mcp_status TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE subtasks ADD COLUMN latest_progress TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE subtasks ADD COLUMN latest_progress_phase TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE subtasks ADD COLUMN latest_progress_at TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
 		return err
 	}
 	if _, err := db.Exec(`ALTER TABLE tasks ADD COLUMN slave_agent_id TEXT`); err != nil && !isDuplicateColumn(err) {
@@ -207,7 +239,7 @@ func (s *Store) Ingest(ev observer.Event) error {
 }
 
 func (s *Store) ListTasks() ([]TaskView, error) {
-	rows, err := s.db.Query(`SELECT workspace_id, task_id, COALESCE(driver_agent_id, ''), COALESCE(master_agent_id, ''), COALESCE(slave_agent_id, ''), summary, status, has_mcp, mcp_status, COALESCE(output, ''), COALESCE(error, '')
+	rows, err := s.db.Query(`SELECT workspace_id, task_id, COALESCE(driver_agent_id, ''), COALESCE(master_agent_id, ''), COALESCE(slave_agent_id, ''), summary, status, has_mcp, mcp_status, latest_progress, latest_progress_phase, latest_progress_at, final_output, is_final, COALESCE(output, ''), COALESCE(error, '')
 		FROM tasks ORDER BY created_at ASC, task_id ASC`)
 	if err != nil {
 		return nil, err
@@ -218,10 +250,12 @@ func (s *Store) ListTasks() ([]TaskView, error) {
 	for rows.Next() {
 		var task TaskView
 		var hasMCP int
-		if err := rows.Scan(&task.WorkspaceID, &task.TaskID, &task.DriverID, &task.MasterID, &task.SlaveID, &task.Summary, &task.Status, &hasMCP, &task.MCPStatus, &task.Output, &task.Error); err != nil {
+		var isFinal int
+		if err := rows.Scan(&task.WorkspaceID, &task.TaskID, &task.DriverID, &task.MasterID, &task.SlaveID, &task.Summary, &task.Status, &hasMCP, &task.MCPStatus, &task.LatestProgress, &task.LatestProgressPhase, &task.LatestProgressAt, &task.FinalOutput, &isFinal, &task.Output, &task.Error); err != nil {
 			return nil, err
 		}
 		task.HasMCP = hasMCP != 0
+		task.IsFinal = isFinal != 0
 		task.Subtasks, err = s.listSubtasks(task.WorkspaceID, task.TaskID)
 		if err != nil {
 			return nil, err
@@ -279,7 +313,7 @@ func (s *Store) ListEvents(taskID string) ([]observer.Event, error) {
 }
 
 func (s *Store) listSubtasks(workspaceID, taskID string) ([]SubtaskView, error) {
-	rows, err := s.db.Query(`SELECT parent_task_id, subtask_id, COALESCE(child_task_id, ''), COALESCE(master_agent_id, ''), COALESCE(slave_agent_id, ''), summary, display_label, status, mcp_status, COALESCE(output, ''), COALESCE(error, '')
+	rows, err := s.db.Query(`SELECT parent_task_id, subtask_id, COALESCE(child_task_id, ''), COALESCE(master_agent_id, ''), COALESCE(slave_agent_id, ''), summary, display_label, status, mcp_status, latest_progress, latest_progress_phase, latest_progress_at, COALESCE(output, ''), COALESCE(error, '')
 		FROM subtasks WHERE workspace_id=? AND parent_task_id=? ORDER BY created_at ASC, subtask_id ASC`, workspaceID, taskID)
 	if err != nil {
 		return nil, err
@@ -289,7 +323,7 @@ func (s *Store) listSubtasks(workspaceID, taskID string) ([]SubtaskView, error) 
 	subtasks := []SubtaskView{}
 	for rows.Next() {
 		var subtask SubtaskView
-		if err := rows.Scan(&subtask.ParentTaskID, &subtask.SubtaskID, &subtask.ChildTaskID, &subtask.MasterID, &subtask.SlaveID, &subtask.Summary, &subtask.DisplayLabel, &subtask.Status, &subtask.MCPStatus, &subtask.Output, &subtask.Error); err != nil {
+		if err := rows.Scan(&subtask.ParentTaskID, &subtask.SubtaskID, &subtask.ChildTaskID, &subtask.MasterID, &subtask.SlaveID, &subtask.Summary, &subtask.DisplayLabel, &subtask.Status, &subtask.MCPStatus, &subtask.LatestProgress, &subtask.LatestProgressPhase, &subtask.LatestProgressAt, &subtask.Output, &subtask.Error); err != nil {
 			return nil, err
 		}
 		subtasks = append(subtasks, subtask)
@@ -328,6 +362,9 @@ func (s *Store) listMCPServers(workspaceID, taskID string) ([]MCPServerView, err
 }
 
 func applyAggregate(tx *sql.Tx, ev observer.Event) error {
+	if observer.IsProgressEvent(ev.Type) {
+		return updateLatestProgress(tx, ev)
+	}
 	switch ev.Type {
 	case observer.EventDriverTaskSubmitted:
 		return upsertDriverTask(tx, ev)
@@ -402,8 +439,48 @@ func updateTaskStatus(tx *sql.Tx, ev observer.Event) error {
 	if ev.Status == "" {
 		return nil
 	}
-	_, err := tx.Exec(`UPDATE tasks SET status=?, updated_at=? WHERE workspace_id=? AND task_id=?`,
-		ev.Status, ev.TS, ev.WorkspaceID, ev.TaskID)
+	output := payloadString(ev.Payload, "output")
+	terminal := isTerminalStatus(ev.Status)
+	_, err := tx.Exec(`UPDATE tasks SET status=?, is_final=CASE WHEN ? THEN 1 ELSE is_final END, final_output=CASE WHEN ? THEN COALESCE(?, final_output) ELSE final_output END, updated_at=? WHERE workspace_id=? AND task_id=?`,
+		ev.Status, terminal, terminal, output, ev.TS, ev.WorkspaceID, ev.TaskID)
+	return err
+}
+
+func updateLatestProgress(tx *sql.Tx, ev observer.Event) error {
+	message := payloadString(ev.Payload, "message")
+	if !message.Valid {
+		message = nullString(ev.Summary)
+	}
+	phase := payloadString(ev.Payload, "phase")
+	if !phase.Valid {
+		phase = nullString(ev.Type)
+	}
+
+	parentTaskID, subtaskID := linkedParentAndSubtask(tx, ev)
+	if parentTaskID != "" && subtaskID != "" {
+		result, err := tx.Exec(`UPDATE subtasks SET latest_progress=?, latest_progress_phase=?, latest_progress_at=?, updated_at=? WHERE workspace_id=? AND parent_task_id=? AND subtask_id=?`,
+			message.String, phase.String, ev.TS, ev.TS, ev.WorkspaceID, parentTaskID, subtaskID)
+		if err != nil {
+			return err
+		}
+		updated, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if updated > 0 {
+			return nil
+		}
+	}
+
+	taskID := ev.TaskID
+	if parentTaskID != "" {
+		taskID = parentTaskID
+	}
+	if taskID == "" {
+		return nil
+	}
+	_, err := tx.Exec(`UPDATE tasks SET latest_progress=?, latest_progress_phase=?, latest_progress_at=?, updated_at=? WHERE workspace_id=? AND task_id=?`,
+		message.String, phase.String, ev.TS, ev.TS, ev.WorkspaceID, taskID)
 	return err
 }
 
@@ -460,15 +537,18 @@ func upsertSlaveTask(tx *sql.Tx, ev observer.Event) error {
 		return err
 	}
 	summary := valueOr(ev.Summary, ev.TaskID)
-	_, err = tx.Exec(`INSERT INTO tasks(workspace_id, task_id, slave_agent_id, summary, status, output, error, created_at, updated_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+	terminal := isTerminalStatus(status)
+	_, err = tx.Exec(`INSERT INTO tasks(workspace_id, task_id, slave_agent_id, summary, status, output, error, final_output, is_final, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, CASE WHEN ? THEN COALESCE(?, '') ELSE '' END, CASE WHEN ? THEN 1 ELSE 0 END, ?, ?)
 		ON CONFLICT(workspace_id, task_id) DO UPDATE SET
 			slave_agent_id=excluded.slave_agent_id,
 			status=excluded.status,
 			output=COALESCE(excluded.output, tasks.output),
 			error=COALESCE(excluded.error, tasks.error),
+			final_output=CASE WHEN excluded.is_final=1 AND excluded.final_output!='' THEN excluded.final_output ELSE tasks.final_output END,
+			is_final=CASE WHEN excluded.is_final=1 THEN 1 ELSE tasks.is_final END,
 			updated_at=excluded.updated_at`,
-		ev.WorkspaceID, ev.TaskID, ev.AgentID, summary, status, output, eventErr, ev.TS, ev.TS)
+		ev.WorkspaceID, ev.TaskID, ev.AgentID, summary, status, output, eventErr, terminal, output, terminal, ev.TS, ev.TS)
 	return err
 }
 
@@ -688,6 +768,15 @@ func valueOr(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func isTerminalStatus(status string) bool {
+	switch status {
+	case "completed", "failed", "cancelled":
+		return true
+	default:
+		return false
+	}
 }
 
 func nowUTC() string {
