@@ -191,6 +191,9 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 		if err != nil {
 			return nil, err
 		}
+		return plan, nil
+	}
+	emitPlanningCompleted := func(plan []planner.Node) {
 		o.emit(observer.Event{
 			Type:   observer.EventMasterPlanningCompleted,
 			TaskID: t.ID,
@@ -202,7 +205,6 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 				"node_count": len(plan),
 			}),
 		})
-		return plan, nil
 	}
 	plan, err := planWithProgress(ctx, t.Prompt, agents)
 	if err != nil {
@@ -211,6 +213,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 	if err := Validate(plan); err != nil {
 		return executor.Result{}, fmt.Errorf("invalid plan: %w", err)
 	}
+	emitPlanningCompleted(plan)
 	nodeIDs := make([]string, len(plan))
 	for i, n := range plan {
 		nodeIDs[i] = n.ID
@@ -471,6 +474,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("invalid build_mcp spec validation replan: %w", err)
 					}
+					emitPlanningCompleted(newPlan)
 					newPlan = renamePlanIDs(newPlan, n.ID)
 					if err := sched.Append(newPlan); err != nil {
 						cancelAll()
@@ -534,6 +538,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 					cancelAll()
 					return executor.Result{}, fmt.Errorf("invalid mcp validation replan: %w", err)
 				}
+				emitPlanningCompleted(newPlan)
 				newPlan = renamePlanIDs(newPlan, n.ID)
 				if err := sched.Append(newPlan); err != nil {
 					cancelAll()
@@ -610,6 +615,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("invalid replan: %w", err)
 					}
+					emitPlanningCompleted(newPlan)
 					newPlan = renamePlanIDs(newPlan, d.NodeID)
 					if err := sched.Append(newPlan); err != nil {
 						cancelAll()
@@ -656,6 +662,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("invalid post-build plan: %w", err)
 					}
+					emitPlanningCompleted(newPlan)
 					newPlan = renamePlanIDs(newPlan, d.NodeID)
 					if err := sched.Append(newPlan); err != nil {
 						cancelAll()

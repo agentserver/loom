@@ -82,6 +82,7 @@ func (p *Planner) runClaude(ctx context.Context, stdinPrompt string) (string, er
 
 	var stderrBuf strings.Builder
 	var out []byte
+	commandDone := make(chan struct{})
 	err := progress.RunWithHeartbeat(ctx, progress.Config{
 		Interval:    15 * time.Second,
 		HardTimeout: timeout,
@@ -92,6 +93,7 @@ func (p *Planner) runClaude(ctx context.Context, stdinPrompt string) (string, er
 			}
 		},
 	}, func(runCtx context.Context) error {
+		defer close(commandDone)
 		args := append([]string{"--print"}, p.cfg.ExtraArgs...)
 		cmd := exec.CommandContext(runCtx, p.cfg.Bin, args...)
 		cmd.Stdin = strings.NewReader(stdinPrompt)
@@ -100,6 +102,7 @@ func (p *Planner) runClaude(ctx context.Context, stdinPrompt string) (string, er
 		out, err = cmd.Output()
 		return err
 	})
+	<-commandDone
 	if err != nil {
 		if strings.Contains(err.Error(), "hard timeout") {
 			return "", fmt.Errorf("planner timeout after %s", timeout)

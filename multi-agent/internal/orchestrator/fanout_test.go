@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -12,8 +13,11 @@ import (
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/stretchr/testify/require"
+	"github.com/yourorg/multi-agent/internal/config"
 	"github.com/yourorg/multi-agent/internal/executor"
 	"github.com/yourorg/multi-agent/internal/observer"
+	"github.com/yourorg/multi-agent/internal/planner"
+	"github.com/yourorg/multi-agent/internal/store"
 )
 
 // fakeSDKQueue lets each child task return a queued (status, output) pair keyed by request order.
@@ -148,6 +152,67 @@ func TestFanout_EmitsPlanningCompleted(t *testing.T) {
 
 	require.Error(t, err)
 	require.NotEmpty(t, eventsOfType(obs.events, observer.EventMasterPlanningCompleted))
+}
+
+func TestFanout_DoesNotEmitPlanningCompletedForInvalidInitialPlan(t *testing.T) {
+	sdk := &fakeSDKQueue{
+		agents: []agentsdk.AgentCard{
+			{AgentID: "agent-a", Status: "available"},
+			{AgentID: "agent-b", Status: "available"},
+		},
+	}
+	obs := &fakeObserver{}
+	o := newOrchWithObserver(t, sdk, "plan_invalid_cycle", obs)
+
+	_, err := o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: "do"})
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid plan")
+	require.Empty(t, eventsOfType(obs.events, observer.EventMasterPlanningCompleted))
+}
+
+func TestFanout_DoesNotEmitPlanningCompletedForInvalidReplan(t *testing.T) {
+	dir := t.TempDir()
+	roundFile := filepath.Join(dir, "round")
+	bin := filepath.Join(dir, "planner.sh")
+	err := os.WriteFile(bin, []byte(`#!/usr/bin/env bash
+round=$(cat "$ROUND_FILE" 2>/dev/null || echo 0)
+case "$round" in
+  0)
+    cat <<'EOF'
+[{"id":"n0","target_id":"agent-a","skill":"mcp","prompt":"{\"server\":\"srv\",\"tool\":\"render\",\"args\":{\"bad\":true}}"}]
+EOF
+    ;;
+  1)
+    cat <<'EOF'
+[
+  {"id":"x","target_id":"agent-a","prompt":"x","depends_on":["y"]},
+  {"id":"y","target_id":"agent-a","prompt":"y","depends_on":["x"]}
+]
+EOF
+    ;;
+  *) echo "REDUCED";;
+esac
+echo $((round+1)) > "$ROUND_FILE"
+`), 0o755)
+	require.NoError(t, err)
+	t.Setenv("ROUND_FILE", roundFile)
+
+	sdk := &fakeSDKQueue{
+		agents: []agentsdk.AgentCard{agentWithRenderTool(t)},
+	}
+	obs := &fakeObserver{}
+	p := planner.New(config.Planner{Bin: bin, TimeoutSec: 5})
+	s, err := store.Open(filepath.Join(t.TempDir(), "x.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { s.Close() })
+	o := New(s, p, sdk, config.Fanout{MaxConcurrency: 4, DefaultPolicy: "best_effort"}, "self-id", obs)
+
+	_, err = o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: "do"})
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid mcp validation replan")
+	require.Len(t, eventsOfType(obs.events, observer.EventMasterPlanningCompleted), 1)
 }
 
 func TestFanout_AllOrNothingFailsImmediately(t *testing.T) {

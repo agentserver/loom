@@ -3,6 +3,7 @@ package planner
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -120,6 +121,40 @@ func TestRunClaude_Timeout(t *testing.T) {
 		_, err := p.Route(ctx, "x", demoAgents)
 		require.ErrorContains(t, err, "timeout")
 	})
+}
+
+func TestRunClaude_CancelWaitsForCommandBeforeReadingStderr(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "late-stderr.sh")
+	started := filepath.Join(dir, "started")
+	err := os.WriteFile(bin, []byte(`#!/usr/bin/env bash
+touch "$RUN_CLAUDE_STARTED"
+(sleep 0.25; echo late-stderr >&2) &
+wait
+`), 0o755)
+	require.NoError(t, err)
+
+	t.Setenv("RUN_CLAUDE_STARTED", started)
+	p := New(config.Planner{Bin: bin, TimeoutSec: 5})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := p.Route(ctx, "x", demoAgents)
+		errCh <- err
+	}()
+
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(started)
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+
+	start := time.Now()
+	cancel()
+	err = <-errCh
+	require.Error(t, err)
+	require.GreaterOrEqual(t, time.Since(start), 200*time.Millisecond)
 }
 
 func TestPlan_DecodeNodeKindAndSkill(t *testing.T) {
