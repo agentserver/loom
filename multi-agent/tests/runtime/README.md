@@ -6,8 +6,8 @@ This directory keeps one independent working directory per process:
 - `master/` for `master-agent`
 - `slave/` for `slave-agent`
 
-Before first use, replace `https://agent.example.com` in all three
-`config.yaml` files with the same agentserver URL, then register each agent.
+All three `config.yaml` files point at `https://agent.cs.ac.cn`. Register each
+agent before first use.
 
 Run these commands inside WSL:
 

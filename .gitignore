@@ -3,3 +3,4 @@ agentserver
 env
 cmd.md
 .claude/
+.tmp-review-*/

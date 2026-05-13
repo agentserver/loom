@@ -8,6 +8,7 @@ observer.db
 observer.db-*
 cmd/slave-agent/dynamic_mcp.yaml
 cmd/slave-agent/generated_mcp/
+tests/runtime/slave/work/
 *.tmp
 /bin/
 /.run/
