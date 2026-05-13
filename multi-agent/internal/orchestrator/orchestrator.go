@@ -107,6 +107,7 @@ func (o *Orchestrator) Run(ctx context.Context, t executor.Task) (executor.Resul
 		TaskID:  t.ID,
 		Summary: summary,
 		Status:  "completed",
+		Payload: observerPayload(map[string]string{"output": res.Summary}),
 	})
 	return res, nil
 }

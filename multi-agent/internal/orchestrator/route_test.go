@@ -159,6 +159,10 @@ func TestRun_EmitsMasterTaskLifecycleEvents(t *testing.T) {
 	require.Equal(t, "p6", last.TaskID)
 	require.Equal(t, "completed", last.Status)
 	require.Equal(t, "do a useful thing", last.Summary)
+
+	var payload map[string]string
+	require.NoError(t, json.Unmarshal(last.Payload, &payload))
+	require.Equal(t, "child output", payload["output"])
 }
 
 func TestRun_EmitsMasterTaskFailedWithErrorPayload(t *testing.T) {

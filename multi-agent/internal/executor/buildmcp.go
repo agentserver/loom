@@ -116,11 +116,11 @@ func (e *BuildMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, 
 		return Result{}, fmt.Errorf("buildmcp: invalid spec: %w", err)
 	}
 	specHash := computeSpecHashFromCanonical(canonical)
-	legacySpecHash := computeLegacySpecHashFromPrompt(t.Prompt)
+	legacySpecHashes := computeLegacySpecHashes(t.Prompt, spec)
 
 	// Idempotency: if dynamic_mcp.yaml has a matching entry that points at an
 	// existing file, short-circuit.
-	if existing, ok := e.lookupExistingEntry(spec.Name); ok && existing.Version == spec.Version && specHashMatches(existing.SpecHash, specHash, legacySpecHash) {
+	if existing, ok := e.lookupExistingEntry(spec.Name); ok && existing.Version == spec.Version && specHashMatches(existing.SpecHash, specHash, legacySpecHashes) {
 		if _, err := os.Stat(filepath.Join(e.cfg.WorkDir, existing.Args[0])); err == nil {
 			e.progress(t, "reuse", "reusing existing generated MCP server", map[string]interface{}{"name": spec.Name})
 			return Result{Summary: e.successHandle(spec, existing.Args[0], existing.Tools, 0).Marshal()}, nil
@@ -480,8 +480,105 @@ func computeLegacySpecHashFromPrompt(raw string) string {
 	return computeSpecHashFromCanonical(string(b))
 }
 
-func specHashMatches(existing, canonical, legacy string) bool {
-	return existing == canonical || (legacy != "" && existing == legacy)
+func computeLegacySpecHashes(raw string, spec buildSpec) []string {
+	seen := map[string]bool{}
+	hashes := []string{}
+	add := func(hash string) {
+		if hash == "" || seen[hash] {
+			return
+		}
+		seen[hash] = true
+		hashes = append(hashes, hash)
+	}
+	add(computeLegacySpecHashFromPrompt(raw))
+
+	base := legacySpecFromBuildSpec(spec)
+	add(computeLegacySpecHash(base))
+
+	versions := []int{base.Version}
+	if base.Version == 1 {
+		versions = append(versions, 0)
+	}
+	iterations := []int{base.Iteration}
+	if base.Iteration == 1 {
+		iterations = append(iterations, 0)
+	}
+	maxIterations := []int{base.MaxIterations}
+	if base.MaxIterations == 3 {
+		maxIterations = append(maxIterations, 0)
+	}
+	allowedPackages := [][]string{base.AllowedPackages}
+	if len(base.AllowedPackages) == 0 && base.AllowedPackages != nil {
+		allowedPackages = append(allowedPackages, nil)
+	}
+	composeServers := [][]string{base.ComposeServers}
+	if len(base.ComposeServers) == 0 && base.ComposeServers != nil {
+		composeServers = append(composeServers, nil)
+	}
+
+	for _, version := range versions {
+		for _, iteration := range iterations {
+			for _, maxIteration := range maxIterations {
+				for _, allowed := range allowedPackages {
+					for _, compose := range composeServers {
+						candidate := base
+						candidate.Version = version
+						candidate.Iteration = iteration
+						candidate.MaxIterations = maxIteration
+						candidate.AllowedPackages = allowed
+						candidate.ComposeServers = compose
+						add(computeLegacySpecHash(candidate))
+					}
+				}
+			}
+		}
+	}
+	return hashes
+}
+
+func legacySpecFromBuildSpec(spec buildSpec) legacyBuildSpec {
+	tools := make([]legacyBuildToolSpec, 0, len(spec.Tools))
+	for _, tool := range spec.Tools {
+		tools = append(tools, legacyBuildToolSpec{
+			Name:              tool.Name,
+			Description:       tool.Description,
+			ArgsSchema:        tool.ArgsSchema,
+			ResultDescription: tool.ResultDescription,
+		})
+	}
+	return legacyBuildSpec{
+		Name:              spec.Name,
+		Description:       spec.Description,
+		Tools:             tools,
+		Hints:             spec.Hints,
+		AllowedPackages:   spec.AllowedPackages,
+		ComposeServers:    spec.ComposeServers,
+		Version:           spec.Version,
+		PriorPath:         spec.PriorPath,
+		PatchInstructions: spec.PatchInstructions,
+		Iteration:         spec.Iteration,
+		MaxIterations:     spec.MaxIterations,
+	}
+}
+
+func computeLegacySpecHash(spec legacyBuildSpec) string {
+	b, err := json.Marshal(spec)
+	if err != nil {
+		return ""
+	}
+	return computeSpecHashFromCanonical(string(b))
+}
+
+func specHashMatches(existing, canonical string, legacy []string) bool {
+	if existing == canonical {
+		return true
+	}
+	for _, hash := range legacy {
+		if existing == hash {
+			return true
+		}
+	}
+	return false
 }
 
 type dynamicEntry struct {
