@@ -10,11 +10,23 @@ import (
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/yourorg/multi-agent/internal/config"
+	"github.com/yourorg/multi-agent/internal/progress"
 )
 
-type Planner struct{ cfg config.Planner }
+type ProgressFunc func(ctx context.Context, phase, message string, elapsed time.Duration)
+
+type Planner struct {
+	cfg      config.Planner
+	progress ProgressFunc
+}
 
 func New(cfg config.Planner) *Planner { return &Planner{cfg: cfg} }
+
+func (p *Planner) WithProgress(fn ProgressFunc) *Planner {
+	cp := *p
+	cp.progress = fn
+	return &cp
+}
 
 type Node struct {
 	ID        string          `json:"id"`
@@ -67,17 +79,29 @@ func (p *Planner) runClaude(ctx context.Context, stdinPrompt string) (string, er
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
-	cctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 
-	args := append([]string{"--print"}, p.cfg.ExtraArgs...)
-	cmd := exec.CommandContext(cctx, p.cfg.Bin, args...)
-	cmd.Stdin = strings.NewReader(stdinPrompt)
 	var stderrBuf strings.Builder
-	cmd.Stderr = &stderrBuf
-	out, err := cmd.Output()
+	var out []byte
+	err := progress.RunWithHeartbeat(ctx, progress.Config{
+		Interval:    15 * time.Second,
+		HardTimeout: timeout,
+		Message:     "planner still running",
+		Emit: func(ctx context.Context, elapsed time.Duration) {
+			if p.progress != nil {
+				p.progress(ctx, "planning", "planner still running", elapsed)
+			}
+		},
+	}, func(runCtx context.Context) error {
+		args := append([]string{"--print"}, p.cfg.ExtraArgs...)
+		cmd := exec.CommandContext(runCtx, p.cfg.Bin, args...)
+		cmd.Stdin = strings.NewReader(stdinPrompt)
+		cmd.Stderr = &stderrBuf
+		var err error
+		out, err = cmd.Output()
+		return err
+	})
 	if err != nil {
-		if cctx.Err() == context.DeadlineExceeded {
+		if strings.Contains(err.Error(), "hard timeout") {
 			return "", fmt.Errorf("planner timeout after %s", timeout)
 		}
 		tail := stderrBuf.String()

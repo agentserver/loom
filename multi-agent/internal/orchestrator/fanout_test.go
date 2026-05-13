@@ -136,6 +136,20 @@ func TestFanout_BestEffortPartialFailure(t *testing.T) {
 	require.Len(t, sdk.dispatched, 1)
 }
 
+func TestFanout_EmitsPlanningCompleted(t *testing.T) {
+	sdk := &fakeSDKQueue{
+		agents: []agentsdk.AgentCard{{AgentID: "agent-a", Status: "available"}},
+		queue:  []agentsdk.TaskInfo{{Status: "completed", Output: "ok"}},
+	}
+	obs := &fakeObserver{}
+	o := newOrchWithObserver(t, sdk, "plan_chain", obs)
+
+	_, err := o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: "do"})
+
+	require.Error(t, err)
+	require.NotEmpty(t, eventsOfType(obs.events, observer.EventMasterPlanningCompleted))
+}
+
 func TestFanout_AllOrNothingFailsImmediately(t *testing.T) {
 	sdk := &fakeSDKQueue{
 		agents: []agentsdk.AgentCard{

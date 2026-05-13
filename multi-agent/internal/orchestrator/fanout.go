@@ -173,7 +173,38 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 	if err != nil {
 		return executor.Result{}, err
 	}
-	plan, err := o.planner.Plan(ctx, t.Prompt, agents)
+	planningProgress := func(ctx context.Context, phase, message string, elapsed time.Duration) {
+		o.emit(observer.Event{
+			Type:   observer.EventMasterPlanningProgress,
+			TaskID: t.ID,
+			Status: "running",
+			Payload: observerPayload(map[string]interface{}{
+				"phase":      phase,
+				"message":    message,
+				"elapsed_ms": elapsed.Milliseconds(),
+				"is_final":   false,
+			}),
+		})
+	}
+	planWithProgress := func(ctx context.Context, prompt string, agents []agentsdk.AgentCard) ([]planner.Node, error) {
+		plan, err := o.planner.WithProgress(planningProgress).Plan(ctx, prompt, agents)
+		if err != nil {
+			return nil, err
+		}
+		o.emit(observer.Event{
+			Type:   observer.EventMasterPlanningCompleted,
+			TaskID: t.ID,
+			Status: "completed",
+			Payload: observerPayload(map[string]interface{}{
+				"phase":      "planning",
+				"message":    "planning completed",
+				"is_final":   false,
+				"node_count": len(plan),
+			}),
+		})
+		return plan, nil
+	}
+	plan, err := planWithProgress(ctx, t.Prompt, agents)
 	if err != nil {
 		return executor.Result{}, fmt.Errorf("planner.Plan: %w", err)
 	}
@@ -431,7 +462,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 						continue
 					}
 					ctx2 := t.Prompt + "\n\n" + buildMCPSpecInvalidReplanContext(n, err)
-					newPlan, perr := o.planner.Plan(fanoutCtx, ctx2, agents)
+					newPlan, perr := planWithProgress(fanoutCtx, ctx2, agents)
 					if perr != nil {
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("replan after build_mcp spec validation failure: %w", perr)
@@ -494,7 +525,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 				}
 
 				ctx2 := t.Prompt + "\n\n" + mcpValidationReplanContext(n, agents, prompt, verr)
-				newPlan, perr := o.planner.Plan(fanoutCtx, ctx2, agents)
+				newPlan, perr := planWithProgress(fanoutCtx, ctx2, agents)
 				if perr != nil {
 					cancelAll()
 					return executor.Result{}, fmt.Errorf("replan after mcp validation failure: %w", perr)
@@ -570,7 +601,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 							hMeta["needed_packages"], hMeta["reason"])
 					}
 					ctx2 := t.Prompt + "\n\nBUILD_MCP_BLOCKED: " + d.Output
-					newPlan, perr := o.planner.Plan(fanoutCtx, ctx2, agents)
+					newPlan, perr := planWithProgress(fanoutCtx, ctx2, agents)
 					if perr != nil {
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("replan after blocked: %w", perr)
@@ -613,7 +644,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 							"prompt JSON {\"server\":%q,\"tool\":\"<one of: %s>\",\"args\":{...}}.",
 						hMeta["name"], hMeta["tools"])
 					ctx2 := t.Prompt + "\n\n" + builtMsg
-					newPlan, perr := o.planner.Plan(fanoutCtx, ctx2, agents)
+					newPlan, perr := planWithProgress(fanoutCtx, ctx2, agents)
 					if perr != nil {
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("replan after build: %w", perr)
