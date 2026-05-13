@@ -44,10 +44,8 @@ func RunWithHeartbeat(parent context.Context, cfg Config, fn func(context.Contex
 	for {
 		select {
 		case err := <-done:
-			if err != nil {
-				if timeoutErr := hardTimeoutError(parent, ctx, cfg.HardTimeout); timeoutErr != nil {
-					return timeoutErr
-				}
+			if timeoutErr := hardTimeoutError(parent, ctx, cfg.HardTimeout); timeoutErr != nil {
+				return timeoutErr
 			}
 			return err
 		case <-ticker.C:
