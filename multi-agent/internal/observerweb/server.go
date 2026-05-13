@@ -239,7 +239,7 @@ th{background:#edf2ef}
 {{if .Subtasks}}
 {{range .Subtasks}}
 <tr>
-<td>{{.DisplayLabel}}<div class="muted">{{.ChildTaskID}}</div></td>
+<td>{{.DisplayLabel}}<div class="muted">{{.ChildTaskID}}</div>{{if .LatestProgress}}<div class="muted">Progress: {{.LatestProgressPhase}} - {{.LatestProgress}}</div>{{end}}</td>
 <td>{{.SlaveID}}</td>
 <td class="status">{{.Status}}</td>
 <td>{{if .Output}}{{.Output}}{{else}}{{.Error}}{{end}}</td>
@@ -248,7 +248,7 @@ th{background:#edf2ef}
 {{end}}
 {{else}}
 <tr>
-<td>{{.Summary}}<div class="muted">{{.TaskID}}</div></td>
+<td>{{.Summary}}<div class="muted">{{.TaskID}}</div>{{if .LatestProgress}}<div class="muted">Progress: {{.LatestProgressPhase}} - {{.LatestProgress}}</div>{{end}}</td>
 <td>{{.SlaveID}}</td>
 <td class="status">{{.Status}}</td>
 <td>{{if .Output}}{{.Output}}{{else}}{{.Error}}{{end}}</td>
@@ -266,10 +266,10 @@ th{background:#edf2ef}
 <tbody>
 {{range .Tasks}}
 <tr>
-<td>{{.Summary}}<div class="muted">{{.TaskID}}</div></td>
+<td>{{.Summary}}<div class="muted">{{.TaskID}}</div>{{if .LatestProgress}}<div class="muted">Progress: {{.LatestProgressPhase}} - {{.LatestProgress}}</div>{{end}}</td>
 <td class="status">{{.Status}}</td>
 <td>{{.MasterID}}</td>
-<td>{{range .Subtasks}}<div class="subtask">{{.DisplayLabel}} <span class="status">{{.Status}}</span> <span class="muted">{{.SlaveID}}</span></div>{{end}}</td>
+<td>{{range .Subtasks}}<div class="subtask">{{.DisplayLabel}} <span class="status">{{.Status}}</span> <span class="muted">{{.SlaveID}}</span>{{if .LatestProgress}}<div class="muted">Progress: {{.LatestProgressPhase}} - {{.LatestProgress}}</div>{{end}}</div>{{end}}</td>
 <td>{{if .MCPStatus}}{{.MCPStatus}}{{else}}none{{end}}</td>
 </tr>
 {{else}}
@@ -283,11 +283,11 @@ th{background:#edf2ef}
 <tbody>
 {{range .Tasks}}
 <tr>
-<td>{{.Summary}}<div class="muted">{{.TaskID}}</div></td>
+<td>{{.Summary}}<div class="muted">{{.TaskID}}</div>{{if .LatestProgress}}<div class="muted">Progress: {{.LatestProgressPhase}} - {{.LatestProgress}}</div>{{end}}</td>
 <td class="status">{{.Status}}</td>
 <td>{{.DriverID}}</td>
 <td>{{.MasterID}}</td>
-<td>{{range .Subtasks}}<div class="subtask">{{.SlaveID}} <span class="status">{{.Status}}</span></div>{{end}}</td>
+<td>{{range .Subtasks}}<div class="subtask">{{.SlaveID}} <span class="status">{{.Status}}</span>{{if .LatestProgress}}<div class="muted">Progress: {{.LatestProgressPhase}} - {{.LatestProgress}}</div>{{end}}</div>{{end}}</td>
 <td>{{if .MCPStatus}}{{.MCPStatus}}{{else}}none{{end}}</td>
 </tr>
 {{else}}

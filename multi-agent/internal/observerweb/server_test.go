@@ -138,6 +138,36 @@ func TestAPITasksExposesMCPToolDescriptors(t *testing.T) {
 	require.JSONEq(t, `[{"server":"calc","name":"add","input_schema":{"type":"object","properties":{"a":{"type":"number"}}}}]`, string(tasks[0].MCPServers[0].ToolDescriptors))
 }
 
+func TestAPITasksIncludesLatestProgress(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "master", Role: observer.RoleMaster, DisplayName: "Master"}, "master-token"))
+
+	require.NoError(t, st.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "t1", Summary: "build thing",
+		TargetAgentID: "master", TargetRole: observer.RoleMaster, Status: "assigned",
+	}))
+	require.NoError(t, st.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterPlanningProgress, TaskID: "t1",
+		Payload: json.RawMessage(`{"phase":"planning","message":"planner still running","is_final":false}`),
+	}))
+
+	rr := httptest.NewRecorder()
+	New(st).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/tasks", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var tasks []observerstore.TaskView
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &tasks))
+	require.Len(t, tasks, 1)
+	require.Equal(t, "planner still running", tasks[0].LatestProgress)
+	require.False(t, tasks[0].IsFinal)
+}
+
 func TestAPITasksAndEventsExposeValidationFailureEvidence(t *testing.T) {
 	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
 	require.NoError(t, err)
@@ -239,6 +269,53 @@ func TestRolePagesRenderDistinctViewsAndMCPStatus(t *testing.T) {
 		{path: "/masters", want: "Decomposition"},
 		{path: "/slaves", want: "Task / Subtask"},
 		{path: "/slaves", want: "blocked"},
+	} {
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, tc.path, nil))
+		require.Equal(t, http.StatusOK, rr.Code)
+		require.Contains(t, rr.Body.String(), tc.want)
+	}
+}
+
+func TestRolePagesRenderLatestProgress(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "master", Role: observer.RoleMaster, DisplayName: "Master"}, "master-token"))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"}, "slave-token"))
+	require.NoError(t, st.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "mt1", Summary: "build thing",
+		TargetAgentID: "master", Status: "assigned",
+	}))
+	require.NoError(t, st.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterPlanningProgress, TaskID: "mt1",
+		Payload: json.RawMessage(`{"phase":"planning","message":"planner still running","is_final":false}`),
+	}))
+	require.NoError(t, st.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterSubtaskDispatched, TaskID: "mt1", SubtaskID: "n1",
+		ChildTaskID: "st1", SubtaskSummary: "make tool", TargetAgentID: "slave",
+		Status: "assigned",
+	}))
+	require.NoError(t, st.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave", AgentRole: observer.RoleSlave,
+		Type: observer.EventSlaveTaskProgress, TaskID: "st1",
+		Payload: json.RawMessage(`{"phase":"build","message":"slave halfway done"}`),
+	}))
+
+	h := New(st)
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{path: "/drivers", want: "Progress: planning - planner still running"},
+		{path: "/masters", want: "Progress: planning - planner still running"},
+		{path: "/masters", want: "Progress: build - slave halfway done"},
+		{path: "/slaves", want: "Progress: build - slave halfway done"},
 	} {
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, tc.path, nil))
