@@ -15,6 +15,8 @@ import (
 
 type ProgressFunc func(ctx context.Context, phase, message string, elapsed time.Duration)
 
+const plannerIdleTimeout = 90 * time.Second
+
 type Planner struct {
 	cfg      config.Planner
 	progress ProgressFunc
@@ -85,6 +87,7 @@ func (p *Planner) runClaude(ctx context.Context, stdinPrompt string) (string, er
 	commandDone := make(chan struct{})
 	err := progress.RunWithHeartbeat(ctx, progress.Config{
 		Interval:    15 * time.Second,
+		IdleTimeout: plannerIdleTimeout,
 		HardTimeout: timeout,
 		Message:     "planner still running",
 		Emit: func(ctx context.Context, elapsed time.Duration) {
