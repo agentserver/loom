@@ -17,7 +17,7 @@ type taskProgress struct {
 }
 
 func (t *Tools) observerProgress(ctx context.Context, taskID string) taskProgress {
-	if t == nil || t.cfg == nil || t.cfg.Observer.URL == "" {
+	if t == nil || t.cfg == nil || !t.cfg.Observer.Enabled || t.cfg.Observer.URL == "" {
 		return taskProgress{}
 	}
 

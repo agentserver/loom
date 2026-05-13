@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
@@ -290,6 +291,7 @@ func TestGetTaskIncludesObserverProgress(t *testing.T) {
 		},
 	}
 	tools := newTestTools(t, sdk)
+	tools.cfg.Observer.Enabled = true
 	tools.cfg.Observer.URL = observerServer.URL
 
 	for _, tt := range tools.All() {
@@ -299,6 +301,43 @@ func TestGetTaskIncludesObserverProgress(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := `{"status":"running","output":"sdk output","failure_reason":"","latest_progress":"working","latest_progress_phase":"build","latest_progress_at":"2026-05-13T01:02:03Z","final_output":"not done","is_final":false}`
+			if string(res) != want {
+				t.Fatalf("response mismatch\nwant: %s\n got: %s", want, res)
+			}
+			return
+		}
+	}
+	t.Fatal("get_task tool not registered")
+}
+
+func TestGetTaskSkipsObserverProgressWhenObserverDisabled(t *testing.T) {
+	var calls int32
+	observerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"task_id":"t1","latest_progress":"unexpected","latest_progress_phase":"build","latest_progress_at":"2026-05-13T01:02:03Z","final_output":"unexpected","is_final":true}]`))
+	}))
+	defer observerServer.Close()
+
+	sdk := &fakeSDK{
+		getTaskFunc: func(id string, _ bool) (*agentsdk.TaskInfo, error) {
+			return &agentsdk.TaskInfo{TaskID: id, Status: "running", Output: "sdk output"}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	tools.cfg.Observer.Enabled = false
+	tools.cfg.Observer.URL = observerServer.URL
+
+	for _, tt := range tools.All() {
+		if tt.Name() == "get_task" {
+			res, err := tt.Call(context.Background(), json.RawMessage(`{"task_id":"t1"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := atomic.LoadInt32(&calls); got != 0 {
+				t.Fatalf("observer requests: got %d, want 0", got)
+			}
+			want := `{"status":"running","output":"sdk output","failure_reason":"","latest_progress":"","latest_progress_phase":"","latest_progress_at":"","final_output":"","is_final":false}`
 			if string(res) != want {
 				t.Fatalf("response mismatch\nwant: %s\n got: %s", want, res)
 			}
@@ -347,6 +386,7 @@ func TestWaitTaskTerminalFinalOutputFallsBackToSDKOutput(t *testing.T) {
 		},
 	}
 	tools := newTestTools(t, sdk)
+	tools.cfg.Observer.Enabled = true
 	tools.cfg.Observer.URL = observerServer.URL
 	tools.reg.RecordWritten("t2", WrittenFile{Path: "/p", Bytes: 5, SHA256: "s"})
 
