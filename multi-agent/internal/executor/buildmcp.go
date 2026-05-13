@@ -12,11 +12,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/yourorg/multi-agent/internal/buildspec"
 	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"gopkg.in/yaml.v3"
@@ -62,49 +62,20 @@ func buildMCPObserverPayload(v interface{}) json.RawMessage {
 	return b
 }
 
-type buildSpec struct {
-	Name              string          `json:"name"`
-	Description       string          `json:"description"`
-	Tools             []buildToolSpec `json:"tools"`
-	Hints             string          `json:"hints"`
-	AllowedPackages   []string        `json:"allowed_packages"`
-	ComposeServers    []string        `json:"compose_servers"`
-	Version           int             `json:"version"`
-	PriorPath         string          `json:"prior_path"`
-	PatchInstructions string          `json:"patch_instructions"`
-	Iteration         int             `json:"iteration"`
-	MaxIterations     int             `json:"max_iterations"`
-}
-
-type buildToolSpec struct {
-	Name              string          `json:"name"`
-	Description       string          `json:"description"`
-	ArgsSchema        json.RawMessage `json:"args_schema"`
-	ResultDescription string          `json:"result_description"`
-}
-
-var validName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
+type buildSpec = buildspec.Spec
+type buildToolSpec = buildspec.ToolSpec
 
 func (e *BuildMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, error) {
 	defer sink.Close()
-	var spec buildSpec
-	if err := json.Unmarshal([]byte(t.Prompt), &spec); err != nil {
+	spec, err := buildspec.ParseJSON(t.Prompt)
+	if err != nil {
 		return Result{}, fmt.Errorf("buildmcp: malformed spec: %w", err)
 	}
-	if !validName.MatchString(spec.Name) {
-		return Result{}, fmt.Errorf("buildmcp: invalid name %q (must match [a-z][a-z0-9_]{0,31})", spec.Name)
+	canonical, err := buildspec.MarshalCanonical(spec)
+	if err != nil {
+		return Result{}, fmt.Errorf("buildmcp: invalid spec: %w", err)
 	}
-	if len(spec.Tools) == 0 {
-		return Result{}, fmt.Errorf("buildmcp: spec.tools must have at least 1 entry")
-	}
-	if spec.Version < 1 {
-		return Result{}, fmt.Errorf("buildmcp: spec.version must be >=1")
-	}
-	if spec.Version >= 2 && spec.PriorPath == "" {
-		return Result{}, fmt.Errorf("buildmcp: prior_path required for version>=2")
-	}
-
-	specHash := computeSpecHash(spec)
+	specHash := computeSpecHashFromCanonical(canonical)
 
 	// Idempotency: if dynamic_mcp.yaml has a matching entry that points at an
 	// existing file, short-circuit.
@@ -417,9 +388,8 @@ func validatePythonSyntax(src string) error {
 	return nil
 }
 
-func computeSpecHash(spec buildSpec) string {
-	b, _ := json.Marshal(spec)
-	sum := sha256.Sum256(b)
+func computeSpecHashFromCanonical(canonical string) string {
+	sum := sha256.Sum256([]byte(canonical))
 	return hex.EncodeToString(sum[:])
 }
 

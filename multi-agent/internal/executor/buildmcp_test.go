@@ -303,6 +303,20 @@ func TestBuildMCP_MalformedSpec_ReturnsErr(t *testing.T) {
 	}
 }
 
+func TestBuildMCP_RejectsMalformedSpecBeforeExecution(t *testing.T) {
+	be, _ := newBuildMCPForTest(t)
+	defer be.MCPExec.Close()
+
+	_, err := be.Run(context.Background(), Task{ID: "tx", Skill: "build_mcp", Prompt: "please build a tool"}, &nopSink{})
+
+	if err == nil {
+		t.Fatal("expected malformed spec error")
+	}
+	if !strings.Contains(err.Error(), "buildmcp: malformed spec") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 type nopSink struct{}
 
 func (*nopSink) Write(string, string) {}
