@@ -376,10 +376,25 @@ func (g *getTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMe
 		TaskID: taskID,
 		Status: info.Status,
 	})
-	return json.Marshal(map[string]interface{}{
-		"status":         info.Status,
-		"output":         info.Output,
-		"failure_reason": info.FailureReason,
+	progress := g.t.observerProgress(ctx, taskID)
+	return json.Marshal(struct {
+		Status              string `json:"status"`
+		Output              string `json:"output"`
+		FailureReason       string `json:"failure_reason"`
+		LatestProgress      string `json:"latest_progress"`
+		LatestProgressPhase string `json:"latest_progress_phase"`
+		LatestProgressAt    string `json:"latest_progress_at"`
+		FinalOutput         string `json:"final_output"`
+		IsFinal             bool   `json:"is_final"`
+	}{
+		Status:              info.Status,
+		Output:              info.Output,
+		FailureReason:       info.FailureReason,
+		LatestProgress:      progress.LatestProgress,
+		LatestProgressPhase: progress.LatestProgressPhase,
+		LatestProgressAt:    progress.LatestProgressAt,
+		FinalOutput:         progress.FinalOutput,
+		IsFinal:             progress.IsFinal || isTerminalStatus(info.Status),
 	})
 }
 
@@ -434,11 +449,27 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 			})
 			written := w.t.reg.WrittenFiles(args.TaskID)
 			w.t.reg.ForgetTask(args.TaskID)
-			return json.Marshal(map[string]interface{}{
-				"status":         info.Status,
-				"output":         info.Output,
-				"failure_reason": info.FailureReason,
-				"written_files":  written,
+			progress := w.t.observerProgress(ctx, taskID)
+			return json.Marshal(struct {
+				Status              string        `json:"status"`
+				Output              string        `json:"output"`
+				FailureReason       string        `json:"failure_reason"`
+				LatestProgress      string        `json:"latest_progress"`
+				LatestProgressPhase string        `json:"latest_progress_phase"`
+				LatestProgressAt    string        `json:"latest_progress_at"`
+				FinalOutput         string        `json:"final_output"`
+				IsFinal             bool          `json:"is_final"`
+				WrittenFiles        []WrittenFile `json:"written_files"`
+			}{
+				Status:              info.Status,
+				Output:              info.Output,
+				FailureReason:       info.FailureReason,
+				LatestProgress:      progress.LatestProgress,
+				LatestProgressPhase: progress.LatestProgressPhase,
+				LatestProgressAt:    progress.LatestProgressAt,
+				FinalOutput:         firstNonEmpty(progress.FinalOutput, info.Output),
+				IsFinal:             true,
+				WrittenFiles:        written,
 			})
 		}
 		if time.Now().After(deadline) {
@@ -449,6 +480,15 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 			return nil, ctx.Err()
 		case <-time.After(time.Duration(args.PollIntervalSec) * time.Second):
 		}
+	}
+}
+
+func isTerminalStatus(status string) bool {
+	switch status {
+	case "completed", "failed", "cancelled":
+		return true
+	default:
+		return false
 	}
 }
 

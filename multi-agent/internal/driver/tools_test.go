@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -267,6 +268,46 @@ func TestTool_GetTask_ReturnsStatus(t *testing.T) {
 	}
 }
 
+func TestGetTaskIncludesObserverProgress(t *testing.T) {
+	observerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tasks" {
+			t.Fatalf("path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"task_id":"other","latest_progress":"ignore"},{"task_id":"t1","latest_progress":"working","latest_progress_phase":"build","latest_progress_at":"2026-05-13T01:02:03Z","final_output":"not done","is_final":false}]`))
+	}))
+	defer observerServer.Close()
+
+	sdk := &fakeSDK{
+		getTaskFunc: func(id string, includeOutput bool) (*agentsdk.TaskInfo, error) {
+			if id != "t1" {
+				return nil, errors.New("nope")
+			}
+			if !includeOutput {
+				t.Fatal("includeOutput = false")
+			}
+			return &agentsdk.TaskInfo{TaskID: "t1", Status: "running", Output: "sdk output"}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	tools.cfg.Observer.URL = observerServer.URL
+
+	for _, tt := range tools.All() {
+		if tt.Name() == "get_task" {
+			res, err := tt.Call(context.Background(), json.RawMessage(`{"task_id":"t1"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := `{"status":"running","output":"sdk output","failure_reason":"","latest_progress":"working","latest_progress_phase":"build","latest_progress_at":"2026-05-13T01:02:03Z","final_output":"not done","is_final":false}`
+			if string(res) != want {
+				t.Fatalf("response mismatch\nwant: %s\n got: %s", want, res)
+			}
+			return
+		}
+	}
+	t.Fatal("get_task tool not registered")
+}
+
 func TestTool_WaitTask_ReturnsWrittenFiles(t *testing.T) {
 	sdk := &fakeSDK{
 		getTaskFunc: func(id string, _ bool) (*agentsdk.TaskInfo, error) {
@@ -288,6 +329,42 @@ func TestTool_WaitTask_ReturnsWrittenFiles(t *testing.T) {
 			return
 		}
 	}
+}
+
+func TestWaitTaskTerminalFinalOutputFallsBackToSDKOutput(t *testing.T) {
+	observerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tasks" {
+			t.Fatalf("path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"task_id":"t2","latest_progress":"done","latest_progress_phase":"final","latest_progress_at":"2026-05-13T04:05:06Z","final_output":"","is_final":false}]`))
+	}))
+	defer observerServer.Close()
+
+	sdk := &fakeSDK{
+		getTaskFunc: func(id string, _ bool) (*agentsdk.TaskInfo, error) {
+			return &agentsdk.TaskInfo{TaskID: id, Status: "completed", Output: "sdk final"}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	tools.cfg.Observer.URL = observerServer.URL
+	tools.reg.RecordWritten("t2", WrittenFile{Path: "/p", Bytes: 5, SHA256: "s"})
+
+	for _, tt := range tools.All() {
+		if tt.Name() == "wait_task" {
+			res, err := tt.Call(context.Background(),
+				json.RawMessage(`{"task_id":"t2","poll_interval_sec":1,"timeout_sec":5}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := `{"status":"completed","output":"sdk final","failure_reason":"","latest_progress":"done","latest_progress_phase":"final","latest_progress_at":"2026-05-13T04:05:06Z","final_output":"sdk final","is_final":true,"written_files":[{"path":"/p","bytes":5,"sha256":"s","written_at":""}]}`
+			if string(res) != want {
+				t.Fatalf("response mismatch\nwant: %s\n got: %s", want, res)
+			}
+			return
+		}
+	}
+	t.Fatal("wait_task tool not registered")
 }
 
 func TestTool_TailSubtasks_PeerProxiesMaster(t *testing.T) {
