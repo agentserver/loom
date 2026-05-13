@@ -65,6 +65,27 @@ func buildMCPObserverPayload(v interface{}) json.RawMessage {
 type buildSpec = buildspec.Spec
 type buildToolSpec = buildspec.ToolSpec
 
+type legacyBuildSpec struct {
+	Name              string                `json:"name"`
+	Description       string                `json:"description"`
+	Tools             []legacyBuildToolSpec `json:"tools"`
+	Hints             string                `json:"hints"`
+	AllowedPackages   []string              `json:"allowed_packages"`
+	ComposeServers    []string              `json:"compose_servers"`
+	Version           int                   `json:"version"`
+	PriorPath         string                `json:"prior_path"`
+	PatchInstructions string                `json:"patch_instructions"`
+	Iteration         int                   `json:"iteration"`
+	MaxIterations     int                   `json:"max_iterations"`
+}
+
+type legacyBuildToolSpec struct {
+	Name              string          `json:"name"`
+	Description       string          `json:"description"`
+	ArgsSchema        json.RawMessage `json:"args_schema"`
+	ResultDescription string          `json:"result_description"`
+}
+
 func (e *BuildMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, error) {
 	defer sink.Close()
 	spec, err := buildspec.ParseJSON(t.Prompt)
@@ -76,10 +97,11 @@ func (e *BuildMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, 
 		return Result{}, fmt.Errorf("buildmcp: invalid spec: %w", err)
 	}
 	specHash := computeSpecHashFromCanonical(canonical)
+	legacySpecHash := computeLegacySpecHashFromPrompt(t.Prompt)
 
 	// Idempotency: if dynamic_mcp.yaml has a matching entry that points at an
 	// existing file, short-circuit.
-	if existing, ok := e.lookupExistingEntry(spec.Name); ok && existing.SpecHash == specHash && existing.Version == spec.Version {
+	if existing, ok := e.lookupExistingEntry(spec.Name); ok && existing.Version == spec.Version && specHashMatches(existing.SpecHash, specHash, legacySpecHash) {
 		if _, err := os.Stat(filepath.Join(e.cfg.WorkDir, existing.Args[0])); err == nil {
 			return Result{Summary: e.successHandle(spec, existing.Args[0], existing.Tools, 0).Marshal()}, nil
 		}
@@ -391,6 +413,22 @@ func validatePythonSyntax(src string) error {
 func computeSpecHashFromCanonical(canonical string) string {
 	sum := sha256.Sum256([]byte(canonical))
 	return hex.EncodeToString(sum[:])
+}
+
+func computeLegacySpecHashFromPrompt(raw string) string {
+	var spec legacyBuildSpec
+	if err := json.Unmarshal([]byte(raw), &spec); err != nil {
+		return ""
+	}
+	b, err := json.Marshal(spec)
+	if err != nil {
+		return ""
+	}
+	return computeSpecHashFromCanonical(string(b))
+}
+
+func specHashMatches(existing, canonical, legacy string) bool {
+	return existing == canonical || (legacy != "" && existing == legacy)
 }
 
 type dynamicEntry struct {

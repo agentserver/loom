@@ -208,6 +208,61 @@ func TestBuildMCP_ReadDynamicYAMLConvertsOldToolNamesToDescriptors(t *testing.T)
 	}
 }
 
+func TestBuildMCP_ReusesExistingEntryWithLegacySpecHash(t *testing.T) {
+	os.Setenv("FAKE_BUILD_CLAUDE_MODE", "crash")
+	defer os.Unsetenv("FAKE_BUILD_CLAUDE_MODE")
+	be, work := newBuildMCPForTest(t)
+	defer be.MCPExec.Close()
+
+	specBytes, _ := json.Marshal(map[string]interface{}{
+		"name": "foo", "description": "d",
+		"tools": []map[string]interface{}{
+			{"name": "foo", "description": "d", "args_schema": map[string]interface{}{"type": "object"}, "result_description": "r"},
+		},
+		"hints":            "",
+		"allowed_packages": []string{},
+		"version":          1,
+		"iteration":        1,
+		"max_iterations":   3,
+	})
+	legacyHash := oldBuildMCPSpecHashForTest(t, string(specBytes))
+	relPath := filepath.Join("generated_mcp", "foo", "v1.py")
+	absPath := filepath.Join(work, relPath)
+	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+		t.Fatalf("mkdir generated mcp: %v", err)
+	}
+	if err := os.WriteFile(absPath, []byte("print('existing')\n"), 0o600); err != nil {
+		t.Fatalf("write generated mcp: %v", err)
+	}
+	dy := []byte(`servers:
+  foo:
+    transport: stdio
+    command: python3
+    args:
+      - generated_mcp/foo/v1.py
+    version: 1
+    created_at: "2026-05-13T00:00:00Z"
+    spec_hash: ` + legacyHash + `
+    tools:
+      - foo
+`)
+	if err := os.WriteFile(filepath.Join(work, "dynamic_mcp.yaml"), dy, 0o600); err != nil {
+		t.Fatalf("write dynamic yaml: %v", err)
+	}
+
+	res, err := be.Run(context.Background(), Task{ID: "tx", Skill: "build_mcp", Prompt: string(specBytes), TimeoutSec: 30}, &nopSink{})
+
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(res.Summary, `"type":"mcp_tool_set"`) {
+		t.Fatalf("expected existing mcp_tool_set handle, got %q", res.Summary)
+	}
+	if strings.Contains(res.Summary, `"type":"build_mcp_blocked"`) {
+		t.Fatalf("expected reuse to bypass Claude crash, got %q", res.Summary)
+	}
+}
+
 func TestBuildMCP_BadImport_ReturnsBlocked(t *testing.T) {
 	os.Setenv("FAKE_BUILD_CLAUDE_MODE", "bad_import")
 	defer os.Unsetenv("FAKE_BUILD_CLAUDE_MODE")
@@ -324,3 +379,33 @@ func (*nopSink) Close()               {}
 
 // Avoid unused-import warning in case store isn't otherwise used.
 var _ = store.SubTaskRow{}
+
+func oldBuildMCPSpecHashForTest(t *testing.T, raw string) string {
+	t.Helper()
+	var spec struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Tools       []struct {
+			Name              string          `json:"name"`
+			Description       string          `json:"description"`
+			ArgsSchema        json.RawMessage `json:"args_schema"`
+			ResultDescription string          `json:"result_description"`
+		} `json:"tools"`
+		Hints             string   `json:"hints"`
+		AllowedPackages   []string `json:"allowed_packages"`
+		ComposeServers    []string `json:"compose_servers"`
+		Version           int      `json:"version"`
+		PriorPath         string   `json:"prior_path"`
+		PatchInstructions string   `json:"patch_instructions"`
+		Iteration         int      `json:"iteration"`
+		MaxIterations     int      `json:"max_iterations"`
+	}
+	if err := json.Unmarshal([]byte(raw), &spec); err != nil {
+		t.Fatalf("unmarshal old build spec: %v", err)
+	}
+	b, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal old build spec: %v", err)
+	}
+	return computeSpecHashFromCanonical(string(b))
+}
