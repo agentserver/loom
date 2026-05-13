@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/observer"
@@ -49,6 +50,44 @@ func observerEventOfType(events []observer.Event, eventType string) (observer.Ev
 		}
 	}
 	return observer.Event{}, false
+}
+
+func progressPayloads(t *testing.T, events []observer.Event) []map[string]interface{} {
+	t.Helper()
+	payloads := []map[string]interface{}{}
+	for _, ev := range events {
+		if ev.Type != observer.EventSlaveBuildMCPProgress {
+			continue
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+			t.Fatalf("progress payload unmarshal: %v", err)
+		}
+		payloads = append(payloads, payload)
+	}
+	return payloads
+}
+
+func progressPhases(payloads []map[string]interface{}) []string {
+	phases := make([]string, 0, len(payloads))
+	for _, payload := range payloads {
+		phase, _ := payload["phase"].(string)
+		phases = append(phases, phase)
+	}
+	return phases
+}
+
+func assertPhaseSubsequence(t *testing.T, got, want []string) {
+	t.Helper()
+	next := 0
+	for _, phase := range got {
+		if next < len(want) && phase == want[next] {
+			next++
+		}
+	}
+	if next != len(want) {
+		t.Fatalf("progress phases = %+v, want subsequence %+v", got, want)
+	}
 }
 
 func newBuildMCPForTest(t *testing.T) (*BuildMCPExecutor, string) {
@@ -202,14 +241,83 @@ func TestBuildMCP_EmitsProgressEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	progress := []observer.Event{}
-	for _, ev := range obs.events {
-		if ev.Type == observer.EventSlaveBuildMCPProgress {
-			progress = append(progress, ev)
+	payloads := progressPayloads(t, obs.events)
+	if len(payloads) == 0 {
+		t.Fatalf("expected build progress events, got %+v", obs.events)
+	}
+	assertPhaseSubsequence(t, progressPhases(payloads), []string{
+		"parse_spec",
+		"generate",
+		"validate",
+		"smoke_launch",
+		"register",
+		"republish",
+	})
+	for _, payload := range payloads {
+		if payload["message"] == "" || payload["name"] != "foo" || payload["is_final"] != false {
+			t.Fatalf("unexpected progress payload: %+v", payload)
 		}
 	}
-	if len(progress) == 0 {
-		t.Fatalf("expected build progress events, got %+v", obs.events)
+	if obs.events[len(obs.events)-1].Type != observer.EventMCPServerCreated {
+		t.Fatalf("expected terminal created event last, got events %+v", obs.events)
+	}
+	for i, ev := range obs.events {
+		if ev.Type == observer.EventMCPServerCreated {
+			for _, later := range obs.events[i+1:] {
+				if later.Type == observer.EventSlaveBuildMCPProgress {
+					t.Fatalf("progress emitted after terminal success: events %+v", obs.events)
+				}
+			}
+			return
+		}
+	}
+	t.Fatalf("expected created event, got %+v", obs.events)
+}
+
+func TestBuildMCP_InvokeClaudeWaitsForCommandDrainAfterCancellation(t *testing.T) {
+	be, _ := newBuildMCPForTest(t)
+	defer be.MCPExec.Close()
+
+	started := filepath.Join(t.TempDir(), "started")
+	claude := filepath.Join(t.TempDir(), "fake-claude-drain.sh")
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+(sleep 0.25) &
+: > "$FAKE_BUILD_CLAUDE_STARTED"
+sleep 1
+`
+	if err := os.WriteFile(claude, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	be.cfg.ClaudeBin = claude
+	t.Setenv("FAKE_BUILD_CLAUDE_STARTED", started)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := be.invokeClaude(ctx, Task{ID: "tx"}, buildSpec{Name: "foo"}, "")
+		done <- err
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fake claude did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancelAt := time.Now()
+	cancel()
+	err := <-done
+	if err == nil {
+		t.Fatal("expected cancellation error")
+	}
+	if elapsed := time.Since(cancelAt); elapsed < 200*time.Millisecond {
+		t.Fatalf("invokeClaude returned before command stdout path drained: elapsed %s", elapsed)
 	}
 }
 

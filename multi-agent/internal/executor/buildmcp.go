@@ -200,6 +200,13 @@ func (e *BuildMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, 
 	}); err != nil {
 		return Result{}, fmt.Errorf("buildmcp: persist yaml: %w", err)
 	}
+	// Re-publish card.
+	if e.cfg.Republish != nil {
+		e.progress(t, "republish", "republishing slave capability card", map[string]interface{}{"name": spec.Name})
+		if err := e.cfg.Republish(ctx); err != nil {
+			sink.Write("warn", fmt.Sprintf("republish card: %v", err))
+		}
+	}
 	e.emit(observer.Event{
 		Type:          observer.EventMCPServerCreated,
 		TaskID:        t.ID,
@@ -210,13 +217,6 @@ func (e *BuildMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, 
 			"mcp_tool_descriptors": tools,
 		}),
 	})
-	// Re-publish card.
-	if e.cfg.Republish != nil {
-		e.progress(t, "republish", "republishing slave capability card", map[string]interface{}{"name": spec.Name})
-		if err := e.cfg.Republish(ctx); err != nil {
-			sink.Write("warn", fmt.Sprintf("republish card: %v", err))
-		}
-	}
 	return Result{Summary: e.successHandle(spec, relPath, tools, len(strings.Split(src, "\n"))).Marshal()}, nil
 }
 
@@ -341,6 +341,7 @@ func (h handleJSON) Marshal() string {
 
 func (e *BuildMCPExecutor) invokeClaude(ctx context.Context, t Task, spec buildSpec, priorCode string) (string, error) {
 	var src string
+	commandDone := make(chan struct{})
 	err := progress.RunWithHeartbeat(ctx, progress.Config{
 		Interval:    20 * time.Second,
 		HardTimeout: 0,
@@ -351,6 +352,7 @@ func (e *BuildMCPExecutor) invokeClaude(ctx context.Context, t Task, spec buildS
 			})
 		},
 	}, func(ctx context.Context) error {
+		defer close(commandDone)
 		out, err := e.invokeClaudeOnce(ctx, spec, priorCode)
 		if err != nil {
 			return err
@@ -358,6 +360,7 @@ func (e *BuildMCPExecutor) invokeClaude(ctx context.Context, t Task, spec buildS
 		src = out
 		return nil
 	})
+	<-commandDone
 	if err != nil {
 		return "", err
 	}
