@@ -2,6 +2,8 @@ package buildspec
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,6 +29,27 @@ type Spec struct {
 }
 
 type ToolSpec struct {
+	Name              string          `json:"name"`
+	Description       string          `json:"description"`
+	ArgsSchema        json.RawMessage `json:"args_schema"`
+	ResultDescription string          `json:"result_description"`
+}
+
+type legacySpec struct {
+	Name              string       `json:"name"`
+	Description       string       `json:"description"`
+	Tools             []legacyTool `json:"tools"`
+	Hints             string       `json:"hints"`
+	AllowedPackages   []string     `json:"allowed_packages"`
+	ComposeServers    []string     `json:"compose_servers"`
+	Version           int          `json:"version"`
+	PriorPath         string       `json:"prior_path"`
+	PatchInstructions string       `json:"patch_instructions"`
+	Iteration         int          `json:"iteration"`
+	MaxIterations     int          `json:"max_iterations"`
+}
+
+type legacyTool struct {
 	Name              string          `json:"name"`
 	Description       string          `json:"description"`
 	ArgsSchema        json.RawMessage `json:"args_schema"`
@@ -128,6 +151,19 @@ func MarshalCanonical(spec Spec) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+func LegacyHashFromJSON(raw string) string {
+	var spec legacySpec
+	if err := json.Unmarshal([]byte(raw), &spec); err != nil {
+		return ""
+	}
+	out, err := json.Marshal(spec)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(out)
+	return hex.EncodeToString(sum[:])
 }
 
 func cleanList(values []string) []string {

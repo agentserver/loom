@@ -104,7 +104,10 @@ type legacyBuildToolSpec struct {
 	ResultDescription string          `json:"result_description"`
 }
 
-const legacyListPermutationLimit = 6
+const (
+	legacyListPermutationLimit     = 6
+	buildMCPLegacyHashesContextKey = "build_mcp_legacy_spec_hashes"
+)
 
 func (e *BuildMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, error) {
 	defer sink.Close()
@@ -118,7 +121,7 @@ func (e *BuildMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, 
 		return Result{}, fmt.Errorf("buildmcp: invalid spec: %w", err)
 	}
 	specHash := computeSpecHashFromCanonical(canonical)
-	legacySpecHashes := computeLegacySpecHashes(t.Prompt, spec)
+	legacySpecHashes := computeLegacySpecHashes(t.Prompt, t.SystemContext, spec)
 
 	// Idempotency: if dynamic_mcp.yaml has a matching entry that points at an
 	// existing file, short-circuit.
@@ -471,18 +474,10 @@ func computeSpecHashFromCanonical(canonical string) string {
 }
 
 func computeLegacySpecHashFromPrompt(raw string) string {
-	var spec legacyBuildSpec
-	if err := json.Unmarshal([]byte(raw), &spec); err != nil {
-		return ""
-	}
-	b, err := json.Marshal(spec)
-	if err != nil {
-		return ""
-	}
-	return computeSpecHashFromCanonical(string(b))
+	return buildspec.LegacyHashFromJSON(raw)
 }
 
-func computeLegacySpecHashes(raw string, spec buildSpec) []string {
+func computeLegacySpecHashes(raw, systemContext string, spec buildSpec) []string {
 	seen := map[string]bool{}
 	hashes := []string{}
 	add := func(hash string) {
@@ -491,6 +486,9 @@ func computeLegacySpecHashes(raw string, spec buildSpec) []string {
 		}
 		seen[hash] = true
 		hashes = append(hashes, hash)
+	}
+	for _, hash := range legacyHashesFromSystemContext(systemContext) {
+		add(hash)
 	}
 	add(computeLegacySpecHashFromPrompt(raw))
 
@@ -530,6 +528,17 @@ func computeLegacySpecHashes(raw string, spec buildSpec) []string {
 		}
 	}
 	return hashes
+}
+
+func legacyHashesFromSystemContext(systemContext string) []string {
+	if systemContext == "" {
+		return nil
+	}
+	var payload map[string][]string
+	if err := json.Unmarshal([]byte(systemContext), &payload); err != nil {
+		return nil
+	}
+	return payload[buildMCPLegacyHashesContextKey]
 }
 
 func legacyListOrderCandidates(values []string) [][]string {

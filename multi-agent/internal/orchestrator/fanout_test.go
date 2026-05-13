@@ -513,6 +513,7 @@ func TestFanout_BuildMCPSpecValidationReplans(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, sdk.dispatched, 1)
 	require.JSONEq(t, `{"name":"foo","description":"d","tools":[{"name":"render","description":"d","args_schema":{"type":"object"},"result_description":"r"}],"hints":"","allowed_packages":[],"compose_servers":[],"version":1,"iteration":1,"max_iterations":3}`, sdk.dispatched[0].Prompt)
+	require.Contains(t, sdk.dispatched[0].SystemContext, buildMCPLegacyHashesContextKey)
 	require.NotEmpty(t, eventsOfType(obs.events, observer.EventMasterBuildMCPValidationFailed))
 }
 

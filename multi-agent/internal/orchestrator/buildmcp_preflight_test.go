@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/yourorg/multi-agent/internal/buildspec"
 	"github.com/yourorg/multi-agent/internal/planner"
 )
 
@@ -18,6 +19,7 @@ func TestPrepareBuildMCPNode_UsesStructuredBuildSpec(t *testing.T) {
 	require.Equal(t, "build_mcp", got.Skill)
 	require.NotEmpty(t, got.Prompt)
 	require.JSONEq(t, `{"name":"foo","description":"d","tools":[{"name":"render","description":"d","args_schema":{"type":"object"},"result_description":"r"}],"hints":"","allowed_packages":[],"compose_servers":[],"version":1,"iteration":1,"max_iterations":3}`, got.Prompt)
+	require.Contains(t, got.SystemContext, buildspec.LegacyHashFromJSON(string(raw)))
 }
 
 func TestPrepareBuildMCPNode_UsesLegacyPromptJSON(t *testing.T) {
@@ -30,6 +32,7 @@ func TestPrepareBuildMCPNode_UsesLegacyPromptJSON(t *testing.T) {
 
 	require.NoError(t, err)
 	require.JSONEq(t, `{"name":"foo","description":"d","tools":[{"name":"render","description":"d","args_schema":{"type":"object"},"result_description":"r"}],"hints":"","allowed_packages":[],"compose_servers":[],"version":1,"iteration":1,"max_iterations":3}`, got.Prompt)
+	require.Contains(t, got.SystemContext, buildspec.LegacyHashFromJSON(node.Prompt))
 }
 
 func TestPrepareBuildMCPNode_RejectsNaturalLanguage(t *testing.T) {

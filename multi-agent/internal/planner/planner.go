@@ -31,14 +31,15 @@ func (p *Planner) WithProgress(fn ProgressFunc) *Planner {
 }
 
 type Node struct {
-	ID        string          `json:"id"`
-	TargetID  string          `json:"target_id"`
-	Prompt    string          `json:"prompt"`
-	BuildSpec json.RawMessage `json:"build_spec,omitempty"`
-	DependsOn []string        `json:"depends_on,omitempty"`
-	Kind      string          `json:"kind,omitempty"`
-	Skill     string          `json:"skill,omitempty"`
-	Optional  bool            `json:"optional,omitempty"`
+	ID            string          `json:"id"`
+	TargetID      string          `json:"target_id"`
+	Prompt        string          `json:"prompt"`
+	SystemContext string          `json:"-"`
+	BuildSpec     json.RawMessage `json:"build_spec,omitempty"`
+	DependsOn     []string        `json:"depends_on,omitempty"`
+	Kind          string          `json:"kind,omitempty"`
+	Skill         string          `json:"skill,omitempty"`
+	Optional      bool            `json:"optional,omitempty"`
 }
 
 type SubResult struct {

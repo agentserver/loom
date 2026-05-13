@@ -405,6 +405,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 				TargetID:       n.TargetID,
 				Skill:          n.Skill,
 				Prompt:         prompt,
+				SystemContext:  n.SystemContext,
 				TimeoutSeconds: o.cfg.SubTaskDefaults.TimeoutSec,
 			})
 			if err != nil {
