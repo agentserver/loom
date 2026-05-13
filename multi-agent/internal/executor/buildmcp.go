@@ -104,6 +104,8 @@ type legacyBuildToolSpec struct {
 	ResultDescription string          `json:"result_description"`
 }
 
+const legacyListPermutationLimit = 6
+
 func (e *BuildMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, error) {
 	defer sink.Close()
 	spec, err := buildspec.ParseJSON(t.Prompt)
@@ -507,14 +509,8 @@ func computeLegacySpecHashes(raw string, spec buildSpec) []string {
 	if base.MaxIterations == 3 {
 		maxIterations = append(maxIterations, 0)
 	}
-	allowedPackages := [][]string{base.AllowedPackages}
-	if len(base.AllowedPackages) == 0 && base.AllowedPackages != nil {
-		allowedPackages = append(allowedPackages, nil)
-	}
-	composeServers := [][]string{base.ComposeServers}
-	if len(base.ComposeServers) == 0 && base.ComposeServers != nil {
-		composeServers = append(composeServers, nil)
-	}
+	allowedPackages := legacyListOrderCandidates(base.AllowedPackages)
+	composeServers := legacyListOrderCandidates(base.ComposeServers)
 
 	for _, version := range versions {
 		for _, iteration := range iterations {
@@ -534,6 +530,39 @@ func computeLegacySpecHashes(raw string, spec buildSpec) []string {
 		}
 	}
 	return hashes
+}
+
+func legacyListOrderCandidates(values []string) [][]string {
+	if len(values) == 0 {
+		candidates := [][]string{values}
+		if values != nil {
+			candidates = append(candidates, nil)
+		}
+		return candidates
+	}
+	if len(values) > legacyListPermutationLimit {
+		return [][]string{values}
+	}
+	return permuteLegacyList(values)
+}
+
+func permuteLegacyList(values []string) [][]string {
+	current := append([]string(nil), values...)
+	out := [][]string{}
+	var walk func(int)
+	walk = func(i int) {
+		if i == len(current) {
+			out = append(out, append([]string(nil), current...))
+			return
+		}
+		for j := i; j < len(current); j++ {
+			current[i], current[j] = current[j], current[i]
+			walk(i + 1)
+			current[i], current[j] = current[j], current[i]
+		}
+	}
+	walk(0)
+	return out
 }
 
 func legacySpecFromBuildSpec(spec buildSpec) legacyBuildSpec {
