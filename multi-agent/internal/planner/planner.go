@@ -17,13 +17,14 @@ type Planner struct{ cfg config.Planner }
 func New(cfg config.Planner) *Planner { return &Planner{cfg: cfg} }
 
 type Node struct {
-	ID        string   `json:"id"`
-	TargetID  string   `json:"target_id"`
-	Prompt    string   `json:"prompt"`
-	DependsOn []string `json:"depends_on,omitempty"`
-	Kind      string   `json:"kind,omitempty"`  // "" or "build_mcp"
-	Skill     string   `json:"skill,omitempty"` // "" → slave's default exec; "mcp" → mcpExec; "build_mcp" → BuildMCPExecutor
-	Optional  bool     `json:"optional,omitempty"`
+	ID        string          `json:"id"`
+	TargetID  string          `json:"target_id"`
+	Prompt    string          `json:"prompt"`
+	BuildSpec json.RawMessage `json:"build_spec,omitempty"`
+	DependsOn []string        `json:"depends_on,omitempty"`
+	Kind      string          `json:"kind,omitempty"`
+	Skill     string          `json:"skill,omitempty"`
+	Optional  bool            `json:"optional,omitempty"`
 }
 
 type SubResult struct {

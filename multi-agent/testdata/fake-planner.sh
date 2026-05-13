@@ -3,6 +3,7 @@
 #   FAKE_PLANNER_MODE = route_a | route_empty | plan_diamond | plan_chain | plan_parallel |
 #                       plan_mcp_valid | plan_mcp_invalid_arg | plan_mcp_validation_replan |
 #                       plan_optional_failure |
+#                       plan_build_spec_field |
 #                       plan_invalid_cycle |
 #                       plan_invalid_json | plan_with_skill | reduce_ok | exit1 | sleep
 #   FAKE_PLANNER_SLEEP = seconds
@@ -76,6 +77,13 @@ EOF
 [
   {"id":"required","target_id":"agent-a","prompt":"required"},
   {"id":"optional","target_id":"agent-b","prompt":"optional","depends_on":["required"],"optional":true}
+]
+EOF
+    ;;
+  plan_build_spec_field)
+    cat <<'EOF'
+[
+  {"id":"n0","target_id":"agent-a","kind":"build_mcp","skill":"build_mcp","build_spec":{"name":"foo","description":"d","tools":[{"name":"render","description":"d","args_schema":{"type":"object"},"result_description":"r"}]}}
 ]
 EOF
     ;;

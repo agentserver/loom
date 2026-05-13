@@ -79,6 +79,19 @@ func TestPlan_InvalidJSONErrors(t *testing.T) {
 	})
 }
 
+func TestPlanParsesBuildSpecField(t *testing.T) {
+	t.Setenv("FAKE_PLANNER_MODE", "plan_build_spec_field")
+	p := New(config.Planner{Bin: fakePlanner(t), TimeoutSec: 5})
+
+	nodes, err := p.Plan(context.Background(), "build reusable tool", demoAgents)
+
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	require.Equal(t, "build_mcp", nodes[0].Kind)
+	require.Equal(t, "build_mcp", nodes[0].Skill)
+	require.JSONEq(t, `{"name":"foo","description":"d","tools":[{"name":"render","description":"d","args_schema":{"type":"object"},"result_description":"r"}]}`, string(nodes[0].BuildSpec))
+}
+
 func TestReduce_ReturnsClaudeOutput(t *testing.T) {
 	withMode(t, "reduce_ok", func() {
 		p := newPlanner(t, "reduce_ok")
