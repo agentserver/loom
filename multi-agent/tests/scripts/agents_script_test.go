@@ -61,7 +61,7 @@ func TestAgentsScriptDryRunStopUsesPidFilesAndScopedFallback(t *testing.T) {
 		".run/agents/slave-agent.pid",
 		".run/agents/driver-agent.pid",
 		"pkill -f",
-		"multi-agent/.claude/worktrees/http-task-observer/multi-agent",
+		repoRoot(t),
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("dry-run stop missing %q\noutput:\n%s", want, out)
