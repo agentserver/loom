@@ -42,6 +42,27 @@ func TestRunWithHeartbeatHardTimeout(t *testing.T) {
 	require.ErrorContains(t, err, "hard timeout")
 }
 
+func TestRunWithHeartbeatReturnsHardTimeoutWhenFunctionReturnsContextErrorAfterDeadline(t *testing.T) {
+	parent := context.Background()
+
+	for i := 0; i < 100; i++ {
+		err := RunWithHeartbeat(parent, Config{
+			Interval:    time.Millisecond,
+			HardTimeout: 5 * time.Millisecond,
+			Message:     "still running",
+			Emit: func(context.Context, time.Duration) {
+				time.Sleep(10 * time.Millisecond)
+			},
+		}, func(ctx context.Context) error {
+			<-ctx.Done()
+			return ctx.Err()
+		})
+
+		require.Error(t, err)
+		require.ErrorContains(t, err, "hard timeout")
+	}
+}
+
 func TestRunWithHeartbeatIdleTimeout(t *testing.T) {
 	err := RunWithHeartbeat(context.Background(), Config{
 		Interval:    time.Hour,

@@ -44,6 +44,11 @@ func RunWithHeartbeat(parent context.Context, cfg Config, fn func(context.Contex
 	for {
 		select {
 		case err := <-done:
+			if err != nil {
+				if timeoutErr := hardTimeoutError(parent, ctx, cfg.HardTimeout); timeoutErr != nil {
+					return timeoutErr
+				}
+			}
 			return err
 		case <-ticker.C:
 			if cfg.Emit != nil {
@@ -62,10 +67,22 @@ func RunWithHeartbeat(parent context.Context, cfg Config, fn func(context.Contex
 			cancel()
 			return fmt.Errorf("idle timeout after %s", cfg.IdleTimeout)
 		case <-ctx.Done():
-			if cfg.HardTimeout > 0 && parent.Err() == nil {
-				return fmt.Errorf("hard timeout after %s", cfg.HardTimeout)
+			if timeoutErr := hardTimeoutError(parent, ctx, cfg.HardTimeout); timeoutErr != nil {
+				return timeoutErr
 			}
 			return ctx.Err()
 		}
+	}
+}
+
+func hardTimeoutError(parent context.Context, ctx context.Context, hardTimeout time.Duration) error {
+	if hardTimeout <= 0 || parent.Err() != nil {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("hard timeout after %s", hardTimeout)
+	default:
+		return nil
 	}
 }
