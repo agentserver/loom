@@ -322,6 +322,72 @@ func TestProgressEventsUpdateLatestProgressWithoutTerminalState(t *testing.T) {
 	require.Equal(t, "2026-05-11T00:00:03Z", tasks[0].Subtasks[0].LatestProgressAt)
 }
 
+func TestProgressEventWithMissingExplicitSubtaskDoesNotUpdateParent(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	require.NoError(t, s.Ingest(observer.Event{
+		TS: "2026-05-11T00:00:00Z", WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "mt1", Summary: "build thing",
+		TargetAgentID: "master", TargetRole: observer.RoleMaster, Status: "assigned",
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		TS: "2026-05-11T00:00:01Z", WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterPlanningProgress, TaskID: "mt1",
+		Payload: json.RawMessage(`{"phase":"planning","message":"parent progress"}`),
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		TS: "2026-05-11T00:00:02Z", WorkspaceID: "ws1", AgentID: "slave", AgentRole: observer.RoleSlave,
+		Type: observer.EventSlaveTaskProgress, TaskID: "st1", ParentTaskID: "mt1", SubtaskID: "n1",
+		Payload: json.RawMessage(`{"phase":"build","message":"early subtask progress"}`),
+	}))
+
+	tasks, err := s.ListTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, "parent progress", tasks[0].LatestProgress)
+	require.Equal(t, "planning", tasks[0].LatestProgressPhase)
+	require.Equal(t, "2026-05-11T00:00:01Z", tasks[0].LatestProgressAt)
+	require.Empty(t, tasks[0].Subtasks)
+}
+
+func TestProgressEventWithUnknownSubtaskDoesNotUpdateParent(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	require.NoError(t, s.Ingest(observer.Event{
+		TS: "2026-05-11T00:00:00Z", WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "mt1", Summary: "build thing",
+		TargetAgentID: "master", TargetRole: observer.RoleMaster, Status: "assigned",
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		TS: "2026-05-11T00:00:01Z", WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterPlanningProgress, TaskID: "mt1",
+		Payload: json.RawMessage(`{"phase":"planning","message":"parent progress"}`),
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		TS: "2026-05-11T00:00:02Z", WorkspaceID: "ws1", AgentID: "master", AgentRole: observer.RoleMaster,
+		Type: observer.EventMasterSubtaskDispatched, TaskID: "mt1", SubtaskID: "n1",
+		ChildTaskID: "st1", SubtaskSummary: "make tool", TargetAgentID: "slave",
+	}))
+	require.NoError(t, s.Ingest(observer.Event{
+		TS: "2026-05-11T00:00:03Z", WorkspaceID: "ws1", AgentID: "slave", AgentRole: observer.RoleSlave,
+		Type: observer.EventSlaveTaskProgress, TaskID: "st2", ParentTaskID: "mt1", SubtaskID: "unknown",
+		Payload: json.RawMessage(`{"phase":"build","message":"unknown subtask progress"}`),
+	}))
+
+	tasks, err := s.ListTasks()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, "parent progress", tasks[0].LatestProgress)
+	require.Equal(t, "planning", tasks[0].LatestProgressPhase)
+	require.Equal(t, "2026-05-11T00:00:01Z", tasks[0].LatestProgressAt)
+	require.Len(t, tasks[0].Subtasks, 1)
+	require.Empty(t, tasks[0].Subtasks[0].LatestProgress)
+	require.Empty(t, tasks[0].Subtasks[0].LatestProgressPhase)
+	require.Empty(t, tasks[0].Subtasks[0].LatestProgressAt)
+}
+
 func TestTerminalEventSetsIsFinalAndFinalOutput(t *testing.T) {
 	s := testStore(t)
 	defer s.Close()

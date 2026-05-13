@@ -470,6 +470,7 @@ func updateLatestProgress(tx *sql.Tx, ev observer.Event) error {
 		if updated > 0 {
 			return nil
 		}
+		return nil
 	}
 
 	taskID := ev.TaskID
