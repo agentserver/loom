@@ -1,12 +1,12 @@
 services:
   master:
     build:
-      context: .
+      context: ..
       dockerfile: dev/agent-runtime/Dockerfile
     working_dir: /workspace/multi-agent
     volumes:
-      - ./:/workspace/multi-agent
-      - ./dev/configs/master.yaml:/config/config.yaml
+      - ../:/workspace/multi-agent
+      - ./configs/master.yaml:/config/config.yaml
     environment:
       ANTHROPIC_BASE_URL: https://code.ai.cs.ac.cn
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
@@ -15,12 +15,12 @@ services:
 
   driver:
     build:
-      context: .
+      context: ..
       dockerfile: dev/agent-runtime/Dockerfile
     working_dir: /workspace/multi-agent
     volumes:
-      - ./:/workspace/multi-agent
-      - ./dev/configs/driver.yaml:/config/config.yaml
+      - ../:/workspace/multi-agent
+      - ./configs/driver.yaml:/config/config.yaml
     environment:
       ANTHROPIC_BASE_URL: https://code.ai.cs.ac.cn
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
@@ -29,12 +29,12 @@ services:
 
   slave-a:
     build:
-      context: .
+      context: ..
       dockerfile: dev/agent-runtime/Dockerfile
     working_dir: /workspace/multi-agent
     volumes:
-      - ./:/workspace/multi-agent
-      - ./dev/configs/slave-a.yaml:/config/config.yaml
+      - ../:/workspace/multi-agent
+      - ./configs/slave-a.yaml:/config/config.yaml
     environment:
       ANTHROPIC_BASE_URL: https://code.ai.cs.ac.cn
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
@@ -43,12 +43,12 @@ services:
 
   slave-b:
     build:
-      context: .
+      context: ..
       dockerfile: dev/agent-runtime/Dockerfile
     working_dir: /workspace/multi-agent
     volumes:
-      - ./:/workspace/multi-agent
-      - ./dev/configs/slave-b.yaml:/config/config.yaml
+      - ../:/workspace/multi-agent
+      - ./configs/slave-b.yaml:/config/config.yaml
     environment:
       ANTHROPIC_BASE_URL: https://code.ai.cs.ac.cn
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
