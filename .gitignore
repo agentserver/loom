@@ -4,3 +4,4 @@ env
 cmd.md
 .claude/
 .tmp-review-*/
+.worktrees/
