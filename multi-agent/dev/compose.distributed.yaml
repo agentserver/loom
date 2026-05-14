@@ -1,0 +1,56 @@
+services:
+  master:
+    build:
+      context: .
+      dockerfile: dev/agent-runtime/Dockerfile
+    working_dir: /workspace/multi-agent
+    volumes:
+      - ./:/workspace/multi-agent
+      - ./dev/configs/master.yaml:/config/config.yaml
+    environment:
+      ANTHROPIC_BASE_URL: https://code.ai.cs.ac.cn
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    command: zsh -lc "go run ./cmd/master-agent /config/config.yaml"
+    restart: unless-stopped
+
+  driver:
+    build:
+      context: .
+      dockerfile: dev/agent-runtime/Dockerfile
+    working_dir: /workspace/multi-agent
+    volumes:
+      - ./:/workspace/multi-agent
+      - ./dev/configs/driver.yaml:/config/config.yaml
+    environment:
+      ANTHROPIC_BASE_URL: https://code.ai.cs.ac.cn
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    command: zsh -lc "go run ./cmd/driver-agent /config/config.yaml"
+    restart: unless-stopped
+
+  slave-a:
+    build:
+      context: .
+      dockerfile: dev/agent-runtime/Dockerfile
+    working_dir: /workspace/multi-agent
+    volumes:
+      - ./:/workspace/multi-agent
+      - ./dev/configs/slave-a.yaml:/config/config.yaml
+    environment:
+      ANTHROPIC_BASE_URL: https://code.ai.cs.ac.cn
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    command: zsh -lc "go run ./cmd/slave-agent /config/config.yaml"
+    restart: unless-stopped
+
+  slave-b:
+    build:
+      context: .
+      dockerfile: dev/agent-runtime/Dockerfile
+    working_dir: /workspace/multi-agent
+    volumes:
+      - ./:/workspace/multi-agent
+      - ./dev/configs/slave-b.yaml:/config/config.yaml
+    environment:
+      ANTHROPIC_BASE_URL: https://code.ai.cs.ac.cn
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    command: zsh -lc "go run ./cmd/slave-agent /config/config.yaml"
+    restart: unless-stopped
