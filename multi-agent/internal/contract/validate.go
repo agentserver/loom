@@ -92,6 +92,9 @@ func validatePolicy(p ExecutionPolicy) error {
 	if p.CodePersistence != CodePersistenceObserverArtifactStore {
 		return fmt.Errorf("execution_policy.code_persistence %q is not supported", p.CodePersistence)
 	}
+	if p.ExposeCodeToUser != ExposeCodeOnRequest {
+		return fmt.Errorf("execution_policy.expose_code_to_user %q is not supported", p.ExposeCodeToUser)
+	}
 	switch p.WriteMode {
 	case WriteModeArtifactOnly, WriteModePatch, WriteModeRepoCommit:
 	default:

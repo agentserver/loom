@@ -82,6 +82,30 @@ func TestTaskContractValidateRejectsBuildMCPWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestTaskContractValidateRejectsUnsupportedExposeCodePolicy(t *testing.T) {
+	tc := TaskContract{
+		Version:        1,
+		ConversationID: "conv-1",
+		Intent: IntentSpec{
+			Goal:            "generate a helper",
+			SuccessCriteria: []string{"helper is saved as an artifact"},
+		},
+		DataContract: DataContract{
+			WriteTargets: []WriteTarget{{Type: WriteTargetArtifact, Kind: "code", Name: "helper.go"}},
+		},
+	}
+	tc.ApplyDefaults()
+	tc.ExecutionPolicy.ExposeCodeToUser = "always"
+
+	err := tc.Validate()
+	if err == nil {
+		t.Fatalf("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "execution_policy.expose_code_to_user") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestEnvelopeRoundTrip(t *testing.T) {
 	tc := TaskContract{
 		Version:        1,
