@@ -1,0 +1,148 @@
+package contract
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"github.com/agentserver/agentserver/pkg/agentsdk"
+)
+
+func TestTaskContractApplyDefaults(t *testing.T) {
+	tc := TaskContract{
+		Version:        1,
+		ConversationID: "conv-1",
+		Intent: IntentSpec{
+			Goal:            "generate a helper",
+			SuccessCriteria: []string{"helper is saved as an artifact"},
+		},
+		DataContract: DataContract{
+			WriteTargets: []WriteTarget{{Type: WriteTargetArtifact, Kind: "code", Name: "helper.go"}},
+		},
+	}
+
+	tc.ApplyDefaults()
+
+	if tc.ExecutionPolicy.Routing != RoutingDirectFirst {
+		t.Fatalf("routing = %q", tc.ExecutionPolicy.Routing)
+	}
+	if tc.ExecutionPolicy.AllowBuildMCP {
+		t.Fatalf("allow_build_mcp default = true")
+	}
+	if !tc.ExecutionPolicy.AllowCodeArtifacts {
+		t.Fatalf("allow_code_artifacts default = false")
+	}
+	if tc.ExecutionPolicy.CodePersistence != CodePersistenceObserverArtifactStore {
+		t.Fatalf("code_persistence = %q", tc.ExecutionPolicy.CodePersistence)
+	}
+	if tc.ExecutionPolicy.WriteMode != WriteModeArtifactOnly {
+		t.Fatalf("write_mode = %q", tc.ExecutionPolicy.WriteMode)
+	}
+	if tc.ExecutionPolicy.MaxDAGNodes != 6 {
+		t.Fatalf("max_dag_nodes = %d", tc.ExecutionPolicy.MaxDAGNodes)
+	}
+}
+
+func TestTaskContractValidateRejectsMissingIntent(t *testing.T) {
+	tc := TaskContract{Version: 1}
+	tc.ApplyDefaults()
+
+	err := tc.Validate()
+	if err == nil {
+		t.Fatalf("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "intent.goal is required") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestTaskContractValidateRejectsBuildMCPWhenDisabled(t *testing.T) {
+	tc := TaskContract{
+		Version:        1,
+		ConversationID: "conv-1",
+		Intent: IntentSpec{
+			Goal:            "create a durable tool",
+			SuccessCriteria: []string{"tool is callable"},
+		},
+		DataContract: DataContract{
+			WriteTargets: []WriteTarget{{Type: WriteTargetArtifact, Kind: "code", Name: "server.go"}},
+		},
+		CapabilityRequirements: CapabilityRequirements{
+			Skills: []string{"build_mcp"},
+		},
+	}
+	tc.ApplyDefaults()
+
+	err := tc.Validate()
+	if err == nil {
+		t.Fatalf("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "build_mcp requested but execution_policy.allow_build_mcp is false") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestEnvelopeRoundTrip(t *testing.T) {
+	tc := TaskContract{
+		Version:        1,
+		ConversationID: "conv-1",
+		Intent: IntentSpec{
+			Goal:            "summarize artifacts",
+			SuccessCriteria: []string{"summary references artifacts"},
+		},
+		DataContract: DataContract{
+			WriteTargets: []WriteTarget{{Type: WriteTargetArtifact, Kind: "document", Name: "summary.md"}},
+		},
+	}
+	tc.ApplyDefaults()
+
+	prompt, err := EncodeEnvelope(tc, "Use this contract.")
+	if err != nil {
+		t.Fatalf("EncodeEnvelope: %v", err)
+	}
+	got, body, ok, err := DecodeEnvelope(prompt)
+	if err != nil {
+		t.Fatalf("DecodeEnvelope: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected envelope")
+	}
+	if body != "Use this contract." {
+		t.Fatalf("body = %q", body)
+	}
+	if got.ConversationID != "conv-1" {
+		t.Fatalf("conversation_id = %q", got.ConversationID)
+	}
+}
+
+func TestResourceSnapshotFromAgentCards(t *testing.T) {
+	cardBody := json.RawMessage(`{
+        "skills":["chat","mcp"],
+        "tools":["echo"],
+        "short_id":"short-a",
+        "resources":{"memory_gb":16,"tags":["go"]}
+    }`)
+	snap := NewResourceSnapshot([]agentsdk.AgentCard{
+		{
+			AgentID:     "agent-a",
+			DisplayName: "slave-a",
+			Description: "worker",
+			Status:      "available",
+			Card:        cardBody,
+		},
+	}, "driver-id")
+
+	if len(snap.Agents) != 1 {
+		t.Fatalf("agents len = %d", len(snap.Agents))
+	}
+	a := snap.Agents[0]
+	if a.AgentID != "agent-a" || a.ShortID != "short-a" {
+		t.Fatalf("agent = %+v", a)
+	}
+	if len(a.Skills) != 2 || a.Skills[1] != "mcp" {
+		t.Fatalf("skills = %#v", a.Skills)
+	}
+	if string(a.Resources) == "" {
+		t.Fatalf("resources not preserved")
+	}
+}
