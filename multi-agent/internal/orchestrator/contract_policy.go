@@ -31,7 +31,7 @@ func ValidateWithContractPolicy(nodes []planner.Node, policy contract.ExecutionP
 	}
 	if !policy.AllowBuildMCP {
 		for _, n := range nodes {
-			if n.Skill == "build_mcp" {
+			if n.Skill == "build_mcp" || n.Kind == "build_mcp" {
 				return fmt.Errorf("build_mcp node %s rejected by contract policy", n.ID)
 			}
 		}

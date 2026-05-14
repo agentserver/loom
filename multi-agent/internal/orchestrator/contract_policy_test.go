@@ -48,14 +48,29 @@ func TestValidatePlanWithPolicyRejectsBuildMCP(t *testing.T) {
 		},
 	}
 	tc.ApplyDefaults()
-	nodes := []planner.Node{{ID: "n1", TargetID: "slave", Skill: "build_mcp"}}
-
-	err := ValidateWithContractPolicy(nodes, tc.ExecutionPolicy)
-	if err == nil {
-		t.Fatalf("expected policy error")
+	cases := []struct {
+		name string
+		node planner.Node
+	}{
+		{
+			name: "skill",
+			node: planner.Node{ID: "n1", TargetID: "slave", Skill: "build_mcp"},
+		},
+		{
+			name: "kind",
+			node: planner.Node{ID: "n1", TargetID: "slave", Kind: "build_mcp"},
+		},
 	}
-	if err.Error() != "build_mcp node n1 rejected by contract policy" {
-		t.Fatalf("error = %v", err)
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateWithContractPolicy([]planner.Node{tt.node}, tc.ExecutionPolicy)
+			if err == nil {
+				t.Fatalf("expected policy error")
+			}
+			if err.Error() != "build_mcp node n1 rejected by contract policy" {
+				t.Fatalf("error = %v", err)
+			}
+		})
 	}
 }
 
