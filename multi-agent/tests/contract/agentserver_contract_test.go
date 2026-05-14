@@ -49,9 +49,9 @@ func TestContract_PollUsesProxyTokenAndStatusUpdateShape(t *testing.T) {
 				w.WriteHeader(204)
 				return
 			}
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			json.NewEncoder(w).Encode([]map[string]interface{}{{
 				"task_id": "tc1", "skill": "chat", "prompt": "p",
-			})
+			}})
 		case strings.HasPrefix(r.URL.Path, "/api/agent/tasks/") && strings.HasSuffix(r.URL.Path, "/status"):
 			require.Equal(t, "PUT", r.Method)
 			require.Equal(t, "Bearer ptoken", r.Header.Get("Authorization"))
@@ -91,7 +91,7 @@ func TestContract_PollUsesProxyTokenAndStatusUpdateShape(t *testing.T) {
 	require.Equal(t, "Bearer ptoken", pollAuth)
 	require.Equal(t, "running", seenStatuses[0]["status"])
 	require.Equal(t, "completed", seenStatuses[1]["status"])
-	require.Equal(t, "ok", seenStatuses[1]["output"])
+	require.Equal(t, "ok", seenStatuses[1]["result"])
 	mu.Unlock()
 }
 
@@ -105,7 +105,7 @@ func TestContract_FailedHasFailureReason(t *testing.T) {
 				w.WriteHeader(204)
 				return
 			}
-			json.NewEncoder(w).Encode(map[string]interface{}{"task_id": "x", "skill": "chat", "prompt": "p"})
+			json.NewEncoder(w).Encode([]map[string]interface{}{{"task_id": "x", "skill": "chat", "prompt": "p"}})
 			return
 		}
 		body, _ := io.ReadAll(r.Body)

@@ -109,6 +109,7 @@ func (t *Tunnel) PublishCard(ctx context.Context) error {
 		"skills":        t.cfg.Discovery.Skills,
 		"tools":         t.tools,
 		"mcp_tools":     t.mcpTools,
+		"short_id":      t.cfg.Credentials.ShortID,
 		"accepts_tasks": true,
 		"has_web_ui":    true,
 		"version":       "0.1.0",

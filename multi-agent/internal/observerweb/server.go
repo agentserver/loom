@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/yourorg/multi-agent/internal/observer"
@@ -19,6 +20,15 @@ type Store interface {
 	Ingest(ev observer.Event) error
 	ListTasks() ([]observerstore.TaskView, error)
 	ListEvents(taskID string) ([]observer.Event, error)
+	CreateArtifact(observerstore.ArtifactCreate) (observerstore.Artifact, error)
+	RequestArtifact(workspaceID, requesterAgentID, artifactID string) (observerstore.ArtifactRequest, error)
+	ListArtifactRequests(workspaceID, ownerAgentID string) ([]observerstore.ArtifactRequest, error)
+	StoreArtifactContent(workspaceID, ownerAgentID, artifactID, mime string, body io.Reader) error
+	OpenArtifactContent(workspaceID, artifactID string) (observerstore.ArtifactContent, error)
+	CreateWrite(observerstore.WriteCreate) (observerstore.Write, error)
+	StoreWriteContent(workspaceID, writerAgentID, writeID, mime string, body io.Reader) error
+	UpdateWriteTaskID(workspaceID, ownerAgentID, writeID, taskID string) error
+	ListCompletedWrites(workspaceID, ownerAgentID, taskID string) ([]observerstore.Write, error)
 }
 
 func New(s Store) http.Handler {
@@ -26,6 +36,12 @@ func New(s Store) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/events", h.postEvent)
 	mux.HandleFunc("/api/tasks", h.apiTasks)
+	mux.HandleFunc("/api/artifacts", h.artifacts)
+	mux.HandleFunc("/api/artifacts/", h.artifactRouter)
+	mux.HandleFunc("/api/artifact-requests", h.artifactRequests)
+	mux.HandleFunc("/api/write-tokens", h.writeTokens)
+	mux.HandleFunc("/api/writes", h.writes)
+	mux.HandleFunc("/api/writes/", h.writeRouter)
 	mux.HandleFunc("/drivers", h.page("Drivers", "drivers"))
 	mux.HandleFunc("/masters", h.page("Masters", "masters"))
 	mux.HandleFunc("/slaves", h.page("Slaves", "slaves"))
@@ -114,6 +130,280 @@ func bearerToken(auth string) (string, bool) {
 	}
 	token := strings.TrimSpace(strings.TrimPrefix(auth, prefix))
 	return token, token != ""
+}
+
+func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) (observerstore.Agent, bool) {
+	token, ok := bearerToken(r.Header.Get("Authorization"))
+	if !ok {
+		http.Error(w, "missing or invalid bearer token", http.StatusUnauthorized)
+		return observerstore.Agent{}, false
+	}
+	agent, ok, err := h.s.ValidateToken(token)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return observerstore.Agent{}, false
+	}
+	if !ok {
+		http.Error(w, "missing or invalid bearer token", http.StatusUnauthorized)
+		return observerstore.Agent{}, false
+	}
+	return agent, true
+}
+
+func absoluteURL(r *http.Request, path string) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if xf := r.Header.Get("X-Forwarded-Proto"); xf != "" {
+		scheme = strings.Split(xf, ",")[0]
+	}
+	return scheme + "://" + r.Host + path
+}
+
+func (h *handler) artifacts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	agent, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Path   string `json:"path"`
+		Kind   string `json:"kind"`
+		MIME   string `json:"mime"`
+		Bytes  int64  `json:"bytes"`
+		SHA256 string `json:"sha256"`
+		Mode   string `json:"mode"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if req.Kind == "" {
+		req.Kind = "file"
+	}
+	art, err := h.s.CreateArtifact(observerstore.ArtifactCreate{
+		WorkspaceID: agent.WorkspaceID, OwnerAgentID: agent.ID,
+		Path: req.Path, Kind: req.Kind, MIME: req.MIME, Bytes: req.Bytes, SHA256: req.SHA256,
+		State: observerstore.ArtifactStateRegistered,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"artifact_id": art.ID,
+		"url":         absoluteURL(r, "/api/artifacts/"+url.PathEscape(art.ID)),
+		"state":       art.State,
+	})
+}
+
+func (h *handler) artifactRouter(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/artifacts/")
+	if strings.HasSuffix(rest, "/content") {
+		id := strings.TrimSuffix(rest, "/content")
+		h.putArtifactContent(w, r, id)
+		return
+	}
+	if strings.HasSuffix(rest, "/list") || strings.HasSuffix(rest, "/blob") {
+		// Directory lazy list/blob requests use the same pending request path in
+		// v1; rel paths are carried by the URL query for driver-side resolution.
+		id := strings.TrimSuffix(strings.TrimSuffix(rest, "/list"), "/blob")
+		h.getArtifact(w, r, id)
+		return
+	}
+	h.getArtifact(w, r, rest)
+}
+
+func (h *handler) getArtifact(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	agent, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	content, err := h.s.OpenArtifactContent(agent.WorkspaceID, id)
+	if err == nil {
+		if content.MIME != "" {
+			w.Header().Set("Content-Type", content.MIME)
+		}
+		defer content.Body.Close()
+		io.Copy(w, content.Body) //nolint:errcheck
+		return
+	}
+	req, err := h.s.RequestArtifact(agent.WorkspaceID, agent.ID, id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Retry-After", "2")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"state":       req.State,
+		"artifact_id": req.ArtifactID,
+		"request_id":  req.RequestID,
+	})
+}
+
+func (h *handler) putArtifactContent(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	agent, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	if err := h.s.StoreArtifactContent(agent.WorkspaceID, agent.ID, id, r.Header.Get("Content-Type"), r.Body); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (h *handler) artifactRequests(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	agent, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	reqs, err := h.s.ListArtifactRequests(agent.WorkspaceID, agent.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if reqs == nil {
+		reqs = []observerstore.ArtifactRequest{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"requests": reqs})
+}
+
+func (h *handler) writeTokens(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	agent, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		TaskID    string `json:"task_id"`
+		Path      string `json:"path"`
+		Overwrite bool   `json:"overwrite"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	wr, err := h.s.CreateWrite(observerstore.WriteCreate{
+		WorkspaceID: agent.WorkspaceID, OwnerAgentID: agent.ID,
+		TaskID: req.TaskID, Path: req.Path, Overwrite: req.Overwrite,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"write_id": wr.ID,
+		"put_url":  absoluteURL(r, "/api/writes/"+url.PathEscape(wr.ID)),
+	})
+}
+
+func (h *handler) writeRouter(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPatch {
+		h.patchWrite(w, r)
+		return
+	}
+	if r.Method != http.MethodPut {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	agent, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/writes/")
+	if err := h.s.StoreWriteContent(agent.WorkspaceID, agent.ID, id, r.Header.Get("Content-Type"), r.Body); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (h *handler) patchWrite(w http.ResponseWriter, r *http.Request) {
+	agent, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/writes/")
+	if err := h.s.UpdateWriteTaskID(agent.WorkspaceID, agent.ID, id, req.TaskID); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (h *handler) writes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	agent, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	taskID := r.URL.Query().Get("task_id")
+	rows, err := h.s.ListCompletedWrites(agent.WorkspaceID, agent.ID, taskID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if rows == nil {
+		rows = []observerstore.Write{}
+	}
+	type writeResponse struct {
+		WriteID       string `json:"write_id"`
+		Path          string `json:"path"`
+		Overwrite     bool   `json:"overwrite"`
+		State         string `json:"state"`
+		MIME          string `json:"mime,omitempty"`
+		Bytes         int64  `json:"bytes,omitempty"`
+		SHA256        string `json:"sha256,omitempty"`
+		Content       []byte `json:"content"`
+		WriterAgentID string `json:"writer_agent_id,omitempty"`
+	}
+	resp := make([]writeResponse, len(rows))
+	for i, row := range rows {
+		resp[i] = writeResponse{
+			WriteID: row.ID, Path: row.Path, Overwrite: row.Overwrite,
+			State: row.State, MIME: row.MIME, Bytes: row.Bytes, SHA256: row.SHA256,
+			Content: row.Content, WriterAgentID: row.WriterAgentID,
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"writes": resp})
 }
 
 func (h *handler) apiTasks(w http.ResponseWriter, r *http.Request) {

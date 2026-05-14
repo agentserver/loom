@@ -145,11 +145,14 @@ func runServe(args []string) {
 	})
 	defer obs.Close()
 
-	tools := driver.NewTools(reg, audit, cli, cfg, obs)
+	tools := driver.NewTools(reg, audit, driver.NewAgentSDKClient(cli, cfg.Server.URL, cfg.Credentials.ProxyToken), cfg, obs)
 	mcpSrv := driver.NewMCPServer(tools.All())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	if cfg.DriverDefaults.ArtifactTransport == driver.ArtifactTransportObserverLazy {
+		go driver.NewObserverRelay(cfg).ServePendingLoop(ctx, reg, audit, 2*time.Second)
+	}
 
 	connDone := make(chan error, 1)
 	go func() {
@@ -186,6 +189,7 @@ func publishCard(cfg *driver.Config) error {
 		"agent_type":   "driver",
 		"card": map[string]interface{}{
 			"skills":        cfg.Discovery.Skills,
+			"short_id":      cfg.Credentials.ShortID,
 			"accepts_tasks": false,
 			"has_web_ui":    false,
 			"version":       "0.1.0",

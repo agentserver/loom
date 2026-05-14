@@ -96,6 +96,98 @@ func TestPostEventRejectsTrailingJSONValue(t *testing.T) {
 	require.Zero(t, count)
 }
 
+func TestArtifactLazyHTTPFlow(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"}, "slave-token"))
+
+	h := New(st)
+	createBody := bytes.NewBufferString(`{"path":"/tmp/input.txt","kind":"file","mime":"text/plain","mode":"lazy"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/artifacts", createBody)
+	req.Header.Set("Authorization", "Bearer driver-token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+	var created struct {
+		ArtifactID string `json:"artifact_id"`
+		URL        string `json:"url"`
+		State      string `json:"state"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &created))
+	require.NotEmpty(t, created.ArtifactID)
+	require.Contains(t, created.URL, "/api/artifacts/"+created.ArtifactID)
+
+	req = httptest.NewRequest(http.MethodGet, "/api/artifacts/"+created.ArtifactID, nil)
+	req.Header.Set("Authorization", "Bearer slave-token")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusAccepted, rr.Code, rr.Body.String())
+	require.Equal(t, "2", rr.Header().Get("Retry-After"))
+
+	req = httptest.NewRequest(http.MethodGet, "/api/artifact-requests", nil)
+	req.Header.Set("Authorization", "Bearer driver-token")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), created.ArtifactID)
+
+	req = httptest.NewRequest(http.MethodPut, "/api/artifacts/"+created.ArtifactID+"/content", bytes.NewBufferString("hello"))
+	req.Header.Set("Authorization", "Bearer driver-token")
+	req.Header.Set("Content-Type", "text/plain")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	req = httptest.NewRequest(http.MethodGet, "/api/artifacts/"+created.ArtifactID, nil)
+	req.Header.Set("Authorization", "Bearer slave-token")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Equal(t, "hello", rr.Body.String())
+	require.Equal(t, "text/plain", rr.Header().Get("Content-Type"))
+}
+
+func TestWriteHTTPFlow(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"}, "slave-token"))
+
+	h := New(st)
+	req := httptest.NewRequest(http.MethodPost, "/api/write-tokens", bytes.NewBufferString(`{"task_id":"task-1","path":"/tmp/out.txt","overwrite":true}`))
+	req.Header.Set("Authorization", "Bearer driver-token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+	var created struct {
+		WriteID string `json:"write_id"`
+		PutURL  string `json:"put_url"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &created))
+	require.NotEmpty(t, created.WriteID)
+	require.Contains(t, created.PutURL, "/api/writes/"+created.WriteID)
+
+	req = httptest.NewRequest(http.MethodPut, "/api/writes/"+created.WriteID, bytes.NewBufferString("done"))
+	req.Header.Set("Authorization", "Bearer slave-token")
+	req.Header.Set("Content-Type", "text/plain")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	req = httptest.NewRequest(http.MethodGet, "/api/writes?task_id=task-1", nil)
+	req.Header.Set("Authorization", "Bearer driver-token")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), `"path":"/tmp/out.txt"`)
+	require.Contains(t, rr.Body.String(), `"content":"ZG9uZQ=="`)
+}
+
 func TestAPITasksExposesMCPToolDescriptors(t *testing.T) {
 	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
 	require.NoError(t, err)

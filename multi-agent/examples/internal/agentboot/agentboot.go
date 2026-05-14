@@ -112,6 +112,7 @@ func PublishCard(ctx context.Context, cfg *Config) error {
 		"agent_type":   "custom",
 		"card": map[string]interface{}{
 			"skills":        cfg.Discovery.Skills,
+			"short_id":      cfg.Credentials.ShortID,
 			"accepts_tasks": true,
 			"has_web_ui":    false,
 			"version":       "0.1.0",

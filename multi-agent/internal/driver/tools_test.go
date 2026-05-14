@@ -189,6 +189,178 @@ func TestTool_SubmitTask_RegistersFilesAndDelegates(t *testing.T) {
 	t.Fatal("submit_task tool not registered")
 }
 
+func TestTool_SubmitTask_ObserverLazyManifest(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "a.txt")
+	out := filepath.Join(dir, "out.txt")
+	if err := os.WriteFile(in, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var artifacts int
+	var writes int
+	observerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer observer-token" {
+			t.Fatalf("observer auth = %q", got)
+		}
+		switch r.URL.Path {
+		case "/api/artifacts":
+			artifacts++
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"artifact_id":"art_1","url":"` + r.Host + `/api/artifacts/art_1","state":"registered"}`))
+		case "/api/write-tokens":
+			writes++
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"write_id":"wr_1","put_url":"` + r.Host + `/api/writes/wr_1"}`))
+		case "/api/writes/wr_1":
+			if r.Method != http.MethodPatch {
+				t.Fatalf("write rebind method = %s", r.Method)
+			}
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected observer path: %s", r.URL.Path)
+		}
+	}))
+	defer observerServer.Close()
+
+	var gotPrompt string
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{{AgentID: "sbx-master", DisplayName: "master-prod", Card: json.RawMessage(`{"skills":["fanout"]}`)}}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			gotPrompt = req.Prompt
+			return &agentsdk.DelegateTaskResponse{TaskID: "t-1"}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	tools.cfg.Observer.Enabled = true
+	tools.cfg.Observer.URL = observerServer.URL
+	tools.cfg.Observer.Token = "observer-token"
+	tools.cfg.DriverDefaults.ArtifactTransport = ArtifactTransportObserverLazy
+
+	for _, tt := range tools.All() {
+		if tt.Name() == "submit_task" {
+			res, err := tt.Call(context.Background(), json.RawMessage(`{
+				"prompt":"merge",
+				"read_paths":["`+in+`"],
+				"write_paths":[{"path":"`+out+`","overwrite":true}]
+			}`))
+			if err != nil {
+				t.Fatalf("submit_task: %v", err)
+			}
+			if artifacts != 1 || writes != 1 {
+				t.Fatalf("observer calls: artifacts=%d writes=%d", artifacts, writes)
+			}
+			if strings.Contains(gotPrompt, "/api/agent/peer/") {
+				t.Fatalf("prompt still uses peer proxy: %s", gotPrompt)
+			}
+			for _, want := range []string{"/api/artifacts/art_1", "/api/writes/wr_1"} {
+				if !strings.Contains(gotPrompt, want) {
+					t.Fatalf("prompt missing %s: %s", want, gotPrompt)
+				}
+			}
+			if !strings.Contains(string(res), "/api/artifacts/art_1") {
+				t.Fatalf("response missing artifact URL: %s", res)
+			}
+			return
+		}
+	}
+	t.Fatal("submit_task tool not registered")
+}
+
+func TestTool_SubmitTask_ObserverLazyRejectsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{{AgentID: "sbx-master", DisplayName: "master-prod", Card: json.RawMessage(`{"skills":["fanout"]}`)}}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	tools.cfg.Observer.Enabled = true
+	tools.cfg.Observer.URL = "http://observer.example"
+	tools.cfg.Observer.Token = "observer-token"
+	tools.cfg.DriverDefaults.ArtifactTransport = ArtifactTransportObserverLazy
+
+	for _, tt := range tools.All() {
+		if tt.Name() == "submit_task" {
+			_, err := tt.Call(context.Background(), json.RawMessage(`{"prompt":"merge","read_paths":["`+dir+`"]}`))
+			if err == nil || !strings.Contains(err.Error(), "directory read_paths are not implemented") {
+				t.Fatalf("err = %v", err)
+			}
+			return
+		}
+	}
+	t.Fatal("submit_task tool not registered")
+}
+
+func TestObserverRelayServesPendingFileRequest(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(in, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := NewFileRegistry(100)
+	reg.RegisterObserverArtifact("art_1", in, "file")
+
+	var uploaded string
+	observerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer observer-token" {
+			t.Fatalf("observer auth = %q", got)
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/artifact-requests":
+			_, _ = w.Write([]byte(`{"requests":[{"request_id":"fetch_1","artifact_id":"art_1","kind":"file","path":"` + in + `","state":"pending"}]}`))
+		case r.Method == http.MethodPut && r.URL.Path == "/api/artifacts/art_1/content":
+			body, _ := io.ReadAll(r.Body)
+			uploaded = string(body)
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected observer request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer observerServer.Close()
+
+	relay := &ObserverRelay{baseURL: observerServer.URL, token: "observer-token", http: observerServer.Client()}
+	err := relay.ServePendingOnce(context.Background(), reg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uploaded != "hello" {
+		t.Fatalf("uploaded = %q", uploaded)
+	}
+}
+
+func TestObserverRelaySyncWrites(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "out.txt")
+	reg := NewFileRegistry(100)
+
+	observerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/writes" || r.URL.Query().Get("task_id") != "t-1" {
+			t.Fatalf("unexpected observer request: %s %s", r.Method, r.URL.String())
+		}
+		_, _ = w.Write([]byte(`{"writes":[{"write_id":"wr_1","path":"` + out + `","overwrite":true,"bytes":4,"sha256":"s","content":"ZG9uZQ=="}]}`))
+	}))
+	defer observerServer.Close()
+
+	relay := &ObserverRelay{baseURL: observerServer.URL, token: "observer-token", http: observerServer.Client()}
+	written, err := relay.SyncWrites(context.Background(), "t-1", false, reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(written) != 1 || written[0].Path != out {
+		t.Fatalf("written: %+v", written)
+	}
+	body, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "done" {
+		t.Fatalf("body = %q", body)
+	}
+}
+
 func TestTool_SubmitTask_EmitsSlaveTargetRoleForNonMasterTarget(t *testing.T) {
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
@@ -413,8 +585,7 @@ func TestTool_TailSubtasks_PeerProxiesMaster(t *testing.T) {
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
 			return []agentsdk.AgentCard{
 				{AgentID: "sbx-master", DisplayName: "master-prod",
-					ShortID: "m-short",
-					Card:    json.RawMessage(`{"skills":["fanout"]}`)},
+					Card: json.RawMessage(`{"skills":["fanout"],"short_id":"m-short"}`)},
 			}, nil
 		},
 		peerProxyFunc: func(method, target, path string, body io.Reader) (*http.Response, error) {

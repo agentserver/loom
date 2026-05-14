@@ -45,7 +45,14 @@ type DriverDefaults struct {
 	AuditLogDir        string `yaml:"audit_log_dir"`
 	DisableUIDCheck    bool   `yaml:"disable_uid_check"`
 	MaxDirCacheEntries int    `yaml:"max_dir_cache_entries"`
+	ArtifactTransport  string `yaml:"artifact_transport"`
 }
+
+const (
+	ArtifactTransportPeerProxy     = "peer_proxy"
+	ArtifactTransportObserverLazy  = "observer_lazy"
+	ArtifactTransportObserverEager = "observer_eager"
+)
 
 type Observer struct {
 	Enabled     bool   `yaml:"enabled"`
@@ -80,6 +87,9 @@ func LoadConfig(path string) (*Config, error) {
 	if c.DriverDefaults.MaxDirCacheEntries == 0 {
 		c.DriverDefaults.MaxDirCacheEntries = 50000
 	}
+	if c.DriverDefaults.ArtifactTransport == "" {
+		c.DriverDefaults.ArtifactTransport = ArtifactTransportPeerProxy
+	}
 	if c.Observer.URL != "" {
 		if c.Observer.AgentID == "" {
 			c.Observer.AgentID = c.Discovery.DisplayName
@@ -98,6 +108,9 @@ func LoadConfig(path string) (*Config, error) {
 		if c.Observer.Token == "" {
 			return nil, fmt.Errorf("observer.token is required when observer.enabled is true")
 		}
+	}
+	if c.DriverDefaults.ArtifactTransport == ArtifactTransportObserverLazy && !c.Observer.Enabled {
+		return nil, fmt.Errorf("observer must be enabled when driver_defaults.artifact_transport is observer_lazy")
 	}
 	return &c, nil
 }

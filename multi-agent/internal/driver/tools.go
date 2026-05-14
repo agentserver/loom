@@ -35,11 +35,12 @@ type Tools struct {
 	sdk      SDKClient
 	cfg      *Config
 	observer ObserverSink
+	relay    *ObserverRelay
 }
 
 // NewTools constructs a Tools bundle.
 func NewTools(reg *FileRegistry, audit *AuditLog, sdk SDKClient, cfg *Config, obs ObserverSink) *Tools {
-	return &Tools{reg: reg, audit: audit, sdk: sdk, cfg: cfg, observer: obs}
+	return &Tools{reg: reg, audit: audit, sdk: sdk, cfg: cfg, observer: obs, relay: NewObserverRelay(cfg)}
 }
 
 func (t *Tools) emit(ev observer.Event) {
@@ -64,6 +65,17 @@ func (t *Tools) All() []Tool {
 func (t *Tools) peerProxyURL(suffix string) string {
 	return strings.TrimRight(t.cfg.Server.URL, "/") +
 		"/api/agent/peer/" + t.cfg.Credentials.ShortID + "/proxy" + suffix
+}
+
+func (t *Tools) useObserverRelay() bool {
+	return t.cfg != nil && t.cfg.DriverDefaults.ArtifactTransport == ArtifactTransportObserverLazy
+}
+
+func (t *Tools) observerRelay() *ObserverRelay {
+	if t.relay == nil {
+		t.relay = NewObserverRelay(t.cfg)
+	}
+	return t.relay
 }
 
 // resolveTarget picks a target agent by display_name override, config default,
@@ -127,11 +139,8 @@ func observerRoleForCard(c agentsdk.AgentCard) string {
 }
 
 func cardShortID(c agentsdk.AgentCard) string {
-	// Prefer the top-level ShortID added by Task 3.5.
-	if c.ShortID != "" {
-		return c.ShortID
-	}
-	// Fallback for older agentserver builds.
+	// agentserver v0.40.0 does not expose short_id as a top-level AgentCard
+	// field. Agents that need peer-proxy addressing publish it inside card.
 	var card struct {
 		ShortID string `json:"short_id"`
 	}
@@ -178,12 +187,8 @@ func (l *listAgentsTool) Call(ctx context.Context, _ json.RawMessage) (json.RawM
 			ShortID   string          `json:"short_id"`
 		}
 		_ = json.Unmarshal(c.Card, &card)
-		shortID := c.ShortID
-		if shortID == "" {
-			shortID = card.ShortID
-		}
 		results = append(results, out{
-			AgentID: c.AgentID, DisplayName: c.DisplayName, ShortID: shortID,
+			AgentID: c.AgentID, DisplayName: c.DisplayName, ShortID: card.ShortID,
 			Skills: card.Skills, Tools: card.Tools, Resources: card.Resources,
 			Description: c.Description,
 		})
@@ -250,32 +255,48 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 			return nil, &MCPToolError{Message: "symlinks not allowed: " + absP}
 		}
 		if info.IsDir() {
+			if s.t.useObserverRelay() {
+				return nil, &MCPToolError{Message: "observer_lazy directory read_paths are not implemented yet; use file paths or artifact_transport=peer_proxy"}
+			}
 			tok := s.t.reg.RegisterDir(absP)
 			s.t.audit.Log(AuditEvent{Event: "register_read_dir", Path: absP})
-			manifest.Files = append(manifest.Files, FileEntry{
+			entry := FileEntry{
 				Path:    absP,
 				Kind:    "dir",
 				ListURL: s.t.peerProxyURL("/files/dir/" + tok + "?recursive=true"),
 				BlobURL: s.t.peerProxyURL("/files/dir/" + tok + "/blob"),
-			})
+			}
+			manifest.Files = append(manifest.Files, entry)
 		} else {
 			sha, size, mt, err := s.t.reg.RegisterFile(absP)
 			if err != nil {
 				return nil, &MCPToolError{Message: err.Error()}
 			}
 			s.t.audit.Log(AuditEvent{Event: "register_read", Path: absP, SHA256: sha, Bytes: size})
-			manifest.Files = append(manifest.Files, FileEntry{
+			entry := FileEntry{
 				Path:   absP,
 				Kind:   "file",
 				Bytes:  size,
 				MIME:   mt,
 				SHA256: sha,
 				URL:    s.t.peerProxyURL("/files/blob/" + sha),
-			})
+			}
+			if s.t.useObserverRelay() {
+				relayResp, err := s.t.observerRelay().RegisterArtifact(ctx, observerArtifactCreate{
+					Path: absP, Kind: "file", MIME: mt, Bytes: size, SHA256: sha, Mode: "lazy",
+				})
+				if err != nil {
+					return nil, &MCPToolError{Message: "observer register file: " + err.Error()}
+				}
+				s.t.reg.RegisterObserverArtifact(relayResp.ArtifactID, absP, "file")
+				entry.URL = relayResp.URL
+			}
+			manifest.Files = append(manifest.Files, entry)
 		}
 	}
 
 	var writeTokens []string
+	var observerWriteIDs []string
 	for _, w := range args.WritePaths {
 		absP, err := filepath.Abs(w.Path)
 		if err != nil {
@@ -287,11 +308,22 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		tok := s.t.reg.RegisterWrite(absP, w.Overwrite, "")
 		writeTokens = append(writeTokens, tok)
 		s.t.audit.Log(AuditEvent{Event: "register_write", Path: absP, Overwrite: w.Overwrite})
+		putURL := s.t.peerProxyURL("/files/put/" + tok)
+		if s.t.useObserverRelay() {
+			relayResp, err := s.t.observerRelay().CreateWrite(ctx, observerWriteCreate{
+				TaskID: "__pending__", Path: absP, Overwrite: w.Overwrite,
+			})
+			if err != nil {
+				return nil, &MCPToolError{Message: "observer create write: " + err.Error()}
+			}
+			observerWriteIDs = append(observerWriteIDs, relayResp.WriteID)
+			putURL = relayResp.PutURL
+		}
 		manifest.Writes = append(manifest.Writes, WriteRequestEntry{
 			Path:      absP,
 			Kind:      "file",
 			Overwrite: w.Overwrite,
-			PutURL:    s.t.peerProxyURL("/files/put/" + tok),
+			PutURL:    putURL,
 		})
 	}
 
@@ -330,6 +362,11 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 
 	for _, tok := range writeTokens {
 		s.t.reg.RebindWriteTokenTaskID(tok, resp.TaskID)
+	}
+	for _, writeID := range observerWriteIDs {
+		if err := s.t.observerRelay().UpdateWriteTask(ctx, writeID, resp.TaskID); err != nil {
+			return nil, &MCPToolError{Message: "observer update write task: " + err.Error()}
+		}
 	}
 	s.t.reg.TrackTask(resp.TaskID, writeTokens)
 
@@ -447,6 +484,11 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 				TaskID: taskID,
 				Status: info.Status,
 			})
+			if w.t.useObserverRelay() {
+				if _, err := w.t.observerRelay().SyncWrites(ctx, taskID, w.t.cfg.DriverDefaults.DisableUIDCheck, w.t.reg); err != nil {
+					return nil, &MCPToolError{Message: "observer sync writes: " + err.Error()}
+				}
+			}
 			written := w.t.reg.WrittenFiles(args.TaskID)
 			w.t.reg.ForgetTask(args.TaskID)
 			progress := w.t.observerProgress(ctx, taskID)

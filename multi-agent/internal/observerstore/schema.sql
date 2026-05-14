@@ -88,3 +88,51 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
     created_at TEXT NOT NULL,
     PRIMARY KEY (workspace_id, task_id, name)
 );
+
+CREATE TABLE IF NOT EXISTS artifacts (
+    workspace_id TEXT NOT NULL,
+    id TEXT NOT NULL,
+    owner_agent_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    mime TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL,
+    bytes INTEGER NOT NULL DEFAULT 0,
+    sha256 TEXT NOT NULL DEFAULT '',
+    content BLOB,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, id)
+);
+
+CREATE TABLE IF NOT EXISTS artifact_requests (
+    workspace_id TEXT NOT NULL,
+    id TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    requester_agent_id TEXT NOT NULL,
+    owner_agent_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, id)
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_requests_owner_state ON artifact_requests(workspace_id, owner_agent_id, state);
+
+CREATE TABLE IF NOT EXISTS writes (
+    workspace_id TEXT NOT NULL,
+    id TEXT NOT NULL,
+    owner_agent_id TEXT NOT NULL,
+    writer_agent_id TEXT NOT NULL DEFAULT '',
+    task_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    overwrite INTEGER NOT NULL DEFAULT 0,
+    state TEXT NOT NULL,
+    mime TEXT NOT NULL DEFAULT '',
+    bytes INTEGER NOT NULL DEFAULT 0,
+    sha256 TEXT NOT NULL DEFAULT '',
+    content BLOB,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, id)
+);
+CREATE INDEX IF NOT EXISTS idx_writes_owner_task_state ON writes(workspace_id, owner_agent_id, task_id, state);

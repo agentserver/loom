@@ -30,3 +30,4 @@ driver_defaults:
   audit_log_dir: ""              # blank = ~/.cache/multi-agent/<short_id>/
   disable_uid_check: false
   max_dir_cache_entries: 50000
+  artifact_transport: peer_proxy # peer_proxy | observer_lazy | observer_eager

@@ -31,17 +31,23 @@ type WrittenFile struct {
 
 // FileRegistry holds read/dir/write tokens for an in-flight driver process.
 type FileRegistry struct {
-	mu            sync.RWMutex
-	blobs         map[string]string            // sha256 -> abs path
-	blobMeta      map[string]blobMeta          // sha256 -> size, mime
-	dirs          map[string]string            // dir token -> abs root
-	writes        map[string]WriteEntry        // write token -> entry (single-use)
-	dirSHA        map[string]map[string]dirEntry // dir token -> relpath -> entry
-	maxDirEntries int
+	mu                sync.RWMutex
+	blobs             map[string]string              // sha256 -> abs path
+	blobMeta          map[string]blobMeta            // sha256 -> size, mime
+	dirs              map[string]string              // dir token -> abs root
+	writes            map[string]WriteEntry          // write token -> entry (single-use)
+	dirSHA            map[string]map[string]dirEntry // dir token -> relpath -> entry
+	observerArtifacts map[string]observerArtifactEntry
+	maxDirEntries     int
 
 	taskMu      sync.Mutex
 	taskWritten map[string][]WrittenFile // task_id -> appended writes
 	taskOrder   []string                 // insertion order for bounded eviction
+}
+
+type observerArtifactEntry struct {
+	path string
+	kind string
 }
 
 type blobMeta struct {
@@ -59,13 +65,14 @@ func NewFileRegistry(maxDirEntries int) *FileRegistry {
 		maxDirEntries = 50000
 	}
 	return &FileRegistry{
-		blobs:         map[string]string{},
-		blobMeta:      map[string]blobMeta{},
-		dirs:          map[string]string{},
-		writes:        map[string]WriteEntry{},
-		dirSHA:        map[string]map[string]dirEntry{},
-		maxDirEntries: maxDirEntries,
-		taskWritten:   map[string][]WrittenFile{},
+		blobs:             map[string]string{},
+		blobMeta:          map[string]blobMeta{},
+		dirs:              map[string]string{},
+		writes:            map[string]WriteEntry{},
+		dirSHA:            map[string]map[string]dirEntry{},
+		observerArtifacts: map[string]observerArtifactEntry{},
+		maxDirEntries:     maxDirEntries,
+		taskWritten:       map[string][]WrittenFile{},
 	}
 }
 
@@ -248,6 +255,22 @@ func (r *FileRegistry) ForgetTask(taskID string) {
 			return
 		}
 	}
+}
+
+func (r *FileRegistry) RegisterObserverArtifact(id, absPath, kind string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.observerArtifacts[id] = observerArtifactEntry{path: absPath, kind: kind}
+}
+
+func (r *FileRegistry) LookupObserverArtifact(id string) (path, kind string, ok bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	entry, ok := r.observerArtifacts[id]
+	if !ok {
+		return "", "", false
+	}
+	return entry.path, entry.kind, true
 }
 
 func newToken() string {

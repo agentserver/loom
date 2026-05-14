@@ -1,6 +1,7 @@
 package observerstore
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -8,6 +9,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -85,6 +88,75 @@ type MCPServerView struct {
 	ToolDescriptors json.RawMessage `json:"tool_descriptors,omitempty"`
 }
 
+const (
+	ArtifactStateRegistered = "registered"
+	ArtifactStatePending    = "pending"
+	ArtifactStateAvailable  = "available"
+	WriteStateRegistered    = "registered"
+	WriteStateCompleted     = "completed"
+)
+
+type ArtifactCreate struct {
+	WorkspaceID  string
+	OwnerAgentID string
+	Path         string
+	Kind         string
+	MIME         string
+	Bytes        int64
+	SHA256       string
+	State        string
+}
+
+type Artifact struct {
+	ID           string `json:"artifact_id"`
+	WorkspaceID  string `json:"workspace_id,omitempty"`
+	OwnerAgentID string `json:"owner_agent_id,omitempty"`
+	Path         string `json:"path,omitempty"`
+	Kind         string `json:"kind,omitempty"`
+	MIME         string `json:"mime,omitempty"`
+	State        string `json:"state"`
+	Bytes        int64  `json:"bytes,omitempty"`
+	SHA256       string `json:"sha256,omitempty"`
+}
+
+type ArtifactRequest struct {
+	RequestID    string `json:"request_id"`
+	ArtifactID   string `json:"artifact_id"`
+	Kind         string `json:"kind"`
+	Path         string `json:"path"`
+	State        string `json:"state"`
+	WorkspaceID  string `json:"workspace_id,omitempty"`
+	OwnerAgentID string `json:"owner_agent_id,omitempty"`
+}
+
+type ArtifactContent struct {
+	Artifact
+	Body io.ReadCloser
+}
+
+type WriteCreate struct {
+	WorkspaceID  string
+	OwnerAgentID string
+	TaskID       string
+	Path         string
+	Overwrite    bool
+}
+
+type Write struct {
+	ID            string `json:"write_id"`
+	WorkspaceID   string `json:"workspace_id,omitempty"`
+	OwnerAgentID  string `json:"owner_agent_id,omitempty"`
+	WriterAgentID string `json:"writer_agent_id,omitempty"`
+	TaskID        string `json:"task_id,omitempty"`
+	Path          string `json:"path"`
+	Overwrite     bool   `json:"overwrite"`
+	State         string `json:"state"`
+	MIME          string `json:"mime,omitempty"`
+	Bytes         int64  `json:"bytes,omitempty"`
+	SHA256        string `json:"sha256,omitempty"`
+	Content       []byte `json:"-"`
+}
+
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -142,6 +214,61 @@ func ensureColumns(db *sql.DB) error {
 		return err
 	}
 	if _, err := db.Exec(`ALTER TABLE mcp_servers ADD COLUMN tool_descriptors TEXT`); err != nil && !isDuplicateColumn(err) {
+		return err
+	}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS artifacts (
+		workspace_id TEXT NOT NULL,
+		id TEXT NOT NULL,
+		owner_agent_id TEXT NOT NULL,
+		path TEXT NOT NULL,
+		kind TEXT NOT NULL,
+		mime TEXT NOT NULL DEFAULT '',
+		state TEXT NOT NULL,
+		bytes INTEGER NOT NULL DEFAULT 0,
+		sha256 TEXT NOT NULL DEFAULT '',
+		content BLOB,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		PRIMARY KEY (workspace_id, id)
+	)`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS artifact_requests (
+		workspace_id TEXT NOT NULL,
+		id TEXT NOT NULL,
+		artifact_id TEXT NOT NULL,
+		requester_agent_id TEXT NOT NULL,
+		owner_agent_id TEXT NOT NULL,
+		state TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		PRIMARY KEY (workspace_id, id)
+	)`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_artifact_requests_owner_state ON artifact_requests(workspace_id, owner_agent_id, state)`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS writes (
+		workspace_id TEXT NOT NULL,
+		id TEXT NOT NULL,
+		owner_agent_id TEXT NOT NULL,
+		writer_agent_id TEXT NOT NULL DEFAULT '',
+		task_id TEXT NOT NULL,
+		path TEXT NOT NULL,
+		overwrite INTEGER NOT NULL DEFAULT 0,
+		state TEXT NOT NULL,
+		mime TEXT NOT NULL DEFAULT '',
+		bytes INTEGER NOT NULL DEFAULT 0,
+		sha256 TEXT NOT NULL DEFAULT '',
+		content BLOB,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		PRIMARY KEY (workspace_id, id)
+	)`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_writes_owner_task_state ON writes(workspace_id, owner_agent_id, task_id, state)`); err != nil {
 		return err
 	}
 	return nil
@@ -310,6 +437,219 @@ func (s *Store) ListEvents(taskID string) ([]observer.Event, error) {
 		return nil, err
 	}
 	return events, nil
+}
+
+func (s *Store) CreateArtifact(in ArtifactCreate) (Artifact, error) {
+	if in.State == "" {
+		in.State = ArtifactStateRegistered
+	}
+	if in.WorkspaceID == "" || in.OwnerAgentID == "" || in.Path == "" || in.Kind == "" {
+		return Artifact{}, errors.New("observerstore: workspace, owner, path, and kind are required")
+	}
+	id, err := prefixedID("art")
+	if err != nil {
+		return Artifact{}, err
+	}
+	now := nowUTC()
+	_, err = s.db.Exec(`INSERT INTO artifacts(workspace_id, id, owner_agent_id, path, kind, mime, state, bytes, sha256, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		in.WorkspaceID, id, in.OwnerAgentID, in.Path, in.Kind, in.MIME, in.State, in.Bytes, in.SHA256, now, now)
+	if err != nil {
+		return Artifact{}, err
+	}
+	return Artifact{
+		ID: id, WorkspaceID: in.WorkspaceID, OwnerAgentID: in.OwnerAgentID,
+		Path: in.Path, Kind: in.Kind, MIME: in.MIME, State: in.State,
+		Bytes: in.Bytes, SHA256: in.SHA256,
+	}, nil
+}
+
+func (s *Store) RequestArtifact(workspaceID, requesterAgentID, artifactID string) (ArtifactRequest, error) {
+	var owner, path, kind, state string
+	err := s.db.QueryRow(`SELECT owner_agent_id, path, kind, state FROM artifacts WHERE workspace_id=? AND id=?`, workspaceID, artifactID).
+		Scan(&owner, &path, &kind, &state)
+	if err == sql.ErrNoRows {
+		return ArtifactRequest{}, fmt.Errorf("artifact not found")
+	}
+	if err != nil {
+		return ArtifactRequest{}, err
+	}
+	if state == ArtifactStateAvailable {
+		return ArtifactRequest{ArtifactID: artifactID, Kind: kind, Path: path, State: ArtifactStateAvailable, WorkspaceID: workspaceID, OwnerAgentID: owner}, nil
+	}
+	var existing string
+	err = s.db.QueryRow(`SELECT id FROM artifact_requests WHERE workspace_id=? AND artifact_id=? AND state=? ORDER BY created_at ASC LIMIT 1`,
+		workspaceID, artifactID, ArtifactStatePending).Scan(&existing)
+	if err != nil && err != sql.ErrNoRows {
+		return ArtifactRequest{}, err
+	}
+	if existing == "" {
+		var genErr error
+		existing, genErr = prefixedID("fetch")
+		if genErr != nil {
+			return ArtifactRequest{}, genErr
+		}
+		now := nowUTC()
+		_, err = s.db.Exec(`INSERT INTO artifact_requests(workspace_id, id, artifact_id, requester_agent_id, owner_agent_id, state, created_at, updated_at)
+			VALUES(?, ?, ?, ?, ?, ?, ?, ?)`, workspaceID, existing, artifactID, requesterAgentID, owner, ArtifactStatePending, now, now)
+		if err != nil {
+			return ArtifactRequest{}, err
+		}
+	}
+	return ArtifactRequest{RequestID: existing, ArtifactID: artifactID, Kind: kind, Path: path, State: ArtifactStatePending, WorkspaceID: workspaceID, OwnerAgentID: owner}, nil
+}
+
+func (s *Store) ListArtifactRequests(workspaceID, ownerAgentID string) ([]ArtifactRequest, error) {
+	rows, err := s.db.Query(`SELECT r.id, r.artifact_id, a.kind, a.path, r.state
+		FROM artifact_requests r JOIN artifacts a ON a.workspace_id=r.workspace_id AND a.id=r.artifact_id
+		WHERE r.workspace_id=? AND r.owner_agent_id=? AND r.state=?
+		ORDER BY r.created_at ASC`, workspaceID, ownerAgentID, ArtifactStatePending)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ArtifactRequest
+	for rows.Next() {
+		var r ArtifactRequest
+		r.WorkspaceID = workspaceID
+		r.OwnerAgentID = ownerAgentID
+		if err := rows.Scan(&r.RequestID, &r.ArtifactID, &r.Kind, &r.Path, &r.State); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) StoreArtifactContent(workspaceID, ownerAgentID, artifactID, mime string, body io.Reader) error {
+	data, sha, err := readAndHash(body)
+	if err != nil {
+		return err
+	}
+	now := nowUTC()
+	res, err := s.db.Exec(`UPDATE artifacts SET state=?, mime=CASE WHEN ?='' THEN mime ELSE ? END, bytes=?, sha256=?, content=?, updated_at=?
+		WHERE workspace_id=? AND id=? AND owner_agent_id=?`,
+		ArtifactStateAvailable, mime, mime, len(data), sha, data, now, workspaceID, artifactID, ownerAgentID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("artifact not found")
+	}
+	_, err = s.db.Exec(`UPDATE artifact_requests SET state=?, updated_at=? WHERE workspace_id=? AND artifact_id=? AND owner_agent_id=? AND state=?`,
+		ArtifactStateAvailable, now, workspaceID, artifactID, ownerAgentID, ArtifactStatePending)
+	return err
+}
+
+func (s *Store) OpenArtifactContent(workspaceID, artifactID string) (ArtifactContent, error) {
+	var a ArtifactContent
+	var content []byte
+	err := s.db.QueryRow(`SELECT id, owner_agent_id, path, kind, mime, state, bytes, sha256, content
+		FROM artifacts WHERE workspace_id=? AND id=?`, workspaceID, artifactID).
+		Scan(&a.ID, &a.OwnerAgentID, &a.Path, &a.Kind, &a.MIME, &a.State, &a.Bytes, &a.SHA256, &content)
+	if err == sql.ErrNoRows {
+		return ArtifactContent{}, fmt.Errorf("artifact not found")
+	}
+	if err != nil {
+		return ArtifactContent{}, err
+	}
+	if a.State != ArtifactStateAvailable {
+		return ArtifactContent{}, fmt.Errorf("artifact not available")
+	}
+	a.WorkspaceID = workspaceID
+	a.Body = io.NopCloser(bytes.NewReader(content))
+	return a, nil
+}
+
+func (s *Store) CreateWrite(in WriteCreate) (Write, error) {
+	if in.WorkspaceID == "" || in.OwnerAgentID == "" || in.TaskID == "" || in.Path == "" {
+		return Write{}, errors.New("observerstore: workspace, owner, task, and path are required")
+	}
+	id, err := prefixedID("wr")
+	if err != nil {
+		return Write{}, err
+	}
+	now := nowUTC()
+	overwrite := 0
+	if in.Overwrite {
+		overwrite = 1
+	}
+	_, err = s.db.Exec(`INSERT INTO writes(workspace_id, id, owner_agent_id, task_id, path, overwrite, state, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`, in.WorkspaceID, id, in.OwnerAgentID, in.TaskID, in.Path, overwrite, WriteStateRegistered, now, now)
+	if err != nil {
+		return Write{}, err
+	}
+	return Write{ID: id, WorkspaceID: in.WorkspaceID, OwnerAgentID: in.OwnerAgentID, TaskID: in.TaskID, Path: in.Path, Overwrite: in.Overwrite, State: WriteStateRegistered}, nil
+}
+
+func (s *Store) StoreWriteContent(workspaceID, writerAgentID, writeID, mime string, body io.Reader) error {
+	data, sha, err := readAndHash(body)
+	if err != nil {
+		return err
+	}
+	now := nowUTC()
+	res, err := s.db.Exec(`UPDATE writes SET writer_agent_id=?, state=?, mime=?, bytes=?, sha256=?, content=?, updated_at=?
+		WHERE workspace_id=? AND id=? AND state=?`,
+		writerAgentID, WriteStateCompleted, mime, len(data), sha, data, now, workspaceID, writeID, WriteStateRegistered)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("write not found or already completed")
+	}
+	return nil
+}
+
+func (s *Store) UpdateWriteTaskID(workspaceID, ownerAgentID, writeID, taskID string) error {
+	if taskID == "" {
+		return errors.New("observerstore: task_id is required")
+	}
+	res, err := s.db.Exec(`UPDATE writes SET task_id=?, updated_at=? WHERE workspace_id=? AND owner_agent_id=? AND id=?`,
+		taskID, nowUTC(), workspaceID, ownerAgentID, writeID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("write not found")
+	}
+	return nil
+}
+
+func (s *Store) ListCompletedWrites(workspaceID, ownerAgentID, taskID string) ([]Write, error) {
+	rows, err := s.db.Query(`SELECT id, writer_agent_id, path, overwrite, mime, bytes, sha256, content
+		FROM writes WHERE workspace_id=? AND owner_agent_id=? AND task_id=? AND state=?
+		ORDER BY updated_at ASC`, workspaceID, ownerAgentID, taskID, WriteStateCompleted)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Write
+	for rows.Next() {
+		var w Write
+		var overwrite int
+		w.WorkspaceID = workspaceID
+		w.OwnerAgentID = ownerAgentID
+		w.TaskID = taskID
+		w.State = WriteStateCompleted
+		if err := rows.Scan(&w.ID, &w.WriterAgentID, &w.Path, &overwrite, &w.MIME, &w.Bytes, &w.SHA256, &w.Content); err != nil {
+			return nil, err
+		}
+		w.Overwrite = overwrite != 0
+		out = append(out, w)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) listSubtasks(workspaceID, taskID string) ([]SubtaskView, error) {
@@ -746,6 +1086,23 @@ func generatedEventID() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(bytes[:]), nil
+}
+
+func prefixedID(prefix string) (string, error) {
+	id, err := generatedEventID()
+	if err != nil {
+		return "", err
+	}
+	return prefix + "_" + id, nil
+}
+
+func readAndHash(r io.Reader) ([]byte, string, error) {
+	var buf bytes.Buffer
+	hasher := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(&buf, hasher), r); err != nil {
+		return nil, "", err
+	}
+	return buf.Bytes(), hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 func taskSummary(tx *sql.Tx, workspaceID, taskID string) string {

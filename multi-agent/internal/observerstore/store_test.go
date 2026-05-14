@@ -1,7 +1,9 @@
 package observerstore
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"path/filepath"
 	"testing"
 
@@ -652,4 +654,63 @@ func TestSchemaRequiresUniqueTokenHashes(t *testing.T) {
 	}
 	require.NoError(t, rows.Err())
 	require.True(t, foundUnique)
+}
+
+func TestArtifactLazyLifecycle(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	art, err := s.CreateArtifact(ArtifactCreate{
+		WorkspaceID: "ws1", OwnerAgentID: "driver", Path: "/tmp/input.txt",
+		Kind: "file", MIME: "text/plain", State: ArtifactStateRegistered,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, art.ID)
+	require.Equal(t, ArtifactStateRegistered, art.State)
+
+	req, err := s.RequestArtifact("ws1", "slave", art.ID)
+	require.NoError(t, err)
+	require.Equal(t, ArtifactStatePending, req.State)
+	require.NotEmpty(t, req.RequestID)
+
+	pending, err := s.ListArtifactRequests("ws1", "driver")
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	require.Equal(t, art.ID, pending[0].ArtifactID)
+	require.Equal(t, "/tmp/input.txt", pending[0].Path)
+
+	err = s.StoreArtifactContent("ws1", "driver", art.ID, "text/plain", bytes.NewBufferString("hello"))
+	require.NoError(t, err)
+
+	got, err := s.OpenArtifactContent("ws1", art.ID)
+	require.NoError(t, err)
+	body, err := io.ReadAll(got.Body)
+	require.NoError(t, err)
+	require.NoError(t, got.Body.Close())
+	require.Equal(t, "hello", string(body))
+	require.Equal(t, int64(5), got.Bytes)
+	require.Equal(t, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", got.SHA256)
+}
+
+func TestWriteLifecycle(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	wr, err := s.CreateWrite(WriteCreate{
+		WorkspaceID: "ws1", OwnerAgentID: "driver", TaskID: "task-1",
+		Path: "/tmp/out.txt", Overwrite: true,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, wr.ID)
+
+	err = s.StoreWriteContent("ws1", "slave", wr.ID, "text/plain", bytes.NewBufferString("done"))
+	require.NoError(t, err)
+
+	writes, err := s.ListCompletedWrites("ws1", "driver", "task-1")
+	require.NoError(t, err)
+	require.Len(t, writes, 1)
+	require.Equal(t, "/tmp/out.txt", writes[0].Path)
+	require.Equal(t, int64(4), writes[0].Bytes)
+	require.Equal(t, "a4c3ed04a95a3da14a9d235c83d868bed7c0f45cf7f3faa751ee8f50598d2211", writes[0].SHA256)
+	require.Equal(t, "done", string(writes[0].Content))
 }
