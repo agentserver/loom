@@ -6,6 +6,7 @@ import (
 	"io"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/yourorg/multi-agent/internal/capability"
@@ -735,17 +736,25 @@ func TestTaskContractPersistence(t *testing.T) {
 
 func TestResourceSnapshotPersistence(t *testing.T) {
 	s := testStore(t)
-	body := json.RawMessage(`{"generated_at":"now","agents":[{"agent_id":"a","display_name":"slave"}]}`)
+	firstBody := json.RawMessage(`{"generated_at":"first","agents":[{"agent_id":"a","display_name":"slave"}]}`)
+	secondBody := json.RawMessage(`{"generated_at":"second","agents":[{"agent_id":"b","display_name":"driver"}]}`)
 
 	require.NoError(t, s.SaveResourceSnapshot(ResourceSnapshotRecord{
 		WorkspaceID:  "ws1",
 		SnapshotID:   "snap-1",
 		OwnerAgentID: "driver",
-		Body:         body,
+		Body:         firstBody,
+	}))
+	time.Sleep(time.Millisecond)
+	require.NoError(t, s.SaveResourceSnapshot(ResourceSnapshotRecord{
+		WorkspaceID:  "ws1",
+		SnapshotID:   "snap-2",
+		OwnerAgentID: "driver",
+		Body:         secondBody,
 	}))
 
 	got, err := s.GetLatestResourceSnapshot("ws1")
 	require.NoError(t, err)
-	require.Equal(t, "snap-1", got.SnapshotID)
-	require.JSONEq(t, string(body), string(got.Body))
+	require.Equal(t, "snap-2", got.SnapshotID)
+	require.JSONEq(t, string(secondBody), string(got.Body))
 }
