@@ -15,8 +15,8 @@ func (tc *TaskContract) ApplyDefaults() {
 	if tc.ExecutionPolicy.AllowMaster == nil {
 		tc.ExecutionPolicy.AllowMaster = Bool(true)
 	}
-	if !tc.ExecutionPolicy.AllowCodeArtifacts {
-		tc.ExecutionPolicy.AllowCodeArtifacts = true
+	if tc.ExecutionPolicy.AllowCodeArtifacts == nil {
+		tc.ExecutionPolicy.AllowCodeArtifacts = Bool(true)
 	}
 	if tc.ExecutionPolicy.CodePersistence == "" {
 		tc.ExecutionPolicy.CodePersistence = CodePersistenceObserverArtifactStore
@@ -81,6 +81,10 @@ func Bool(v bool) *bool {
 
 func (p ExecutionPolicy) AllowsMaster() bool {
 	return p.AllowMaster == nil || *p.AllowMaster
+}
+
+func (p ExecutionPolicy) AllowsCodeArtifacts() bool {
+	return p.AllowCodeArtifacts == nil || *p.AllowCodeArtifacts
 }
 
 func validatePolicy(p ExecutionPolicy) error {

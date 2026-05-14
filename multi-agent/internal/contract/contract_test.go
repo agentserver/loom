@@ -29,7 +29,7 @@ func TestTaskContractApplyDefaults(t *testing.T) {
 	if tc.ExecutionPolicy.AllowBuildMCP {
 		t.Fatalf("allow_build_mcp default = true")
 	}
-	if !tc.ExecutionPolicy.AllowCodeArtifacts {
+	if !tc.ExecutionPolicy.AllowsCodeArtifacts() {
 		t.Fatalf("allow_code_artifacts default = false")
 	}
 	if tc.ExecutionPolicy.CodePersistence != CodePersistenceObserverArtifactStore {
@@ -40,6 +40,36 @@ func TestTaskContractApplyDefaults(t *testing.T) {
 	}
 	if tc.ExecutionPolicy.MaxDAGNodes != 6 {
 		t.Fatalf("max_dag_nodes = %d", tc.ExecutionPolicy.MaxDAGNodes)
+	}
+}
+
+func TestTaskContractApplyDefaultsPreservesExplicitCodeArtifactsFalse(t *testing.T) {
+	raw := []byte(`{
+		"version": 1,
+		"conversation_id": "conv-1",
+		"intent": {
+			"goal": "generate a helper",
+			"success_criteria": ["helper is saved as an artifact"]
+		},
+		"data_contract": {
+			"write_targets": [{"type":"artifact","kind":"code","name":"helper.go"}]
+		},
+		"execution_policy": {
+			"allow_code_artifacts": false
+		}
+	}`)
+	var tc TaskContract
+	if err := json.Unmarshal(raw, &tc); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	tc.ApplyDefaults()
+
+	if tc.ExecutionPolicy.AllowCodeArtifacts == nil {
+		t.Fatalf("allow_code_artifacts pointer is nil")
+	}
+	if tc.ExecutionPolicy.AllowsCodeArtifacts() {
+		t.Fatalf("allow_code_artifacts false was not preserved")
 	}
 }
 

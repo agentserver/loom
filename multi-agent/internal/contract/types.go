@@ -56,7 +56,7 @@ type ExecutionPolicy struct {
 	Routing                          string   `json:"routing"`
 	AllowMaster                      *bool    `json:"allow_master,omitempty"`
 	AllowBuildMCP                    bool     `json:"allow_build_mcp"`
-	AllowCodeArtifacts               bool     `json:"allow_code_artifacts"`
+	AllowCodeArtifacts               *bool    `json:"allow_code_artifacts"`
 	CodePersistence                  string   `json:"code_persistence"`
 	ExposeCodeToUser                 string   `json:"expose_code_to_user"`
 	WriteMode                        string   `json:"write_mode"`
