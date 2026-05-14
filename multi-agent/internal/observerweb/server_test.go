@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -258,6 +259,31 @@ func TestAPITasksIncludesLatestProgress(t *testing.T) {
 	require.Len(t, tasks, 1)
 	require.Equal(t, "planner still running", tasks[0].LatestProgress)
 	require.False(t, tasks[0].IsFinal)
+}
+
+func TestTaskContractAPI(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "tok"))
+	h := New(st)
+
+	body := `{"task_id":"task-1","conversation_id":"conv-1","body":{"version":1,"intent":{"goal":"g","success_criteria":["s"]}}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/task-contracts", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	req = httptest.NewRequest(http.MethodGet, "/api/task-contracts/task-1", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var got observerstore.TaskContractRecord
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&got))
+	require.Equal(t, "conv-1", got.ConversationID)
 }
 
 func TestAPITasksAndEventsExposeValidationFailureEvidence(t *testing.T) {

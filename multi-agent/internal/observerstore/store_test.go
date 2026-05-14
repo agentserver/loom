@@ -714,3 +714,38 @@ func TestWriteLifecycle(t *testing.T) {
 	require.Equal(t, "a4c3ed04a95a3da14a9d235c83d868bed7c0f45cf7f3faa751ee8f50598d2211", writes[0].SHA256)
 	require.Equal(t, "done", string(writes[0].Content))
 }
+
+func TestTaskContractPersistence(t *testing.T) {
+	s := testStore(t)
+
+	body := json.RawMessage(`{"version":1,"conversation_id":"conv-1","intent":{"goal":"g","success_criteria":["s"]}}`)
+	require.NoError(t, s.SaveTaskContract(TaskContractRecord{
+		WorkspaceID:    "ws1",
+		TaskID:         "task-1",
+		ConversationID: "conv-1",
+		OwnerAgentID:   "driver",
+		Body:           body,
+	}))
+
+	got, err := s.GetTaskContract("ws1", "task-1")
+	require.NoError(t, err)
+	require.Equal(t, "conv-1", got.ConversationID)
+	require.JSONEq(t, string(body), string(got.Body))
+}
+
+func TestResourceSnapshotPersistence(t *testing.T) {
+	s := testStore(t)
+	body := json.RawMessage(`{"generated_at":"now","agents":[{"agent_id":"a","display_name":"slave"}]}`)
+
+	require.NoError(t, s.SaveResourceSnapshot(ResourceSnapshotRecord{
+		WorkspaceID:  "ws1",
+		SnapshotID:   "snap-1",
+		OwnerAgentID: "driver",
+		Body:         body,
+	}))
+
+	got, err := s.GetLatestResourceSnapshot("ws1")
+	require.NoError(t, err)
+	require.Equal(t, "snap-1", got.SnapshotID)
+	require.JSONEq(t, string(body), string(got.Body))
+}

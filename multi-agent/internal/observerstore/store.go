@@ -157,6 +157,24 @@ type Write struct {
 	Content       []byte `json:"-"`
 }
 
+type TaskContractRecord struct {
+	WorkspaceID    string          `json:"workspace_id"`
+	TaskID         string          `json:"task_id"`
+	ConversationID string          `json:"conversation_id"`
+	OwnerAgentID   string          `json:"owner_agent_id"`
+	Body           json.RawMessage `json:"body"`
+	CreatedAt      string          `json:"created_at,omitempty"`
+	UpdatedAt      string          `json:"updated_at,omitempty"`
+}
+
+type ResourceSnapshotRecord struct {
+	WorkspaceID  string          `json:"workspace_id"`
+	SnapshotID   string          `json:"snapshot_id"`
+	OwnerAgentID string          `json:"owner_agent_id"`
+	Body         json.RawMessage `json:"body"`
+	CreatedAt    string          `json:"created_at,omitempty"`
+}
+
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -650,6 +668,64 @@ func (s *Store) ListCompletedWrites(workspaceID, ownerAgentID, taskID string) ([
 		out = append(out, w)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) SaveTaskContract(in TaskContractRecord) error {
+	if in.WorkspaceID == "" || in.TaskID == "" || in.ConversationID == "" || in.OwnerAgentID == "" || len(in.Body) == 0 {
+		return errors.New("observerstore: workspace, task, conversation, owner, and body are required")
+	}
+	now := nowUTC()
+	_, err := s.db.Exec(`INSERT INTO task_contracts(workspace_id, task_id, conversation_id, owner_agent_id, body, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(workspace_id, task_id) DO UPDATE SET
+			conversation_id=excluded.conversation_id,
+			owner_agent_id=excluded.owner_agent_id,
+			body=excluded.body,
+			updated_at=excluded.updated_at`,
+		in.WorkspaceID, in.TaskID, in.ConversationID, in.OwnerAgentID, string(in.Body), now, now)
+	return err
+}
+
+func (s *Store) GetTaskContract(workspaceID, taskID string) (TaskContractRecord, error) {
+	var out TaskContractRecord
+	var body string
+	err := s.db.QueryRow(`SELECT workspace_id, task_id, conversation_id, owner_agent_id, body, created_at, updated_at
+		FROM task_contracts WHERE workspace_id=? AND task_id=?`, workspaceID, taskID).
+		Scan(&out.WorkspaceID, &out.TaskID, &out.ConversationID, &out.OwnerAgentID, &body, &out.CreatedAt, &out.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return TaskContractRecord{}, fmt.Errorf("task contract not found")
+	}
+	if err != nil {
+		return TaskContractRecord{}, err
+	}
+	out.Body = json.RawMessage(body)
+	return out, nil
+}
+
+func (s *Store) SaveResourceSnapshot(in ResourceSnapshotRecord) error {
+	if in.WorkspaceID == "" || in.SnapshotID == "" || in.OwnerAgentID == "" || len(in.Body) == 0 {
+		return errors.New("observerstore: workspace, snapshot, owner, and body are required")
+	}
+	now := nowUTC()
+	_, err := s.db.Exec(`INSERT INTO resource_snapshots(workspace_id, snapshot_id, owner_agent_id, body, created_at)
+		VALUES(?, ?, ?, ?, ?)`, in.WorkspaceID, in.SnapshotID, in.OwnerAgentID, string(in.Body), now)
+	return err
+}
+
+func (s *Store) GetLatestResourceSnapshot(workspaceID string) (ResourceSnapshotRecord, error) {
+	var out ResourceSnapshotRecord
+	var body string
+	err := s.db.QueryRow(`SELECT workspace_id, snapshot_id, owner_agent_id, body, created_at
+		FROM resource_snapshots WHERE workspace_id=? ORDER BY created_at DESC, snapshot_id DESC LIMIT 1`, workspaceID).
+		Scan(&out.WorkspaceID, &out.SnapshotID, &out.OwnerAgentID, &body, &out.CreatedAt)
+	if err == sql.ErrNoRows {
+		return ResourceSnapshotRecord{}, fmt.Errorf("resource snapshot not found")
+	}
+	if err != nil {
+		return ResourceSnapshotRecord{}, err
+	}
+	out.Body = json.RawMessage(body)
+	return out, nil
 }
 
 func (s *Store) listSubtasks(workspaceID, taskID string) ([]SubtaskView, error) {
