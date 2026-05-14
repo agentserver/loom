@@ -218,11 +218,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 	if err != nil {
 		return executor.Result{}, fmt.Errorf("planner.Plan: %w", err)
 	}
-	if tc.Version != 0 {
-		if err := ValidateWithContractPolicy(plan, tc.ExecutionPolicy); err != nil {
-			return executor.Result{}, fmt.Errorf("invalid plan: %w", err)
-		}
-	} else if err := Validate(plan); err != nil {
+	if err := validatePlanForContract(plan, tc); err != nil {
 		return executor.Result{}, fmt.Errorf("invalid plan: %w", err)
 	}
 	emitPlanningCompleted(plan)
@@ -483,7 +479,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("replan after build_mcp spec validation failure: %w", perr)
 					}
-					if err := Validate(newPlan); err != nil {
+					if err := validatePlanForContract(newPlan, tc); err != nil {
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("invalid build_mcp spec validation replan: %w", err)
 					}
@@ -547,7 +543,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 					cancelAll()
 					return executor.Result{}, fmt.Errorf("replan after mcp validation failure: %w", perr)
 				}
-				if err := Validate(newPlan); err != nil {
+				if err := validatePlanForContract(newPlan, tc); err != nil {
 					cancelAll()
 					return executor.Result{}, fmt.Errorf("invalid mcp validation replan: %w", err)
 				}
@@ -624,7 +620,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("replan after blocked: %w", perr)
 					}
-					if err := Validate(newPlan); err != nil {
+					if err := validatePlanForContract(newPlan, tc); err != nil {
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("invalid replan: %w", err)
 					}
@@ -671,7 +667,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 					if len(newPlan) == 0 {
 						continue
 					}
-					if err := Validate(newPlan); err != nil {
+					if err := validatePlanForContract(newPlan, tc); err != nil {
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("invalid post-build plan: %w", err)
 					}

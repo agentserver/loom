@@ -38,3 +38,10 @@ func ValidateWithContractPolicy(nodes []planner.Node, policy contract.ExecutionP
 	}
 	return nil
 }
+
+func validatePlanForContract(nodes []planner.Node, tc contract.TaskContract) error {
+	if tc.Version != 0 {
+		return ValidateWithContractPolicy(nodes, tc.ExecutionPolicy)
+	}
+	return Validate(nodes)
+}
