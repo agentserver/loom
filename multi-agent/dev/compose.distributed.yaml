@@ -66,5 +66,5 @@ services:
     environment:
       ANTHROPIC_BASE_URL: https://code.ai.cs.ac.cn
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-    command: zsh -lc "go run ./cmd/observer-server /config/config.yaml"
+    command: zsh -lc "go run ./cmd/observer-server --config /config/config.yaml"
     restart: unless-stopped

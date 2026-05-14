@@ -31,7 +31,7 @@ func TestDistributedComposeScaffold(t *testing.T) {
 		"./configs/slave-b.yaml:/config/config.yaml",
 		"./configs/observer.yaml:/config/config.yaml",
 		"go run ./cmd/driver-agent serve-mcp --config /config/config.yaml",
-		"go run ./cmd/observer-server /config/config.yaml",
+		"go run ./cmd/observer-server --config /config/config.yaml",
 		"restart: unless-stopped",
 	} {
 		if !strings.Contains(text, want) {
