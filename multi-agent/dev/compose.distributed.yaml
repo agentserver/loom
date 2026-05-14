@@ -24,7 +24,7 @@ services:
     environment:
       ANTHROPIC_BASE_URL: https://code.ai.cs.ac.cn
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-    command: zsh -lc "go run ./cmd/driver-agent /config/config.yaml"
+    command: zsh -lc "go run ./cmd/driver-agent serve-mcp --config /config/config.yaml"
     restart: unless-stopped
 
   slave-a:
@@ -53,4 +53,18 @@ services:
       ANTHROPIC_BASE_URL: https://code.ai.cs.ac.cn
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
     command: zsh -lc "go run ./cmd/slave-agent /config/config.yaml"
+    restart: unless-stopped
+
+  observer:
+    build:
+      context: ..
+      dockerfile: dev/agent-runtime/Dockerfile
+    working_dir: /workspace/multi-agent
+    volumes:
+      - ../:/workspace/multi-agent
+      - ./configs/observer.yaml:/config/config.yaml
+    environment:
+      ANTHROPIC_BASE_URL: https://code.ai.cs.ac.cn
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    command: zsh -lc "go run ./cmd/observer-server /config/config.yaml"
     restart: unless-stopped

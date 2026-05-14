@@ -1,3 +1,7 @@
+server:
+  url: https://agent.example.com
+  name: slave-b-dev
+
 credentials:
   sandbox_id: ""
   tunnel_token: ""

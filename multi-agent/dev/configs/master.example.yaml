@@ -1,5 +1,6 @@
 server:
-  url: http://master:8080
+  url: https://agent.example.com
+  name: master-dev
 
 credentials:
   sandbox_id: ""
