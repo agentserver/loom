@@ -14,6 +14,7 @@ import (
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/stretchr/testify/require"
 	"github.com/yourorg/multi-agent/internal/config"
+	"github.com/yourorg/multi-agent/internal/contract"
 	"github.com/yourorg/multi-agent/internal/executor"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/planner"
@@ -352,6 +353,49 @@ func TestFanout_InvalidMCPArgsTriggersBoundedReplan(t *testing.T) {
 	require.Equal(t, "completed", statusByNode["n0_n1"])
 }
 
+func TestFanout_MCPValidationReplanRejectsDisallowedContractTarget(t *testing.T) {
+	dir := t.TempDir()
+	roundFile := filepath.Join(dir, "round")
+	bin := filepath.Join(dir, "planner.sh")
+	err := os.WriteFile(bin, []byte(`#!/usr/bin/env bash
+round=$(cat "$ROUND_FILE" 2>/dev/null || echo 0)
+case "$round" in
+  0)
+    cat <<'EOF'
+[{"id":"n0","target_id":"agent-a","skill":"mcp","prompt":"{\"server\":\"srv\",\"tool\":\"render\",\"args\":{\"n\":7,\"put_url_128\":\"http://x\"}}"}]
+EOF
+    ;;
+  1)
+    cat <<'EOF'
+[{"id":"n1","target_id":"agent-b","skill":"chat","prompt":"bypass"}]
+EOF
+    ;;
+  *) echo "REDUCED";;
+esac
+echo $((round+1)) > "$ROUND_FILE"
+`), 0o755)
+	require.NoError(t, err)
+	t.Setenv("ROUND_FILE", roundFile)
+
+	sdk := &fakeSDKQueue{
+		agents: []agentsdk.AgentCard{agentWithRenderTool(t)},
+		queue:  []agentsdk.TaskInfo{{Status: "completed", Output: "bypass"}},
+	}
+	p := planner.New(config.Planner{Bin: bin, TimeoutSec: 5})
+	s, err := store.Open(filepath.Join(t.TempDir(), "x.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { s.Close() })
+	o := New(s, p, sdk, config.Fanout{MaxConcurrency: 4, DefaultPolicy: "best_effort"}, "self-id", nil)
+	prompt := fanoutContractPrompt(t, contract.TaskContract{}, "do")
+
+	_, err = o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: prompt})
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid mcp validation replan")
+	require.Contains(t, err.Error(), "target agent-b is not allowed")
+	require.Empty(t, sdk.dispatched)
+}
+
 func TestFanout_ValidMCPArgsDispatchesOnce(t *testing.T) {
 	sdk := &fakeSDKQueue{
 		agents: []agentsdk.AgentCard{agentWithRenderTool(t)},
@@ -517,6 +561,51 @@ func TestFanout_BuildMCPSpecValidationReplans(t *testing.T) {
 	require.NotEmpty(t, eventsOfType(obs.events, observer.EventMasterBuildMCPValidationFailed))
 }
 
+func TestFanout_BuildMCPSpecValidationReplanRejectsDisallowedContractTarget(t *testing.T) {
+	dir := t.TempDir()
+	roundFile := filepath.Join(dir, "round")
+	bin := filepath.Join(dir, "planner.sh")
+	err := os.WriteFile(bin, []byte(`#!/usr/bin/env bash
+round=$(cat "$ROUND_FILE" 2>/dev/null || echo 0)
+case "$round" in
+  0)
+    cat <<'EOF'
+[{"id":"n0","target_id":"agent-a","kind":"build_mcp","skill":"build_mcp","prompt":"build a reusable server"}]
+EOF
+    ;;
+  1)
+    cat <<'EOF'
+[{"id":"n1","target_id":"agent-b","skill":"chat","prompt":"bypass"}]
+EOF
+    ;;
+  *) echo "REDUCED";;
+esac
+echo $((round+1)) > "$ROUND_FILE"
+`), 0o755)
+	require.NoError(t, err)
+	t.Setenv("ROUND_FILE", roundFile)
+
+	sdk := &fakeSDKQueue{
+		agents: []agentsdk.AgentCard{{AgentID: "agent-a", Status: "available", Card: json.RawMessage(`{"skills":["build_mcp"]}`)}},
+		queue:  []agentsdk.TaskInfo{{Status: "completed", Output: "bypass"}},
+	}
+	p := planner.New(config.Planner{Bin: bin, TimeoutSec: 5})
+	s, err := store.Open(filepath.Join(t.TempDir(), "x.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { s.Close() })
+	o := New(s, p, sdk, config.Fanout{MaxConcurrency: 4, DefaultPolicy: "best_effort"}, "self-id", nil)
+	tc := contract.TaskContract{}
+	tc.ExecutionPolicy.AllowBuildMCP = true
+	prompt := fanoutContractPrompt(t, tc, "build reusable server")
+
+	_, err = o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: prompt})
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid build_mcp spec validation replan")
+	require.Contains(t, err.Error(), "target agent-b is not allowed")
+	require.Empty(t, sdk.dispatched)
+}
+
 func TestFanout_EmitsPlanDispatchAndDoneEvents(t *testing.T) {
 	sdk := &fakeSDKQueue{
 		agents: []agentsdk.AgentCard{agentWithTool(t, "x", "y")},
@@ -607,6 +696,24 @@ func firstEventOfType(t *testing.T, events []observer.Event, typ string) observe
 	matches := eventsOfType(events, typ)
 	require.NotEmpty(t, matches, "event type %s not emitted", typ)
 	return matches[0]
+}
+
+func fanoutContractPrompt(t *testing.T, tc contract.TaskContract, body string) string {
+	t.Helper()
+	tc.Version = contract.Version
+	tc.ConversationID = "conv-1"
+	tc.Intent = contract.IntentSpec{
+		Goal:            body,
+		SuccessCriteria: []string{"done"},
+	}
+	tc.DataContract = contract.DataContract{
+		WriteTargets: []contract.WriteTarget{{Type: contract.WriteTargetArtifact, Kind: "document", Name: "out.md"}},
+	}
+	tc.ExecutionPolicy.AllowedTargets = []string{"agent-a"}
+	tc.ApplyDefaults()
+	prompt, err := contract.EncodeEnvelope(tc, body)
+	require.NoError(t, err)
+	return prompt
 }
 
 func agentWithRenderTool(t *testing.T) agentsdk.AgentCard {

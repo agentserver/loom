@@ -480,7 +480,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 						return executor.Result{}, fmt.Errorf("replan after build_mcp spec validation failure: %w", perr)
 					}
 					newPlan = renamePlanIDs(newPlan, n.ID)
-					if err := validateAppendPlanForContract(allNodes, newPlan, tc); err != nil {
+					if err := validateAppendPlanForContract(allNodes, newPlan, tc, agents); err != nil {
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("invalid build_mcp spec validation replan: %w", err)
 					}
@@ -544,7 +544,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 					return executor.Result{}, fmt.Errorf("replan after mcp validation failure: %w", perr)
 				}
 				newPlan = renamePlanIDs(newPlan, n.ID)
-				if err := validateAppendPlanForContract(allNodes, newPlan, tc); err != nil {
+				if err := validateAppendPlanForContract(allNodes, newPlan, tc, agents); err != nil {
 					cancelAll()
 					return executor.Result{}, fmt.Errorf("invalid mcp validation replan: %w", err)
 				}
