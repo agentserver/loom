@@ -93,8 +93,9 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 	if err != nil {
 		return nil, &MCPToolError{Message: "encode task contract: " + err.Error()}
 	}
+	warnings := []string{}
 	if err := s.t.observerRelay().SaveTaskContract(ctx, resp.TaskID, tc.ConversationID, contractBody); err != nil {
-		return nil, &MCPToolError{Message: "observer save task contract: " + err.Error()}
+		warnings = append(warnings, "observer save task contract: "+err.Error())
 	}
 
 	return json.Marshal(map[string]interface{}{
@@ -103,12 +104,13 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 		"target_display_name": targetName,
 		"skill":               skill,
 		"resource_snapshot":   snapshot,
+		"warnings":            warnings,
 	})
 }
 
 func (s *submitContractTaskTool) selectTarget(ctx context.Context, cards []agentsdk.AgentCard, tc contract.TaskContract, targetOverride, skillOverride string) (string, string, string, error) {
 	if targetOverride == "" && tc.ExecutionPolicy.Routing == contract.RoutingDirectFirst {
-		matches := directContractMatches(cards, s.t.cfg.Credentials.SandboxID, tc.CapabilityRequirements.Skills)
+		matches := directContractMatches(cards, s.t.cfg.Credentials.SandboxID, tc.CapabilityRequirements.Skills, tc.ExecutionPolicy.AllowedTargets)
 		if len(matches) == 1 {
 			skill := skillOverride
 			if skill == "" {
@@ -117,10 +119,15 @@ func (s *submitContractTaskTool) selectTarget(ctx context.Context, cards []agent
 			return matches[0].AgentID, matches[0].DisplayName, skill, nil
 		}
 	}
-
-	targetID, targetName, _, _, err := s.t.resolveTarget(ctx, targetOverride)
+	targetID, targetName, _, targetRole, err := s.t.resolveTarget(ctx, targetOverride)
 	if err != nil {
 		return "", "", "", err
+	}
+	if targetRole == observer.RoleMaster && !tc.ExecutionPolicy.AllowsMaster() {
+		return "", "", "", &MCPToolError{Message: "master fallback is not allowed by contract"}
+	}
+	if !targetAllowed(targetID, tc.ExecutionPolicy.AllowedTargets) {
+		return "", "", "", &MCPToolError{Message: "target is not allowed by contract: " + targetID}
 	}
 	skill := skillOverride
 	if skill == "" {
@@ -129,13 +136,19 @@ func (s *submitContractTaskTool) selectTarget(ctx context.Context, cards []agent
 	return targetID, targetName, skill, nil
 }
 
-func directContractMatches(cards []agentsdk.AgentCard, selfID string, requiredSkills []string) []agentsdk.AgentCard {
+func directContractMatches(cards []agentsdk.AgentCard, selfID string, requiredSkills, allowedTargets []string) []agentsdk.AgentCard {
 	var matches []agentsdk.AgentCard
 	for _, c := range cards {
 		if c.AgentID == selfID {
 			continue
 		}
+		if c.Status != "available" {
+			continue
+		}
 		if observerRoleForCard(c) == observer.RoleMaster {
+			continue
+		}
+		if !targetAllowed(c.AgentID, allowedTargets) {
 			continue
 		}
 		if !hasAllSkills(c, requiredSkills) {
@@ -153,4 +166,16 @@ func hasAllSkills(c agentsdk.AgentCard, required []string) bool {
 		}
 	}
 	return true
+}
+
+func targetAllowed(agentID string, allowedTargets []string) bool {
+	if len(allowedTargets) == 0 {
+		return true
+	}
+	for _, allowed := range allowedTargets {
+		if allowed == agentID {
+			return true
+		}
+	}
+	return false
 }

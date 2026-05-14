@@ -68,6 +68,32 @@ func newTestToolsWithObserver(t *testing.T, sdk SDKClient, obs ObserverSink) *To
 	return NewTools(NewFileRegistry(50000), a, sdk, cfg, obs)
 }
 
+func submitContractToolForTest(t *testing.T, tools *Tools) Tool {
+	t.Helper()
+	for _, candidate := range tools.All() {
+		if candidate.Name() == "submit_contract_task" {
+			return candidate
+		}
+	}
+	t.Fatal("submit_contract_task tool not registered")
+	return nil
+}
+
+func testTaskContract() contract.TaskContract {
+	return contract.TaskContract{
+		Version:        1,
+		ConversationID: "conv-1",
+		Intent: contract.IntentSpec{
+			Goal:            "write a helper",
+			SuccessCriteria: []string{"helper is saved"},
+		},
+		DataContract: contract.DataContract{
+			WriteTargets: []contract.WriteTarget{{Type: contract.WriteTargetArtifact, Kind: "code", Name: "helper.go"}},
+		},
+		CapabilityRequirements: contract.CapabilityRequirements{Skills: []string{"chat"}},
+	}
+}
+
 func TestSubmitContractTaskRoutesToSingleMatchingSlave(t *testing.T) {
 	var lastDelegate agentsdk.DelegateTaskRequest
 	sdk := &fakeSDK{
@@ -83,28 +109,11 @@ func TestSubmitContractTaskRoutesToSingleMatchingSlave(t *testing.T) {
 		},
 	}
 	tools := newTestTools(t, sdk)
-	tc := contract.TaskContract{
-		Version:        1,
-		ConversationID: "conv-1",
-		Intent: contract.IntentSpec{
-			Goal:            "write a helper",
-			SuccessCriteria: []string{"helper is saved"},
-		},
-		DataContract: contract.DataContract{
-			WriteTargets: []contract.WriteTarget{{Type: contract.WriteTargetArtifact, Kind: "code", Name: "helper.go"}},
-		},
-		CapabilityRequirements: contract.CapabilityRequirements{Skills: []string{"chat"}},
-	}
+	tc := testTaskContract()
 	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
 	require.NoError(t, err)
 
-	var tool Tool
-	for _, candidate := range tools.All() {
-		if candidate.Name() == "submit_contract_task" {
-			tool = candidate
-		}
-	}
-	require.NotNil(t, tool)
+	tool := submitContractToolForTest(t, tools)
 
 	out, err := tool.Call(context.Background(), raw)
 	require.NoError(t, err)
@@ -112,6 +121,119 @@ func TestSubmitContractTaskRoutesToSingleMatchingSlave(t *testing.T) {
 	require.Equal(t, "slave-a", lastDelegate.TargetID)
 	require.Equal(t, "chat", lastDelegate.Skill)
 	require.Contains(t, lastDelegate.Prompt, contract.EnvelopeStart)
+}
+
+func TestSubmitContractTaskIgnoresOfflineSlaveAndFallsBackToAvailableMaster(t *testing.T) {
+	var lastDelegate agentsdk.DelegateTaskRequest
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "slave-offline", DisplayName: "slave-offline", Status: "offline", Card: json.RawMessage(`{"skills":["chat"]}`)},
+				{AgentID: "sbx-master", DisplayName: "master", Status: "available", Card: json.RawMessage(`{"skills":["fanout"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			lastDelegate = req
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-1"}, nil
+		},
+	}
+	raw, err := json.Marshal(map[string]interface{}{"contract": testTaskContract()})
+	require.NoError(t, err)
+
+	out, err := submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	require.NoError(t, err)
+	require.Contains(t, string(out), `"task_id":"task-1"`)
+	require.Equal(t, "sbx-master", lastDelegate.TargetID)
+	require.Equal(t, "fanout", lastDelegate.Skill)
+}
+
+func TestSubmitContractTaskDisallowsMasterFallbackWhenPolicyForbidsMaster(t *testing.T) {
+	var delegated bool
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "sbx-master", DisplayName: "master", Status: "available", Card: json.RawMessage(`{"skills":["fanout"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			delegated = true
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-1"}, nil
+		},
+	}
+	tc := testTaskContract()
+	tc.ExecutionPolicy.AllowMaster = contract.Bool(false)
+	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
+	require.NoError(t, err)
+
+	_, err = submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "master fallback is not allowed")
+	require.False(t, delegated)
+}
+
+func TestSubmitContractTaskAllowedTargetsRestrictsDirectRoute(t *testing.T) {
+	var lastDelegate agentsdk.DelegateTaskRequest
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["chat"]}`)},
+				{AgentID: "slave-b", DisplayName: "slave-b", Status: "available", Card: json.RawMessage(`{"skills":["chat"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			lastDelegate = req
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-1"}, nil
+		},
+	}
+	tc := testTaskContract()
+	tc.ExecutionPolicy.AllowedTargets = []string{"slave-b"}
+	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
+	require.NoError(t, err)
+
+	out, err := submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	require.NoError(t, err)
+	require.Contains(t, string(out), `"task_id":"task-1"`)
+	require.Equal(t, "slave-b", lastDelegate.TargetID)
+	require.Equal(t, "chat", lastDelegate.Skill)
+}
+
+func TestSubmitContractTaskReturnsWarningWhenTaskContractSaveFailsAfterDelegate(t *testing.T) {
+	observerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/resource-snapshots":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{}`))
+		case "/api/task-contracts":
+			http.Error(w, "store unavailable", http.StatusInternalServerError)
+		default:
+			t.Fatalf("unexpected observer path: %s", r.URL.Path)
+		}
+	}))
+	defer observerServer.Close()
+
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["chat"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-1"}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	tools.cfg.Observer.Enabled = true
+	tools.cfg.Observer.URL = observerServer.URL
+	tools.cfg.Observer.Token = "observer-token"
+	tools.relay = NewObserverRelay(tools.cfg)
+	raw, err := json.Marshal(map[string]interface{}{"contract": testTaskContract()})
+	require.NoError(t, err)
+
+	out, err := submitContractToolForTest(t, tools).Call(context.Background(), raw)
+	require.NoError(t, err)
+	require.Contains(t, string(out), `"task_id":"task-1"`)
+	require.Contains(t, string(out), `"warnings"`)
+	require.Contains(t, string(out), "observer save task contract")
 }
 
 func TestTool_ListAgents_FiltersSelf(t *testing.T) {
