@@ -48,7 +48,7 @@ func TestEnsureRegistered_PersistsCredentials(t *testing.T) {
 				"tunnel_token": "tt",
 				"proxy_token":  "pt",
 				"short_id":     "sid",
-				"workspace_id": "ws",
+				"workspace_id": "ws-1",
 			})
 		default:
 			t.Logf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -70,6 +70,7 @@ func TestEnsureRegistered_PersistsCredentials(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "sb-1", reloaded.Credentials.SandboxID)
 	require.Equal(t, "pt", reloaded.Credentials.ProxyToken)
+	require.Equal(t, "ws-1", reloaded.Credentials.WorkspaceID)
 	require.Equal(t, "sid", reloaded.Credentials.ShortID)
 }
 

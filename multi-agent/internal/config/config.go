@@ -28,6 +28,7 @@ type Credentials struct {
 	SandboxID   string `yaml:"sandbox_id"`
 	TunnelToken string `yaml:"tunnel_token"`
 	ProxyToken  string `yaml:"proxy_token"`
+	WorkspaceID string `yaml:"workspace_id"`
 	ShortID     string `yaml:"short_id"`
 }
 
