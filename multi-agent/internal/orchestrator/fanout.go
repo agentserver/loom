@@ -169,6 +169,14 @@ func mcpValidationReplanContext(n planner.Node, agents []agentsdk.AgentCard, pro
 }
 
 func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor.Result, error) {
+	tc, prompt, err := contractPolicyFromPrompt(t.Prompt)
+	if err != nil {
+		return executor.Result{}, err
+	}
+	if tc.Version != 0 {
+		t.Prompt = prompt
+	}
+
 	agents, err := o.discoverFiltered(ctx)
 	if err != nil {
 		return executor.Result{}, err
@@ -210,7 +218,11 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 	if err != nil {
 		return executor.Result{}, fmt.Errorf("planner.Plan: %w", err)
 	}
-	if err := Validate(plan); err != nil {
+	if tc.Version != 0 {
+		if err := ValidateWithContractPolicy(plan, tc.ExecutionPolicy); err != nil {
+			return executor.Result{}, fmt.Errorf("invalid plan: %w", err)
+		}
+	} else if err := Validate(plan); err != nil {
 		return executor.Result{}, fmt.Errorf("invalid plan: %w", err)
 	}
 	emitPlanningCompleted(plan)

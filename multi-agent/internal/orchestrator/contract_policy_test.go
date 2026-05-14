@@ -1,0 +1,85 @@
+package orchestrator
+
+import (
+	"testing"
+
+	"github.com/yourorg/multi-agent/internal/contract"
+	"github.com/yourorg/multi-agent/internal/planner"
+)
+
+func TestContractFromPromptRejectsAllowMasterFalse(t *testing.T) {
+	tc := contract.TaskContract{
+		Version:        1,
+		ConversationID: "conv-1",
+		Intent: contract.IntentSpec{
+			Goal:            "single-agent work",
+			SuccessCriteria: []string{"done"},
+		},
+		DataContract: contract.DataContract{
+			WriteTargets: []contract.WriteTarget{{Type: contract.WriteTargetArtifact, Kind: "document", Name: "out.md"}},
+		},
+	}
+	tc.ApplyDefaults()
+	tc.ExecutionPolicy.AllowMaster = contract.Bool(false)
+	prompt, err := contract.EncodeEnvelope(tc, "body")
+	if err != nil {
+		t.Fatalf("EncodeEnvelope: %v", err)
+	}
+
+	_, _, err = contractPolicyFromPrompt(prompt)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if err.Error() != "contract execution_policy.allow_master is false" {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestValidatePlanWithPolicyRejectsBuildMCP(t *testing.T) {
+	tc := contract.TaskContract{
+		Version:        1,
+		ConversationID: "conv-1",
+		Intent: contract.IntentSpec{
+			Goal:            "generate code",
+			SuccessCriteria: []string{"artifact saved"},
+		},
+		DataContract: contract.DataContract{
+			WriteTargets: []contract.WriteTarget{{Type: contract.WriteTargetArtifact, Kind: "code", Name: "helper.go"}},
+		},
+	}
+	tc.ApplyDefaults()
+	nodes := []planner.Node{{ID: "n1", TargetID: "slave", Skill: "build_mcp"}}
+
+	err := ValidateWithContractPolicy(nodes, tc.ExecutionPolicy)
+	if err == nil {
+		t.Fatalf("expected policy error")
+	}
+	if err.Error() != "build_mcp node n1 rejected by contract policy" {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestValidatePlanWithPolicyRejectsTooManyNodes(t *testing.T) {
+	p := contract.ExecutionPolicy{
+		AllowMaster:        contract.Bool(true),
+		AllowCodeArtifacts: contract.Bool(true),
+		CodePersistence:    contract.CodePersistenceObserverArtifactStore,
+		WriteMode:          contract.WriteModeArtifactOnly,
+		Routing:            contract.RoutingMasterOnly,
+		MaxDAGNodes:        contract.Int(1),
+		MaxDepth:           contract.Int(3),
+		MaxConcurrency:     contract.Int(3),
+	}
+	nodes := []planner.Node{
+		{ID: "n1", TargetID: "slave"},
+		{ID: "n2", TargetID: "slave"},
+	}
+
+	err := ValidateWithContractPolicy(nodes, p)
+	if err == nil {
+		t.Fatalf("expected policy error")
+	}
+	if err.Error() != "plan too large for contract: 2 nodes (max 1)" {
+		t.Fatalf("error = %v", err)
+	}
+}

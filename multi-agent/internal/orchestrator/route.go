@@ -11,6 +11,14 @@ import (
 )
 
 func (o *Orchestrator) runRoute(ctx context.Context, t executor.Task) (executor.Result, error) {
+	tc, prompt, err := contractPolicyFromPrompt(t.Prompt)
+	if err != nil {
+		return executor.Result{}, err
+	}
+	if tc.Version != 0 {
+		t.Prompt = prompt
+	}
+
 	agents, err := o.discoverFiltered(ctx)
 	if err != nil {
 		return executor.Result{}, err
