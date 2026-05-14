@@ -486,6 +486,10 @@ func (h *handler) resourceSnapshots(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if agent.Role != observer.RoleDriver && agent.Role != observer.RoleMaster {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	var req struct {
 		SnapshotID string          `json:"snapshot_id"`
 		Body       json.RawMessage `json:"body"`
@@ -514,6 +518,10 @@ func (h *handler) latestResourceSnapshot(w http.ResponseWriter, r *http.Request)
 	}
 	agent, ok := h.authenticate(w, r)
 	if !ok {
+		return
+	}
+	if agent.Role != observer.RoleDriver && agent.Role != observer.RoleMaster {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	got, err := h.s.GetLatestResourceSnapshot(agent.WorkspaceID)

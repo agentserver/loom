@@ -218,7 +218,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 	if err != nil {
 		return executor.Result{}, fmt.Errorf("planner.Plan: %w", err)
 	}
-	if err := validatePlanForContract(plan, tc); err != nil {
+	if err := validatePlanForContract(plan, tc, agents); err != nil {
 		return executor.Result{}, fmt.Errorf("invalid plan: %w", err)
 	}
 	emitPlanningCompleted(plan)
@@ -621,7 +621,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 						return executor.Result{}, fmt.Errorf("replan after blocked: %w", perr)
 					}
 					newPlan = renamePlanIDs(newPlan, d.NodeID)
-					if err := validateAppendPlanForContract(allNodes, newPlan, tc); err != nil {
+					if err := validateAppendPlanForContract(allNodes, newPlan, tc, agents); err != nil {
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("invalid replan: %w", err)
 					}
@@ -668,7 +668,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 						continue
 					}
 					newPlan = renamePlanIDs(newPlan, d.NodeID)
-					if err := validateAppendPlanForContract(allNodes, newPlan, tc); err != nil {
+					if err := validateAppendPlanForContract(allNodes, newPlan, tc, agents); err != nil {
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("invalid post-build plan: %w", err)
 					}

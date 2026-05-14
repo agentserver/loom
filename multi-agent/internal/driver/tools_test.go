@@ -282,6 +282,47 @@ func TestSubmitContractTaskReturnsWarningWhenTaskContractSaveFailsAfterDelegate(
 	require.Contains(t, string(out), "observer save task contract")
 }
 
+func TestSubmitContractTaskReturnsWarningWhenResourceSnapshotSaveFailsAfterDelegate(t *testing.T) {
+	observerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/resource-snapshots":
+			http.Error(w, "store unavailable", http.StatusInternalServerError)
+		case "/api/task-contracts":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			t.Fatalf("unexpected observer path: %s", r.URL.Path)
+		}
+	}))
+	defer observerServer.Close()
+
+	var delegated bool
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["chat"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			delegated = true
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-1"}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	tools.cfg.Observer.Enabled = true
+	tools.cfg.Observer.URL = observerServer.URL
+	tools.cfg.Observer.Token = "observer-token"
+	tools.relay = NewObserverRelay(tools.cfg)
+	raw, err := json.Marshal(map[string]interface{}{"contract": testTaskContract()})
+	require.NoError(t, err)
+
+	out, err := submitContractToolForTest(t, tools).Call(context.Background(), raw)
+	require.NoError(t, err)
+	require.True(t, delegated)
+	require.Contains(t, string(out), `"task_id":"task-1"`)
+	require.Contains(t, string(out), "observer save resource snapshot")
+}
+
 func TestTool_ListAgents_FiltersSelf(t *testing.T) {
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {

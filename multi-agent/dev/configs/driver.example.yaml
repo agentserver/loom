@@ -1,5 +1,5 @@
 server:
-  url: https://agent.example.com
+  url: http://agentserver:8080
   name: driver-dev
 
 credentials:

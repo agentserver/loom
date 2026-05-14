@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"testing"
 
+	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/yourorg/multi-agent/internal/contract"
 	"github.com/yourorg/multi-agent/internal/planner"
 )
@@ -119,6 +120,75 @@ func TestValidatePlanWithPolicyRejectsTooManyNodes(t *testing.T) {
 		t.Fatalf("expected policy error")
 	}
 	if err.Error() != "plan too large for contract: 2 nodes (max 1)" {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestValidatePlanWithPolicyAndAgentsRejectsDisallowedTarget(t *testing.T) {
+	p := contract.ExecutionPolicy{
+		AllowMaster:        contract.Bool(true),
+		AllowCodeArtifacts: contract.Bool(true),
+		CodePersistence:    contract.CodePersistenceObserverArtifactStore,
+		WriteMode:          contract.WriteModeArtifactOnly,
+		Routing:            contract.RoutingMasterOnly,
+		MaxDAGNodes:        contract.Int(3),
+		MaxDepth:           contract.Int(3),
+		MaxConcurrency:     contract.Int(3),
+		AllowedTargets:     []string{"slave-a"},
+	}
+	nodes := []planner.Node{{ID: "n1", TargetID: "slave-b"}}
+	agents := []agentsdk.AgentCard{{AgentID: "slave-a", Status: "available"}, {AgentID: "slave-b", Status: "available"}}
+
+	err := ValidateWithContractPolicyAndAgents(nodes, p, agents)
+	if err == nil {
+		t.Fatalf("expected policy error")
+	}
+	if err.Error() != "node n1 target slave-b is not allowed by contract policy" {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestValidatePlanWithPolicyAndAgentsRejectsUnknownTarget(t *testing.T) {
+	p := contract.ExecutionPolicy{
+		AllowMaster:        contract.Bool(true),
+		AllowCodeArtifacts: contract.Bool(true),
+		CodePersistence:    contract.CodePersistenceObserverArtifactStore,
+		WriteMode:          contract.WriteModeArtifactOnly,
+		Routing:            contract.RoutingMasterOnly,
+		MaxDAGNodes:        contract.Int(3),
+		MaxDepth:           contract.Int(3),
+		MaxConcurrency:     contract.Int(3),
+	}
+	nodes := []planner.Node{{ID: "n1", TargetID: "slave-b"}}
+	agents := []agentsdk.AgentCard{{AgentID: "slave-a", Status: "available"}}
+
+	err := ValidateWithContractPolicyAndAgents(nodes, p, agents)
+	if err == nil {
+		t.Fatalf("expected policy error")
+	}
+	if err.Error() != "node n1 target slave-b is not in current resource snapshot" {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestValidatePlanWithPolicyAndAgentsRejectsTargetWhenSnapshotEmpty(t *testing.T) {
+	p := contract.ExecutionPolicy{
+		AllowMaster:        contract.Bool(true),
+		AllowCodeArtifacts: contract.Bool(true),
+		CodePersistence:    contract.CodePersistenceObserverArtifactStore,
+		WriteMode:          contract.WriteModeArtifactOnly,
+		Routing:            contract.RoutingMasterOnly,
+		MaxDAGNodes:        contract.Int(3),
+		MaxDepth:           contract.Int(3),
+		MaxConcurrency:     contract.Int(3),
+	}
+	nodes := []planner.Node{{ID: "n1", TargetID: "slave-b"}}
+
+	err := ValidateWithContractPolicyAndAgents(nodes, p, nil)
+	if err == nil {
+		t.Fatalf("expected policy error")
+	}
+	if err.Error() != "node n1 target slave-b is not in current resource snapshot" {
 		t.Fatalf("error = %v", err)
 	}
 }

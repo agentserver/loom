@@ -300,6 +300,42 @@ func TestTaskContractAPI(t *testing.T) {
 	require.Equal(t, "conv-1", got.ConversationID)
 }
 
+func TestResourceSnapshotAPIRestrictsRoles(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "master", Role: observer.RoleMaster, DisplayName: "Master"}, "master-token"))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"}, "slave-token"))
+	h := New(st)
+
+	body := `{"snapshot_id":"snap-1","body":{"generated_at":"2026-05-14T00:00:00Z","agents":[]}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/resource-snapshots", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer slave-token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code)
+
+	req = httptest.NewRequest(http.MethodPost, "/api/resource-snapshots", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer driver-token")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	req = httptest.NewRequest(http.MethodGet, "/api/resource-snapshots/latest", nil)
+	req.Header.Set("Authorization", "Bearer slave-token")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code)
+
+	req = httptest.NewRequest(http.MethodGet, "/api/resource-snapshots/latest", nil)
+	req.Header.Set("Authorization", "Bearer master-token")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+}
+
 func TestAPITasksAndEventsExposeValidationFailureEvidence(t *testing.T) {
 	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
 	require.NoError(t, err)

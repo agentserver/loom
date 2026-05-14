@@ -42,11 +42,17 @@ func (tc TaskContract) Validate() error {
 	if tc.Version != Version {
 		return fmt.Errorf("unsupported contract version: %d", tc.Version)
 	}
+	if strings.TrimSpace(tc.ConversationID) == "" {
+		return fmt.Errorf("conversation_id is required")
+	}
 	if strings.TrimSpace(tc.Intent.Goal) == "" {
 		return fmt.Errorf("intent.goal is required")
 	}
 	if len(tc.Intent.SuccessCriteria) == 0 {
 		return fmt.Errorf("intent.success_criteria is required")
+	}
+	if len(tc.DataContract.WriteTargets) == 0 {
+		return fmt.Errorf("data_contract.write_targets is required")
 	}
 	for i, wt := range tc.DataContract.WriteTargets {
 		if wt.Type == "" {
@@ -60,6 +66,9 @@ func (tc TaskContract) Validate() error {
 		}
 		if wt.Name == "" {
 			return fmt.Errorf("data_contract.write_targets[%d].name is required", i)
+		}
+		if wt.Kind == "code" && !tc.ExecutionPolicy.AllowsCodeArtifacts() {
+			return fmt.Errorf("data_contract.write_targets[%d] code write target requires execution_policy.allow_code_artifacts", i)
 		}
 	}
 	if err := validatePolicy(tc.ExecutionPolicy); err != nil {

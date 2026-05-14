@@ -54,12 +54,13 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 		return nil, &MCPToolError{Message: "discover agents: " + err.Error()}
 	}
 	snapshot := contract.NewResourceSnapshot(cards, s.t.cfg.Credentials.SandboxID)
+	warnings := []string{}
 	snapshotBody, err := json.Marshal(snapshot)
 	if err != nil {
 		return nil, &MCPToolError{Message: "encode resource snapshot: " + err.Error()}
 	}
 	if err := s.t.observerRelay().SaveResourceSnapshot(ctx, snapshotBody); err != nil {
-		return nil, &MCPToolError{Message: "observer save resource snapshot: " + err.Error()}
+		warnings = append(warnings, "observer save resource snapshot: "+err.Error())
 	}
 
 	targetID, targetName, skill, err := s.selectTarget(ctx, cards, tc, args.TargetDisplayName, args.Skill)
@@ -93,7 +94,6 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 	if err != nil {
 		return nil, &MCPToolError{Message: "encode task contract: " + err.Error()}
 	}
-	warnings := []string{}
 	if err := s.t.observerRelay().SaveTaskContract(ctx, resp.TaskID, tc.ConversationID, contractBody); err != nil {
 		warnings = append(warnings, "observer save task contract: "+err.Error())
 	}

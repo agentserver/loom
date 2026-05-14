@@ -105,7 +105,13 @@ func TestTaskContractValidateRejectsExplicitZeroDAGNodeLimit(t *testing.T) {
 }
 
 func TestTaskContractValidateRejectsMissingIntent(t *testing.T) {
-	tc := TaskContract{Version: 1}
+	tc := TaskContract{
+		Version:        1,
+		ConversationID: "conv-1",
+		DataContract: DataContract{
+			WriteTargets: []WriteTarget{{Type: WriteTargetArtifact, Kind: "document", Name: "out.md"}},
+		},
+	}
 	tc.ApplyDefaults()
 
 	err := tc.Validate()
@@ -113,6 +119,72 @@ func TestTaskContractValidateRejectsMissingIntent(t *testing.T) {
 		t.Fatalf("expected validation error")
 	}
 	if !strings.Contains(err.Error(), "intent.goal is required") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestTaskContractValidateRejectsMissingConversationID(t *testing.T) {
+	tc := TaskContract{
+		Version: 1,
+		Intent: IntentSpec{
+			Goal:            "generate a helper",
+			SuccessCriteria: []string{"helper is saved as an artifact"},
+		},
+		DataContract: DataContract{
+			WriteTargets: []WriteTarget{{Type: WriteTargetArtifact, Kind: "code", Name: "helper.go"}},
+		},
+	}
+	tc.ApplyDefaults()
+
+	err := tc.Validate()
+	if err == nil {
+		t.Fatalf("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "conversation_id is required") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestTaskContractValidateRejectsMissingWriteTargets(t *testing.T) {
+	tc := TaskContract{
+		Version:        1,
+		ConversationID: "conv-1",
+		Intent: IntentSpec{
+			Goal:            "generate a helper",
+			SuccessCriteria: []string{"helper is saved as an artifact"},
+		},
+	}
+	tc.ApplyDefaults()
+
+	err := tc.Validate()
+	if err == nil {
+		t.Fatalf("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "data_contract.write_targets is required") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestTaskContractValidateRejectsCodeWriteTargetWhenCodeArtifactsDisabled(t *testing.T) {
+	tc := TaskContract{
+		Version:        1,
+		ConversationID: "conv-1",
+		Intent: IntentSpec{
+			Goal:            "generate a helper",
+			SuccessCriteria: []string{"helper is saved as an artifact"},
+		},
+		DataContract: DataContract{
+			WriteTargets: []WriteTarget{{Type: WriteTargetArtifact, Kind: "code", Name: "helper.go"}},
+		},
+	}
+	tc.ApplyDefaults()
+	tc.ExecutionPolicy.AllowCodeArtifacts = Bool(false)
+
+	err := tc.Validate()
+	if err == nil {
+		t.Fatalf("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "code write target requires execution_policy.allow_code_artifacts") {
 		t.Fatalf("error = %v", err)
 	}
 }

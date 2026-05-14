@@ -7,6 +7,7 @@ import (
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/yourorg/multi-agent/internal/executor"
+	"github.com/yourorg/multi-agent/internal/planner"
 	"github.com/yourorg/multi-agent/internal/store"
 )
 
@@ -29,6 +30,9 @@ func (o *Orchestrator) runRoute(ctx context.Context, t executor.Task) (executor.
 	}
 	if target == "" {
 		return executor.Result{}, fmt.Errorf("no candidate")
+	}
+	if err := validatePlanForContract([]planner.Node{{ID: "root", TargetID: target}}, tc, agents); err != nil {
+		return executor.Result{}, fmt.Errorf("invalid route target: %w", err)
 	}
 
 	if err := o.store.InsertSubTasks(t.ID, []store.SubTaskRow{

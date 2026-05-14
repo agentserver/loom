@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"fmt"
 
+	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/yourorg/multi-agent/internal/contract"
 	"github.com/yourorg/multi-agent/internal/planner"
 )
@@ -41,6 +42,13 @@ func ValidateWithContractPolicy(nodes []planner.Node, policy contract.ExecutionP
 	return nil
 }
 
+func ValidateWithContractPolicyAndAgents(nodes []planner.Node, policy contract.ExecutionPolicy, agents []agentsdk.AgentCard) error {
+	if err := ValidateWithContractPolicy(nodes, policy); err != nil {
+		return err
+	}
+	return validateContractTargets(nodes, policy, agents)
+}
+
 func ValidateAppendWithContractPolicy(existing []planner.Node, appended []planner.Node, policy contract.ExecutionPolicy) error {
 	if len(appended) == 0 {
 		return fmt.Errorf("plan empty")
@@ -67,15 +75,28 @@ func ValidateAppendWithContractPolicy(existing []planner.Node, appended []planne
 	return nil
 }
 
-func validatePlanForContract(nodes []planner.Node, tc contract.TaskContract) error {
+func ValidateAppendWithContractPolicyAndAgents(existing []planner.Node, appended []planner.Node, policy contract.ExecutionPolicy, agents []agentsdk.AgentCard) error {
+	if err := ValidateAppendWithContractPolicy(existing, appended, policy); err != nil {
+		return err
+	}
+	return validateContractTargets(appended, policy, agents)
+}
+
+func validatePlanForContract(nodes []planner.Node, tc contract.TaskContract, agents ...[]agentsdk.AgentCard) error {
 	if tc.Version != 0 {
+		if len(agents) > 0 {
+			return ValidateWithContractPolicyAndAgents(nodes, tc.ExecutionPolicy, agents[0])
+		}
 		return ValidateWithContractPolicy(nodes, tc.ExecutionPolicy)
 	}
 	return Validate(nodes)
 }
 
-func validateAppendPlanForContract(existing []planner.Node, appended []planner.Node, tc contract.TaskContract) error {
+func validateAppendPlanForContract(existing []planner.Node, appended []planner.Node, tc contract.TaskContract, agents ...[]agentsdk.AgentCard) error {
 	if tc.Version != 0 {
+		if len(agents) > 0 {
+			return ValidateAppendWithContractPolicyAndAgents(existing, appended, tc.ExecutionPolicy, agents[0])
+		}
 		return ValidateAppendWithContractPolicy(existing, appended, tc.ExecutionPolicy)
 	}
 	if len(appended) == 0 {
@@ -85,6 +106,33 @@ func validateAppendPlanForContract(existing []planner.Node, appended []planner.N
 	combined = append(combined, existing...)
 	combined = append(combined, appended...)
 	return Validate(combined)
+}
+
+func validateContractTargets(nodes []planner.Node, policy contract.ExecutionPolicy, agents []agentsdk.AgentCard) error {
+	allowedTargets := make(map[string]bool, len(policy.AllowedTargets))
+	for _, target := range policy.AllowedTargets {
+		if target != "" {
+			allowedTargets[target] = true
+		}
+	}
+	availableTargets := make(map[string]bool, len(agents))
+	for _, agent := range agents {
+		if agent.AgentID != "" {
+			availableTargets[agent.AgentID] = true
+		}
+	}
+	for _, n := range nodes {
+		if n.TargetID == "" {
+			return fmt.Errorf("node %s target_id is required by contract policy", n.ID)
+		}
+		if len(allowedTargets) > 0 && !allowedTargets[n.TargetID] {
+			return fmt.Errorf("node %s target %s is not allowed by contract policy", n.ID, n.TargetID)
+		}
+		if !availableTargets[n.TargetID] {
+			return fmt.Errorf("node %s target %s is not in current resource snapshot", n.ID, n.TargetID)
+		}
+	}
+	return nil
 }
 
 func validateContractNodeLimit(nodeCount int, policy contract.ExecutionPolicy) error {
