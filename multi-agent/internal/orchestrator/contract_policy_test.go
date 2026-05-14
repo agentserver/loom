@@ -122,3 +122,119 @@ func TestValidatePlanWithPolicyRejectsTooManyNodes(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestValidateAppendWithPolicyAllowsDependencyOnExistingNode(t *testing.T) {
+	p := contract.ExecutionPolicy{
+		AllowMaster:        contract.Bool(true),
+		AllowCodeArtifacts: contract.Bool(true),
+		CodePersistence:    contract.CodePersistenceObserverArtifactStore,
+		WriteMode:          contract.WriteModeArtifactOnly,
+		Routing:            contract.RoutingMasterOnly,
+		MaxDAGNodes:        contract.Int(3),
+		MaxDepth:           contract.Int(2),
+		MaxConcurrency:     contract.Int(3),
+	}
+	existing := []planner.Node{{ID: "n1", TargetID: "slave"}}
+	appended := []planner.Node{{ID: "n2", TargetID: "slave", DependsOn: []string{"n1"}}}
+
+	if err := ValidateAppendWithContractPolicy(existing, appended, p); err != nil {
+		t.Fatalf("ValidateAppendWithContractPolicy: %v", err)
+	}
+}
+
+func TestValidateAppendWithPolicyRejectsTotalNodeLimit(t *testing.T) {
+	p := contract.ExecutionPolicy{
+		AllowMaster:        contract.Bool(true),
+		AllowCodeArtifacts: contract.Bool(true),
+		CodePersistence:    contract.CodePersistenceObserverArtifactStore,
+		WriteMode:          contract.WriteModeArtifactOnly,
+		Routing:            contract.RoutingMasterOnly,
+		MaxDAGNodes:        contract.Int(2),
+		MaxDepth:           contract.Int(3),
+		MaxConcurrency:     contract.Int(3),
+	}
+	existing := []planner.Node{
+		{ID: "n1", TargetID: "slave"},
+		{ID: "n2", TargetID: "slave"},
+	}
+	appended := []planner.Node{{ID: "n3", TargetID: "slave"}}
+
+	err := ValidateAppendWithContractPolicy(existing, appended, p)
+	if err == nil {
+		t.Fatalf("expected policy error")
+	}
+	if err.Error() != "plan too large for contract: 3 nodes (max 2)" {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestValidateWithPolicyRejectsDepthLimit(t *testing.T) {
+	p := contract.ExecutionPolicy{
+		AllowMaster:        contract.Bool(true),
+		AllowCodeArtifacts: contract.Bool(true),
+		CodePersistence:    contract.CodePersistenceObserverArtifactStore,
+		WriteMode:          contract.WriteModeArtifactOnly,
+		Routing:            contract.RoutingMasterOnly,
+		MaxDAGNodes:        contract.Int(4),
+		MaxDepth:           contract.Int(2),
+		MaxConcurrency:     contract.Int(3),
+	}
+	nodes := []planner.Node{
+		{ID: "n1", TargetID: "slave"},
+		{ID: "n2", TargetID: "slave", DependsOn: []string{"n1"}},
+		{ID: "n3", TargetID: "slave", DependsOn: []string{"n2"}},
+	}
+
+	err := ValidateWithContractPolicy(nodes, p)
+	if err == nil {
+		t.Fatalf("expected policy error")
+	}
+	if err.Error() != "plan depth exceeds contract: 3 (max 2)" {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestValidateAppendWithPolicyRejectsDepthLimit(t *testing.T) {
+	p := contract.ExecutionPolicy{
+		AllowMaster:        contract.Bool(true),
+		AllowCodeArtifacts: contract.Bool(true),
+		CodePersistence:    contract.CodePersistenceObserverArtifactStore,
+		WriteMode:          contract.WriteModeArtifactOnly,
+		Routing:            contract.RoutingMasterOnly,
+		MaxDAGNodes:        contract.Int(4),
+		MaxDepth:           contract.Int(2),
+		MaxConcurrency:     contract.Int(3),
+	}
+	existing := []planner.Node{
+		{ID: "n1", TargetID: "slave"},
+		{ID: "n2", TargetID: "slave", DependsOn: []string{"n1"}},
+	}
+	appended := []planner.Node{{ID: "n3", TargetID: "slave", DependsOn: []string{"n2"}}}
+
+	err := ValidateAppendWithContractPolicy(existing, appended, p)
+	if err == nil {
+		t.Fatalf("expected policy error")
+	}
+	if err.Error() != "plan depth exceeds contract: 3 (max 2)" {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestEffectiveFanoutConcurrencyUsesContractLimit(t *testing.T) {
+	p := contract.ExecutionPolicy{MaxConcurrency: contract.Int(2)}
+
+	got := effectiveFanoutConcurrency(5, p, true)
+	if got != 2 {
+		t.Fatalf("effectiveFanoutConcurrency = %d", got)
+	}
+
+	got = effectiveFanoutConcurrency(1, p, true)
+	if got != 1 {
+		t.Fatalf("effectiveFanoutConcurrency with lower config = %d", got)
+	}
+
+	got = effectiveFanoutConcurrency(5, p, false)
+	if got != 5 {
+		t.Fatalf("effectiveFanoutConcurrency without contract = %d", got)
+	}
+}

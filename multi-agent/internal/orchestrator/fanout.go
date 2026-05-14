@@ -246,7 +246,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 	}
 
 	policy := o.policyForSkill(t.Skill)
-	sched := NewScheduler(plan, o.cfg.MaxConcurrency)
+	sched := NewScheduler(plan, effectiveFanoutConcurrency(o.cfg.MaxConcurrency, tc.ExecutionPolicy, tc.Version != 0))
 	outputs := map[string]string{}
 	var outputsMu sync.Mutex
 	iterCount := map[string]int{}
@@ -479,12 +479,12 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("replan after build_mcp spec validation failure: %w", perr)
 					}
-					if err := validatePlanForContract(newPlan, tc); err != nil {
+					newPlan = renamePlanIDs(newPlan, n.ID)
+					if err := validateAppendPlanForContract(allNodes, newPlan, tc); err != nil {
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("invalid build_mcp spec validation replan: %w", err)
 					}
 					emitPlanningCompleted(newPlan)
-					newPlan = renamePlanIDs(newPlan, n.ID)
 					if err := sched.Append(newPlan); err != nil {
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("append build_mcp spec validation replan: %w", err)
@@ -543,12 +543,12 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 					cancelAll()
 					return executor.Result{}, fmt.Errorf("replan after mcp validation failure: %w", perr)
 				}
-				if err := validatePlanForContract(newPlan, tc); err != nil {
+				newPlan = renamePlanIDs(newPlan, n.ID)
+				if err := validateAppendPlanForContract(allNodes, newPlan, tc); err != nil {
 					cancelAll()
 					return executor.Result{}, fmt.Errorf("invalid mcp validation replan: %w", err)
 				}
 				emitPlanningCompleted(newPlan)
-				newPlan = renamePlanIDs(newPlan, n.ID)
 				if err := sched.Append(newPlan); err != nil {
 					cancelAll()
 					return executor.Result{}, fmt.Errorf("append mcp validation replan: %w", err)
@@ -620,12 +620,12 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("replan after blocked: %w", perr)
 					}
-					if err := validatePlanForContract(newPlan, tc); err != nil {
+					newPlan = renamePlanIDs(newPlan, d.NodeID)
+					if err := validateAppendPlanForContract(allNodes, newPlan, tc); err != nil {
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("invalid replan: %w", err)
 					}
 					emitPlanningCompleted(newPlan)
-					newPlan = renamePlanIDs(newPlan, d.NodeID)
 					if err := sched.Append(newPlan); err != nil {
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("append replan: %w", err)
@@ -667,12 +667,12 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 					if len(newPlan) == 0 {
 						continue
 					}
-					if err := validatePlanForContract(newPlan, tc); err != nil {
+					newPlan = renamePlanIDs(newPlan, d.NodeID)
+					if err := validateAppendPlanForContract(allNodes, newPlan, tc); err != nil {
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("invalid post-build plan: %w", err)
 					}
 					emitPlanningCompleted(newPlan)
-					newPlan = renamePlanIDs(newPlan, d.NodeID)
 					if err := sched.Append(newPlan); err != nil {
 						cancelAll()
 						return executor.Result{}, fmt.Errorf("append post-build plan: %w", err)
