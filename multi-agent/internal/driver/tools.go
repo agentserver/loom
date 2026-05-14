@@ -90,16 +90,27 @@ func (t *Tools) resolveTarget(ctx context.Context, override string) (id, display
 		override = t.cfg.DriverDefaults.TargetDisplayName
 	}
 	if override != "" {
+		unavailable := false
 		for _, c := range cards {
 			if c.DisplayName == override && c.AgentID != t.cfg.Credentials.SandboxID {
+				if !agentAvailable(c) {
+					unavailable = true
+					continue
+				}
 				return c.AgentID, c.DisplayName, cardShortID(c), observerRoleForCard(c), nil
 			}
+		}
+		if unavailable {
+			return "", "", "", "", &MCPToolError{Message: "agent named " + override + " is not available"}
 		}
 		return "", "", "", "", &MCPToolError{Message: "no agent named: " + override}
 	}
 	var matches []agentsdk.AgentCard
 	for _, c := range cards {
 		if c.AgentID == t.cfg.Credentials.SandboxID {
+			continue
+		}
+		if !agentAvailable(c) {
 			continue
 		}
 		if hasSkill(c, "fanout") {
@@ -117,6 +128,10 @@ func (t *Tools) resolveTarget(ctx context.Context, override string) (id, display
 		return "", "", "", "", &MCPToolError{Message: "ambiguous target: " + strings.Join(names, ", ") + " (pass target_display_name)"}
 	}
 	return matches[0].AgentID, matches[0].DisplayName, cardShortID(matches[0]), observerRoleForCard(matches[0]), nil
+}
+
+func agentAvailable(c agentsdk.AgentCard) bool {
+	return c.Status == "available"
 }
 
 func hasSkill(c agentsdk.AgentCard, want string) bool {
