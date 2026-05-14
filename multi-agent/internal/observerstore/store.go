@@ -675,15 +675,37 @@ func (s *Store) SaveTaskContract(in TaskContractRecord) error {
 		return errors.New("observerstore: workspace, task, conversation, owner, and body are required")
 	}
 	now := nowUTC()
-	_, err := s.db.Exec(`INSERT INTO task_contracts(workspace_id, task_id, conversation_id, owner_agent_id, body, created_at, updated_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(workspace_id, task_id) DO UPDATE SET
-			conversation_id=excluded.conversation_id,
-			owner_agent_id=excluded.owner_agent_id,
-			body=excluded.body,
-			updated_at=excluded.updated_at`,
-		in.WorkspaceID, in.TaskID, in.ConversationID, in.OwnerAgentID, string(in.Body), now, now)
-	return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var existingOwner string
+	err = tx.QueryRow(`SELECT owner_agent_id FROM task_contracts WHERE workspace_id=? AND task_id=?`,
+		in.WorkspaceID, in.TaskID).Scan(&existingOwner)
+	if err == sql.ErrNoRows {
+		_, err = tx.Exec(`INSERT INTO task_contracts(workspace_id, task_id, conversation_id, owner_agent_id, body, created_at, updated_at)
+			VALUES(?, ?, ?, ?, ?, ?, ?)`,
+			in.WorkspaceID, in.TaskID, in.ConversationID, in.OwnerAgentID, string(in.Body), now, now)
+		if err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	if err != nil {
+		return err
+	}
+	if existingOwner != in.OwnerAgentID {
+		return errors.New("task contract owner mismatch")
+	}
+	_, err = tx.Exec(`UPDATE task_contracts SET conversation_id=?, body=?, updated_at=?
+		WHERE workspace_id=? AND task_id=? AND owner_agent_id=?`,
+		in.ConversationID, string(in.Body), now, in.WorkspaceID, in.TaskID, in.OwnerAgentID)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) GetTaskContract(workspaceID, taskID string) (TaskContractRecord, error) {

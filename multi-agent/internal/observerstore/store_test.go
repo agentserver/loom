@@ -734,6 +734,35 @@ func TestTaskContractPersistence(t *testing.T) {
 	require.JSONEq(t, string(body), string(got.Body))
 }
 
+func TestTaskContractRejectsOverwriteByDifferentOwner(t *testing.T) {
+	s := testStore(t)
+
+	original := json.RawMessage(`{"version":1,"conversation_id":"conv-1","intent":{"goal":"original","success_criteria":["s"]}}`)
+	require.NoError(t, s.SaveTaskContract(TaskContractRecord{
+		WorkspaceID:    "ws1",
+		TaskID:         "task-1",
+		ConversationID: "conv-1",
+		OwnerAgentID:   "driver",
+		Body:           original,
+	}))
+
+	err := s.SaveTaskContract(TaskContractRecord{
+		WorkspaceID:    "ws1",
+		TaskID:         "task-1",
+		ConversationID: "conv-2",
+		OwnerAgentID:   "other-driver",
+		Body:           json.RawMessage(`{"version":1,"conversation_id":"conv-2","intent":{"goal":"overwrite","success_criteria":["s"]}}`),
+	})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "task contract owner mismatch")
+
+	got, err := s.GetTaskContract("ws1", "task-1")
+	require.NoError(t, err)
+	require.Equal(t, "driver", got.OwnerAgentID)
+	require.Equal(t, "conv-1", got.ConversationID)
+	require.JSONEq(t, string(original), string(got.Body))
+}
+
 func TestResourceSnapshotPersistence(t *testing.T) {
 	s := testStore(t)
 	firstBody := json.RawMessage(`{"generated_at":"first","agents":[{"agent_id":"a","display_name":"slave"}]}`)

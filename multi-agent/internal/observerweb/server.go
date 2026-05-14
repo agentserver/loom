@@ -423,6 +423,10 @@ func (h *handler) taskContracts(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if agent.Role != observer.RoleDriver {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	var req struct {
 		TaskID         string          `json:"task_id"`
 		ConversationID string          `json:"conversation_id"`
@@ -463,6 +467,10 @@ func (h *handler) taskContractByID(w http.ResponseWriter, r *http.Request) {
 	got, err := h.s.GetTaskContract(agent.WorkspaceID, taskID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if got.OwnerAgentID != agent.ID && agent.Role != observer.RoleMaster {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
