@@ -14,6 +14,8 @@ import (
 	"testing"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
+	"github.com/stretchr/testify/require"
+	"github.com/yourorg/multi-agent/internal/contract"
 	"github.com/yourorg/multi-agent/internal/observer"
 )
 
@@ -64,6 +66,52 @@ func newTestToolsWithObserver(t *testing.T, sdk SDKClient, obs ObserverSink) *To
 	cfg.Credentials.SandboxID = "sbx-driver"
 	cfg.DriverDefaults.TaskTimeoutSec = 600
 	return NewTools(NewFileRegistry(50000), a, sdk, cfg, obs)
+}
+
+func TestSubmitContractTaskRoutesToSingleMatchingSlave(t *testing.T) {
+	var lastDelegate agentsdk.DelegateTaskRequest
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "sbx-driver", DisplayName: "driver", Status: "available", Card: json.RawMessage(`{"skills":[]}`)},
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["chat"],"short_id":"sa"}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			lastDelegate = req
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-1"}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	tc := contract.TaskContract{
+		Version:        1,
+		ConversationID: "conv-1",
+		Intent: contract.IntentSpec{
+			Goal:            "write a helper",
+			SuccessCriteria: []string{"helper is saved"},
+		},
+		DataContract: contract.DataContract{
+			WriteTargets: []contract.WriteTarget{{Type: contract.WriteTargetArtifact, Kind: "code", Name: "helper.go"}},
+		},
+		CapabilityRequirements: contract.CapabilityRequirements{Skills: []string{"chat"}},
+	}
+	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
+	require.NoError(t, err)
+
+	var tool Tool
+	for _, candidate := range tools.All() {
+		if candidate.Name() == "submit_contract_task" {
+			tool = candidate
+		}
+	}
+	require.NotNil(t, tool)
+
+	out, err := tool.Call(context.Background(), raw)
+	require.NoError(t, err)
+	require.Contains(t, string(out), `"task_id":"task-1"`)
+	require.Equal(t, "slave-a", lastDelegate.TargetID)
+	require.Equal(t, "chat", lastDelegate.Skill)
+	require.Contains(t, lastDelegate.Prompt, contract.EnvelopeStart)
 }
 
 func TestTool_ListAgents_FiltersSelf(t *testing.T) {

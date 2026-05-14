@@ -54,6 +54,7 @@ func (t *Tools) All() []Tool {
 	return []Tool{
 		&listAgentsTool{t},
 		&submitTaskTool{t},
+		&submitContractTaskTool{t},
 		&getTaskTool{t},
 		&waitTaskTool{t},
 		&tailSubtasksTool{t},

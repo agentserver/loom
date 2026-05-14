@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -45,6 +46,68 @@ type observerArtifactCreateResponse struct {
 	ArtifactID string `json:"artifact_id"`
 	URL        string `json:"url"`
 	State      string `json:"state"`
+}
+
+type observerTaskContractSave struct {
+	TaskID         string          `json:"task_id"`
+	ConversationID string          `json:"conversation_id"`
+	Body           json.RawMessage `json:"body"`
+}
+
+type observerResourceSnapshotSave struct {
+	SnapshotID string          `json:"snapshot_id"`
+	Body       json.RawMessage `json:"body"`
+}
+
+func (r *ObserverRelay) SaveTaskContract(ctx context.Context, taskID, conversationID string, body json.RawMessage) error {
+	if r == nil {
+		return nil
+	}
+	payload, _ := json.Marshal(observerTaskContractSave{
+		TaskID:         taskID,
+		ConversationID: conversationID,
+		Body:           body,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.baseURL+"/api/task-contracts", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+r.token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := r.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("save task contract status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (r *ObserverRelay) SaveResourceSnapshot(ctx context.Context, body json.RawMessage) error {
+	if r == nil {
+		return nil
+	}
+	payload, _ := json.Marshal(observerResourceSnapshotSave{
+		SnapshotID: "snap-" + strconv.FormatInt(time.Now().UnixNano(), 10),
+		Body:       body,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.baseURL+"/api/resource-snapshots", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+r.token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := r.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("save resource snapshot status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (r *ObserverRelay) RegisterArtifact(ctx context.Context, entry observerArtifactCreate) (*observerArtifactCreateResponse, error) {
