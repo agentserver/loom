@@ -27,14 +27,14 @@ func (tc *TaskContract) ApplyDefaults() {
 	if tc.ExecutionPolicy.WriteMode == "" {
 		tc.ExecutionPolicy.WriteMode = WriteModeArtifactOnly
 	}
-	if tc.ExecutionPolicy.MaxDAGNodes == 0 {
-		tc.ExecutionPolicy.MaxDAGNodes = 6
+	if tc.ExecutionPolicy.MaxDAGNodes == nil {
+		tc.ExecutionPolicy.MaxDAGNodes = Int(6)
 	}
-	if tc.ExecutionPolicy.MaxDepth == 0 {
-		tc.ExecutionPolicy.MaxDepth = 3
+	if tc.ExecutionPolicy.MaxDepth == nil {
+		tc.ExecutionPolicy.MaxDepth = Int(3)
 	}
-	if tc.ExecutionPolicy.MaxConcurrency == 0 {
-		tc.ExecutionPolicy.MaxConcurrency = 3
+	if tc.ExecutionPolicy.MaxConcurrency == nil {
+		tc.ExecutionPolicy.MaxConcurrency = Int(3)
 	}
 }
 
@@ -79,12 +79,37 @@ func Bool(v bool) *bool {
 	return &v
 }
 
+func Int(v int) *int {
+	return &v
+}
+
 func (p ExecutionPolicy) AllowsMaster() bool {
 	return p.AllowMaster == nil || *p.AllowMaster
 }
 
 func (p ExecutionPolicy) AllowsCodeArtifacts() bool {
 	return p.AllowCodeArtifacts == nil || *p.AllowCodeArtifacts
+}
+
+func (p ExecutionPolicy) DAGNodeLimit() int {
+	if p.MaxDAGNodes == nil {
+		return 6
+	}
+	return *p.MaxDAGNodes
+}
+
+func (p ExecutionPolicy) DepthLimit() int {
+	if p.MaxDepth == nil {
+		return 3
+	}
+	return *p.MaxDepth
+}
+
+func (p ExecutionPolicy) ConcurrencyLimit() int {
+	if p.MaxConcurrency == nil {
+		return 3
+	}
+	return *p.MaxConcurrency
 }
 
 func validatePolicy(p ExecutionPolicy) error {
@@ -107,13 +132,13 @@ func validatePolicy(p ExecutionPolicy) error {
 	if p.WriteMode == WriteModeRepoCommit && !p.RequireUserApprovalForRepoWrites {
 		return fmt.Errorf("repo_commit requires execution_policy.require_user_approval_for_repo_writes")
 	}
-	if p.MaxDAGNodes < 1 {
+	if p.MaxDAGNodes != nil && *p.MaxDAGNodes < 1 {
 		return fmt.Errorf("execution_policy.max_dag_nodes must be >= 1")
 	}
-	if p.MaxDepth < 1 {
+	if p.MaxDepth != nil && *p.MaxDepth < 1 {
 		return fmt.Errorf("execution_policy.max_depth must be >= 1")
 	}
-	if p.MaxConcurrency < 1 {
+	if p.MaxConcurrency != nil && *p.MaxConcurrency < 1 {
 		return fmt.Errorf("execution_policy.max_concurrency must be >= 1")
 	}
 	return nil

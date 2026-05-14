@@ -60,9 +60,9 @@ type ExecutionPolicy struct {
 	CodePersistence                  string   `json:"code_persistence"`
 	ExposeCodeToUser                 string   `json:"expose_code_to_user"`
 	WriteMode                        string   `json:"write_mode"`
-	MaxDAGNodes                      int      `json:"max_dag_nodes"`
-	MaxDepth                         int      `json:"max_depth"`
-	MaxConcurrency                   int      `json:"max_concurrency"`
+	MaxDAGNodes                      *int     `json:"max_dag_nodes"`
+	MaxDepth                         *int     `json:"max_depth"`
+	MaxConcurrency                   *int     `json:"max_concurrency"`
 	RequirePlanApproval              bool     `json:"require_plan_approval"`
 	RequireUserApprovalForRepoWrites bool     `json:"require_user_approval_for_repo_writes"`
 	AllowedTargets                   []string `json:"allowed_targets,omitempty"`

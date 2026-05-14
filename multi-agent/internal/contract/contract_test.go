@@ -38,8 +38,8 @@ func TestTaskContractApplyDefaults(t *testing.T) {
 	if tc.ExecutionPolicy.WriteMode != WriteModeArtifactOnly {
 		t.Fatalf("write_mode = %q", tc.ExecutionPolicy.WriteMode)
 	}
-	if tc.ExecutionPolicy.MaxDAGNodes != 6 {
-		t.Fatalf("max_dag_nodes = %d", tc.ExecutionPolicy.MaxDAGNodes)
+	if tc.ExecutionPolicy.DAGNodeLimit() != 6 {
+		t.Fatalf("max_dag_nodes = %d", tc.ExecutionPolicy.DAGNodeLimit())
 	}
 }
 
@@ -70,6 +70,37 @@ func TestTaskContractApplyDefaultsPreservesExplicitCodeArtifactsFalse(t *testing
 	}
 	if tc.ExecutionPolicy.AllowsCodeArtifacts() {
 		t.Fatalf("allow_code_artifacts false was not preserved")
+	}
+}
+
+func TestTaskContractValidateRejectsExplicitZeroDAGNodeLimit(t *testing.T) {
+	raw := []byte(`{
+		"version": 1,
+		"conversation_id": "conv-1",
+		"intent": {
+			"goal": "generate a helper",
+			"success_criteria": ["helper is saved as an artifact"]
+		},
+		"data_contract": {
+			"write_targets": [{"type":"artifact","kind":"code","name":"helper.go"}]
+		},
+		"execution_policy": {
+			"max_dag_nodes": 0
+		}
+	}`)
+	var tc TaskContract
+	if err := json.Unmarshal(raw, &tc); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	tc.ApplyDefaults()
+
+	err := tc.Validate()
+	if err == nil {
+		t.Fatalf("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "execution_policy.max_dag_nodes must be >= 1") {
+		t.Fatalf("error = %v", err)
 	}
 }
 
