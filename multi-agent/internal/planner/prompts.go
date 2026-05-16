@@ -31,6 +31,7 @@ func planPrompt(taskPrompt string, agents []agentsdk.AgentCard) string {
   - "kind": optional special node kind (currently only "build_mcp")
   - "build_spec": structured build specification object for build_mcp nodes.
   - "prompt": the sub-task text. May reference an upstream node's output via {{X.output}}, where X must appear in depends_on.
+    Template references also support JSON field paths like {{n1.output.rows}} or {{n2.output.policy.rules}} for extracting nested fields from upstream JSON outputs.
   - "depends_on": array of upstream node ids; empty for root nodes.
   - "optional": optional boolean. Nodes are required by default; set optional:true only when the original user request can still succeed without that node.
 
@@ -43,9 +44,10 @@ Example node with skill: "mcp" (use existing tool):
 
 Each agent card lists "skills", "tools" (a flattened legacy list of MCP tool names), "mcp_tools" (structured MCP tools with server, name, description, input_schema, and result_description), and "resources" (free-form hardware/runtime info: cpu, gpu, memory_gb, devices, tags). When deciding the DAG:
 
-1. If the work needs a tool that some agent already lists in "mcp_tools", prefer/use "mcp_tools" for MCP planning and emit a node targeting that agent. Set "skill": "mcp" and write the prompt as JSON {"server":"<server>","tool":"<tool>","args":{...}} so the slave's mcp executor handles it directly. Omit "kind". The args object MUST conform to that tool's input_schema. You must not invent arguments outside input_schema. If a needed argument is absent from input_schema, evolve/build MCP instead of calling the existing tool with extra args. Use legacy "tools" only when a valid server and argument contract is otherwise known from the task context; otherwise build/evolve an MCP tool or use ordinary chat instead of inventing server names or args.
+1. If the work needs a tool that some agent already lists in "mcp_tools", prefer/use "mcp_tools" for MCP planning and emit a node targeting that agent. Set "skill": "mcp" and write the prompt as JSON {"server":"<server>","tool":"<tool>","args":{...}} so the slave's mcp executor handles it directly. Omit "kind". The args object MUST conform to that tool's input_schema. You must not invent arguments outside input_schema. If a needed argument is absent from input_schema, evolve/build MCP instead of calling the existing tool with extra args. When a schema expects a nested value from an upstream JSON output, use JSON field paths in the MCP JSON prompt, e.g. "rows":{{n1.output.rows}} instead of passing the whole {{n1.output}} when only its rows array is required. Do not turn direct MCP tool calls into ordinary chat prompts asking a slave to call MCP; direct MCP calls must stay skill:"mcp" JSON nodes. Use legacy "tools" only when a valid server and argument contract is otherwise known from the task context; otherwise build/evolve an MCP tool or use ordinary chat instead of inventing server names or args.
 
 2. If no agent lists the needed tool but at least one agent has skill "build_mcp" and resources matching the requirement, emit a sub-task with "kind":"build_mcp", "skill":"build_mcp", and a structured "build_spec" object. Do not put natural language in "prompt" for build_mcp nodes. The master will validate "build_spec" before dispatch.
+   If the task needs multiple independent build_mcp services, emit multiple independent build_mcp root nodes in the same first-phase plan so the scheduler can run them concurrently. Keep each build_spec focused on one reusable MCP service. Do not emit dependent use nodes until a build has completed and the server/tools are visible in the refreshed agent list.
    The build_spec object should have this shape:
        {"name":"<lower_snake>", "description":"...",
         "tools":[{"name":"...","description":"...","args_schema":{...},
@@ -100,15 +102,23 @@ func reducePrompt(originalPrompt string, results []SubResult) string {
 			sb.WriteString("error: " + r.Error + "\n")
 		}
 	}
+	writeGuidance := ""
+	if strings.Contains(originalPrompt, "<USER_FILES_MANIFEST") && strings.Contains(originalPrompt, `"writes"`) {
+		writeGuidance = `
+The original task includes manifest write targets. Do not call curl, do not perform HTTP PUT, and do not ask for approval to write files. The master process will write your returned final answer to the requested destination after reduction. Do not claim the upload failed or is still required.
+`
+	}
+
 	return fmt.Sprintf(`You are a task reducer. Given the original task and the outputs of the sub-tasks that ran on its behalf, produce a final answer to the original task.
 
 If some sub-tasks failed or were skipped, mention which ones explicitly so the caller knows what data is missing.
+%s
 
 Original task:
 %s
 
 %s
-`, originalPrompt, sb.String())
+`, writeGuidance, originalPrompt, sb.String())
 }
 
 func agentsJSON(agents []agentsdk.AgentCard) string {

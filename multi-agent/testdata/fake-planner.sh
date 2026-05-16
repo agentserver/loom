@@ -2,7 +2,7 @@
 # Behavior knobs:
 #   FAKE_PLANNER_MODE = route_a | route_empty | plan_diamond | plan_chain | plan_parallel |
 #                       plan_mcp_valid | plan_mcp_invalid_arg | plan_mcp_validation_replan |
-#                       plan_optional_failure |
+#                       plan_optional_failure | plan_fetch_artifact_then_mcp |
 #                       plan_build_spec_field | plan_build_mcp_bad_text |
 #                       plan_invalid_cycle |
 #                       plan_invalid_json | plan_with_skill | reduce_ok | exit1 | sleep
@@ -77,6 +77,14 @@ EOF
 [
   {"id":"required","target_id":"agent-a","prompt":"required"},
   {"id":"optional","target_id":"agent-b","prompt":"optional","depends_on":["required"],"optional":true}
+]
+EOF
+    ;;
+  plan_fetch_artifact_then_mcp)
+    cat <<'EOF'
+[
+  {"id":"fetch_csv","target_id":"agent-a","prompt":"Fetch the CSV file at http://observer.local/api/artifacts/art_csv"},
+  {"id":"profile","target_id":"agent-a","skill":"mcp","prompt":"{\"server\":\"csv_profile\",\"tool\":\"profile_csv\",\"args\":{\"csv_text\":{{fetch_csv.output}}}}","depends_on":["fetch_csv"]}
 ]
 EOF
     ;;

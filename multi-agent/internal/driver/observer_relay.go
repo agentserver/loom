@@ -178,21 +178,41 @@ func (r *ObserverRelay) UpdateWriteTask(ctx context.Context, writeID, taskID str
 		return nil
 	}
 	body, _ := json.Marshal(map[string]string{"task_id": taskID})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, r.baseURL+"/api/writes/"+writeID, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+r.token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := r.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPatch, r.baseURL+"/api/writes/"+writeID, bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+r.token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := r.http.Do(req)
+		if err != nil {
+			return err
+		}
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+		if resp.StatusCode/100 == 2 {
+			return nil
+		}
+		msg := strings.TrimSpace(string(respBody))
+		if resp.StatusCode == http.StatusInternalServerError && isObserverSQLiteBusy(msg) && time.Now().Before(deadline) {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(500 * time.Millisecond):
+				continue
+			}
+		}
+		if msg != "" {
+			return fmt.Errorf("update write task status %d: %s", resp.StatusCode, msg)
+		}
 		return fmt.Errorf("update write task status %d", resp.StatusCode)
 	}
-	return nil
+}
+
+func isObserverSQLiteBusy(msg string) bool {
+	return strings.Contains(msg, "SQLITE_BUSY") || strings.Contains(strings.ToLower(msg), "database is locked")
 }
 
 type observerArtifactRequestsResponse struct {

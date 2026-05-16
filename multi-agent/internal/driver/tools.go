@@ -430,6 +430,11 @@ func (g *getTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMe
 		Status: info.Status,
 	})
 	progress := g.t.observerProgress(ctx, taskID)
+	output := sdkTaskOutput(info)
+	finalOutput := progress.FinalOutput
+	if finalOutput == "" && isTerminalStatus(info.Status) {
+		finalOutput = output
+	}
 	return json.Marshal(struct {
 		Status              string `json:"status"`
 		Output              string `json:"output"`
@@ -441,12 +446,12 @@ func (g *getTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMe
 		IsFinal             bool   `json:"is_final"`
 	}{
 		Status:              info.Status,
-		Output:              info.Output,
+		Output:              output,
 		FailureReason:       info.FailureReason,
 		LatestProgress:      progress.LatestProgress,
 		LatestProgressPhase: progress.LatestProgressPhase,
 		LatestProgressAt:    progress.LatestProgressAt,
-		FinalOutput:         progress.FinalOutput,
+		FinalOutput:         finalOutput,
 		IsFinal:             progress.IsFinal || isTerminalStatus(info.Status),
 	})
 }
@@ -508,6 +513,7 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 			written := w.t.reg.WrittenFiles(args.TaskID)
 			w.t.reg.ForgetTask(args.TaskID)
 			progress := w.t.observerProgress(ctx, taskID)
+			output := sdkTaskOutput(info)
 			return json.Marshal(struct {
 				Status              string        `json:"status"`
 				Output              string        `json:"output"`
@@ -520,12 +526,12 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 				WrittenFiles        []WrittenFile `json:"written_files"`
 			}{
 				Status:              info.Status,
-				Output:              info.Output,
+				Output:              output,
 				FailureReason:       info.FailureReason,
 				LatestProgress:      progress.LatestProgress,
 				LatestProgressPhase: progress.LatestProgressPhase,
 				LatestProgressAt:    progress.LatestProgressAt,
-				FinalOutput:         firstNonEmpty(progress.FinalOutput, info.Output),
+				FinalOutput:         firstNonEmpty(progress.FinalOutput, output),
 				IsFinal:             true,
 				WrittenFiles:        written,
 			})
@@ -548,6 +554,29 @@ func isTerminalStatus(status string) bool {
 	default:
 		return false
 	}
+}
+
+func sdkTaskOutput(info *agentsdk.TaskInfo) string {
+	if info == nil {
+		return ""
+	}
+	if info.Output != "" {
+		return info.Output
+	}
+	if len(info.Result) == 0 {
+		return ""
+	}
+	var obj struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(info.Result, &obj); err == nil && obj.Output != "" {
+		return obj.Output
+	}
+	var raw string
+	if err := json.Unmarshal(info.Result, &raw); err == nil {
+		return raw
+	}
+	return ""
 }
 
 // =========================================================================

@@ -73,6 +73,30 @@ func TestRender_RepeatedReferences(t *testing.T) {
 	require.Equal(t, "X X", out)
 }
 
+func TestRender_JSONFieldPath(t *testing.T) {
+	out, err := Render(`{"rows":{{csv.output.rows}},"policy":{{policy.output.policy}}}`, map[string]string{
+		"csv":    `{"rows":[{"order_id":"1001","amount":128.5}],"summary":{"row_count":1}}`,
+		"policy": `{"policy":{"rules":[{"id":"R1","text":"ok"}]}}`,
+	})
+	require.NoError(t, err)
+	require.JSONEq(t, `{"rows":[{"order_id":"1001","amount":128.5}],"policy":{"rules":[{"id":"R1","text":"ok"}]}}`, out)
+}
+
+func TestRender_JSONNestedFieldPath(t *testing.T) {
+	out, err := Render(`count={{csv.output.summary.row_count}}`, map[string]string{
+		"csv": `{"summary":{"row_count":5}}`,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "count=5", out)
+}
+
+func TestRender_JSONFieldPathErrorsWhenMissing(t *testing.T) {
+	_, err := Render(`{{csv.output.missing}}`, map[string]string{
+		"csv": `{"rows":[]}`,
+	})
+	require.ErrorContains(t, err, "csv.output.missing")
+}
+
 func TestScheduler_LinearChain(t *testing.T) {
 	nodes := []planner.Node{
 		{ID: "a", TargetID: "x", Prompt: "p"},

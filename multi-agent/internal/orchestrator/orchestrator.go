@@ -26,17 +26,32 @@ type ObserverSink interface {
 	Emit(observer.Event)
 }
 
+type ArtifactResolver interface {
+	GetArtifact(ctx context.Context, rawURL string) ([]byte, string, error)
+	PutWrite(ctx context.Context, rawURL string, content []byte, mime string) error
+}
+
+type ArtifactURLAuthorizer interface {
+	AuthorizeArtifactURL(rawURL string) (string, bool)
+}
+
 type Orchestrator struct {
-	store    *store.Store
-	planner  *planner.Planner
-	sdk      SDKDelegator
-	cfg      config.Fanout
-	selfID   string
-	observer ObserverSink
+	store     *store.Store
+	planner   *planner.Planner
+	sdk       SDKDelegator
+	cfg       config.Fanout
+	selfID    string
+	observer  ObserverSink
+	artifacts ArtifactResolver
 }
 
 func New(s *store.Store, p *planner.Planner, sdk SDKDelegator, cfg config.Fanout, selfID string, obs ObserverSink) *Orchestrator {
 	return &Orchestrator{store: s, planner: p, sdk: sdk, cfg: cfg, selfID: selfID, observer: obs}
+}
+
+func (o *Orchestrator) SetArtifactResolver(r ArtifactResolver) *Orchestrator {
+	o.artifacts = r
+	return o
 }
 
 func (o *Orchestrator) emit(ev observer.Event) {

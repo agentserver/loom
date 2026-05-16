@@ -1,0 +1,76 @@
+[
+  {
+    "id": "build_csv_profile",
+    "target_id": "builder-slave",
+    "kind": "build_mcp",
+    "skill": "build_mcp",
+    "build_spec": {
+      "name": "csv_profile",
+      "description": "Profile small CSV files supplied through driver manifest file URLs.",
+      "tools": [
+        {
+          "name": "profile_csv",
+          "description": "Return row count, column names, numeric totals, and refund-related outliers from CSV text.",
+          "args_schema": {
+            "type": "object",
+            "properties": {
+              "csv_text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "csv_text"
+            ],
+            "additionalProperties": false
+          },
+          "result_description": "JSON object with row_count, columns, totals, and suspicious_rows."
+        }
+      ],
+      "hints": "Use Python stdlib csv, decimal, and statistics only. Do not read local paths; callers pass file contents from manifest URLs.",
+      "allowed_packages": [],
+      "compose_servers": [],
+      "version": 1,
+      "iteration": 1,
+      "max_iterations": 3
+    }
+  },
+  {
+    "id": "build_refund_policy_check",
+    "target_id": "builder-slave",
+    "kind": "build_mcp",
+    "skill": "build_mcp",
+    "build_spec": {
+      "name": "refund_policy_check",
+      "description": "Evaluate profiled order/refund facts against a markdown refund policy.",
+      "tools": [
+        {
+          "name": "check_refund_policy",
+          "description": "Return policy violations, risk labels, and recommended review actions.",
+          "args_schema": {
+            "type": "object",
+            "properties": {
+              "policy_markdown": {
+                "type": "string"
+              },
+              "order_facts": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "policy_markdown",
+              "order_facts"
+            ],
+            "additionalProperties": false
+          },
+          "result_description": "JSON object with violations, risk_level, and recommended_actions."
+        }
+      ],
+      "hints": "Use deterministic string and numeric rules. Do not call external services.",
+      "allowed_packages": [],
+      "compose_servers": [],
+      "version": 1,
+      "iteration": 1,
+      "max_iterations": 3
+    }
+  }
+]

@@ -618,6 +618,31 @@ func TestObserverRelaySyncWrites(t *testing.T) {
 	}
 }
 
+func TestObserverRelayUpdateWriteTaskRetriesSQLiteBusy(t *testing.T) {
+	calls := 0
+	observerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPatch || r.URL.Path != "/api/writes/wr_1" {
+			t.Fatalf("unexpected observer request: %s %s", r.Method, r.URL.Path)
+		}
+		if calls == 1 {
+			http.Error(w, "database is locked (5) (SQLITE_BUSY)", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer observerServer.Close()
+
+	relay := &ObserverRelay{baseURL: observerServer.URL, token: "observer-token", http: observerServer.Client()}
+	err := relay.UpdateWriteTask(context.Background(), "wr_1", "task_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d", calls)
+	}
+}
+
 func TestTool_SubmitTask_EmitsSlaveTargetRoleForNonMasterTarget(t *testing.T) {
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
@@ -827,6 +852,42 @@ func TestWaitTaskTerminalFinalOutputFallsBackToSDKOutput(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := `{"status":"completed","output":"sdk final","failure_reason":"","latest_progress":"done","latest_progress_phase":"final","latest_progress_at":"2026-05-13T04:05:06Z","final_output":"sdk final","is_final":true,"written_files":[{"path":"/p","bytes":5,"sha256":"s","written_at":""}]}`
+			if string(res) != want {
+				t.Fatalf("response mismatch\nwant: %s\n got: %s", want, res)
+			}
+			return
+		}
+	}
+	t.Fatal("wait_task tool not registered")
+}
+
+func TestWaitTaskTerminalFinalOutputFallsBackToSDKResultOutput(t *testing.T) {
+	observerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tasks" {
+			t.Fatalf("path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"task_id":"t3","final_output":"","is_final":false}]`))
+	}))
+	defer observerServer.Close()
+
+	sdk := &fakeSDK{
+		getTaskFunc: func(id string, _ bool) (*agentsdk.TaskInfo, error) {
+			return &agentsdk.TaskInfo{TaskID: id, Status: "completed", Result: json.RawMessage(`{"output":"result final"}`)}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	tools.cfg.Observer.Enabled = true
+	tools.cfg.Observer.URL = observerServer.URL
+
+	for _, tt := range tools.All() {
+		if tt.Name() == "wait_task" {
+			res, err := tt.Call(context.Background(),
+				json.RawMessage(`{"task_id":"t3","poll_interval_sec":1,"timeout_sec":5}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := `{"status":"completed","output":"result final","failure_reason":"","latest_progress":"","latest_progress_phase":"","latest_progress_at":"","final_output":"result final","is_final":true,"written_files":null}`
 			if string(res) != want {
 				t.Fatalf("response mismatch\nwant: %s\n got: %s", want, res)
 			}

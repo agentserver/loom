@@ -55,3 +55,37 @@ func TestPlanPrompt_IncludesStructuredMCPGuidance(t *testing.T) {
 		}
 	}
 }
+
+func TestPlanPrompt_IncludesJSONFieldPathGuidanceForMCPArgs(t *testing.T) {
+	out := planPrompt("evaluate rows", []agentsdk.AgentCard{})
+	wantPhrases := []string{
+		"{{n1.output.rows}}",
+		"JSON field paths",
+		"instead of passing the whole {{n1.output}}",
+		"Do not turn direct MCP tool calls into ordinary chat prompts",
+	}
+	for _, w := range wantPhrases {
+		if !strings.Contains(out, w) {
+			t.Errorf("planPrompt missing %q\n----\n%s", w, out)
+		}
+	}
+}
+
+func TestReducePrompt_ClarifiesManifestWritesAreHandledByMaster(t *testing.T) {
+	out := reducePrompt(`<USER_FILES_MANIFEST version=1>
+{"writes":[{"put_url":"http://observer.local/api/writes/wr_1"}]}
+</USER_FILES_MANIFEST>
+
+write report`, []SubResult{{NodeID: "n1", Status: "completed", Output: "data"}})
+	wantPhrases := []string{
+		"Do not call curl",
+		"do not perform HTTP PUT",
+		"master process will write",
+		"Do not claim the upload failed",
+	}
+	for _, w := range wantPhrases {
+		if !strings.Contains(out, w) {
+			t.Errorf("reducePrompt missing %q\n----\n%s", w, out)
+		}
+	}
+}

@@ -2,6 +2,7 @@ package observerstore
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"path/filepath"
@@ -23,6 +24,39 @@ func testStore(t *testing.T) *Store {
 	require.NoError(t, s.UpsertAgent(Agent{WorkspaceID: "ws1", ID: "master", Role: observer.RoleMaster, DisplayName: "Master"}, "master-token"))
 	require.NoError(t, s.UpsertAgent(Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"}, "slave-token"))
 	return s
+}
+
+func TestOpenConfiguresSQLiteForConcurrentObserverAccess(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer s.Close()
+
+	var journalMode string
+	require.NoError(t, s.db.QueryRow(`PRAGMA journal_mode`).Scan(&journalMode))
+	require.Equal(t, "wal", journalMode)
+
+	var busyTimeout int
+	require.NoError(t, s.db.QueryRow(`PRAGMA busy_timeout`).Scan(&busyTimeout))
+	require.GreaterOrEqual(t, busyTimeout, 5000)
+}
+
+func TestOpenConfiguresSQLiteBusyTimeoutOnNewConnections(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	firstConn, err := s.db.Conn(ctx)
+	require.NoError(t, err)
+	defer firstConn.Close()
+
+	secondConn, err := s.db.Conn(ctx)
+	require.NoError(t, err)
+	defer secondConn.Close()
+
+	var busyTimeout int
+	require.NoError(t, secondConn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&busyTimeout))
+	require.GreaterOrEqual(t, busyTimeout, 5000)
 }
 
 func mustJSON(t *testing.T, v interface{}) []byte {

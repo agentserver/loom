@@ -12,6 +12,14 @@ tests/runtime/slave/work/
 *.tmp
 /bin/
 /.run/
+/dev/bin/
+/dev/configs/driver.yaml
+/dev/configs/master.yaml
+/dev/configs/observer.yaml
+/dev/configs/slave-a.yaml
+/dev/configs/slave-b.yaml
+/dev/configs/observer-e2e.db
+/dev/tmp/*.jsonl
 /driver-agent
 /master-agent
 /observer-server

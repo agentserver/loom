@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "conversation_id": "scenario-driver-files-multi-mcp",
+  "intent": {
+    "goal": "Analyze driver-provided order and refund policy files, build missing MCP services as needed, and produce a refund risk report.",
+    "business_context": "The driver owns the user files. Master and slave agents may run on other machines, so they must use manifest URLs instead of local file paths.",
+    "success_criteria": [
+      "The first phase can build the CSV profiling and refund policy checking MCP services concurrently.",
+      "The final report references the driver-provided orders.csv and refund-policy.md inputs.",
+      "Generated MCP code is persisted as observer artifacts and hidden from the user unless requested."
+    ]
+  },
+  "data_contract": {
+    "read_artifacts": [],
+    "write_targets": [
+      {
+        "type": "artifact",
+        "kind": "markdown",
+        "name": "refund-risk-report.md"
+      }
+    ]
+  },
+  "execution_policy": {
+    "routing": "master_only",
+    "allow_master": true,
+    "allow_build_mcp": true,
+    "allow_code_artifacts": true,
+    "code_persistence": "observer_artifact_store",
+    "expose_code_to_user": "on_request",
+    "write_mode": "artifact_only",
+    "max_dag_nodes": 6,
+    "max_depth": 3,
+    "max_concurrency": 2,
+    "require_plan_approval": false,
+    "require_user_approval_for_repo_writes": false,
+    "allowed_targets": [
+      "builder-slave"
+    ]
+  },
+  "capability_requirements": {
+    "skills": [
+      "build_mcp"
+    ],
+    "tools": [],
+    "resources": {
+      "tags": [
+        "python3",
+        "data",
+        "policy"
+      ]
+    }
+  }
+}

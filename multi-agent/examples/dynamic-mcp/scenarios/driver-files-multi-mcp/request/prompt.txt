@@ -1,0 +1,13 @@
+<USER_FILES_MANIFEST version=1>
+{"files":[{"path":"driver-files/orders.csv","kind":"file","mime":"text/csv","bytes":281,"sha256":"12bf5821c357264bf7d4adc9d6979f11ee392626cd90e447a232d742b4294588","url":"https://driver.example.invalid/api/files/orders.csv?token=read-orders"},{"path":"driver-files/refund-policy.md","kind":"file","mime":"text/markdown","bytes":362,"sha256":"926bf6fcef56e17434b2bac0d18725d56c36498009692a3b5fabd727172cf4bc","url":"https://driver.example.invalid/api/files/refund-policy.md?token=read-policy"}],"writes":[{"path":"outputs/refund-risk-report.md","kind":"file","overwrite":true,"put_url":"https://driver.example.invalid/api/writes/refund-risk-report?token=write-report"}]}
+</USER_FILES_MANIFEST>
+
+Analyze orders.csv against refund-policy.md and write outputs/refund-risk-report.md.
+
+No available agent currently advertises a CSV profiling MCP tool or a refund
+policy checking MCP tool. Build missing MCP services in parallel when independent, then use the built tools to produce a concise markdown report with:
+
+- high-risk refund requests,
+- policy rule references,
+- recommended review queue,
+- a short note that generated MCP code is persisted but hidden unless requested.

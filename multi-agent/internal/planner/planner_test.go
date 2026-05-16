@@ -104,6 +104,13 @@ func TestReduce_ReturnsClaudeOutput(t *testing.T) {
 	})
 }
 
+func TestStripJSONFence(t *testing.T) {
+	got := stripJSONFence("```json\n[{\"id\":\"n1\"}]\n```")
+	if got != `[{"id":"n1"}]` {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func TestRunClaude_Exit1(t *testing.T) {
 	withMode(t, "exit1", func() {
 		p := newPlanner(t, "exit1")
@@ -199,6 +206,22 @@ func TestPlanPrompt_MentionsBuildMCPAndKindSkill(t *testing.T) {
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("planPrompt missing %q", want)
+		}
+	}
+}
+
+func TestPlanPrompt_AllowsParallelIndependentBuildMCPServices(t *testing.T) {
+	p := planPrompt("build two missing tools", []agentsdk.AgentCard{
+		{AgentID: "builder", DisplayName: "Builder", Status: "available", Card: []byte(`{"skills":["build_mcp"],"resources":{"tags":["python3"]}}`)},
+	})
+	for _, want := range []string{
+		"multiple independent build_mcp services",
+		"same first-phase plan",
+		"run them concurrently",
+		"Do not emit dependent use nodes until a build has completed",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("planPrompt missing %q\n----\n%s", want, p)
 		}
 	}
 }

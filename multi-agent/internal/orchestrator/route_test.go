@@ -12,6 +12,7 @@ import (
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/stretchr/testify/require"
 	"github.com/yourorg/multi-agent/internal/config"
+	"github.com/yourorg/multi-agent/internal/contract"
 	"github.com/yourorg/multi-agent/internal/executor"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/planner"
@@ -98,6 +99,27 @@ func TestRoute_NoCandidate(t *testing.T) {
 	require.Empty(t, sdk.delegatedReqs)
 }
 
+func TestRoute_ContractUniqueTargetBypassesPlanner(t *testing.T) {
+	sdk := &fakeSDK{
+		agents: []agentsdk.AgentCard{
+			{AgentID: "self-id", Status: "available", Card: json.RawMessage(`{"skills":["route"]}`)},
+			{AgentID: "agent-a", Status: "available", Card: json.RawMessage(`{"skills":["chat"]}`)},
+		},
+		delegateResp: &agentsdk.DelegateTaskResponse{TaskID: "child-1"},
+		waitInfo:     &agentsdk.TaskInfo{TaskID: "child-1", Status: "completed", Output: "child output"},
+	}
+	o := newOrch(t, sdk, "route_empty")
+	prompt := routeContractPrompt(t, []string{"self-id", "agent-a"}, []string{"chat"}, "do thing")
+
+	res, err := o.Run(context.Background(), executor.Task{ID: "p-contract", Skill: "route", Prompt: prompt})
+
+	require.NoError(t, err)
+	require.Equal(t, "child output", res.Summary)
+	require.Len(t, sdk.delegatedReqs, 1)
+	require.Equal(t, "agent-a", sdk.delegatedReqs[0].TargetID)
+	require.Equal(t, "do thing", sdk.delegatedReqs[0].Prompt)
+}
+
 func TestRoute_ChildFails(t *testing.T) {
 	sdk := &fakeSDK{
 		agents:       []agentsdk.AgentCard{{AgentID: "agent-a", Status: "available"}},
@@ -134,6 +156,46 @@ func TestRoute_FiltersSelf(t *testing.T) {
 	for _, r := range sdk.delegatedReqs {
 		require.NotEqual(t, "self-id", r.TargetID)
 	}
+}
+
+func TestRoute_UsesResultOutputWhenSDKOutputIsEmpty(t *testing.T) {
+	sdk := &fakeSDK{
+		agents:       []agentsdk.AgentCard{{AgentID: "agent-a", Status: "available"}},
+		delegateResp: &agentsdk.DelegateTaskResponse{TaskID: "child-1"},
+		waitInfo:     &agentsdk.TaskInfo{TaskID: "child-1", Status: "completed", Result: json.RawMessage(`{"output":"child result"}`)},
+	}
+	o := newOrch(t, sdk, "route_a")
+
+	res, err := o.Run(context.Background(), executor.Task{ID: "p-result", Skill: "route", Prompt: "do thing"})
+
+	require.NoError(t, err)
+	require.Equal(t, "child result", res.Summary)
+}
+
+func routeContractPrompt(t *testing.T, allowedTargets, requiredSkills []string, body string) string {
+	t.Helper()
+	allowMaster := true
+	tc := contract.TaskContract{
+		Version:        contract.Version,
+		ConversationID: "route-contract-test",
+		Intent: contract.IntentSpec{
+			Goal:            body,
+			SuccessCriteria: []string{"done"},
+		},
+		DataContract: contract.DataContract{
+			WriteTargets: []contract.WriteTarget{{Type: contract.WriteTargetArtifact, Kind: "text", Name: "out.txt"}},
+		},
+		ExecutionPolicy: contract.ExecutionPolicy{
+			Routing:        contract.RoutingMasterOnly,
+			AllowMaster:    &allowMaster,
+			AllowedTargets: allowedTargets,
+		},
+		CapabilityRequirements: contract.CapabilityRequirements{Skills: requiredSkills},
+	}
+	tc.ApplyDefaults()
+	prompt, err := contract.EncodeEnvelope(tc, body)
+	require.NoError(t, err)
+	return prompt
 }
 
 func TestRun_EmitsMasterTaskLifecycleEvents(t *testing.T) {

@@ -56,7 +56,7 @@ func (p *Poller) Run(ctx context.Context) error {
 		}
 		p.drainPendingAcks(ctx)
 
-		t, ok, err := p.poll(ctx)
+		tasks, ok, err := p.poll(ctx)
 		if err != nil {
 			select {
 			case <-ctx.Done():
@@ -81,23 +81,28 @@ func (p *Poller) Run(ctx context.Context) error {
 			continue
 		}
 		idleSince = time.Time{}
-		p.execute(ctx, t)
+		for _, t := range tasks {
+			if err := ctx.Err(); err != nil {
+				return nil
+			}
+			p.execute(ctx, t)
+		}
 	}
 }
 
-func (p *Poller) poll(ctx context.Context) (pollTask, bool, error) {
+func (p *Poller) poll(ctx context.Context) ([]pollTask, bool, error) {
 	req, _ := http.NewRequestWithContext(ctx, "GET", p.cfg.ServerURL+"/api/agent/tasks/poll", nil)
 	req.Header.Set("Authorization", "Bearer "+p.cfg.ProxyToken)
 	resp, err := p.cli.Do(req)
 	if err != nil {
-		return pollTask{}, false, err
+		return nil, false, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == 204 {
-		return pollTask{}, false, nil
+		return nil, false, nil
 	}
 	if resp.StatusCode != 200 {
-		return pollTask{}, false, fmt.Errorf("poll status %d", resp.StatusCode)
+		return nil, false, fmt.Errorf("poll status %d", resp.StatusCode)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	// agentserver returns a JSON array of pending tasks (possibly empty).
@@ -106,21 +111,22 @@ func (p *Poller) poll(ctx context.Context) (pollTask, bool, error) {
 	// task atomically marked `assigned` server-side with no agent processing it.
 	var arr []pollTask
 	if err := json.Unmarshal(body, &arr); err != nil {
-		return pollTask{}, false, fmt.Errorf("decode poll: %w (body=%q)", err, string(body))
+		return nil, false, fmt.Errorf("decode poll: %w (body=%q)", err, string(body))
 	}
 	if len(arr) == 0 {
-		return pollTask{}, false, nil
+		return nil, false, nil
 	}
-	t := arr[0]
 	// Skill is omitted from the poll response (agentserver/internal/server/agent_tasks.go
 	// pollResponse struct has no Skill field). Fall back to GET /api/agent/tasks/{id}
 	// which does include it; otherwise master can't dispatch the task.
-	if t.Skill == "" {
-		if skill, err := p.fetchSkill(ctx, t.TaskID); err == nil {
-			t.Skill = skill
+	for i := range arr {
+		if arr[i].Skill == "" {
+			if skill, err := p.fetchSkill(ctx, arr[i].TaskID); err == nil {
+				arr[i].Skill = skill
+			}
 		}
 	}
-	return t, true, nil
+	return arr, true, nil
 }
 
 func (p *Poller) fetchSkill(ctx context.Context, id string) (string, error) {

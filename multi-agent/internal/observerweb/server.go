@@ -143,8 +143,12 @@ func bearerToken(auth string) (string, bool) {
 func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) (observerstore.Agent, bool) {
 	token, ok := bearerToken(r.Header.Get("Authorization"))
 	if !ok {
-		http.Error(w, "missing or invalid bearer token", http.StatusUnauthorized)
-		return observerstore.Agent{}, false
+		token = strings.TrimSpace(r.URL.Query().Get("token"))
+		ok = token != ""
+		if !ok {
+			http.Error(w, "missing or invalid bearer token", http.StatusUnauthorized)
+			return observerstore.Agent{}, false
+		}
 	}
 	agent, ok, err := h.s.ValidateToken(token)
 	if err != nil {

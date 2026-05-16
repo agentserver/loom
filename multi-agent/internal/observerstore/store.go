@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"time"
 
@@ -176,8 +177,12 @@ type ResourceSnapshotRecord struct {
 }
 
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", sqliteDSNWithPragmas(path))
 	if err != nil {
+		return nil, err
+	}
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;`); err != nil {
+		_ = db.Close()
 		return nil, err
 	}
 	if _, err := db.Exec(schemaSQL); err != nil {
@@ -189,6 +194,17 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return &Store{db: db}, nil
+}
+
+func sqliteDSNWithPragmas(path string) string {
+	q := url.Values{}
+	q.Add("_pragma", "busy_timeout=5000")
+
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return path + sep + q.Encode()
 }
 
 func ensureColumns(db *sql.DB) error {

@@ -149,6 +149,12 @@ func TestArtifactLazyHTTPFlow(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	require.Equal(t, "hello", rr.Body.String())
 	require.Equal(t, "text/plain", rr.Header().Get("Content-Type"))
+
+	req = httptest.NewRequest(http.MethodGet, "/api/artifacts/"+created.ArtifactID+"?token=slave-token", nil)
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Equal(t, "hello", rr.Body.String())
 }
 
 func TestWriteHTTPFlow(t *testing.T) {

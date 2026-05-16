@@ -24,6 +24,7 @@ with `BUILD_MCP_BLOCKED:` context appended; the planner can expand
 - `agent-builder/config.example.yaml` — slave-agent config with `build_mcp` skill + `resources:` advertising `tags: [crypto, python3]`
 - `e2e-driver/main.go` — Go binary that DelegateTasks the master and asserts the reducer output + checks the generated file landed on disk with the AUTO-GENERATED header
 - `scripts/e2e.sh` — bash wrapper that builds, launches master + builder slave, runs the driver, and reports
+- `scenarios/driver-files-multi-mcp/` — fixture-level scenario showing a driver-side file task that should build multiple independent MCP services in the first phase
 
 ## First-time setup
 

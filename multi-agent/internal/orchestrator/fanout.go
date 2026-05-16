@@ -10,6 +10,7 @@ import (
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/yourorg/multi-agent/internal/capability"
+	"github.com/yourorg/multi-agent/internal/config"
 	"github.com/yourorg/multi-agent/internal/executor"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/planner"
@@ -23,6 +24,13 @@ import (
 const maxBuildIterations = 3
 
 const fanoutFailureDrainTimeout = 5 * time.Second
+
+func fanoutNoProgressTimeout(cfg config.Fanout) time.Duration {
+	if cfg.SubTaskDefaults.TimeoutSec > 0 {
+		return time.Duration(cfg.SubTaskDefaults.TimeoutSec+30) * time.Second
+	}
+	return 60 * time.Second
+}
 
 // parseOutputHandle attempts to interpret s as a phase-boundary handle JSON
 // document. Unlike transport.ParseHandle, it does not require a non-empty URL
@@ -76,16 +84,21 @@ func renamePlanIDs(nodes []planner.Node, parentNodeID string) []planner.Node {
 			}
 		}
 		n.DependsOn = newDeps
-		// Also rewrite {{X.output}} template references in the prompt
-		// for the same reason.
-		for orig, renamed := range rename {
-			n.Prompt = strings.ReplaceAll(n.Prompt,
-				"{{"+orig+".output}}",
-				"{{"+renamed+".output}}")
-		}
+		n.Prompt = rewriteTemplateNodeRefs(n.Prompt, rename)
 		out[i] = n
 	}
 	return out
+}
+
+func rewriteTemplateNodeRefs(prompt string, rename map[string]string) string {
+	return renderRe.ReplaceAllStringFunc(prompt, func(match string) string {
+		sub := renderRe.FindStringSubmatch(match)
+		renamed, ok := rename[sub[1]]
+		if !ok {
+			return match
+		}
+		return "{{" + renamed + ".output" + sub[2] + "}}"
+	})
 }
 
 func validateMCPNode(n planner.Node, agents []agentsdk.AgentCard, prompt string) error {
@@ -163,9 +176,11 @@ func mcpValidationReplanContext(n planner.Node, agents []agentsdk.AgentCard, pro
 	argsJSON, _ := json.Marshal(call.Args)
 
 	return fmt.Sprintf(
-		"MCP_CALL_VALIDATION_FAILED:\nnode_id=%s\nserver=%s\ntool=%s\nargs=%s\nerror=%s\ninput_schema=%s\n"+
-			"Replan with schema-conformant arguments, or add/evolve a build_mcp node if the needed argument is not in the schema.",
-		n.ID, call.Server, call.Tool, string(argsJSON), validationErr.Error(), schema)
+		"MCP_CALL_VALIDATION_FAILED:\nnode_id=%s\nserver=%s\ntool=%s\nfailed_node_prompt_template=%s\nargs=%s\nerror=%s\ninput_schema=%s\n"+
+			"Replan with schema-conformant arguments, or add/evolve a build_mcp node if the needed argument is not in the schema. "+
+			"If an upstream JSON output contains the needed nested value, use JSON field path templates such as {{n1.output.rows}} instead of the whole {{n1.output}}. "+
+			"Do not replace a direct MCP call with an ordinary chat node.",
+		n.ID, call.Server, call.Tool, n.Prompt, string(argsJSON), validationErr.Error(), schema)
 }
 
 func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor.Result, error) {
@@ -251,6 +266,15 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 	var outputsMu sync.Mutex
 	iterCount := map[string]int{}
 	validationReplans := 0
+	noProgressTimeout := fanoutNoProgressTimeout(o.cfg)
+	writeURLs, err := parseManifestWriteURLs(t.Prompt)
+	if err != nil {
+		return executor.Result{}, err
+	}
+	manifestWriteURL := make(map[string]bool, len(writeURLs))
+	for _, u := range writeURLs {
+		manifestWriteURL[u] = true
+	}
 	// allNodes tracks every node ever scheduled, including ones added via Append.
 	allNodes := make([]planner.Node, len(plan))
 	copy(allNodes, plan)
@@ -437,7 +461,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 				doneCh <- done{FinishedNode: FinishedNode{NodeID: n.ID, Status: "failed", Error: err.Error()}, ChildTaskID: resp.TaskID}
 				return
 			}
-			f := FinishedNode{NodeID: n.ID, Status: info.Status, Output: info.Output}
+			f := FinishedNode{NodeID: n.ID, Status: info.Status, Output: taskOutput(info)}
 			if info.Status != "completed" {
 				f.Error = info.FailureReason
 				if f.Error == "" {
@@ -446,6 +470,50 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 			}
 			doneCh <- done{FinishedNode: f, ChildTaskID: resp.TaskID}
 		}(n, prompt)
+	}
+	dispatchSynthetic := func(n planner.Node, prompt string) bool {
+		if n.Skill != "" && n.Skill != "chat" {
+			return false
+		}
+		if rawURL, ok := observerArtifactGetURL(prompt); ok && o.artifacts != nil {
+			sched.MarkDispatched(n.ID)
+			inFlight++
+			_ = o.store.UpdateSubTask(t.ID, n.ID, map[string]interface{}{
+				"status":     "assigned",
+				"prompt":     prompt,
+				"started_at": time.Now().UTC().Format(time.RFC3339Nano),
+			})
+			sseSink.Write("subtask_dispatched", fmt.Sprintf(`{"node_id":%q,"target_id":%q}`, n.ID, n.TargetID))
+			go func(n planner.Node, rawURL string) {
+				content, _, err := o.artifacts.GetArtifact(fanoutCtx, rawURL)
+				if err != nil {
+					doneCh <- done{FinishedNode: FinishedNode{NodeID: n.ID, Status: "failed", Error: err.Error()}}
+					return
+				}
+				quoted, _ := json.Marshal(string(content))
+				doneCh <- done{FinishedNode: FinishedNode{NodeID: n.ID, Status: "completed", Output: string(quoted)}}
+			}(n, rawURL)
+			return true
+		}
+		if rawURL, ok := observerWriteURL(prompt); ok && manifestWriteURL[rawURL] {
+			sched.MarkDispatched(n.ID)
+			inFlight++
+			_ = o.store.UpdateSubTask(t.ID, n.ID, map[string]interface{}{
+				"status":     "assigned",
+				"prompt":     prompt,
+				"started_at": time.Now().UTC().Format(time.RFC3339Nano),
+			})
+			sseSink.Write("subtask_dispatched", fmt.Sprintf(`{"node_id":%q,"target_id":%q}`, n.ID, n.TargetID))
+			go func(n planner.Node, rawURL string) {
+				doneCh <- done{FinishedNode: FinishedNode{
+					NodeID: n.ID,
+					Status: "completed",
+					Output: "Observer write URL " + rawURL + " is handled by the master reducer.",
+				}}
+			}(n, rawURL)
+			return true
+		}
+		return false
 	}
 
 	for !sched.Done() {
@@ -513,6 +581,21 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 				}(n, rerr)
 				continue
 			}
+			if dispatchSynthetic(n, prompt) {
+				continue
+			}
+			if n.Skill == "mcp" {
+				var aerr error
+				prompt, aerr = o.authorizeMCPArtifactURLs(fanoutCtx, prompt)
+				if aerr != nil {
+					sched.MarkDispatched(n.ID)
+					inFlight++
+					go func(n planner.Node, e error) {
+						doneCh <- done{FinishedNode: FinishedNode{NodeID: n.ID, Status: "failed", Error: e.Error()}}
+					}(n, aerr)
+					continue
+				}
+			}
 			if verr := validateMCPNode(n, agents, prompt); verr != nil {
 				o.emit(observer.Event{
 					Type:          observer.EventMasterMCPCallValidationFailed,
@@ -575,7 +658,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 		var d done
 		select {
 		case d = <-doneCh:
-		case <-time.After(60 * time.Second):
+		case <-time.After(noProgressTimeout):
 			cancelAll()
 			// best-effort drain (give goroutines a chance to write after ctx cancel)
 			drainDeadline := time.After(5 * time.Second)
@@ -728,7 +811,63 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 	}
 	summary, rerr := o.planner.Reduce(ctx, t.Prompt, results)
 	if rerr != nil {
-		return executor.Result{}, fmt.Errorf("reduce: %w", rerr)
+		if len(writeURLs) == 0 {
+			return executor.Result{}, fmt.Errorf("reduce: %w", rerr)
+		}
+		summary = fallbackReduceSummary(results, rerr)
+	}
+	if err := o.putManifestWrites(ctx, t.Prompt, summary); err != nil {
+		return executor.Result{}, err
 	}
 	return executor.Result{Summary: summary}, nil
+}
+
+func fallbackReduceSummary(results []planner.SubResult, reduceErr error) string {
+	var sb strings.Builder
+	sb.WriteString("# Task Summary\n\n")
+	sb.WriteString("Reducer failed: ")
+	sb.WriteString(reduceErr.Error())
+	sb.WriteString("\n\n")
+	sb.WriteString("Completed sub-task outputs are preserved below.\n")
+	for _, r := range results {
+		sb.WriteString("\n## ")
+		sb.WriteString(r.NodeID)
+		sb.WriteString(" (")
+		sb.WriteString(r.Status)
+		sb.WriteString(")\n\n")
+		switch {
+		case r.Status == "completed" && r.Output != "":
+			sb.WriteString(truncateForSummary(r.Output, 3000))
+		case r.Error != "":
+			sb.WriteString("Error: ")
+			sb.WriteString(r.Error)
+		default:
+			sb.WriteString("No output.")
+		}
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+func truncateForSummary(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "\n\n[truncated]\n"
+}
+
+func (o *Orchestrator) putManifestWrites(ctx context.Context, prompt, summary string) error {
+	if o.artifacts == nil {
+		return nil
+	}
+	writeURLs, err := parseManifestWriteURLs(prompt)
+	if err != nil {
+		return err
+	}
+	for _, putURL := range writeURLs {
+		if err := o.artifacts.PutWrite(ctx, putURL, []byte(summary), "text/markdown; charset=utf-8"); err != nil {
+			return fmt.Errorf("put final output to observer write: %w", err)
+		}
+	}
+	return nil
 }
