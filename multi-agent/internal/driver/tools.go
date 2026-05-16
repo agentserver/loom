@@ -49,10 +49,13 @@ func (t *Tools) emit(ev observer.Event) {
 	}
 }
 
-// All returns the six tools in stable order.
+// All returns the driver MCP tools in stable order.
 func (t *Tools) All() []Tool {
 	return []Tool{
 		&listAgentsTool{t},
+		&inspectCapabilitiesTool{t},
+		&draftTaskContractTool{t},
+		&dryRunContractTool{t},
 		&submitTaskTool{t},
 		&submitContractTaskTool{t},
 		&getTaskTool{t},
@@ -188,6 +191,7 @@ func (l *listAgentsTool) Call(ctx context.Context, _ json.RawMessage) (json.RawM
 		ShortID     string          `json:"short_id,omitempty"`
 		Skills      []string        `json:"skills"`
 		Tools       []string        `json:"tools"`
+		MCPTools    json.RawMessage `json:"mcp_tools,omitempty"`
 		Resources   json.RawMessage `json:"resources,omitempty"`
 		Description string          `json:"description,omitempty"`
 	}
@@ -199,13 +203,14 @@ func (l *listAgentsTool) Call(ctx context.Context, _ json.RawMessage) (json.RawM
 		var card struct {
 			Skills    []string        `json:"skills"`
 			Tools     []string        `json:"tools"`
+			MCPTools  json.RawMessage `json:"mcp_tools"`
 			Resources json.RawMessage `json:"resources"`
 			ShortID   string          `json:"short_id"`
 		}
 		_ = json.Unmarshal(c.Card, &card)
 		results = append(results, out{
 			AgentID: c.AgentID, DisplayName: c.DisplayName, ShortID: card.ShortID,
-			Skills: card.Skills, Tools: card.Tools, Resources: card.Resources,
+			Skills: card.Skills, Tools: card.Tools, MCPTools: card.MCPTools, Resources: card.Resources,
 			Description: c.Description,
 		})
 	}

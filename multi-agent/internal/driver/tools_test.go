@@ -79,6 +79,17 @@ func submitContractToolForTest(t *testing.T, tools *Tools) Tool {
 	return nil
 }
 
+func toolByName(t *testing.T, tools *Tools, name string) Tool {
+	t.Helper()
+	for _, candidate := range tools.All() {
+		if candidate.Name() == name {
+			return candidate
+		}
+	}
+	t.Fatalf("%s tool not registered", name)
+	return nil
+}
+
 func testTaskContract() contract.TaskContract {
 	return contract.TaskContract{
 		Version:        1,
@@ -329,7 +340,7 @@ func TestTool_ListAgents_FiltersSelf(t *testing.T) {
 			return []agentsdk.AgentCard{
 				{AgentID: "sbx-driver", DisplayName: "driver-yuzishu"},
 				{AgentID: "sbx-master", DisplayName: "master-prod",
-					Card: json.RawMessage(`{"skills":["fanout"],"tools":[]}`)},
+					Card: json.RawMessage(`{"skills":["fanout"],"tools":[],"mcp_tools":[{"server":"refund_policy_checker","name":"evaluate_rows","input_schema":{"type":"object"}}]}`)},
 			}, nil
 		},
 	}
@@ -346,10 +357,139 @@ func TestTool_ListAgents_FiltersSelf(t *testing.T) {
 			if !strings.Contains(string(out), "master-prod") {
 				t.Errorf("master missing: %s", out)
 			}
+			if !strings.Contains(string(out), `"mcp_tools"`) || !strings.Contains(string(out), "evaluate_rows") {
+				t.Errorf("mcp_tools missing: %s", out)
+			}
 			return
 		}
 	}
 	t.Fatal("list_agents tool not registered")
+}
+
+func TestTool_InspectCapabilitiesReturnsSnapshotAndSavesIt(t *testing.T) {
+	var snapshotSaved bool
+	observerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/resource-snapshots" {
+			t.Fatalf("unexpected observer path: %s", r.URL.Path)
+		}
+		snapshotSaved = true
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer observerServer.Close()
+
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "sbx-driver", DisplayName: "driver", Status: "available"},
+				{AgentID: "m1", DisplayName: "master", Status: "available", Card: json.RawMessage(`{"skills":["fanout"],"mcp_tools":[{"server":"policy","name":"evaluate_rows"}]}`)},
+				{AgentID: "s1", DisplayName: "slave", Status: "available", Card: json.RawMessage(`{"skills":["build_mcp"],"resources":{"tags":["python3"]}}`)},
+			}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	tools.cfg.Observer.Enabled = true
+	tools.cfg.Observer.URL = observerServer.URL
+	tools.cfg.Observer.WorkspaceID = "dev"
+	tools.cfg.Observer.AgentID = "driver"
+	tools.cfg.Observer.Token = "driver-token"
+
+	out, err := toolByName(t, tools, "inspect_capabilities").Call(context.Background(), json.RawMessage(`{}`))
+	require.NoError(t, err)
+	require.True(t, snapshotSaved)
+	require.Contains(t, string(out), `"resource_snapshot"`)
+	require.Contains(t, string(out), `"masters"`)
+	require.Contains(t, string(out), `"slaves"`)
+	require.Contains(t, string(out), "evaluate_rows")
+	require.Contains(t, string(out), "build_mcp")
+}
+
+func TestTool_DraftTaskContractBuildsContractAndClarificationQuestions(t *testing.T) {
+	tools := newTestTools(t, &fakeSDK{})
+	out, err := toolByName(t, tools, "draft_task_contract").Call(context.Background(), json.RawMessage(`{
+		"goal":"Analyze refunds and write a report",
+		"write_targets":[{"kind":"markdown","name":"refund-risk-report.md"}],
+		"required_tools":["csv_profiler/profile_orders_csv","refund_policy_checker/evaluate_rows"],
+		"allow_build_mcp":true
+	}`))
+	require.NoError(t, err)
+	require.Contains(t, string(out), `"contract"`)
+	require.Contains(t, string(out), `"conversation_id"`)
+	require.Contains(t, string(out), `"Analyze refunds and write a report"`)
+	require.Contains(t, string(out), `"csv_profiler/profile_orders_csv"`)
+	require.Contains(t, string(out), `"allow_build_mcp":true`)
+	require.Contains(t, string(out), `"clarification_questions"`)
+}
+
+func TestTool_DryRunContractReportsExistingMCPToolsSatisfyRequirements(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "m1", DisplayName: "master", Status: "available", Card: json.RawMessage(`{"skills":["fanout"]}`)},
+				{AgentID: "s1", DisplayName: "slave", Status: "available", Card: json.RawMessage(`{"skills":["chat"],"mcp_tools":[{"server":"refund_policy_checker","name":"evaluate_rows"}]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			t.Fatalf("dry_run_contract must not delegate")
+			return nil, nil
+		},
+	}
+	tc := testTaskContract()
+	tc.CapabilityRequirements.Tools = []string{"refund_policy_checker/evaluate_rows"}
+	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
+	require.NoError(t, err)
+
+	out, err := toolByName(t, newTestTools(t, sdk), "dry_run_contract").Call(context.Background(), raw)
+	require.NoError(t, err)
+	require.Contains(t, string(out), `"runnable":true`)
+	require.Contains(t, string(out), `"requires_build_mcp":false`)
+	require.Contains(t, string(out), `"satisfied_tools"`)
+	require.Contains(t, string(out), "refund_policy_checker/evaluate_rows")
+}
+
+func TestTool_DryRunContractSuggestsBuildMCPWhenToolsMissing(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "m1", DisplayName: "master", Status: "available", Card: json.RawMessage(`{"skills":["fanout"]}`)},
+				{AgentID: "builder", DisplayName: "builder", Status: "available", Card: json.RawMessage(`{"skills":["build_mcp"],"resources":{"tags":["python3"]}}`)},
+			}, nil
+		},
+	}
+	tc := testTaskContract()
+	tc.ExecutionPolicy.AllowBuildMCP = true
+	tc.CapabilityRequirements.Skills = nil
+	tc.CapabilityRequirements.Tools = []string{"csv_profiler/profile_orders_csv"}
+	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
+	require.NoError(t, err)
+
+	out, err := toolByName(t, newTestTools(t, sdk), "dry_run_contract").Call(context.Background(), raw)
+	require.NoError(t, err)
+	require.Contains(t, string(out), `"runnable":true`)
+	require.Contains(t, string(out), `"requires_build_mcp":true`)
+	require.Contains(t, string(out), `"missing_tools":["csv_profiler/profile_orders_csv"]`)
+	require.Contains(t, string(out), `"candidate_build_targets"`)
+	require.Contains(t, string(out), "builder")
+}
+
+func TestTool_DryRunContractRejectsMissingToolsWhenBuildMCPDisabled(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "m1", DisplayName: "master", Status: "available", Card: json.RawMessage(`{"skills":["fanout"]}`)},
+			}, nil
+		},
+	}
+	tc := testTaskContract()
+	tc.CapabilityRequirements.Tools = []string{"missing/tool"}
+	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
+	require.NoError(t, err)
+
+	out, err := toolByName(t, newTestTools(t, sdk), "dry_run_contract").Call(context.Background(), raw)
+	require.NoError(t, err)
+	require.Contains(t, string(out), `"runnable":false`)
+	require.Contains(t, string(out), `"requires_build_mcp":false`)
+	require.Contains(t, string(out), "missing/tool")
 }
 
 func TestTool_SubmitTask_RegistersFilesAndDelegates(t *testing.T) {
