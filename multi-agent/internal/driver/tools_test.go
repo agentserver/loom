@@ -197,6 +197,33 @@ func TestSubmitContractTaskReturnsMasterFanoutRoute(t *testing.T) {
 	require.Equal(t, "fanout", lastDelegate.Skill)
 }
 
+func TestSubmitContractTaskMasterOnlyStillDelegatesToMasterFanout(t *testing.T) {
+	var lastDelegate agentsdk.DelegateTaskRequest
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "m1", DisplayName: "master", Status: "available", Card: json.RawMessage(`{"skills":["fanout"]}`)},
+				{AgentID: "s1", DisplayName: "slave", Status: "available", Card: json.RawMessage(`{"skills":["chat"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			lastDelegate = req
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-1"}, nil
+		},
+	}
+	tc := testTaskContract()
+	tc.ExecutionPolicy.Routing = contract.RoutingMasterOnly
+	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
+	require.NoError(t, err)
+
+	out, err := submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	require.NoError(t, err)
+	require.Contains(t, string(out), `"route":"master_fanout"`)
+	require.Equal(t, "m1", lastDelegate.TargetID)
+	require.Equal(t, "fanout", lastDelegate.Skill)
+	require.Contains(t, lastDelegate.Prompt, contract.EnvelopeStart)
+}
+
 func TestSubmitContractTaskUsesDriverFanoutWhenRecommended(t *testing.T) {
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
