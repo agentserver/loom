@@ -1,8 +1,11 @@
 package orchestrator
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
+	"strings"
 
 	"github.com/yourorg/multi-agent/internal/planner"
 )
@@ -257,13 +260,14 @@ func (s *Scheduler) Append(nodes []planner.Node) error {
 	return nil
 }
 
-var renderRe = regexp.MustCompile(`\{\{\s*([A-Za-z0-9_-]+)\.output\s*\}\}`)
+var renderRe = regexp.MustCompile(`\{\{\s*([A-Za-z0-9_-]+)\.output((?:\.[A-Za-z0-9_-]+)*)\s*\}\}`)
 
 func Render(template string, outputs map[string]string) (string, error) {
 	var firstErr error
 	out := renderRe.ReplaceAllStringFunc(template, func(match string) string {
 		sub := renderRe.FindStringSubmatch(match)
 		id := sub[1]
+		path := sub[2]
 		v, ok := outputs[id]
 		if !ok {
 			if firstErr == nil {
@@ -271,10 +275,56 @@ func Render(template string, outputs map[string]string) (string, error) {
 			}
 			return match
 		}
-		return v
+		if path == "" {
+			return v
+		}
+		rendered, err := renderJSONPath(id, path, v)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			return match
+		}
+		return rendered
 	})
 	if firstErr != nil {
 		return "", firstErr
 	}
 	return out, nil
+}
+
+func renderJSONPath(id, path, raw string) (string, error) {
+	var value interface{}
+	if err := json.Unmarshal([]byte(raw), &value); err != nil {
+		return "", fmt.Errorf("template reference %s.output%s requires JSON output: %w", id, path, err)
+	}
+	cur := value
+	fullPath := id + ".output"
+	for _, part := range strings.Split(strings.TrimPrefix(path, "."), ".") {
+		fullPath += "." + part
+		switch x := cur.(type) {
+		case map[string]interface{}:
+			next, ok := x[part]
+			if !ok {
+				return "", fmt.Errorf("template references missing JSON field: %s", fullPath)
+			}
+			cur = next
+		case []interface{}:
+			idx, err := strconv.Atoi(part)
+			if err != nil || idx < 0 || idx >= len(x) {
+				return "", fmt.Errorf("template references missing JSON array element: %s", fullPath)
+			}
+			cur = x[idx]
+		default:
+			return "", fmt.Errorf("template cannot descend into non-container JSON value: %s", fullPath)
+		}
+	}
+	if s, ok := cur.(string); ok {
+		return s, nil
+	}
+	b, err := json.Marshal(cur)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }

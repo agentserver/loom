@@ -1,0 +1,25 @@
+server:
+  url: http://agentserver:8080
+  name: driver-dev
+
+credentials:
+  sandbox_id: ""
+  tunnel_token: ""
+  proxy_token: ""
+  workspace_id: ""
+  short_id: ""
+
+driver_defaults:
+  target_display_name: master-dev
+  task_timeout_sec: 600
+  artifact_transport: observer_lazy
+
+observer:
+  enabled: true
+  url: http://observer:8080
+  workspace_id: dev
+  agent_id: driver-dev
+  token: driver-token
+
+discovery:
+  display_name: driver-dev

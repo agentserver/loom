@@ -1,0 +1,108 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: agentserver
+      POSTGRES_USER: agentserver
+      POSTGRES_PASSWORD: agentserver
+    volumes:
+      - agentserver-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentserver -d agentserver"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  agentserver:
+    build:
+      context: ..
+      dockerfile: dev/agent-runtime/Dockerfile
+    working_dir: /workspace/multi-agent
+    volumes:
+      - ../:/workspace/multi-agent
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      DATABASE_URL: postgres://agentserver:agentserver@postgres:5432/agentserver?sslmode=disable
+      ANTHROPIC_BASE_URL: https://code.ai.cs.ac.cn
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    command: zsh -lc "go run github.com/agentserver/agentserver@v0.48.1 serve --db-url postgres://agentserver:agentserver@postgres:5432/agentserver?sslmode=disable --port 8080 --backend docker"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "18080:8080"
+    restart: unless-stopped
+
+  master:
+    build:
+      context: ..
+      dockerfile: dev/agent-runtime/Dockerfile
+    working_dir: /workspace/multi-agent
+    volumes:
+      - ../:/workspace/multi-agent
+      - ./configs/master.yaml:/config/config.yaml
+    environment:
+      ANTHROPIC_BASE_URL: https://code.ai.cs.ac.cn
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    command: zsh -lc "go run ./cmd/master-agent /config/config.yaml"
+    restart: unless-stopped
+
+  driver:
+    build:
+      context: ..
+      dockerfile: dev/agent-runtime/Dockerfile
+    working_dir: /workspace/multi-agent
+    volumes:
+      - ../:/workspace/multi-agent
+      - ./configs/driver.yaml:/config/config.yaml
+    environment:
+      ANTHROPIC_BASE_URL: https://code.ai.cs.ac.cn
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    command: zsh -lc "go run ./cmd/driver-agent serve-mcp --config /config/config.yaml"
+    restart: unless-stopped
+
+  slave-a:
+    build:
+      context: ..
+      dockerfile: dev/agent-runtime/Dockerfile
+    working_dir: /workspace/multi-agent
+    volumes:
+      - ../:/workspace/multi-agent
+      - ./configs/slave-a.yaml:/config/config.yaml
+    environment:
+      ANTHROPIC_BASE_URL: https://code.ai.cs.ac.cn
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    command: zsh -lc "go run ./cmd/slave-agent /config/config.yaml"
+    restart: unless-stopped
+
+  slave-b:
+    build:
+      context: ..
+      dockerfile: dev/agent-runtime/Dockerfile
+    working_dir: /workspace/multi-agent
+    volumes:
+      - ../:/workspace/multi-agent
+      - ./configs/slave-b.yaml:/config/config.yaml
+    environment:
+      ANTHROPIC_BASE_URL: https://code.ai.cs.ac.cn
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    command: zsh -lc "go run ./cmd/slave-agent /config/config.yaml"
+    restart: unless-stopped
+
+  observer:
+    build:
+      context: ..
+      dockerfile: dev/agent-runtime/Dockerfile
+    working_dir: /workspace/multi-agent
+    volumes:
+      - ../:/workspace/multi-agent
+      - ./configs/observer.yaml:/config/config.yaml
+    environment:
+      ANTHROPIC_BASE_URL: https://code.ai.cs.ac.cn
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    command: zsh -lc "go run ./cmd/observer-server --config /config/config.yaml"
+    restart: unless-stopped
+
+volumes:
+  agentserver-postgres:

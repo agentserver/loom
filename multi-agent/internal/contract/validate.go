@@ -1,0 +1,154 @@
+package contract
+
+import (
+	"fmt"
+	"strings"
+)
+
+func (tc *TaskContract) ApplyDefaults() {
+	if tc.Version == 0 {
+		tc.Version = Version
+	}
+	if tc.ExecutionPolicy.Routing == "" {
+		tc.ExecutionPolicy.Routing = RoutingDirectFirst
+	}
+	if tc.ExecutionPolicy.AllowMaster == nil {
+		tc.ExecutionPolicy.AllowMaster = Bool(true)
+	}
+	if tc.ExecutionPolicy.AllowCodeArtifacts == nil {
+		tc.ExecutionPolicy.AllowCodeArtifacts = Bool(true)
+	}
+	if tc.ExecutionPolicy.CodePersistence == "" {
+		tc.ExecutionPolicy.CodePersistence = CodePersistenceObserverArtifactStore
+	}
+	if tc.ExecutionPolicy.ExposeCodeToUser == "" {
+		tc.ExecutionPolicy.ExposeCodeToUser = ExposeCodeOnRequest
+	}
+	if tc.ExecutionPolicy.WriteMode == "" {
+		tc.ExecutionPolicy.WriteMode = WriteModeArtifactOnly
+	}
+	if tc.ExecutionPolicy.MaxDAGNodes == nil {
+		tc.ExecutionPolicy.MaxDAGNodes = Int(6)
+	}
+	if tc.ExecutionPolicy.MaxDepth == nil {
+		tc.ExecutionPolicy.MaxDepth = Int(3)
+	}
+	if tc.ExecutionPolicy.MaxConcurrency == nil {
+		tc.ExecutionPolicy.MaxConcurrency = Int(3)
+	}
+}
+
+func (tc TaskContract) Validate() error {
+	if tc.Version != Version {
+		return fmt.Errorf("unsupported contract version: %d", tc.Version)
+	}
+	if strings.TrimSpace(tc.ConversationID) == "" {
+		return fmt.Errorf("conversation_id is required")
+	}
+	if strings.TrimSpace(tc.Intent.Goal) == "" {
+		return fmt.Errorf("intent.goal is required")
+	}
+	if len(tc.Intent.SuccessCriteria) == 0 {
+		return fmt.Errorf("intent.success_criteria is required")
+	}
+	if len(tc.DataContract.WriteTargets) == 0 {
+		return fmt.Errorf("data_contract.write_targets is required")
+	}
+	for i, wt := range tc.DataContract.WriteTargets {
+		if wt.Type == "" {
+			return fmt.Errorf("data_contract.write_targets[%d].type is required", i)
+		}
+		if wt.Type != WriteTargetArtifact {
+			return fmt.Errorf("data_contract.write_targets[%d].type %q is not supported", i, wt.Type)
+		}
+		if wt.Kind == "" {
+			return fmt.Errorf("data_contract.write_targets[%d].kind is required", i)
+		}
+		if wt.Name == "" {
+			return fmt.Errorf("data_contract.write_targets[%d].name is required", i)
+		}
+		if wt.Kind == "code" && !tc.ExecutionPolicy.AllowsCodeArtifacts() {
+			return fmt.Errorf("data_contract.write_targets[%d] code write target requires execution_policy.allow_code_artifacts", i)
+		}
+	}
+	if err := validatePolicy(tc.ExecutionPolicy); err != nil {
+		return err
+	}
+	if !tc.ExecutionPolicy.AllowBuildMCP {
+		for _, s := range tc.CapabilityRequirements.Skills {
+			if s == "build_mcp" {
+				return fmt.Errorf("build_mcp requested but execution_policy.allow_build_mcp is false")
+			}
+		}
+	}
+	return nil
+}
+
+func Bool(v bool) *bool {
+	return &v
+}
+
+func Int(v int) *int {
+	return &v
+}
+
+func (p ExecutionPolicy) AllowsMaster() bool {
+	return p.AllowMaster == nil || *p.AllowMaster
+}
+
+func (p ExecutionPolicy) AllowsCodeArtifacts() bool {
+	return p.AllowCodeArtifacts == nil || *p.AllowCodeArtifacts
+}
+
+func (p ExecutionPolicy) DAGNodeLimit() int {
+	if p.MaxDAGNodes == nil {
+		return 6
+	}
+	return *p.MaxDAGNodes
+}
+
+func (p ExecutionPolicy) DepthLimit() int {
+	if p.MaxDepth == nil {
+		return 3
+	}
+	return *p.MaxDepth
+}
+
+func (p ExecutionPolicy) ConcurrencyLimit() int {
+	if p.MaxConcurrency == nil {
+		return 3
+	}
+	return *p.MaxConcurrency
+}
+
+func validatePolicy(p ExecutionPolicy) error {
+	switch p.Routing {
+	case RoutingDirectFirst, RoutingMasterOnly:
+	default:
+		return fmt.Errorf("execution_policy.routing %q is not supported", p.Routing)
+	}
+	if p.CodePersistence != CodePersistenceObserverArtifactStore {
+		return fmt.Errorf("execution_policy.code_persistence %q is not supported", p.CodePersistence)
+	}
+	if p.ExposeCodeToUser != ExposeCodeOnRequest {
+		return fmt.Errorf("execution_policy.expose_code_to_user %q is not supported", p.ExposeCodeToUser)
+	}
+	switch p.WriteMode {
+	case WriteModeArtifactOnly, WriteModePatch, WriteModeRepoCommit:
+	default:
+		return fmt.Errorf("execution_policy.write_mode %q is not supported", p.WriteMode)
+	}
+	if p.WriteMode == WriteModeRepoCommit && !p.RequireUserApprovalForRepoWrites {
+		return fmt.Errorf("repo_commit requires execution_policy.require_user_approval_for_repo_writes")
+	}
+	if p.MaxDAGNodes != nil && *p.MaxDAGNodes < 1 {
+		return fmt.Errorf("execution_policy.max_dag_nodes must be >= 1")
+	}
+	if p.MaxDepth != nil && *p.MaxDepth < 1 {
+		return fmt.Errorf("execution_policy.max_depth must be >= 1")
+	}
+	if p.MaxConcurrency != nil && *p.MaxConcurrency < 1 {
+		return fmt.Errorf("execution_policy.max_concurrency must be >= 1")
+	}
+	return nil
+}

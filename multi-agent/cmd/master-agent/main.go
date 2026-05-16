@@ -73,7 +73,8 @@ func run(cfgPath string) error {
 		Token:       cfg.Observer.Token,
 	})
 	defer obs.Close()
-	orch := orchestrator.New(s, p, sdk, cfg.Fanout, cfg.Credentials.SandboxID, obs)
+	orch := orchestrator.New(s, p, sdk, cfg.Fanout, cfg.Credentials.SandboxID, obs).
+		SetArtifactResolver(orchestrator.NewObserverArtifactResolver(cfg.Observer))
 
 	pollCfg := poller.Config{
 		ServerURL:  cfg.Server.URL,

@@ -26,6 +26,17 @@ workspaces:
 	require.Len(t, cfg.Workspaces, 1)
 }
 
+func TestLoadDistributedObserverExampleConfig(t *testing.T) {
+	cfg, err := loadConfig("../../dev/configs/observer.example.yaml")
+	require.NoError(t, err)
+
+	require.Equal(t, ":8080", cfg.ListenAddr)
+	require.Equal(t, "observer.db", cfg.DBPath)
+	require.Len(t, cfg.Workspaces, 1)
+	require.Equal(t, "dev", cfg.Workspaces[0].ID)
+	require.Len(t, cfg.Workspaces[0].Agents, 4)
+}
+
 func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -2,10 +2,12 @@ package observerstore
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/yourorg/multi-agent/internal/capability"
@@ -22,6 +24,39 @@ func testStore(t *testing.T) *Store {
 	require.NoError(t, s.UpsertAgent(Agent{WorkspaceID: "ws1", ID: "master", Role: observer.RoleMaster, DisplayName: "Master"}, "master-token"))
 	require.NoError(t, s.UpsertAgent(Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"}, "slave-token"))
 	return s
+}
+
+func TestOpenConfiguresSQLiteForConcurrentObserverAccess(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer s.Close()
+
+	var journalMode string
+	require.NoError(t, s.db.QueryRow(`PRAGMA journal_mode`).Scan(&journalMode))
+	require.Equal(t, "wal", journalMode)
+
+	var busyTimeout int
+	require.NoError(t, s.db.QueryRow(`PRAGMA busy_timeout`).Scan(&busyTimeout))
+	require.GreaterOrEqual(t, busyTimeout, 5000)
+}
+
+func TestOpenConfiguresSQLiteBusyTimeoutOnNewConnections(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	firstConn, err := s.db.Conn(ctx)
+	require.NoError(t, err)
+	defer firstConn.Close()
+
+	secondConn, err := s.db.Conn(ctx)
+	require.NoError(t, err)
+	defer secondConn.Close()
+
+	var busyTimeout int
+	require.NoError(t, secondConn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&busyTimeout))
+	require.GreaterOrEqual(t, busyTimeout, 5000)
 }
 
 func mustJSON(t *testing.T, v interface{}) []byte {
@@ -713,4 +748,76 @@ func TestWriteLifecycle(t *testing.T) {
 	require.Equal(t, int64(4), writes[0].Bytes)
 	require.Equal(t, "a4c3ed04a95a3da14a9d235c83d868bed7c0f45cf7f3faa751ee8f50598d2211", writes[0].SHA256)
 	require.Equal(t, "done", string(writes[0].Content))
+}
+
+func TestTaskContractPersistence(t *testing.T) {
+	s := testStore(t)
+
+	body := json.RawMessage(`{"version":1,"conversation_id":"conv-1","intent":{"goal":"g","success_criteria":["s"]}}`)
+	require.NoError(t, s.SaveTaskContract(TaskContractRecord{
+		WorkspaceID:    "ws1",
+		TaskID:         "task-1",
+		ConversationID: "conv-1",
+		OwnerAgentID:   "driver",
+		Body:           body,
+	}))
+
+	got, err := s.GetTaskContract("ws1", "task-1")
+	require.NoError(t, err)
+	require.Equal(t, "conv-1", got.ConversationID)
+	require.JSONEq(t, string(body), string(got.Body))
+}
+
+func TestTaskContractRejectsOverwriteByDifferentOwner(t *testing.T) {
+	s := testStore(t)
+
+	original := json.RawMessage(`{"version":1,"conversation_id":"conv-1","intent":{"goal":"original","success_criteria":["s"]}}`)
+	require.NoError(t, s.SaveTaskContract(TaskContractRecord{
+		WorkspaceID:    "ws1",
+		TaskID:         "task-1",
+		ConversationID: "conv-1",
+		OwnerAgentID:   "driver",
+		Body:           original,
+	}))
+
+	err := s.SaveTaskContract(TaskContractRecord{
+		WorkspaceID:    "ws1",
+		TaskID:         "task-1",
+		ConversationID: "conv-2",
+		OwnerAgentID:   "other-driver",
+		Body:           json.RawMessage(`{"version":1,"conversation_id":"conv-2","intent":{"goal":"overwrite","success_criteria":["s"]}}`),
+	})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "task contract owner mismatch")
+
+	got, err := s.GetTaskContract("ws1", "task-1")
+	require.NoError(t, err)
+	require.Equal(t, "driver", got.OwnerAgentID)
+	require.Equal(t, "conv-1", got.ConversationID)
+	require.JSONEq(t, string(original), string(got.Body))
+}
+
+func TestResourceSnapshotPersistence(t *testing.T) {
+	s := testStore(t)
+	firstBody := json.RawMessage(`{"generated_at":"first","agents":[{"agent_id":"a","display_name":"slave"}]}`)
+	secondBody := json.RawMessage(`{"generated_at":"second","agents":[{"agent_id":"b","display_name":"driver"}]}`)
+
+	require.NoError(t, s.SaveResourceSnapshot(ResourceSnapshotRecord{
+		WorkspaceID:  "ws1",
+		SnapshotID:   "snap-1",
+		OwnerAgentID: "driver",
+		Body:         firstBody,
+	}))
+	time.Sleep(time.Millisecond)
+	require.NoError(t, s.SaveResourceSnapshot(ResourceSnapshotRecord{
+		WorkspaceID:  "ws1",
+		SnapshotID:   "snap-2",
+		OwnerAgentID: "driver",
+		Body:         secondBody,
+	}))
+
+	got, err := s.GetLatestResourceSnapshot("ws1")
+	require.NoError(t, err)
+	require.Equal(t, "snap-2", got.SnapshotID)
+	require.JSONEq(t, string(secondBody), string(got.Body))
 }

@@ -29,6 +29,10 @@ type Store interface {
 	StoreWriteContent(workspaceID, writerAgentID, writeID, mime string, body io.Reader) error
 	UpdateWriteTaskID(workspaceID, ownerAgentID, writeID, taskID string) error
 	ListCompletedWrites(workspaceID, ownerAgentID, taskID string) ([]observerstore.Write, error)
+	SaveTaskContract(observerstore.TaskContractRecord) error
+	GetTaskContract(workspaceID, taskID string) (observerstore.TaskContractRecord, error)
+	SaveResourceSnapshot(observerstore.ResourceSnapshotRecord) error
+	GetLatestResourceSnapshot(workspaceID string) (observerstore.ResourceSnapshotRecord, error)
 }
 
 func New(s Store) http.Handler {
@@ -42,6 +46,10 @@ func New(s Store) http.Handler {
 	mux.HandleFunc("/api/write-tokens", h.writeTokens)
 	mux.HandleFunc("/api/writes", h.writes)
 	mux.HandleFunc("/api/writes/", h.writeRouter)
+	mux.HandleFunc("/api/task-contracts", h.taskContracts)
+	mux.HandleFunc("/api/task-contracts/", h.taskContractByID)
+	mux.HandleFunc("/api/resource-snapshots", h.resourceSnapshots)
+	mux.HandleFunc("/api/resource-snapshots/latest", h.latestResourceSnapshot)
 	mux.HandleFunc("/drivers", h.page("Drivers", "drivers"))
 	mux.HandleFunc("/masters", h.page("Masters", "masters"))
 	mux.HandleFunc("/slaves", h.page("Slaves", "slaves"))
@@ -135,8 +143,12 @@ func bearerToken(auth string) (string, bool) {
 func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) (observerstore.Agent, bool) {
 	token, ok := bearerToken(r.Header.Get("Authorization"))
 	if !ok {
-		http.Error(w, "missing or invalid bearer token", http.StatusUnauthorized)
-		return observerstore.Agent{}, false
+		token = strings.TrimSpace(r.URL.Query().Get("token"))
+		ok = token != ""
+		if !ok {
+			http.Error(w, "missing or invalid bearer token", http.StatusUnauthorized)
+			return observerstore.Agent{}, false
+		}
 	}
 	agent, ok, err := h.s.ValidateToken(token)
 	if err != nil {
@@ -404,6 +416,125 @@ func (h *handler) writes(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"writes": resp})
+}
+
+func (h *handler) taskContracts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	agent, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	if agent.Role != observer.RoleDriver {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	var req struct {
+		TaskID         string          `json:"task_id"`
+		ConversationID string          `json:"conversation_id"`
+		Body           json.RawMessage `json:"body"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	record := observerstore.TaskContractRecord{
+		WorkspaceID: agent.WorkspaceID, OwnerAgentID: agent.ID,
+		TaskID: req.TaskID, ConversationID: req.ConversationID, Body: req.Body,
+	}
+	if err := h.s.SaveTaskContract(record); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	got, err := h.s.GetTaskContract(agent.WorkspaceID, req.TaskID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(got)
+}
+
+func (h *handler) taskContractByID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	agent, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	taskID := strings.TrimPrefix(r.URL.Path, "/api/task-contracts/")
+	got, err := h.s.GetTaskContract(agent.WorkspaceID, taskID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if got.OwnerAgentID != agent.ID && agent.Role != observer.RoleMaster {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(got)
+}
+
+func (h *handler) resourceSnapshots(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	agent, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	if agent.Role != observer.RoleDriver && agent.Role != observer.RoleMaster {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	var req struct {
+		SnapshotID string          `json:"snapshot_id"`
+		Body       json.RawMessage `json:"body"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	record := observerstore.ResourceSnapshotRecord{
+		WorkspaceID: agent.WorkspaceID, OwnerAgentID: agent.ID,
+		SnapshotID: req.SnapshotID, Body: req.Body,
+	}
+	if err := h.s.SaveResourceSnapshot(record); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(record)
+}
+
+func (h *handler) latestResourceSnapshot(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	agent, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	if agent.Role != observer.RoleDriver && agent.Role != observer.RoleMaster {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	got, err := h.s.GetLatestResourceSnapshot(agent.WorkspaceID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(got)
 }
 
 func (h *handler) apiTasks(w http.ResponseWriter, r *http.Request) {

@@ -1,0 +1,6 @@
+order_id,customer_tier,order_total,refund_requested,refund_reason,days_since_delivery
+1001,gold,128.50,true,damaged item,3
+1002,standard,42.00,false,,9
+1003,standard,310.20,true,changed mind,18
+1004,platinum,87.99,true,missing accessory,5
+1005,gold,605.75,true,not as described,41

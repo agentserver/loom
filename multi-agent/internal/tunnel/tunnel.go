@@ -97,6 +97,7 @@ func (t *Tunnel) EnsureRegistered(ctx context.Context) error {
 	t.cfg.Credentials.SandboxID = reg.SandboxID
 	t.cfg.Credentials.TunnelToken = reg.TunnelToken
 	t.cfg.Credentials.ProxyToken = reg.ProxyToken
+	t.cfg.Credentials.WorkspaceID = reg.WorkspaceID
 	t.cfg.Credentials.ShortID = reg.ShortID
 	t.sdk = cli
 	return t.cfg.Save(t.cfgPath)

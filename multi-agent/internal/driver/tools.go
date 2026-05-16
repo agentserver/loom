@@ -54,6 +54,7 @@ func (t *Tools) All() []Tool {
 	return []Tool{
 		&listAgentsTool{t},
 		&submitTaskTool{t},
+		&submitContractTaskTool{t},
 		&getTaskTool{t},
 		&waitTaskTool{t},
 		&tailSubtasksTool{t},
@@ -89,16 +90,27 @@ func (t *Tools) resolveTarget(ctx context.Context, override string) (id, display
 		override = t.cfg.DriverDefaults.TargetDisplayName
 	}
 	if override != "" {
+		unavailable := false
 		for _, c := range cards {
 			if c.DisplayName == override && c.AgentID != t.cfg.Credentials.SandboxID {
+				if !agentAvailable(c) {
+					unavailable = true
+					continue
+				}
 				return c.AgentID, c.DisplayName, cardShortID(c), observerRoleForCard(c), nil
 			}
+		}
+		if unavailable {
+			return "", "", "", "", &MCPToolError{Message: "agent named " + override + " is not available"}
 		}
 		return "", "", "", "", &MCPToolError{Message: "no agent named: " + override}
 	}
 	var matches []agentsdk.AgentCard
 	for _, c := range cards {
 		if c.AgentID == t.cfg.Credentials.SandboxID {
+			continue
+		}
+		if !agentAvailable(c) {
 			continue
 		}
 		if hasSkill(c, "fanout") {
@@ -116,6 +128,10 @@ func (t *Tools) resolveTarget(ctx context.Context, override string) (id, display
 		return "", "", "", "", &MCPToolError{Message: "ambiguous target: " + strings.Join(names, ", ") + " (pass target_display_name)"}
 	}
 	return matches[0].AgentID, matches[0].DisplayName, cardShortID(matches[0]), observerRoleForCard(matches[0]), nil
+}
+
+func agentAvailable(c agentsdk.AgentCard) bool {
+	return c.Status == "available"
 }
 
 func hasSkill(c agentsdk.AgentCard, want string) bool {
@@ -414,6 +430,11 @@ func (g *getTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMe
 		Status: info.Status,
 	})
 	progress := g.t.observerProgress(ctx, taskID)
+	output := sdkTaskOutput(info)
+	finalOutput := progress.FinalOutput
+	if finalOutput == "" && isTerminalStatus(info.Status) {
+		finalOutput = output
+	}
 	return json.Marshal(struct {
 		Status              string `json:"status"`
 		Output              string `json:"output"`
@@ -425,12 +446,12 @@ func (g *getTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMe
 		IsFinal             bool   `json:"is_final"`
 	}{
 		Status:              info.Status,
-		Output:              info.Output,
+		Output:              output,
 		FailureReason:       info.FailureReason,
 		LatestProgress:      progress.LatestProgress,
 		LatestProgressPhase: progress.LatestProgressPhase,
 		LatestProgressAt:    progress.LatestProgressAt,
-		FinalOutput:         progress.FinalOutput,
+		FinalOutput:         finalOutput,
 		IsFinal:             progress.IsFinal || isTerminalStatus(info.Status),
 	})
 }
@@ -492,6 +513,7 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 			written := w.t.reg.WrittenFiles(args.TaskID)
 			w.t.reg.ForgetTask(args.TaskID)
 			progress := w.t.observerProgress(ctx, taskID)
+			output := sdkTaskOutput(info)
 			return json.Marshal(struct {
 				Status              string        `json:"status"`
 				Output              string        `json:"output"`
@@ -504,12 +526,12 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 				WrittenFiles        []WrittenFile `json:"written_files"`
 			}{
 				Status:              info.Status,
-				Output:              info.Output,
+				Output:              output,
 				FailureReason:       info.FailureReason,
 				LatestProgress:      progress.LatestProgress,
 				LatestProgressPhase: progress.LatestProgressPhase,
 				LatestProgressAt:    progress.LatestProgressAt,
-				FinalOutput:         firstNonEmpty(progress.FinalOutput, info.Output),
+				FinalOutput:         firstNonEmpty(progress.FinalOutput, output),
 				IsFinal:             true,
 				WrittenFiles:        written,
 			})
@@ -532,6 +554,29 @@ func isTerminalStatus(status string) bool {
 	default:
 		return false
 	}
+}
+
+func sdkTaskOutput(info *agentsdk.TaskInfo) string {
+	if info == nil {
+		return ""
+	}
+	if info.Output != "" {
+		return info.Output
+	}
+	if len(info.Result) == 0 {
+		return ""
+	}
+	var obj struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(info.Result, &obj); err == nil && obj.Output != "" {
+		return obj.Output
+	}
+	var raw string
+	if err := json.Unmarshal(info.Result, &raw); err == nil {
+		return raw
+	}
+	return ""
 }
 
 // =========================================================================

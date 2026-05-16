@@ -136,3 +136,29 @@ CREATE TABLE IF NOT EXISTS writes (
     PRIMARY KEY (workspace_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_writes_owner_task_state ON writes(workspace_id, owner_agent_id, task_id, state);
+
+CREATE TABLE IF NOT EXISTS task_contracts (
+  workspace_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  owner_agent_id TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, task_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_contracts_conversation
+ON task_contracts(workspace_id, conversation_id, updated_at);
+
+CREATE TABLE IF NOT EXISTS resource_snapshots (
+  workspace_id TEXT NOT NULL,
+  snapshot_id TEXT NOT NULL,
+  owner_agent_id TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, snapshot_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_resource_snapshots_latest
+ON resource_snapshots(workspace_id, created_at);

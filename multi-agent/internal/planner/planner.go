@@ -66,11 +66,30 @@ func (p *Planner) Plan(ctx context.Context, prompt string, agents []agentsdk.Age
 	if err != nil {
 		return nil, err
 	}
+	out = stripJSONFence(out)
 	var nodes []Node
 	if err := json.Unmarshal([]byte(out), &nodes); err != nil {
 		return nil, fmt.Errorf("plan unmarshal: %w; output: %s", err, truncate(out, 512))
 	}
 	return nodes, nil
+}
+
+func stripJSONFence(out string) string {
+	s := strings.TrimSpace(out)
+	if !strings.HasPrefix(s, "```") {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) < 2 {
+		return s
+	}
+	if !strings.HasPrefix(strings.TrimSpace(lines[0]), "```") {
+		return s
+	}
+	if strings.TrimSpace(lines[len(lines)-1]) != "```" {
+		return s
+	}
+	return strings.TrimSpace(strings.Join(lines[1:len(lines)-1], "\n"))
 }
 
 func (p *Planner) Reduce(ctx context.Context, originalPrompt string, results []SubResult) (string, error) {

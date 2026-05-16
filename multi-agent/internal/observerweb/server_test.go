@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -148,6 +149,12 @@ func TestArtifactLazyHTTPFlow(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	require.Equal(t, "hello", rr.Body.String())
 	require.Equal(t, "text/plain", rr.Header().Get("Content-Type"))
+
+	req = httptest.NewRequest(http.MethodGet, "/api/artifacts/"+created.ArtifactID+"?token=slave-token", nil)
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Equal(t, "hello", rr.Body.String())
 }
 
 func TestWriteHTTPFlow(t *testing.T) {
@@ -258,6 +265,81 @@ func TestAPITasksIncludesLatestProgress(t *testing.T) {
 	require.Len(t, tasks, 1)
 	require.Equal(t, "planner still running", tasks[0].LatestProgress)
 	require.False(t, tasks[0].IsFinal)
+}
+
+func TestTaskContractAPI(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "master", Role: observer.RoleMaster, DisplayName: "Master"}, "master-token"))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"}, "slave-token"))
+	h := New(st)
+
+	body := `{"task_id":"task-1","conversation_id":"conv-1","body":{"version":1,"intent":{"goal":"g","success_criteria":["s"]}}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/task-contracts", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer driver-token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	req = httptest.NewRequest(http.MethodPost, "/api/task-contracts", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer slave-token")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code)
+
+	req = httptest.NewRequest(http.MethodGet, "/api/task-contracts/task-1", nil)
+	req.Header.Set("Authorization", "Bearer slave-token")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code)
+
+	req = httptest.NewRequest(http.MethodGet, "/api/task-contracts/task-1", nil)
+	req.Header.Set("Authorization", "Bearer master-token")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var got observerstore.TaskContractRecord
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&got))
+	require.Equal(t, "conv-1", got.ConversationID)
+}
+
+func TestResourceSnapshotAPIRestrictsRoles(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "master", Role: observer.RoleMaster, DisplayName: "Master"}, "master-token"))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"}, "slave-token"))
+	h := New(st)
+
+	body := `{"snapshot_id":"snap-1","body":{"generated_at":"2026-05-14T00:00:00Z","agents":[]}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/resource-snapshots", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer slave-token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code)
+
+	req = httptest.NewRequest(http.MethodPost, "/api/resource-snapshots", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer driver-token")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	req = httptest.NewRequest(http.MethodGet, "/api/resource-snapshots/latest", nil)
+	req.Header.Set("Authorization", "Bearer slave-token")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code)
+
+	req = httptest.NewRequest(http.MethodGet, "/api/resource-snapshots/latest", nil)
+	req.Header.Set("Authorization", "Bearer master-token")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
 }
 
 func TestAPITasksAndEventsExposeValidationFailureEvidence(t *testing.T) {

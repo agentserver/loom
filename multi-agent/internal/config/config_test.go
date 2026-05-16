@@ -67,6 +67,33 @@ func TestSaveLoad_Roundtrip(t *testing.T) {
 	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 }
 
+func TestCredentialsWorkspaceIDRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+server: { url: "https://agentserver.test" }
+credentials:
+  sandbox_id: sbx
+  tunnel_token: tt
+  proxy_token: pt
+  workspace_id: ws-1
+  short_id: short
+discovery:
+  display_name: agent
+  skills: [chat]
+fanout: { max_concurrency: 1 }
+`), 0o600))
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.Equal(t, "ws-1", cfg.Credentials.WorkspaceID)
+	require.NoError(t, cfg.Save(path))
+
+	reloaded, err := Load(path)
+	require.NoError(t, err)
+	require.Equal(t, "ws-1", reloaded.Credentials.WorkspaceID)
+}
+
 func TestLoad_MasterFields(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "c.yaml")

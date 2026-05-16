@@ -14,6 +14,8 @@ import (
 	"testing"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
+	"github.com/stretchr/testify/require"
+	"github.com/yourorg/multi-agent/internal/contract"
 	"github.com/yourorg/multi-agent/internal/observer"
 )
 
@@ -66,6 +68,261 @@ func newTestToolsWithObserver(t *testing.T, sdk SDKClient, obs ObserverSink) *To
 	return NewTools(NewFileRegistry(50000), a, sdk, cfg, obs)
 }
 
+func submitContractToolForTest(t *testing.T, tools *Tools) Tool {
+	t.Helper()
+	for _, candidate := range tools.All() {
+		if candidate.Name() == "submit_contract_task" {
+			return candidate
+		}
+	}
+	t.Fatal("submit_contract_task tool not registered")
+	return nil
+}
+
+func testTaskContract() contract.TaskContract {
+	return contract.TaskContract{
+		Version:        1,
+		ConversationID: "conv-1",
+		Intent: contract.IntentSpec{
+			Goal:            "write a helper",
+			SuccessCriteria: []string{"helper is saved"},
+		},
+		DataContract: contract.DataContract{
+			WriteTargets: []contract.WriteTarget{{Type: contract.WriteTargetArtifact, Kind: "code", Name: "helper.go"}},
+		},
+		CapabilityRequirements: contract.CapabilityRequirements{Skills: []string{"chat"}},
+	}
+}
+
+func TestSubmitContractTaskRoutesToSingleMatchingSlave(t *testing.T) {
+	var lastDelegate agentsdk.DelegateTaskRequest
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "sbx-driver", DisplayName: "driver", Status: "available", Card: json.RawMessage(`{"skills":[]}`)},
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["chat"],"short_id":"sa"}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			lastDelegate = req
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-1"}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	tc := testTaskContract()
+	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
+	require.NoError(t, err)
+
+	tool := submitContractToolForTest(t, tools)
+
+	out, err := tool.Call(context.Background(), raw)
+	require.NoError(t, err)
+	require.Contains(t, string(out), `"task_id":"task-1"`)
+	require.Equal(t, "slave-a", lastDelegate.TargetID)
+	require.Equal(t, "chat", lastDelegate.Skill)
+	require.Contains(t, lastDelegate.Prompt, contract.EnvelopeStart)
+}
+
+func TestSubmitContractTaskIgnoresOfflineSlaveAndFallsBackToAvailableMaster(t *testing.T) {
+	var lastDelegate agentsdk.DelegateTaskRequest
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "slave-offline", DisplayName: "slave-offline", Status: "offline", Card: json.RawMessage(`{"skills":["chat"]}`)},
+				{AgentID: "sbx-master", DisplayName: "master", Status: "available", Card: json.RawMessage(`{"skills":["fanout"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			lastDelegate = req
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-1"}, nil
+		},
+	}
+	raw, err := json.Marshal(map[string]interface{}{"contract": testTaskContract()})
+	require.NoError(t, err)
+
+	out, err := submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	require.NoError(t, err)
+	require.Contains(t, string(out), `"task_id":"task-1"`)
+	require.Equal(t, "sbx-master", lastDelegate.TargetID)
+	require.Equal(t, "fanout", lastDelegate.Skill)
+}
+
+func TestSubmitContractTaskDisallowsMasterFallbackWhenPolicyForbidsMaster(t *testing.T) {
+	var delegated bool
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "sbx-master", DisplayName: "master", Status: "available", Card: json.RawMessage(`{"skills":["fanout"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			delegated = true
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-1"}, nil
+		},
+	}
+	tc := testTaskContract()
+	tc.ExecutionPolicy.AllowMaster = contract.Bool(false)
+	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
+	require.NoError(t, err)
+
+	_, err = submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "master fallback is not allowed")
+	require.False(t, delegated)
+}
+
+func TestSubmitContractTaskDoesNotFallbackToUnavailableMaster(t *testing.T) {
+	var delegated bool
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "sbx-master", DisplayName: "master", Status: "offline", Card: json.RawMessage(`{"skills":["fanout"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			delegated = true
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-1"}, nil
+		},
+	}
+	raw, err := json.Marshal(map[string]interface{}{"contract": testTaskContract()})
+	require.NoError(t, err)
+
+	_, err = submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no fanout-skilled agent available")
+	require.False(t, delegated)
+}
+
+func TestSubmitContractTaskAllowedTargetsRestrictsDirectRoute(t *testing.T) {
+	var lastDelegate agentsdk.DelegateTaskRequest
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["chat"]}`)},
+				{AgentID: "slave-b", DisplayName: "slave-b", Status: "available", Card: json.RawMessage(`{"skills":["chat"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			lastDelegate = req
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-1"}, nil
+		},
+	}
+	tc := testTaskContract()
+	tc.ExecutionPolicy.AllowedTargets = []string{"slave-b"}
+	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
+	require.NoError(t, err)
+
+	out, err := submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	require.NoError(t, err)
+	require.Contains(t, string(out), `"task_id":"task-1"`)
+	require.Equal(t, "slave-b", lastDelegate.TargetID)
+	require.Equal(t, "chat", lastDelegate.Skill)
+}
+
+func TestSubmitContractTaskAllowedTargetsRejectsFallbackTarget(t *testing.T) {
+	var delegated bool
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "sbx-master", DisplayName: "master", Status: "available", Card: json.RawMessage(`{"skills":["fanout"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			delegated = true
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-1"}, nil
+		},
+	}
+	tc := testTaskContract()
+	tc.ExecutionPolicy.AllowedTargets = []string{"slave-a"}
+	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
+	require.NoError(t, err)
+
+	_, err = submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "target is not allowed by contract")
+	require.False(t, delegated)
+}
+
+func TestSubmitContractTaskReturnsWarningWhenTaskContractSaveFailsAfterDelegate(t *testing.T) {
+	observerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/resource-snapshots":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{}`))
+		case "/api/task-contracts":
+			http.Error(w, "store unavailable", http.StatusInternalServerError)
+		default:
+			t.Fatalf("unexpected observer path: %s", r.URL.Path)
+		}
+	}))
+	defer observerServer.Close()
+
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["chat"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-1"}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	tools.cfg.Observer.Enabled = true
+	tools.cfg.Observer.URL = observerServer.URL
+	tools.cfg.Observer.Token = "observer-token"
+	tools.relay = NewObserverRelay(tools.cfg)
+	raw, err := json.Marshal(map[string]interface{}{"contract": testTaskContract()})
+	require.NoError(t, err)
+
+	out, err := submitContractToolForTest(t, tools).Call(context.Background(), raw)
+	require.NoError(t, err)
+	require.Contains(t, string(out), `"task_id":"task-1"`)
+	require.Contains(t, string(out), `"warnings"`)
+	require.Contains(t, string(out), "observer save task contract")
+}
+
+func TestSubmitContractTaskReturnsWarningWhenResourceSnapshotSaveFailsAfterDelegate(t *testing.T) {
+	observerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/resource-snapshots":
+			http.Error(w, "store unavailable", http.StatusInternalServerError)
+		case "/api/task-contracts":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			t.Fatalf("unexpected observer path: %s", r.URL.Path)
+		}
+	}))
+	defer observerServer.Close()
+
+	var delegated bool
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["chat"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			delegated = true
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-1"}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	tools.cfg.Observer.Enabled = true
+	tools.cfg.Observer.URL = observerServer.URL
+	tools.cfg.Observer.Token = "observer-token"
+	tools.relay = NewObserverRelay(tools.cfg)
+	raw, err := json.Marshal(map[string]interface{}{"contract": testTaskContract()})
+	require.NoError(t, err)
+
+	out, err := submitContractToolForTest(t, tools).Call(context.Background(), raw)
+	require.NoError(t, err)
+	require.True(t, delegated)
+	require.Contains(t, string(out), `"task_id":"task-1"`)
+	require.Contains(t, string(out), "observer save resource snapshot")
+}
+
 func TestTool_ListAgents_FiltersSelf(t *testing.T) {
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
@@ -107,7 +364,7 @@ func TestTool_SubmitTask_RegistersFilesAndDelegates(t *testing.T) {
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
 			return []agentsdk.AgentCard{
-				{AgentID: "sbx-master", DisplayName: "master-prod",
+				{AgentID: "sbx-master", DisplayName: "master-prod", Status: "available",
 					Card: json.RawMessage(`{"skills":["fanout"]}`)},
 			}, nil
 		},
@@ -226,7 +483,7 @@ func TestTool_SubmitTask_ObserverLazyManifest(t *testing.T) {
 	var gotPrompt string
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
-			return []agentsdk.AgentCard{{AgentID: "sbx-master", DisplayName: "master-prod", Card: json.RawMessage(`{"skills":["fanout"]}`)}}, nil
+			return []agentsdk.AgentCard{{AgentID: "sbx-master", DisplayName: "master-prod", Status: "available", Card: json.RawMessage(`{"skills":["fanout"]}`)}}, nil
 		},
 		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
 			gotPrompt = req.Prompt
@@ -273,7 +530,7 @@ func TestTool_SubmitTask_ObserverLazyRejectsDirectory(t *testing.T) {
 	dir := t.TempDir()
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
-			return []agentsdk.AgentCard{{AgentID: "sbx-master", DisplayName: "master-prod", Card: json.RawMessage(`{"skills":["fanout"]}`)}}, nil
+			return []agentsdk.AgentCard{{AgentID: "sbx-master", DisplayName: "master-prod", Status: "available", Card: json.RawMessage(`{"skills":["fanout"]}`)}}, nil
 		},
 	}
 	tools := newTestTools(t, sdk)
@@ -361,11 +618,36 @@ func TestObserverRelaySyncWrites(t *testing.T) {
 	}
 }
 
+func TestObserverRelayUpdateWriteTaskRetriesSQLiteBusy(t *testing.T) {
+	calls := 0
+	observerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPatch || r.URL.Path != "/api/writes/wr_1" {
+			t.Fatalf("unexpected observer request: %s %s", r.Method, r.URL.Path)
+		}
+		if calls == 1 {
+			http.Error(w, "database is locked (5) (SQLITE_BUSY)", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer observerServer.Close()
+
+	relay := &ObserverRelay{baseURL: observerServer.URL, token: "observer-token", http: observerServer.Client()}
+	err := relay.UpdateWriteTask(context.Background(), "wr_1", "task_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d", calls)
+	}
+}
+
 func TestTool_SubmitTask_EmitsSlaveTargetRoleForNonMasterTarget(t *testing.T) {
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
 			return []agentsdk.AgentCard{
-				{AgentID: "sbx-slave", DisplayName: "slave-prod",
+				{AgentID: "sbx-slave", DisplayName: "slave-prod", Status: "available",
 					Card: json.RawMessage(`{"skills":["chat","mcp"]}`)},
 			}, nil
 		},
@@ -397,8 +679,8 @@ func TestTool_SubmitTask_RejectsAmbiguousTarget(t *testing.T) {
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
 			return []agentsdk.AgentCard{
-				{AgentID: "m1", DisplayName: "master-a", Card: json.RawMessage(`{"skills":["fanout"]}`)},
-				{AgentID: "m2", DisplayName: "master-b", Card: json.RawMessage(`{"skills":["fanout"]}`)},
+				{AgentID: "m1", DisplayName: "master-a", Status: "available", Card: json.RawMessage(`{"skills":["fanout"]}`)},
+				{AgentID: "m2", DisplayName: "master-b", Status: "available", Card: json.RawMessage(`{"skills":["fanout"]}`)},
 			}, nil
 		},
 	}
@@ -579,12 +861,48 @@ func TestWaitTaskTerminalFinalOutputFallsBackToSDKOutput(t *testing.T) {
 	t.Fatal("wait_task tool not registered")
 }
 
+func TestWaitTaskTerminalFinalOutputFallsBackToSDKResultOutput(t *testing.T) {
+	observerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tasks" {
+			t.Fatalf("path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"task_id":"t3","final_output":"","is_final":false}]`))
+	}))
+	defer observerServer.Close()
+
+	sdk := &fakeSDK{
+		getTaskFunc: func(id string, _ bool) (*agentsdk.TaskInfo, error) {
+			return &agentsdk.TaskInfo{TaskID: id, Status: "completed", Result: json.RawMessage(`{"output":"result final"}`)}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	tools.cfg.Observer.Enabled = true
+	tools.cfg.Observer.URL = observerServer.URL
+
+	for _, tt := range tools.All() {
+		if tt.Name() == "wait_task" {
+			res, err := tt.Call(context.Background(),
+				json.RawMessage(`{"task_id":"t3","poll_interval_sec":1,"timeout_sec":5}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := `{"status":"completed","output":"result final","failure_reason":"","latest_progress":"","latest_progress_phase":"","latest_progress_at":"","final_output":"result final","is_final":true,"written_files":null}`
+			if string(res) != want {
+				t.Fatalf("response mismatch\nwant: %s\n got: %s", want, res)
+			}
+			return
+		}
+	}
+	t.Fatal("wait_task tool not registered")
+}
+
 func TestTool_TailSubtasks_PeerProxiesMaster(t *testing.T) {
 	called := false
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
 			return []agentsdk.AgentCard{
-				{AgentID: "sbx-master", DisplayName: "master-prod",
+				{AgentID: "sbx-master", DisplayName: "master-prod", Status: "available",
 					Card: json.RawMessage(`{"skills":["fanout"],"short_id":"m-short"}`)},
 			}, nil
 		},

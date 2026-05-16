@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"time"
 
@@ -157,9 +158,31 @@ type Write struct {
 	Content       []byte `json:"-"`
 }
 
+type TaskContractRecord struct {
+	WorkspaceID    string          `json:"workspace_id"`
+	TaskID         string          `json:"task_id"`
+	ConversationID string          `json:"conversation_id"`
+	OwnerAgentID   string          `json:"owner_agent_id"`
+	Body           json.RawMessage `json:"body"`
+	CreatedAt      string          `json:"created_at,omitempty"`
+	UpdatedAt      string          `json:"updated_at,omitempty"`
+}
+
+type ResourceSnapshotRecord struct {
+	WorkspaceID  string          `json:"workspace_id"`
+	SnapshotID   string          `json:"snapshot_id"`
+	OwnerAgentID string          `json:"owner_agent_id"`
+	Body         json.RawMessage `json:"body"`
+	CreatedAt    string          `json:"created_at,omitempty"`
+}
+
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", sqliteDSNWithPragmas(path))
 	if err != nil {
+		return nil, err
+	}
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;`); err != nil {
+		_ = db.Close()
 		return nil, err
 	}
 	if _, err := db.Exec(schemaSQL); err != nil {
@@ -171,6 +194,17 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return &Store{db: db}, nil
+}
+
+func sqliteDSNWithPragmas(path string) string {
+	q := url.Values{}
+	q.Add("_pragma", "busy_timeout=5000")
+
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return path + sep + q.Encode()
 }
 
 func ensureColumns(db *sql.DB) error {
@@ -650,6 +684,86 @@ func (s *Store) ListCompletedWrites(workspaceID, ownerAgentID, taskID string) ([
 		out = append(out, w)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) SaveTaskContract(in TaskContractRecord) error {
+	if in.WorkspaceID == "" || in.TaskID == "" || in.ConversationID == "" || in.OwnerAgentID == "" || len(in.Body) == 0 {
+		return errors.New("observerstore: workspace, task, conversation, owner, and body are required")
+	}
+	now := nowUTC()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var existingOwner string
+	err = tx.QueryRow(`SELECT owner_agent_id FROM task_contracts WHERE workspace_id=? AND task_id=?`,
+		in.WorkspaceID, in.TaskID).Scan(&existingOwner)
+	if err == sql.ErrNoRows {
+		_, err = tx.Exec(`INSERT INTO task_contracts(workspace_id, task_id, conversation_id, owner_agent_id, body, created_at, updated_at)
+			VALUES(?, ?, ?, ?, ?, ?, ?)`,
+			in.WorkspaceID, in.TaskID, in.ConversationID, in.OwnerAgentID, string(in.Body), now, now)
+		if err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	if err != nil {
+		return err
+	}
+	if existingOwner != in.OwnerAgentID {
+		return errors.New("task contract owner mismatch")
+	}
+	_, err = tx.Exec(`UPDATE task_contracts SET conversation_id=?, body=?, updated_at=?
+		WHERE workspace_id=? AND task_id=? AND owner_agent_id=?`,
+		in.ConversationID, string(in.Body), now, in.WorkspaceID, in.TaskID, in.OwnerAgentID)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) GetTaskContract(workspaceID, taskID string) (TaskContractRecord, error) {
+	var out TaskContractRecord
+	var body string
+	err := s.db.QueryRow(`SELECT workspace_id, task_id, conversation_id, owner_agent_id, body, created_at, updated_at
+		FROM task_contracts WHERE workspace_id=? AND task_id=?`, workspaceID, taskID).
+		Scan(&out.WorkspaceID, &out.TaskID, &out.ConversationID, &out.OwnerAgentID, &body, &out.CreatedAt, &out.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return TaskContractRecord{}, fmt.Errorf("task contract not found")
+	}
+	if err != nil {
+		return TaskContractRecord{}, err
+	}
+	out.Body = json.RawMessage(body)
+	return out, nil
+}
+
+func (s *Store) SaveResourceSnapshot(in ResourceSnapshotRecord) error {
+	if in.WorkspaceID == "" || in.SnapshotID == "" || in.OwnerAgentID == "" || len(in.Body) == 0 {
+		return errors.New("observerstore: workspace, snapshot, owner, and body are required")
+	}
+	now := nowUTC()
+	_, err := s.db.Exec(`INSERT INTO resource_snapshots(workspace_id, snapshot_id, owner_agent_id, body, created_at)
+		VALUES(?, ?, ?, ?, ?)`, in.WorkspaceID, in.SnapshotID, in.OwnerAgentID, string(in.Body), now)
+	return err
+}
+
+func (s *Store) GetLatestResourceSnapshot(workspaceID string) (ResourceSnapshotRecord, error) {
+	var out ResourceSnapshotRecord
+	var body string
+	err := s.db.QueryRow(`SELECT workspace_id, snapshot_id, owner_agent_id, body, created_at
+		FROM resource_snapshots WHERE workspace_id=? ORDER BY created_at DESC, snapshot_id DESC LIMIT 1`, workspaceID).
+		Scan(&out.WorkspaceID, &out.SnapshotID, &out.OwnerAgentID, &body, &out.CreatedAt)
+	if err == sql.ErrNoRows {
+		return ResourceSnapshotRecord{}, fmt.Errorf("resource snapshot not found")
+	}
+	if err != nil {
+		return ResourceSnapshotRecord{}, err
+	}
+	out.Body = json.RawMessage(body)
+	return out, nil
 }
 
 func (s *Store) listSubtasks(workspaceID, taskID string) ([]SubtaskView, error) {
