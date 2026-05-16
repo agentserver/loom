@@ -64,15 +64,6 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 	}
 
 	report := analyzeContractCapabilities(cards, s.t.cfg.Credentials.SandboxID, tc)
-	if args.TargetDisplayName == "" && report.RecommendedRoute == routeDriverFanout {
-		return nil, &MCPToolError{Message: "driver_fanout route is recommended but driver-managed fanout is not implemented yet"}
-	}
-
-	targetID, targetName, skill, route, err := s.selectTarget(ctx, cards, tc, args.TargetDisplayName, args.Skill)
-	if err != nil {
-		return nil, err
-	}
-
 	body := strings.TrimSpace(args.Prompt)
 	if body == "" {
 		body = tc.Intent.Goal
@@ -81,6 +72,27 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 	if err != nil {
 		return nil, &MCPToolError{Message: "encode contract envelope: " + err.Error()}
 	}
+	if args.TargetDisplayName == "" && report.RecommendedRoute == routeDriverFanout {
+		if s.t.contractRunner == nil {
+			return nil, &MCPToolError{Message: "driver_fanout route is recommended but no driver contract runner is configured"}
+		}
+		result, err := s.t.contractRunner.Run(ctx, finalPrompt)
+		if err != nil {
+			return nil, &MCPToolError{Message: "driver fanout: " + err.Error()}
+		}
+		return json.Marshal(map[string]interface{}{
+			"route":             routeDriverFanout,
+			"summary":           result.Summary,
+			"resource_snapshot": snapshot,
+			"warnings":          warnings,
+		})
+	}
+
+	targetID, targetName, skill, route, err := s.selectTarget(ctx, cards, tc, args.TargetDisplayName, args.Skill)
+	if err != nil {
+		return nil, err
+	}
+
 	timeout := args.TimeoutSec
 	if timeout == 0 {
 		timeout = s.t.cfg.DriverDefaults.TaskTimeoutSec

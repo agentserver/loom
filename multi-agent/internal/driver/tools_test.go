@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/yourorg/multi-agent/internal/contract"
 	"github.com/yourorg/multi-agent/internal/observer"
+	"github.com/yourorg/multi-agent/internal/orchestration"
 )
 
 // fakeSDK satisfies SDKClient for tests.
@@ -46,6 +47,17 @@ type fakeObserver struct {
 
 func (f *fakeObserver) Emit(ev observer.Event) {
 	f.events = append(f.events, ev)
+}
+
+type fakeContractRunner struct {
+	prompt string
+	result orchestration.RunnerResult
+	err    error
+}
+
+func (f *fakeContractRunner) Run(ctx context.Context, prompt string) (orchestration.RunnerResult, error) {
+	f.prompt = prompt
+	return f.result, f.err
 }
 
 func newTestTools(t *testing.T, sdk SDKClient) *Tools {
@@ -185,7 +197,42 @@ func TestSubmitContractTaskReturnsMasterFanoutRoute(t *testing.T) {
 	require.Equal(t, "fanout", lastDelegate.Skill)
 }
 
-func TestSubmitContractTaskDriverFanoutNotImplemented(t *testing.T) {
+func TestSubmitContractTaskUsesDriverFanoutWhenRecommended(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "sbx-driver", DisplayName: "driver", Status: "available"},
+				{AgentID: "builder", DisplayName: "builder", Status: "available", Card: json.RawMessage(`{"skills":["build_mcp"],"resources":{"tags":["python3"]}}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			t.Fatalf("driver_fanout route must not delegate")
+			return nil, nil
+		},
+	}
+	tc := testTaskContract()
+	tc.ExecutionPolicy.Routing = contract.RoutingDirectFirst
+	tc.ExecutionPolicy.AllowBuildMCP = true
+	tc.CapabilityRequirements.Skills = nil
+	tc.CapabilityRequirements.Tools = []string{"csv_profiler/profile_orders_csv"}
+	raw, err := json.Marshal(map[string]interface{}{
+		"contract": tc,
+		"prompt":   "analyze refunds",
+	})
+	require.NoError(t, err)
+
+	tools := newTestTools(t, sdk)
+	runner := &fakeContractRunner{result: orchestration.RunnerResult{Summary: "driver summary"}}
+	tools.SetContractRunner(runner)
+
+	out, err := submitContractToolForTest(t, tools).Call(context.Background(), raw)
+	require.NoError(t, err)
+	require.Contains(t, string(out), `"route":"driver_fanout"`)
+	require.Contains(t, string(out), `"summary":"driver summary"`)
+	require.Contains(t, runner.prompt, contract.EnvelopeStart)
+}
+
+func TestSubmitContractTaskDriverFanoutRequiresConfiguredRunner(t *testing.T) {
 	var delegated bool
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
@@ -209,7 +256,7 @@ func TestSubmitContractTaskDriverFanoutNotImplemented(t *testing.T) {
 
 	_, err = submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "driver_fanout route is recommended but driver-managed fanout is not implemented yet")
+	require.Contains(t, err.Error(), "driver_fanout route is recommended but no driver contract runner is configured")
 	require.False(t, delegated)
 }
 
