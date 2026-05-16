@@ -134,6 +134,169 @@ func TestSubmitContractTaskRoutesToSingleMatchingSlave(t *testing.T) {
 	require.Contains(t, lastDelegate.Prompt, contract.EnvelopeStart)
 }
 
+func TestSubmitContractTaskReturnsDirectSlaveRoute(t *testing.T) {
+	var lastDelegate agentsdk.DelegateTaskRequest
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "sbx-driver", DisplayName: "driver", Status: "available", Card: json.RawMessage(`{"skills":[]}`)},
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["chat"],"short_id":"sa"}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			lastDelegate = req
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-1"}, nil
+		},
+	}
+	tc := testTaskContract()
+	tc.ExecutionPolicy.Routing = contract.RoutingDirectFirst
+	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
+	require.NoError(t, err)
+
+	out, err := submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	require.NoError(t, err)
+	require.Contains(t, string(out), `"route":"direct_slave"`)
+	require.Equal(t, "slave-a", lastDelegate.TargetID)
+	require.Equal(t, "chat", lastDelegate.Skill)
+}
+
+func TestSubmitContractTaskReturnsMasterFanoutRoute(t *testing.T) {
+	var lastDelegate agentsdk.DelegateTaskRequest
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "m1", DisplayName: "master", Status: "available", Card: json.RawMessage(`{"skills":["fanout"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			lastDelegate = req
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-1"}, nil
+		},
+	}
+	tc := testTaskContract()
+	tc.ExecutionPolicy.Routing = contract.RoutingMasterOnly
+	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
+	require.NoError(t, err)
+
+	out, err := submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	require.NoError(t, err)
+	require.Contains(t, string(out), `"route":"master_fanout"`)
+	require.Equal(t, "m1", lastDelegate.TargetID)
+	require.Equal(t, "fanout", lastDelegate.Skill)
+}
+
+func TestSubmitContractTaskDriverFanoutNotImplemented(t *testing.T) {
+	var delegated bool
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "sbx-driver", DisplayName: "driver", Status: "available"},
+				{AgentID: "builder", DisplayName: "builder", Status: "available", Card: json.RawMessage(`{"skills":["build_mcp"],"resources":{"tags":["python3"]}}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			delegated = true
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-1"}, nil
+		},
+	}
+	tc := testTaskContract()
+	tc.ExecutionPolicy.Routing = contract.RoutingDirectFirst
+	tc.ExecutionPolicy.AllowBuildMCP = true
+	tc.CapabilityRequirements.Skills = nil
+	tc.CapabilityRequirements.Tools = []string{"csv_profiler/profile_orders_csv"}
+	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
+	require.NoError(t, err)
+
+	_, err = submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "driver_fanout route is recommended but driver-managed fanout is not implemented yet")
+	require.False(t, delegated)
+}
+
+func TestSubmitContractTaskDirectRouteUsesCapabilityAwareMatch(t *testing.T) {
+	var lastDelegate agentsdk.DelegateTaskRequest
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["chat"]}`)},
+				{AgentID: "slave-b", DisplayName: "slave-b", Status: "available", Card: json.RawMessage(`{"skills":["chat"],"mcp_tools":[{"server":"refund_policy_checker","name":"evaluate_rows"}]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			lastDelegate = req
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-1"}, nil
+		},
+	}
+	tc := testTaskContract()
+	tc.CapabilityRequirements.Tools = []string{"refund_policy_checker/evaluate_rows"}
+	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
+	require.NoError(t, err)
+
+	out, err := submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	require.NoError(t, err)
+	require.Contains(t, string(out), `"route":"direct_slave"`)
+	require.Equal(t, "slave-b", lastDelegate.TargetID)
+	require.Equal(t, "chat", lastDelegate.Skill)
+}
+
+func TestSubmitContractTaskExplicitSlaveTargetReturnsDirectRoute(t *testing.T) {
+	var lastDelegate agentsdk.DelegateTaskRequest
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["chat"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			lastDelegate = req
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-1"}, nil
+		},
+	}
+	raw, err := json.Marshal(map[string]interface{}{
+		"contract":            testTaskContract(),
+		"target_display_name": "slave-a",
+	})
+	require.NoError(t, err)
+
+	out, err := submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	require.NoError(t, err)
+	require.Contains(t, string(out), `"route":"direct_slave"`)
+	require.Equal(t, "slave-a", lastDelegate.TargetID)
+	require.Equal(t, "chat", lastDelegate.Skill)
+}
+
+func TestSubmitContractTaskExplicitMasterTargetBypassesDriverFanoutBlock(t *testing.T) {
+	var lastDelegate agentsdk.DelegateTaskRequest
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "m1", DisplayName: "master", Status: "available", Card: json.RawMessage(`{"skills":["fanout"]}`)},
+				{AgentID: "builder", DisplayName: "builder", Status: "available", Card: json.RawMessage(`{"skills":["build_mcp"],"resources":{"tags":["python3"]}}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			lastDelegate = req
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-1"}, nil
+		},
+	}
+	tc := testTaskContract()
+	tc.ExecutionPolicy.Routing = contract.RoutingDirectFirst
+	tc.ExecutionPolicy.AllowBuildMCP = true
+	tc.CapabilityRequirements.Skills = nil
+	tc.CapabilityRequirements.Tools = []string{"csv_profiler/profile_orders_csv"}
+	raw, err := json.Marshal(map[string]interface{}{
+		"contract":            tc,
+		"target_display_name": "master",
+	})
+	require.NoError(t, err)
+
+	out, err := submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	require.NoError(t, err)
+	require.Contains(t, string(out), `"route":"master_fanout"`)
+	require.Equal(t, "m1", lastDelegate.TargetID)
+	require.Equal(t, "fanout", lastDelegate.Skill)
+}
+
 func TestSubmitContractTaskIgnoresOfflineSlaveAndFallsBackToAvailableMaster(t *testing.T) {
 	var lastDelegate agentsdk.DelegateTaskRequest
 	sdk := &fakeSDK{

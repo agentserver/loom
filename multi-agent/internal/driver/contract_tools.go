@@ -63,7 +63,12 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 		warnings = append(warnings, "observer save resource snapshot: "+err.Error())
 	}
 
-	targetID, targetName, skill, err := s.selectTarget(ctx, cards, tc, args.TargetDisplayName, args.Skill)
+	report := analyzeContractCapabilities(cards, s.t.cfg.Credentials.SandboxID, tc)
+	if args.TargetDisplayName == "" && report.RecommendedRoute == routeDriverFanout {
+		return nil, &MCPToolError{Message: "driver_fanout route is recommended but driver-managed fanout is not implemented yet"}
+	}
+
+	targetID, targetName, skill, route, err := s.selectTarget(ctx, cards, tc, args.TargetDisplayName, args.Skill)
 	if err != nil {
 		return nil, err
 	}
@@ -103,37 +108,44 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 		"target_id":           targetID,
 		"target_display_name": targetName,
 		"skill":               skill,
+		"route":               route,
 		"resource_snapshot":   snapshot,
 		"warnings":            warnings,
 	})
 }
 
-func (s *submitContractTaskTool) selectTarget(ctx context.Context, cards []agentsdk.AgentCard, tc contract.TaskContract, targetOverride, skillOverride string) (string, string, string, error) {
+func (s *submitContractTaskTool) selectTarget(ctx context.Context, cards []agentsdk.AgentCard, tc contract.TaskContract, targetOverride, skillOverride string) (targetID, targetName, skill, route string, err error) {
 	if targetOverride == "" && tc.ExecutionPolicy.Routing == contract.RoutingDirectFirst {
-		matches := directContractMatches(cards, s.t.cfg.Credentials.SandboxID, tc.CapabilityRequirements.Skills, tc.ExecutionPolicy.AllowedTargets)
+		matches := directContractCapabilityMatches(cards, s.t.cfg.Credentials.SandboxID, tc)
 		if len(matches) == 1 {
-			skill := skillOverride
+			skill = skillOverride
 			if skill == "" {
 				skill = "chat"
 			}
-			return matches[0].AgentID, matches[0].DisplayName, skill, nil
+			return matches[0].AgentID, matches[0].DisplayName, skill, routeDirectSlave, nil
 		}
 	}
 	targetID, targetName, _, targetRole, err := s.t.resolveTarget(ctx, targetOverride)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", "", err
 	}
 	if targetRole == observer.RoleMaster && !tc.ExecutionPolicy.AllowsMaster() {
-		return "", "", "", &MCPToolError{Message: "master fallback is not allowed by contract"}
+		return "", "", "", "", &MCPToolError{Message: "master fallback is not allowed by contract"}
 	}
 	if !targetAllowed(targetID, tc.ExecutionPolicy.AllowedTargets) {
-		return "", "", "", &MCPToolError{Message: "target is not allowed by contract: " + targetID}
+		return "", "", "", "", &MCPToolError{Message: "target is not allowed by contract: " + targetID}
 	}
-	skill := skillOverride
+	skill = skillOverride
+	if targetRole == observer.RoleMaster {
+		if skill == "" {
+			skill = "fanout"
+		}
+		return targetID, targetName, skill, routeMasterFanout, nil
+	}
 	if skill == "" {
-		skill = "fanout"
+		skill = "chat"
 	}
-	return targetID, targetName, skill, nil
+	return targetID, targetName, skill, routeDirectSlave, nil
 }
 
 func directContractMatches(cards []agentsdk.AgentCard, selfID string, requiredSkills, allowedTargets []string) []agentsdk.AgentCard {
