@@ -1,8 +1,7 @@
 {
   "runnable": true,
   "requires_build_mcp": true,
-  "recommended_target_id": "master-online-e2e",
-  "recommended_target_display_name": "master-online-e2e",
+  "recommended_route": "driver_fanout",
   "recommended_skill": "fanout",
   "satisfied_tools": [
     "csv_profiler/profile_orders_csv"
@@ -24,6 +23,6 @@
     }
   ],
   "reasons": [
-    "missing tools can be built by available build_mcp slaves during master orchestration"
+    "missing tools can be built by available build_mcp slaves during driver orchestration"
   ]
 }

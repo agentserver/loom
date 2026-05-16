@@ -1,7 +1,7 @@
 # driver-clarify-contract
 
 Fixture-level E2E example for driver-side requirement clarification before
-submitting work to a master.
+submitting work through driver orchestration.
 
 ## Story
 
@@ -19,8 +19,8 @@ The visible resources include:
 
 The dry run shows that CSV profiling is already available, but
 `refund_policy_checker/evaluate_rows` is missing. Because the contract allows
-`build_mcp`, the task is runnable through the master and requires one MCP build
-during orchestration.
+`build_mcp`, the task is runnable via driver fanout and requires one MCP build
+during driver orchestration.
 
 ## What This Example Tests
 
