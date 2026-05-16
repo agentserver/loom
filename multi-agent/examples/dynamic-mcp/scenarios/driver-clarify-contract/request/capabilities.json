@@ -1,0 +1,128 @@
+{
+  "resource_snapshot": {
+    "generated_at": "2026-05-16T00:00:00Z",
+    "agents": [
+      {
+        "agent_id": "master-online-e2e",
+        "short_id": "master-short",
+        "display_name": "master-online-e2e",
+        "status": "available",
+        "skills": ["fanout", "route"],
+        "resources": {
+          "tags": ["orchestrator"]
+        }
+      },
+      {
+        "agent_id": "analytics-slave",
+        "short_id": "analytics-short",
+        "display_name": "analytics-slave",
+        "status": "available",
+        "skills": ["chat", "mcp"],
+        "tools": ["profile_orders_csv"],
+        "mcp_tools": [
+          {
+            "server": "csv_profiler",
+            "name": "profile_orders_csv",
+            "description": "Read an orders CSV artifact URL and return rows plus risk signals.",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string"
+                }
+              },
+              "required": ["url"]
+            },
+            "result_description": "JSON object with columns, row_count, rows, risk_signals, and summary."
+          }
+        ],
+        "resources": {
+          "tags": ["python3", "data"]
+        }
+      },
+      {
+        "agent_id": "builder-slave",
+        "short_id": "builder-short",
+        "display_name": "builder-slave",
+        "status": "available",
+        "skills": ["chat", "build_mcp"],
+        "resources": {
+          "tags": ["python3", "data", "policy"]
+        }
+      }
+    ]
+  },
+  "masters": [
+    {
+      "agent_id": "master-online-e2e",
+      "short_id": "master-short",
+      "display_name": "master-online-e2e",
+      "status": "available",
+      "skills": ["fanout", "route"],
+      "resources": {
+        "tags": ["orchestrator"]
+      }
+    }
+  ],
+  "slaves": [
+    {
+      "agent_id": "analytics-slave",
+      "short_id": "analytics-short",
+      "display_name": "analytics-slave",
+      "status": "available",
+      "skills": ["chat", "mcp"],
+      "tools": ["profile_orders_csv"],
+      "mcp_tools": [
+        {
+          "server": "csv_profiler",
+          "name": "profile_orders_csv",
+          "description": "Read an orders CSV artifact URL and return rows plus risk signals.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": ["url"]
+          },
+          "result_description": "JSON object with columns, row_count, rows, risk_signals, and summary."
+        }
+      ],
+      "resources": {
+        "tags": ["python3", "data"]
+      }
+    },
+    {
+      "agent_id": "builder-slave",
+      "short_id": "builder-short",
+      "display_name": "builder-slave",
+      "status": "available",
+      "skills": ["chat", "build_mcp"],
+      "resources": {
+        "tags": ["python3", "data", "policy"]
+      }
+    }
+  ],
+  "mcp_tools": [
+    {
+      "agent_id": "analytics-slave",
+      "agent_display_name": "analytics-slave",
+      "server": "csv_profiler",
+      "name": "profile_orders_csv",
+      "description": "Read an orders CSV artifact URL and return rows plus risk signals.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": ["url"]
+      },
+      "result_description": "JSON object with columns, row_count, rows, risk_signals, and summary.",
+      "qualified_tool_name": "csv_profiler/profile_orders_csv"
+    }
+  ],
+  "warnings": []
+}

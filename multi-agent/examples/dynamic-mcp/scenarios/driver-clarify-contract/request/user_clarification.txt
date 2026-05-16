@@ -1,0 +1,3 @@
+使用 driver 侧的 orders.csv 和 refund-policy.md。
+输出 markdown 报告到 outputs/refund-risk-report.md。
+如果缺少现成 MCP 工具，允许即时构建，但生成的 MCP 代码默认不要展示给用户。

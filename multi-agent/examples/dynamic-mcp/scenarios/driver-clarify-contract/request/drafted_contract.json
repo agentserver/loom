@@ -1,0 +1,72 @@
+{
+  "contract": {
+    "version": 1,
+    "conversation_id": "scenario-driver-clarify-contract",
+    "intent": {
+      "goal": "Analyze driver-provided orders.csv against refund-policy.md and produce a refund risk report.",
+      "business_context": "The driver owns the user files and must clarify the task before submitting work to the master.",
+      "success_criteria": [
+        "The report identifies high-risk refund requests.",
+        "The report cites refund policy rules or explains missing machine-readable rule IDs.",
+        "The report is written as markdown to refund-risk-report.md.",
+        "Generated MCP code is persisted but hidden unless requested."
+      ]
+    },
+    "data_contract": {
+      "read_artifacts": [
+        {
+          "artifact_id": "orders-csv",
+          "kind": "file",
+          "name": "orders.csv",
+          "sha256": "12bf5821c357264bf7d4adc9d6979f11ee392626cd90e447a232d742b4294588"
+        },
+        {
+          "artifact_id": "refund-policy-md",
+          "kind": "file",
+          "name": "refund-policy.md",
+          "sha256": "926bf6fcef56e17434b2bac0d18725d56c36498009692a3b5fabd727172cf4bc"
+        }
+      ],
+      "write_targets": [
+        {
+          "type": "artifact",
+          "kind": "markdown",
+          "name": "refund-risk-report.md"
+        }
+      ]
+    },
+    "execution_policy": {
+      "routing": "master_only",
+      "allow_master": true,
+      "allow_build_mcp": true,
+      "allow_code_artifacts": true,
+      "code_persistence": "observer_artifact_store",
+      "expose_code_to_user": "on_request",
+      "write_mode": "artifact_only",
+      "max_dag_nodes": 6,
+      "max_depth": 3,
+      "max_concurrency": 2,
+      "require_plan_approval": false,
+      "require_user_approval_for_repo_writes": false,
+      "allowed_targets": [
+        "master-online-e2e",
+        "analytics-slave",
+        "builder-slave"
+      ]
+    },
+    "capability_requirements": {
+      "skills": [],
+      "tools": [
+        "csv_profiler/profile_orders_csv",
+        "refund_policy_checker/evaluate_rows"
+      ],
+      "resources": {
+        "tags": ["python3", "data", "policy"]
+      }
+    }
+  },
+  "clarification_questions": [
+    "Which input files or artifact IDs should be read?",
+    "What exact checks should define a successful result?"
+  ]
+}
