@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +12,7 @@ import (
 	"github.com/yourorg/multi-agent/internal/config"
 	"github.com/yourorg/multi-agent/internal/executor"
 	"github.com/yourorg/multi-agent/internal/observer"
+	"github.com/yourorg/multi-agent/internal/orchestration"
 	"github.com/yourorg/multi-agent/internal/planner"
 	"github.com/yourorg/multi-agent/internal/store"
 )
@@ -814,46 +814,12 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 		if len(writeURLs) == 0 {
 			return executor.Result{}, fmt.Errorf("reduce: %w", rerr)
 		}
-		summary = fallbackReduceSummary(results, rerr)
+		summary = orchestration.FallbackReduceSummary(results, rerr)
 	}
 	if err := o.putManifestWrites(ctx, t.Prompt, summary); err != nil {
 		return executor.Result{}, err
 	}
 	return executor.Result{Summary: summary}, nil
-}
-
-func fallbackReduceSummary(results []planner.SubResult, reduceErr error) string {
-	var sb strings.Builder
-	sb.WriteString("# Task Summary\n\n")
-	sb.WriteString("Reducer failed: ")
-	sb.WriteString(reduceErr.Error())
-	sb.WriteString("\n\n")
-	sb.WriteString("Completed sub-task outputs are preserved below.\n")
-	for _, r := range results {
-		sb.WriteString("\n## ")
-		sb.WriteString(r.NodeID)
-		sb.WriteString(" (")
-		sb.WriteString(r.Status)
-		sb.WriteString(")\n\n")
-		switch {
-		case r.Status == "completed" && r.Output != "":
-			sb.WriteString(truncateForSummary(r.Output, 3000))
-		case r.Error != "":
-			sb.WriteString("Error: ")
-			sb.WriteString(r.Error)
-		default:
-			sb.WriteString("No output.")
-		}
-		sb.WriteString("\n")
-	}
-	return sb.String()
-}
-
-func truncateForSummary(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "\n\n[truncated]\n"
 }
 
 func (o *Orchestrator) putManifestWrites(ctx context.Context, prompt, summary string) error {
