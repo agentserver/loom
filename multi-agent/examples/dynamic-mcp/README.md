@@ -19,6 +19,12 @@ but the spec only allowed stdlib), the orchestrator re-calls the planner
 with `BUILD_MCP_BLOCKED:` context appended; the planner can expand
 `allowed_packages`, revise the spec, or abandon. Iteration is bounded at 3.
 
+### Routing Note
+
+Driver-first orchestration is the default for clarified contract workflows.
+Set `execution_policy.routing` to `master_only` when this example should keep
+using the master `fanout` executor for compatibility or batch-style execution.
+
 ## Layout
 
 - `agent-builder/config.example.yaml` — slave-agent config with `build_mcp` skill + `resources:` advertising `tags: [crypto, python3]`

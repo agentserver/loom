@@ -36,7 +36,7 @@
       ]
     },
     "execution_policy": {
-      "routing": "master_only",
+      "routing": "direct_first",
       "allow_master": true,
       "allow_build_mcp": true,
       "allow_code_artifacts": true,

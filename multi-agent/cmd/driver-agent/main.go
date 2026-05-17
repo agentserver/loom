@@ -17,6 +17,8 @@ import (
 	"github.com/yourorg/multi-agent/internal/driver"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/observerclient"
+	"github.com/yourorg/multi-agent/internal/orchestration"
+	"github.com/yourorg/multi-agent/internal/planner"
 	"github.com/yourorg/multi-agent/internal/webui"
 )
 
@@ -145,7 +147,13 @@ func runServe(args []string) {
 	})
 	defer obs.Close()
 
-	tools := driver.NewTools(reg, audit, driver.NewAgentSDKClient(cli, cfg.Server.URL, cfg.Credentials.ProxyToken), cfg, obs)
+	sdkClient := driver.NewAgentSDKClient(cli, cfg.Server.URL, cfg.Credentials.ProxyToken)
+	tools := driver.NewTools(reg, audit, sdkClient, cfg, obs)
+	tools.SetContractRunner(orchestration.NewDriverRunner(planner.New(cfg.Planner), sdkClient, orchestration.RunnerConfig{
+		MaxConcurrency:  cfg.Fanout.MaxConcurrency,
+		ChildTimeoutSec: cfg.Fanout.SubTaskDefaults.TimeoutSec,
+		SelfID:          cfg.Credentials.SandboxID,
+	}))
 	mcpSrv := driver.NewMCPServer(tools.All())
 
 	ctx, cancel := context.WithCancel(context.Background())

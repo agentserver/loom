@@ -13,6 +13,7 @@ import (
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/yourorg/multi-agent/internal/observer"
+	"github.com/yourorg/multi-agent/internal/orchestration"
 )
 
 // SDKClient is the narrow agentserver SDK surface the driver tools use.
@@ -28,19 +29,28 @@ type ObserverSink interface {
 	Emit(observer.Event)
 }
 
+type ContractRunner interface {
+	Run(ctx context.Context, prompt string) (orchestration.RunnerResult, error)
+}
+
 // Tools holds shared state and exposes the six MCP tools as a slice.
 type Tools struct {
-	reg      *FileRegistry
-	audit    *AuditLog
-	sdk      SDKClient
-	cfg      *Config
-	observer ObserverSink
-	relay    *ObserverRelay
+	reg            *FileRegistry
+	audit          *AuditLog
+	sdk            SDKClient
+	cfg            *Config
+	observer       ObserverSink
+	relay          *ObserverRelay
+	contractRunner ContractRunner
 }
 
 // NewTools constructs a Tools bundle.
 func NewTools(reg *FileRegistry, audit *AuditLog, sdk SDKClient, cfg *Config, obs ObserverSink) *Tools {
 	return &Tools{reg: reg, audit: audit, sdk: sdk, cfg: cfg, observer: obs, relay: NewObserverRelay(cfg)}
+}
+
+func (t *Tools) SetContractRunner(r ContractRunner) {
+	t.contractRunner = r
 }
 
 func (t *Tools) emit(ev observer.Event) {

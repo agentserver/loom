@@ -5,6 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"math/big"
+	"reflect"
 	"strings"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
@@ -153,6 +155,13 @@ func (d *draftTaskContractTool) Call(ctx context.Context, raw json.RawMessage) (
 
 type dryRunContractTool struct{ t *Tools }
 
+const (
+	routeDirectSlave  = "direct_slave"
+	routeDriverFanout = "driver_fanout"
+	routeMasterFanout = "master_fanout"
+	routeBlocked      = "blocked"
+)
+
 func (d *dryRunContractTool) Name() string { return "dry_run_contract" }
 
 func (d *dryRunContractTool) Description() string {
@@ -186,31 +195,39 @@ func (d *dryRunContractTool) Call(ctx context.Context, raw json.RawMessage) (jso
 type dryRunReport struct {
 	Runnable              bool                     `json:"runnable"`
 	RequiresBuildMCP      bool                     `json:"requires_build_mcp"`
+	RecommendedRoute      string                   `json:"recommended_route"`
 	RecommendedTargetID   string                   `json:"recommended_target_id,omitempty"`
 	RecommendedTargetName string                   `json:"recommended_target_display_name,omitempty"`
 	RecommendedSkill      string                   `json:"recommended_skill,omitempty"`
 	SatisfiedTools        []string                 `json:"satisfied_tools"`
 	MissingTools          []string                 `json:"missing_tools"`
 	MissingSkills         []string                 `json:"missing_skills"`
+	MissingResources      json.RawMessage          `json:"missing_resources,omitempty"`
 	CandidateBuildTargets []contract.ResourceAgent `json:"candidate_build_targets,omitempty"`
 	Reasons               []string                 `json:"reasons"`
 }
 
 func analyzeContractCapabilities(cards []agentsdk.AgentCard, selfID string, tc contract.TaskContract) dryRunReport {
 	snapshot := contract.NewResourceSnapshot(cards, selfID)
-	report := dryRunReport{}
-	report.SatisfiedTools, report.MissingTools = matchRequiredTools(snapshot.Agents, tc.CapabilityRequirements.Tools)
+	report := dryRunReport{RecommendedRoute: routeBlocked}
+	report.SatisfiedTools, report.MissingTools = matchRequiredTools(snapshot.Agents, tc.CapabilityRequirements.Tools, tc.ExecutionPolicy.AllowedTargets)
 	report.MissingSkills = missingRequiredSkills(snapshot.Agents, tc.CapabilityRequirements.Skills, tc.ExecutionPolicy.AllowedTargets)
-	buildTargets := candidateAgentsWithSkill(snapshot.Agents, "build_mcp", tc.ExecutionPolicy.AllowedTargets)
+	buildTargets := candidateBuildMCPAgents(snapshot.Agents, tc.CapabilityRequirements.Resources, tc.ExecutionPolicy.AllowedTargets)
 	report.CandidateBuildTargets = buildTargets
 	if len(report.MissingSkills) > 0 {
 		report.Reasons = append(report.Reasons, "required skills are missing or unavailable")
 		return report
 	}
+	if !resourcesAvailable(snapshot.Agents, tc.CapabilityRequirements.Resources, tc.ExecutionPolicy.AllowedTargets) {
+		report.MissingResources = append(json.RawMessage(nil), tc.CapabilityRequirements.Resources...)
+		report.Reasons = append(report.Reasons, "required resources are missing or unavailable")
+		return report
+	}
 
-	direct := directContractMatches(cards, selfID, tc.CapabilityRequirements.Skills, tc.ExecutionPolicy.AllowedTargets)
-	if tc.ExecutionPolicy.Routing == contract.RoutingDirectFirst && len(direct) == 1 && len(report.MissingTools) == 0 && cardSatisfiesTools(direct[0], tc.CapabilityRequirements.Tools) {
+	direct := directContractCapabilityMatches(cards, selfID, tc)
+	if tc.ExecutionPolicy.Routing == contract.RoutingDirectFirst && len(direct) == 1 && len(report.MissingTools) == 0 {
 		report.Runnable = true
+		report.RecommendedRoute = routeDirectSlave
 		report.RecommendedTargetID = direct[0].AgentID
 		report.RecommendedTargetName = direct[0].DisplayName
 		report.RecommendedSkill = "chat"
@@ -219,22 +236,43 @@ func analyzeContractCapabilities(cards []agentsdk.AgentCard, selfID string, tc c
 	}
 
 	master := firstAllowedMaster(snapshot.Agents, tc)
-	if master.AgentID != "" && len(report.MissingTools) == 0 {
-		report.Runnable = true
-		report.RecommendedTargetID = master.AgentID
-		report.RecommendedTargetName = master.DisplayName
-		report.RecommendedSkill = "fanout"
-		report.Reasons = append(report.Reasons, "master can orchestrate with currently advertised tools")
-		return report
-	}
-	if len(report.MissingTools) > 0 && tc.ExecutionPolicy.AllowBuildMCP && len(buildTargets) > 0 && master.AgentID != "" {
-		report.Runnable = true
-		report.RequiresBuildMCP = true
-		report.RecommendedTargetID = master.AgentID
-		report.RecommendedTargetName = master.DisplayName
-		report.RecommendedSkill = "fanout"
-		report.Reasons = append(report.Reasons, "missing tools can be built by available build_mcp slaves during master orchestration")
-		return report
+	buildableMissingTools := len(report.MissingTools) > 0 && tc.ExecutionPolicy.AllowBuildMCP && len(buildTargets) > 0
+	if tc.ExecutionPolicy.Routing == contract.RoutingMasterOnly {
+		if master.AgentID != "" && len(report.MissingTools) == 0 {
+			report.Runnable = true
+			report.RecommendedRoute = routeMasterFanout
+			report.RecommendedTargetID = master.AgentID
+			report.RecommendedTargetName = master.DisplayName
+			report.RecommendedSkill = "fanout"
+			report.Reasons = append(report.Reasons, "master can orchestrate with currently advertised tools")
+			return report
+		}
+		if master.AgentID != "" && buildableMissingTools {
+			report.Runnable = true
+			report.RequiresBuildMCP = true
+			report.RecommendedRoute = routeMasterFanout
+			report.RecommendedTargetID = master.AgentID
+			report.RecommendedTargetName = master.DisplayName
+			report.RecommendedSkill = "fanout"
+			report.Reasons = append(report.Reasons, "missing tools can be built by available build_mcp slaves during master orchestration")
+			return report
+		}
+	} else if tc.ExecutionPolicy.Routing == contract.RoutingDirectFirst {
+		if len(report.MissingTools) == 0 {
+			report.Runnable = true
+			report.RecommendedRoute = routeDriverFanout
+			report.RecommendedSkill = "fanout"
+			report.Reasons = append(report.Reasons, "driver can orchestrate with currently advertised tools")
+			return report
+		}
+		if buildableMissingTools {
+			report.Runnable = true
+			report.RequiresBuildMCP = true
+			report.RecommendedRoute = routeDriverFanout
+			report.RecommendedSkill = "fanout"
+			report.Reasons = append(report.Reasons, "missing tools can be built by available build_mcp slaves during driver orchestration")
+			return report
+		}
 	}
 	if len(report.MissingTools) > 0 {
 		if !tc.ExecutionPolicy.AllowBuildMCP {
@@ -272,6 +310,30 @@ func cardSatisfiesTools(card agentsdk.AgentCard, required []string) bool {
 	return true
 }
 
+func cardSatisfiesResources(card agentsdk.AgentCard, required json.RawMessage) bool {
+	if resourcesRequirementEmpty(required) {
+		return true
+	}
+	var inner struct {
+		Resources json.RawMessage `json:"resources"`
+	}
+	if err := json.Unmarshal(card.Card, &inner); err != nil {
+		return false
+	}
+	return resourceJSONContains(inner.Resources, required)
+}
+
+func directContractCapabilityMatches(cards []agentsdk.AgentCard, selfID string, tc contract.TaskContract) []agentsdk.AgentCard {
+	candidates := directContractMatches(cards, selfID, tc.CapabilityRequirements.Skills, tc.ExecutionPolicy.AllowedTargets)
+	matches := make([]agentsdk.AgentCard, 0, len(candidates))
+	for _, candidate := range candidates {
+		if cardSatisfiesTools(candidate, tc.CapabilityRequirements.Tools) && cardSatisfiesResources(candidate, tc.CapabilityRequirements.Resources) {
+			matches = append(matches, candidate)
+		}
+	}
+	return matches
+}
+
 func filterResourceAgents(agents []contract.ResourceAgent, masters bool) []contract.ResourceAgent {
 	out := []contract.ResourceAgent{}
 	for _, a := range agents {
@@ -304,11 +366,11 @@ func flattenSnapshotMCPTools(agents []contract.ResourceAgent) []map[string]inter
 	return out
 }
 
-func matchRequiredTools(agents []contract.ResourceAgent, required []string) ([]string, []string) {
+func matchRequiredTools(agents []contract.ResourceAgent, required []string, allowedTargets []string) ([]string, []string) {
 	satisfied := []string{}
 	missing := []string{}
 	for _, req := range required {
-		if requiredToolAvailable(agents, req) {
+		if requiredToolAvailable(agents, req, allowedTargets) {
 			satisfied = append(satisfied, req)
 		} else {
 			missing = append(missing, req)
@@ -317,9 +379,9 @@ func matchRequiredTools(agents []contract.ResourceAgent, required []string) ([]s
 	return satisfied, missing
 }
 
-func requiredToolAvailable(agents []contract.ResourceAgent, req string) bool {
+func requiredToolAvailable(agents []contract.ResourceAgent, req string, allowedTargets []string) bool {
 	for _, agent := range agents {
-		if agent.Status != "available" {
+		if agent.Status != "available" || !targetAllowed(agent.AgentID, allowedTargets) {
 			continue
 		}
 		for _, flat := range agent.Tools {
@@ -336,6 +398,126 @@ func requiredToolAvailable(agents []contract.ResourceAgent, req string) bool {
 		}
 	}
 	return false
+}
+
+func resourcesAvailable(agents []contract.ResourceAgent, required json.RawMessage, allowedTargets []string) bool {
+	if resourcesRequirementEmpty(required) {
+		return true
+	}
+	for _, agent := range agents {
+		if agent.Status != "available" || !targetAllowed(agent.AgentID, allowedTargets) {
+			continue
+		}
+		if resourceJSONContains(agent.Resources, required) {
+			return true
+		}
+	}
+	return false
+}
+
+func candidateBuildMCPAgents(agents []contract.ResourceAgent, requiredResources json.RawMessage, allowedTargets []string) []contract.ResourceAgent {
+	candidates := candidateAgentsWithSkill(agents, "build_mcp", allowedTargets)
+	if resourcesRequirementEmpty(requiredResources) {
+		return candidates
+	}
+	out := []contract.ResourceAgent{}
+	for _, candidate := range candidates {
+		if resourceJSONContains(candidate.Resources, requiredResources) {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+func resourcesRequirementEmpty(required json.RawMessage) bool {
+	if len(required) == 0 {
+		return true
+	}
+	var value interface{}
+	if err := decodeJSONValue(required, &value); err != nil {
+		return false
+	}
+	if value == nil {
+		return true
+	}
+	object, ok := value.(map[string]interface{})
+	return ok && len(object) == 0
+}
+
+func resourceJSONContains(candidate, required json.RawMessage) bool {
+	if resourcesRequirementEmpty(required) {
+		return true
+	}
+	if len(candidate) == 0 {
+		return false
+	}
+	var candidateValue interface{}
+	if err := decodeJSONValue(candidate, &candidateValue); err != nil {
+		return false
+	}
+	var requiredValue interface{}
+	if err := decodeJSONValue(required, &requiredValue); err != nil {
+		return false
+	}
+	return jsonSubset(candidateValue, requiredValue)
+}
+
+func decodeJSONValue(raw json.RawMessage, dst interface{}) error {
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.UseNumber()
+	return decoder.Decode(dst)
+}
+
+func jsonSubset(candidate, required interface{}) bool {
+	switch req := required.(type) {
+	case map[string]interface{}:
+		cand, ok := candidate.(map[string]interface{})
+		if !ok {
+			return false
+		}
+		for key, reqValue := range req {
+			candValue, ok := cand[key]
+			if !ok || !jsonSubset(candValue, reqValue) {
+				return false
+			}
+		}
+		return true
+	case []interface{}:
+		cand, ok := candidate.([]interface{})
+		if !ok {
+			return false
+		}
+		for _, reqValue := range req {
+			found := false
+			for _, candValue := range cand {
+				if jsonSubset(candValue, reqValue) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
+		return true
+	case json.Number:
+		cand, ok := candidate.(json.Number)
+		return ok && jsonNumbersEqual(cand, req)
+	default:
+		return reflect.DeepEqual(candidate, required)
+	}
+}
+
+func jsonNumbersEqual(candidate, required json.Number) bool {
+	candidateRat, ok := new(big.Rat).SetString(candidate.String())
+	if !ok {
+		return false
+	}
+	requiredRat, ok := new(big.Rat).SetString(required.String())
+	if !ok {
+		return false
+	}
+	return candidateRat.Cmp(requiredRat) == 0
 }
 
 func missingRequiredSkills(agents []contract.ResourceAgent, required, allowedTargets []string) []string {

@@ -20,6 +20,10 @@ tests/runtime/slave/work/
 /dev/configs/slave-b.yaml
 /dev/configs/observer-e2e.db
 /dev/tmp/*.jsonl
+/dev/.env
+/dev/*.env
+/dev/agent-runtime/.zshrc
+/tests/runtime/**/*.env
 /driver-agent
 /master-agent
 /observer-server

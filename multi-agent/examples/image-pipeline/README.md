@@ -24,6 +24,12 @@ consumer parses the URL out and `Get`s the bytes from the side channel
 transport you implement). See `pkg/transport` for the small library that
 makes this convenient.
 
+### Routing Note
+
+Driver-first orchestration is the default for clarified contract workflows.
+Set `execution_policy.routing` to `master_only` when this example should keep
+using the master `fanout` executor for compatibility or batch-style execution.
+
 ## Layout
 
 - `internal/imageops/`   — `SynthPNG` + `EncodeJPEG` (deterministic PNG generator + JPEG encoder)

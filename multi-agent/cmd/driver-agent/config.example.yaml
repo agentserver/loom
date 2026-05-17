@@ -17,6 +17,15 @@ discovery:
 
 listen_addr: "127.0.0.1:0"
 
+planner:
+  bin: claude
+  timeout_sec: 300
+
+fanout:
+  max_concurrency: 4
+  subtask_defaults:
+    timeout_sec: 900
+
 observer:
   enabled: false
   url: https://observer.example.com

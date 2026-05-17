@@ -136,7 +136,7 @@ func TestDriverClarifyContractDryRunExpectation(t *testing.T) {
 	var dryRun struct {
 		Runnable              bool                     `json:"runnable"`
 		RequiresBuildMCP      bool                     `json:"requires_build_mcp"`
-		RecommendedTargetID   string                   `json:"recommended_target_id"`
+		RecommendedRoute      string                   `json:"recommended_route"`
 		RecommendedSkill      string                   `json:"recommended_skill"`
 		SatisfiedTools        []string                 `json:"satisfied_tools"`
 		MissingTools          []string                 `json:"missing_tools"`
@@ -146,7 +146,7 @@ func TestDriverClarifyContractDryRunExpectation(t *testing.T) {
 	readJSON(t, filepath.Join(root, "expected", "dry_run_result.json"), &dryRun)
 	require.True(t, dryRun.Runnable)
 	require.True(t, dryRun.RequiresBuildMCP)
-	require.Equal(t, "master-online-e2e", dryRun.RecommendedTargetID)
+	require.Equal(t, "driver_fanout", dryRun.RecommendedRoute)
 	require.Equal(t, "fanout", dryRun.RecommendedSkill)
 	require.Equal(t, []string{"csv_profiler/profile_orders_csv"}, dryRun.SatisfiedTools)
 	require.Equal(t, []string{"refund_policy_checker/evaluate_rows"}, dryRun.MissingTools)

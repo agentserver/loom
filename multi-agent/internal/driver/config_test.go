@@ -77,6 +77,18 @@ discovery: {display_name: drv}
 	if c.DriverDefaults.MaxDirCacheEntries != 50000 {
 		t.Errorf("default max_dir_cache_entries: want 50000, got %d", c.DriverDefaults.MaxDirCacheEntries)
 	}
+	if c.Planner.Bin != "claude" {
+		t.Errorf("default planner.bin: want claude, got %q", c.Planner.Bin)
+	}
+	if c.Planner.TimeoutSec != 60 {
+		t.Errorf("default planner.timeout_sec: want 60, got %d", c.Planner.TimeoutSec)
+	}
+	if c.Fanout.MaxConcurrency != 4 {
+		t.Errorf("default fanout.max_concurrency: want 4, got %d", c.Fanout.MaxConcurrency)
+	}
+	if c.Fanout.SubTaskDefaults.TimeoutSec != 600 {
+		t.Errorf("default fanout.subtask_defaults.timeout_sec: want 600, got %d", c.Fanout.SubTaskDefaults.TimeoutSec)
+	}
 }
 
 func TestLoadConfig_ObserverURLWithEnabledFalseKeepsDisabledAndDefaultsAgentID(t *testing.T) {
