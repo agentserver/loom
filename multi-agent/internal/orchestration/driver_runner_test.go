@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/stretchr/testify/require"
@@ -86,6 +87,52 @@ func TestDriverRunnerExecutesPlannedNodeAndReduces(t *testing.T) {
 	require.Len(t, plannerFake.gotPlanArgs, 1)
 	require.Len(t, plannerFake.gotResults, 1)
 	require.Equal(t, "child output", plannerFake.gotResults[0].Output)
+}
+
+func TestDriverRunnerPollsUntilTaskCompletes(t *testing.T) {
+	sdk := &fakeRunnerSDK{
+		cards: []agentsdk.AgentCard{{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["chat"]}`)}},
+		tasks: []agentsdk.TaskInfo{
+			{Status: "running"},
+			{Status: "completed", Output: "eventual output"},
+		},
+	}
+	plannerFake := &fakeRunnerPlanner{
+		nodes:   []planner.Node{{ID: "n1", TargetID: "slave-a", Skill: "chat", Prompt: "do work"}},
+		summary: "final answer",
+	}
+	runner := NewDriverRunner(plannerFake, sdk, RunnerConfig{ChildTimeoutSec: 30, PollInterval: time.Nanosecond})
+
+	got, err := runner.Run(context.Background(), "original prompt")
+
+	require.NoError(t, err)
+	require.Equal(t, "final answer", got.Summary)
+	require.Len(t, plannerFake.gotResults, 1)
+	require.Equal(t, "completed", plannerFake.gotResults[0].Status)
+	require.Equal(t, "eventual output", plannerFake.gotResults[0].Output)
+}
+
+func TestDriverRunnerPlansOnlyAgainstAvailableNonSelfAgents(t *testing.T) {
+	sdk := &fakeRunnerSDK{
+		cards: []agentsdk.AgentCard{
+			{AgentID: "driver-self", DisplayName: "driver", Status: "available"},
+			{AgentID: "slave-a", DisplayName: "slave-a", Status: "available"},
+			{AgentID: "slave-b", DisplayName: "slave-b", Status: "offline"},
+		},
+		tasks: []agentsdk.TaskInfo{{Status: "completed", Output: "ok"}},
+	}
+	plannerFake := &fakeRunnerPlanner{
+		nodes:   []planner.Node{{ID: "n1", TargetID: "slave-a", Prompt: "work"}},
+		summary: "final answer",
+	}
+	runner := NewDriverRunner(plannerFake, sdk, RunnerConfig{SelfID: "driver-self"})
+
+	_, err := runner.Run(context.Background(), "original prompt")
+
+	require.NoError(t, err)
+	require.Equal(t, []agentsdk.AgentCard{
+		{AgentID: "slave-a", DisplayName: "slave-a", Status: "available"},
+	}, plannerFake.gotPlanArgs)
 }
 
 func TestDriverRunnerRendersPromptFromPriorNodeOutput(t *testing.T) {

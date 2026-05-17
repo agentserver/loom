@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	agentconfig "github.com/yourorg/multi-agent/internal/config"
 	"gopkg.in/yaml.v3"
 )
 
@@ -12,12 +13,14 @@ import (
 // mirror the agentboot config used by image-pipeline agents (intentional
 // duplication — internal packages must not import from examples/).
 type Config struct {
-	Server         ServerConfig   `yaml:"server"`
-	Credentials    Credentials    `yaml:"credentials"`
-	Discovery      Discovery      `yaml:"discovery"`
-	ListenAddr     string         `yaml:"listen_addr"`
-	DriverDefaults DriverDefaults `yaml:"driver_defaults"`
-	Observer       Observer       `yaml:"observer,omitempty"`
+	Server         ServerConfig        `yaml:"server"`
+	Credentials    Credentials         `yaml:"credentials"`
+	Discovery      Discovery           `yaml:"discovery"`
+	ListenAddr     string              `yaml:"listen_addr"`
+	Planner        agentconfig.Planner `yaml:"planner"`
+	Fanout         agentconfig.Fanout  `yaml:"fanout"`
+	DriverDefaults DriverDefaults      `yaml:"driver_defaults"`
+	Observer       Observer            `yaml:"observer,omitempty"`
 }
 
 type ServerConfig struct {
@@ -89,6 +92,18 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if c.DriverDefaults.ArtifactTransport == "" {
 		c.DriverDefaults.ArtifactTransport = ArtifactTransportPeerProxy
+	}
+	if c.Planner.Bin == "" {
+		c.Planner.Bin = "claude"
+	}
+	if c.Planner.TimeoutSec == 0 {
+		c.Planner.TimeoutSec = 60
+	}
+	if c.Fanout.MaxConcurrency == 0 {
+		c.Fanout.MaxConcurrency = 4
+	}
+	if c.Fanout.SubTaskDefaults.TimeoutSec == 0 {
+		c.Fanout.SubTaskDefaults.TimeoutSec = c.DriverDefaults.TaskTimeoutSec
 	}
 	if c.Observer.URL != "" {
 		if c.Observer.AgentID == "" {

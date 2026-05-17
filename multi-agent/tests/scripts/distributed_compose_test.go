@@ -93,9 +93,53 @@ func TestAgentRuntimeInstallsClaudeCodeAndSkipsOnboarding(t *testing.T) {
 		"npm install -g @anthropic-ai/claude-code",
 		"ANTHROPIC_BASE_URL=https://code.ai.cs.ac.cn",
 		`"hasCompletedOnboarding":true`,
+		"/root/.zshrc",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("Dockerfile missing %q", want)
+		}
+	}
+}
+
+func TestGitignoreProtectsRuntimeSecrets(t *testing.T) {
+	data, err := os.ReadFile("../../.gitignore")
+	if err != nil {
+		t.Fatalf("read .gitignore: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"/dev/.env",
+		"/dev/*.env",
+		"/dev/agent-runtime/.zshrc",
+		"/tests/runtime/**/*.env",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf(".gitignore missing %q", want)
+		}
+	}
+}
+
+func TestRuntimeReadmeDocumentsOnlineReuseContract(t *testing.T) {
+	data, err := os.ReadFile("../../tests/runtime/README.md")
+	if err != nil {
+		t.Fatalf("read runtime README: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"https://agent.cs.ac.cn",
+		"/tmp/multi-agent-driver-first-e2e/driver/",
+		"/tmp/multi-agent-driver-first-e2e/master/",
+		"/tmp/multi-agent-driver-first-e2e/slave-a/",
+		"/tmp/multi-agent-driver-first-e2e/slave-b/",
+		"ma-e2e-driver",
+		"ma-e2e-master",
+		"ma-e2e-slave-a",
+		"ma-e2e-slave-b",
+		"test runner must print the login URL",
+		"reuse the same authorization",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("runtime README missing %q", want)
 		}
 	}
 }

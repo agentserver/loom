@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/yourorg/multi-agent/internal/planner"
@@ -23,6 +24,8 @@ type RunnerSDK interface {
 type RunnerConfig struct {
 	MaxConcurrency  int
 	ChildTimeoutSec int
+	PollInterval    time.Duration
+	SelfID          string
 }
 
 type RunnerResult struct {
@@ -44,7 +47,7 @@ func (r *DriverRunner) Run(ctx context.Context, prompt string) (RunnerResult, er
 	if err != nil {
 		return RunnerResult{}, fmt.Errorf("discover agents: %w", err)
 	}
-	nodes, err := r.planner.Plan(ctx, prompt, agents)
+	nodes, err := r.planner.Plan(ctx, prompt, plannerCandidates(agents, r.cfg.SelfID))
 	if err != nil {
 		return RunnerResult{}, fmt.Errorf("planner plan: %w", err)
 	}
@@ -99,6 +102,20 @@ func (r *DriverRunner) Run(ctx context.Context, prompt string) (RunnerResult, er
 	return RunnerResult{Summary: summary}, nil
 }
 
+func plannerCandidates(agents []agentsdk.AgentCard, selfID string) []agentsdk.AgentCard {
+	out := make([]agentsdk.AgentCard, 0, len(agents))
+	for _, agent := range agents {
+		if agent.AgentID == selfID {
+			continue
+		}
+		if agent.Status != "available" {
+			continue
+		}
+		out = append(out, agent)
+	}
+	return out
+}
+
 func (r *DriverRunner) runNode(ctx context.Context, n planner.Node, outputs map[string]string) (planner.SubResult, error) {
 	rendered, err := Render(n.Prompt, outputs)
 	if err != nil {
@@ -114,7 +131,7 @@ func (r *DriverRunner) runNode(ctx context.Context, n planner.Node, outputs map[
 	if err != nil {
 		return planner.SubResult{}, fmt.Errorf("delegate node %s: %w", n.ID, err)
 	}
-	info, err := r.sdk.GetTask(ctx, resp.TaskID, true)
+	info, err := r.waitTask(ctx, resp.TaskID)
 	if err != nil {
 		return planner.SubResult{}, fmt.Errorf("get task for node %s: %w", n.ID, err)
 	}
@@ -136,6 +153,44 @@ func (r *DriverRunner) runNode(ctx context.Context, n planner.Node, outputs map[
 		Output:   output,
 		Error:    errorMessage,
 	}, nil
+}
+
+func (r *DriverRunner) waitTask(ctx context.Context, taskID string) (*agentsdk.TaskInfo, error) {
+	timeout := time.Duration(r.cfg.ChildTimeoutSec) * time.Second
+	if timeout <= 0 {
+		timeout = 600 * time.Second
+	}
+	pollInterval := r.cfg.PollInterval
+	if pollInterval <= 0 {
+		pollInterval = 2 * time.Second
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		info, err := r.sdk.GetTask(waitCtx, taskID, true)
+		if err != nil {
+			return nil, err
+		}
+		if info == nil || taskTerminal(info.Status) {
+			return info, nil
+		}
+		timer := time.NewTimer(pollInterval)
+		select {
+		case <-waitCtx.Done():
+			timer.Stop()
+			return info, waitCtx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func taskTerminal(status string) bool {
+	switch status {
+	case "completed", "failed", "cancelled", "canceled":
+		return true
+	default:
+		return false
+	}
 }
 
 func reducerResults(nodes []planner.Node, finished []FinishedNode, renderedPrompts map[string]string) []planner.SubResult {
