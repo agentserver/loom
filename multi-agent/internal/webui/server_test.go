@@ -55,6 +55,18 @@ func TestState_RendersJournal(t *testing.T) {
 	require.Equal(t, "text/markdown; charset=utf-8", rr.Header().Get("Content-Type"))
 }
 
+func TestCapabilities_RendersCapabilityDocument(t *testing.T) {
+	s := openStore(t)
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "CAPABILITIES.md"), []byte("# Capability Document\n"), 0o644))
+	h := NewHandler(s, dir, &config.Config{})
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/capabilities", nil))
+	require.Equal(t, 200, rr.Code)
+	require.Equal(t, "# Capability Document\n", rr.Body.String())
+	require.Equal(t, "text/markdown; charset=utf-8", rr.Header().Get("Content-Type"))
+}
+
 func TestStream_LiveAndDone(t *testing.T) {
 	s := openStore(t)
 	require.NoError(t, s.Insert(store.Task{ID: "live"}))

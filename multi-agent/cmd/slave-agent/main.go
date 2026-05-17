@@ -14,6 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/yourorg/multi-agent/internal/capability"
+	"github.com/yourorg/multi-agent/internal/capabilitydoc"
 	"github.com/yourorg/multi-agent/internal/config"
 	"github.com/yourorg/multi-agent/internal/dispatch"
 	"github.com/yourorg/multi-agent/internal/executor"
@@ -56,6 +57,9 @@ func run(cfgPath string) error {
 	if err != nil {
 		return err
 	}
+	capDoc := capabilitydoc.NewStore(journalDir)
+	workdir, _ := os.Getwd()
+	dynamicMCPPath := filepath.Join(workdir, "dynamic_mcp.yaml")
 
 	mcpCfg := map[string]executor.MCPServerCfg{}
 	for name, m := range cfg.MCPServers {
@@ -110,6 +114,21 @@ func run(cfgPath string) error {
 		}
 		return allDesc
 	}
+	refreshCapabilities := func(ctx context.Context, reason string) []capability.MCPToolDescriptor {
+		allDesc := enumerateMCPTools(ctx)
+		tn.SetMCPTools(allDesc)
+		tn.SetTools(capability.FlatNames(allDesc))
+		if err := capDoc.Refresh(ctx, capabilitydoc.Input{
+			Config:         cfg,
+			WorkDir:        workdir,
+			DynamicMCPPath: dynamicMCPPath,
+			MCPTools:       allDesc,
+			Reason:         reason,
+		}); err != nil {
+			log.Printf("capability doc refresh: %v", err)
+		}
+		return allDesc
+	}
 	hasBuildMCP := false
 	for _, skill := range cfg.Discovery.Skills {
 		if skill == "build_mcp" {
@@ -118,30 +137,31 @@ func run(cfgPath string) error {
 		}
 	}
 	if hasBuildMCP {
-		workdir, _ := os.Getwd()
 		buildExec := executor.NewBuildMCPExecutor(executor.BuildMCPConfig{
 			WorkDir:   workdir,
 			ClaudeBin: cfg.Claude.Bin,
 			MCPExec:   mcpExec,
 			Observer:  obs,
 			Republish: func(ctx context.Context) error {
-				allDesc := enumerateMCPTools(ctx)
-				tn.SetMCPTools(allDesc)
-				tn.SetTools(capability.FlatNames(allDesc))
+				refreshCapabilities(ctx, "build_mcp generated or updated MCP server")
 				return tn.PublishCard(ctx)
 			},
 		})
 		routes["build_mcp"] = buildExec
 	}
-	d := dispatch.New(routes, j, s, obs)
+	d := dispatch.New(routes, refreshingJournal{
+		base: j,
+		refresh: func(ctx context.Context, reason string) error {
+			refreshCapabilities(ctx, reason)
+			return nil
+		},
+	}, s, obs)
 
 	if err := tn.EnsureRegistered(ctx); err != nil {
 		return err
 	}
 
-	initDesc := enumerateMCPTools(ctx)
-	tn.SetMCPTools(initDesc)
-	tn.SetTools(capability.FlatNames(initDesc))
+	refreshCapabilities(ctx, "startup scan")
 
 	if err := tn.PublishCard(ctx); err != nil {
 		log.Printf("publish card: %v (continuing)", err)
@@ -160,6 +180,21 @@ func run(cfgPath string) error {
 		return fmt.Errorf("run: %w", err)
 	}
 	return nil
+}
+
+type refreshingJournal struct {
+	base    *journal.Journal
+	refresh func(context.Context, string) error
+}
+
+func (r refreshingJournal) Record(ctx context.Context, t executor.Task, res executor.Result) error {
+	err := r.base.Record(ctx, t, res)
+	if res.CapabilityChange != "" && r.refresh != nil {
+		if refreshErr := r.refresh(ctx, "task capability change: "+t.ID); refreshErr != nil && err == nil {
+			err = refreshErr
+		}
+	}
+	return err
 }
 
 type dynamicMCPFile struct {
