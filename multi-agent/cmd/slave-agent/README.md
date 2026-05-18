@@ -26,11 +26,12 @@ discovery:
   skills:
     - chat
     - mcp
+    - build_mcp
     - bash
     - claude_permissions
 ```
 
-`bash` enables deterministic shell execution through a native `slave-agent` executor. `claude_permissions` enables driver-side permission inspection and patching through the existing task channel. Permission patching is also native `slave-agent` Go code; it must not be implemented by asking the slave's Claude Code process to modify its own `.claude/settings.local.json`, because Claude Code may not yet have the required `Write`, `Edit`, or `Bash` permission.
+`build_mcp` enables dynamic MCP server generation. `bash` enables deterministic shell execution through a native `slave-agent` executor. `claude_permissions` enables driver-side permission inspection and patching through the existing task channel. Permission patching is also native `slave-agent` Go code; it must not be implemented by asking the slave's Claude Code process to modify its own `.claude/settings.local.json`, because Claude Code may not yet have the required `Write`, `Edit`, or `Bash` permission.
 
 This task-channel permission path is a compatibility bridge. When agentserver exposes a dedicated control channel for custom agents, permission management should move there.
 
