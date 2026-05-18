@@ -19,6 +19,21 @@ cp cmd/slave-agent/config.example.yaml cmd/slave-agent/config.yaml
 # edit server.url, claude.bin, mcp_servers as needed
 ```
 
+Optional control skills are advertised through `discovery.skills`:
+
+```yaml
+discovery:
+  skills:
+    - chat
+    - mcp
+    - bash
+    - claude_permissions
+```
+
+`bash` enables deterministic shell execution through a native `slave-agent` executor. `claude_permissions` enables driver-side permission inspection and patching through the existing task channel. Permission patching is also native `slave-agent` Go code; it must not be implemented by asking the slave's Claude Code process to modify its own `.claude/settings.local.json`, because Claude Code may not yet have the required `Write`, `Edit`, or `Bash` permission.
+
+This task-channel permission path is a compatibility bridge. When agentserver exposes a dedicated control channel for custom agents, permission management should move there.
+
 ## Run
 
 ```bash
@@ -40,6 +55,7 @@ The document survives restarts because it is stored in the slave role directory.
 - a generated MCP server is built or updated by `build_mcp`;
 - an MCP tool reports `capability_changed`;
 - a Claude task reports a persistent capability change, such as a new skill or ordinary service.
+- `claude_permissions` patches Claude Code project permissions.
 
 The slave exposes the document through its tunneled web UI:
 

@@ -26,11 +26,38 @@ Bridges Claude Code (CLI or VS Code extension) to a multi-agent workspace. Runs 
    }
    ```
 
-4. Restart Claude Code. The driver's six tools (`list_agents`, `submit_task`, `get_task`, `wait_task`, `tail_subtasks`, `cancel_task`) appear under the `driver/` namespace.
+4. Restart Claude Code. The driver's tools appear under the `driver/` namespace.
 
 ## Tools
 
 See `docs/superpowers/specs/2026-05-09-generic-driver-agent-design.md` § 1 for full schemas.
+
+Slave control helpers:
+
+- `run_slave_bash`: sends explicit Bash code to a slave that advertises `bash`.
+- `get_slave_claude_permissions`: reads a slave's Claude Code project permissions.
+- `update_slave_claude_permissions`: patches a slave's Claude Code project permissions.
+
+Permission tools currently submit ordinary tasks with `skill="claude_permissions"` because the current agentserver does not expose the needed custom-agent peer/control proxy. The task is handled by native Go code in `slave-agent`; it is not a request for the slave's Claude Code process to edit its own permissions. Future work should migrate this control operation to a dedicated agentserver control channel.
+
+Example permission patch:
+
+```json
+{
+  "target_display_name": "slave-a-online-dag-160628",
+  "allow_presets": ["python", "curl", "file_write"]
+}
+```
+
+Example Bash execution:
+
+```json
+{
+  "target_display_name": "slave-a-online-dag-160628",
+  "script": "python3 - <<'PY'\nprint('ok')\nPY",
+  "timeout_sec": 60
+}
+```
 
 ## Audit log
 
