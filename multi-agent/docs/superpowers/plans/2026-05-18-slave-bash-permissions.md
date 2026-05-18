@@ -4,7 +4,7 @@
 
 **Goal:** Add opt-in slave Bash execution and driver-managed Claude Code permission inspection/patching for remote slaves.
 
-**Architecture:** Bash execution is a normal slave task route keyed by `skill="bash"`, preserving task status and observer behavior. Claude permission management is also implemented as a normal task route keyed by `skill="claude_permissions"` for this iteration because current agentserver does not expose the needed custom-agent peer/control proxy; the spec records that this should move to a special control channel in the future.
+**Architecture:** Bash execution is a normal slave task route keyed by `skill="bash"`, preserving task status and observer behavior. Claude permission management is also implemented as a normal task route keyed by `skill="claude_permissions"` for this iteration because current agentserver does not expose the needed custom-agent peer/control proxy; the task is handled by a native `slave-agent` Go executor, not by the slave's Claude Code process. The spec records that this should move to a special control channel in the future.
 
 **Tech Stack:** Go, agentserver `agentsdk`, existing driver MCP tool framework, slave task dispatchers, `encoding/json`, `os/exec`, `gopkg.in/yaml.v3` only where already used.
 
@@ -21,7 +21,7 @@
 - Create `multi-agent/internal/claudeperm/store_test.go`
   - Tests missing-file behavior, idempotent patching, preset expansion, sorting, and unknown-field preservation.
 - Create `multi-agent/internal/executor/claude_permissions.go`
-  - Implements `skill="claude_permissions"` task execution for permission reads and patches.
+  - Implements native `slave-agent` task execution for `skill="claude_permissions"` permission reads and patches without invoking the slave's Claude Code process.
 - Create `multi-agent/internal/executor/claude_permissions_test.go`
   - Tests get, patch, invalid op, and invalid patch behavior.
 - Modify `multi-agent/internal/capabilitydoc/doc.go`
@@ -445,6 +445,8 @@ git commit -m "feat: add claude permission store"
 **Files:**
 - Create: `multi-agent/internal/executor/claude_permissions_test.go`
 - Create: `multi-agent/internal/executor/claude_permissions.go`
+
+**Boundary:** This task implements the permission bootstrap path inside the `slave-agent` Go process. Do not route this skill through the Claude Code chat executor and do not require a slave-local MCP server for this capability; Claude Code may not yet have permission to edit its own settings.
 
 - [ ] **Step 1: Write failing executor tests**
 
@@ -924,8 +926,8 @@ agentsdk.DelegateTaskRequest{
 
 - Default `wait` to true by making the args field `*bool`; nil means true.
 - Reuse `sdkTaskOutput` to parse `TaskInfo`.
-- For permission reads, require `hasSkill(card, "claude_permissions")`, submit `DelegateTaskRequest{TargetID: card.AgentID, Skill: "claude_permissions", Prompt: "{\"op\":\"get\"}"}`, wait for completion, and return the parsed task output.
-- For permission patches, require `hasSkill(card, "claude_permissions")`, marshal a prompt containing `op:"patch"` plus the requested allow/deny fields, submit it with `skill="claude_permissions"`, wait for completion, and return the parsed task output.
+- For permission reads, require `hasSkill(card, "claude_permissions")`, submit `DelegateTaskRequest{TargetID: card.AgentID, Skill: "claude_permissions", Prompt: "{\"op\":\"get\"}"}`, wait for completion, and return the parsed task output. This task is expected to run in the slave-agent native executor.
+- For permission patches, require `hasSkill(card, "claude_permissions")`, marshal a prompt containing `op:"patch"` plus the requested allow/deny fields, submit it with `skill="claude_permissions"`, wait for completion, and return the parsed task output. This task is expected to run in the slave-agent native executor.
 
 Modify `multi-agent/internal/driver/tools.go` `All()` to include:
 
@@ -965,6 +967,7 @@ Document:
 
 - `bash` and `claude_permissions` are opt-in via `discovery.skills`.
 - Permission tools currently use task delegation with `skill="claude_permissions"` because agentserver does not expose the needed custom-agent peer/control proxy.
+- The `claude_permissions` task is handled by slave-agent native Go code and must not be implemented as a request for slave Claude Code to modify its own permissions.
 - Future work should migrate permission management to a special agentserver control channel when available.
 - Driver tools:
   - `run_slave_bash`

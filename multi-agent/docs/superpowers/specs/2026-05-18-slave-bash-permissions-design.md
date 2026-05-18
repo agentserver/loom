@@ -13,11 +13,23 @@ The current system already supports driver-to-slave task delegation through agen
 ### Recommended Approach: Task Channel Now, Dedicated Control Channel Later
 
 1. Add a first-class slave `bash` skill for deterministic shell execution.
-2. Add a first-class slave `claude_permissions` skill for Claude Code permission reads and patches.
+2. Add a first-class slave `claude_permissions` skill for Claude Code permission reads and patches, implemented by the `slave-agent` Go process rather than by the slave's Claude Code process.
 3. Add driver MCP tools that wrap both task skills for Claude Code users.
 4. Record that permission management should move to a dedicated agentserver control channel when one exists.
 
 This keeps both command execution and permission mutation inside the existing task lifecycle, so task status, logs, observer events, timeout handling, and agentserver ownership still work today. Permission mutation is still conceptually a control-plane operation; using `skill="claude_permissions"` is an intentional compatibility bridge until agentserver provides a special peer/control channel.
+
+The required execution boundary is:
+
+```text
+driver Claude Code
+  -> driver MCP tool
+  -> agentserver task channel
+  -> slave-agent native Go executor for skill="claude_permissions"
+  -> <claude.workdir>/.claude/settings.local.json
+```
+
+The implementation must not route `claude_permissions` to the slave's Claude Code chat executor. Claude Code may lack `Write`, `Edit`, or `Bash` permission before this operation, so asking it to edit its own permission file creates a bootstrap failure.
 
 ### Alternatives Considered
 
@@ -64,6 +76,8 @@ Non-zero exit returns the same JSON summary and an error, so the task is marked 
 ## Feature 2: Slave Claude Permission Task Skill
 
 Slaves may advertise `claude_permissions` in `discovery.skills`. When present, `slave-agent` registers `routes["claude_permissions"]` with a deterministic permission executor.
+
+This permission executor is native to `slave-agent`: it is ordinary Go code in the slave control process, not a prompt sent to the slave's Claude Code runtime and not a slave-local MCP server requirement. A slave-local MCP server may be added later as a convenience surface, but it must not be the only path for permission bootstrap because invoking that MCP server may itself depend on Claude Code permissions.
 
 The task prompt for `skill="claude_permissions"` is JSON. A read request is:
 
