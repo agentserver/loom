@@ -102,6 +102,9 @@ func run(cfgPath string) error {
 		"mcp": mcpExec,
 		"":    claudeExec,
 	}
+	if hasSkill(cfg.Discovery.Skills, "bash") {
+		routes["bash"] = executor.NewBashExecutor(executor.BashConfig{WorkDir: cfg.Claude.WorkDir})
+	}
 	enumerateMCPTools := func(ctx context.Context) []capability.MCPToolDescriptor {
 		allDesc := []capability.MCPToolDescriptor{}
 		for _, name := range mcpExec.Servers() {
@@ -129,14 +132,16 @@ func run(cfgPath string) error {
 		}
 		return allDesc
 	}
-	hasBuildMCP := false
-	for _, skill := range cfg.Discovery.Skills {
-		if skill == "build_mcp" {
-			hasBuildMCP = true
-			break
-		}
+	if hasSkill(cfg.Discovery.Skills, "claude_permissions") {
+		routes["claude_permissions"] = executor.NewClaudePermissionsExecutor(executor.ClaudePermissionsConfig{
+			WorkDir: cfg.Claude.WorkDir,
+			Refresh: func(ctx context.Context, reason string) error {
+				refreshCapabilities(ctx, reason)
+				return tn.PublishCard(ctx)
+			},
+		})
 	}
-	if hasBuildMCP {
+	if hasSkill(cfg.Discovery.Skills, "build_mcp") {
 		buildExec := executor.NewBuildMCPExecutor(executor.BuildMCPConfig{
 			WorkDir:   workdir,
 			ClaudeBin: cfg.Claude.Bin,
@@ -180,6 +185,15 @@ func run(cfgPath string) error {
 		return fmt.Errorf("run: %w", err)
 	}
 	return nil
+}
+
+func hasSkill(skills []string, want string) bool {
+	for _, skill := range skills {
+		if skill == want {
+			return true
+		}
+	}
+	return false
 }
 
 type refreshingJournal struct {
