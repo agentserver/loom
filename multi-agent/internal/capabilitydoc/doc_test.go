@@ -77,3 +77,23 @@ servers:
 	require.Contains(t, text, "## Current State")
 	require.Contains(t, text, "cached state")
 }
+
+func TestStoreRefreshIncludesClaudeCodePermissions(t *testing.T) {
+	t.Run("Claude Code Permissions", func(t *testing.T) {
+		dir := t.TempDir()
+		workdir := t.TempDir()
+		settingsPath := filepath.Join(workdir, ".claude", "settings.local.json")
+		require.NoError(t, os.MkdirAll(filepath.Dir(settingsPath), 0o755))
+		require.NoError(t, os.WriteFile(settingsPath, []byte(`{"permissions":{"allow":["Bash(curl *)","Read"],"deny":["Bash(rm *)"]}}`), 0o600))
+
+		store := NewStore(dir)
+		require.NoError(t, store.Refresh(context.Background(), Input{WorkDir: workdir}))
+
+		body, err := os.ReadFile(filepath.Join(dir, "CAPABILITIES.md"))
+		require.NoError(t, err)
+		text := string(body)
+		require.Contains(t, text, "## Claude Code Permissions")
+		require.Contains(t, text, "- allow: Bash(curl *), Read")
+		require.Contains(t, text, "- deny: Bash(rm *)")
+	})
+}

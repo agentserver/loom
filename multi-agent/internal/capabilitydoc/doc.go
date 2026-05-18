@@ -15,6 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/yourorg/multi-agent/internal/capability"
+	"github.com/yourorg/multi-agent/internal/claudeperm"
 	"github.com/yourorg/multi-agent/internal/config"
 )
 
@@ -51,19 +52,20 @@ func (s *Store) Refresh(ctx context.Context, in Input) error {
 }
 
 type snapshot struct {
-	GeneratedAt     string
-	Reason          string
-	DisplayName     string
-	Description     string
-	ServerName      string
-	WorkDir         string
-	Runtime         runtimeInfo
-	Skills          []string
-	Resources       *config.Resources
-	Servers         []serverDoc
-	CurrentState    string
-	RecentHistory   string
-	CommandPresence []commandPresence
+	GeneratedAt       string
+	Reason            string
+	DisplayName       string
+	Description       string
+	ServerName        string
+	WorkDir           string
+	Runtime           runtimeInfo
+	Skills            []string
+	ClaudePermissions claudeperm.State
+	Resources         *config.Resources
+	Servers           []serverDoc
+	CurrentState      string
+	RecentHistory     string
+	CommandPresence   []commandPresence
 }
 
 type runtimeInfo struct {
@@ -111,6 +113,11 @@ func scan(dir string, in Input) snapshot {
 		s.Resources = cfg.Resources
 		s.Servers = append(s.Servers, staticServers(cfg.MCPServers)...)
 	}
+	if in.WorkDir != "" {
+		if state, err := claudeperm.NewStore(in.WorkDir).Read(); err == nil {
+			s.ClaudePermissions = state
+		}
+	}
 	s.Servers = mergeServers(s.Servers, dynamicServers(in.DynamicMCPPath))
 	s.Servers = mergeTools(s.Servers, in.MCPTools)
 	sort.Slice(s.Servers, func(i, j int) bool { return s.Servers[i].Name < s.Servers[j].Name })
@@ -147,6 +154,13 @@ func render(s snapshot) string {
 		for _, skill := range s.Skills {
 			fmt.Fprintf(&b, "- %s\n", skill)
 		}
+	}
+	fmt.Fprintf(&b, "\n## Claude Code Permissions\n\n")
+	if len(s.ClaudePermissions.Allow) == 0 && len(s.ClaudePermissions.Deny) == 0 {
+		fmt.Fprintf(&b, "- none configured\n")
+	} else {
+		writeList(&b, "allow", s.ClaudePermissions.Allow)
+		writeList(&b, "deny", s.ClaudePermissions.Deny)
 	}
 	fmt.Fprintf(&b, "\n## MCP Servers\n\n")
 	if len(s.Servers) == 0 {
