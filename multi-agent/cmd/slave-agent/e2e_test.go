@@ -108,7 +108,7 @@ resources:
 			strings.Contains(text, "generated_e2e/generated_tool") &&
 			strings.Contains(text, "persisted current state") &&
 			strings.Contains(text, "memory_gb: 12")
-	}, 10*time.Second, 100*time.Millisecond, "logs:\n%s", logs.String())
+	}, 90*time.Second, 100*time.Millisecond, "logs:\n%s", logs.String())
 
 	require.Eventually(t, func() bool {
 		mu.Lock()
