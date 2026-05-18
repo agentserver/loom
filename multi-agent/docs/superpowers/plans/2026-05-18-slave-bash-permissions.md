@@ -4,9 +4,9 @@
 
 **Goal:** Add opt-in slave Bash execution and driver-managed Claude Code permission inspection/patching for remote slaves.
 
-**Architecture:** Bash execution is a normal slave task route keyed by `skill="bash"`, preserving task status and observer behavior. Claude permission management is a control-plane HTTP API on each slave and is reached by the driver through agentserver peer proxy using the slave card `short_id`.
+**Architecture:** Bash execution is a normal slave task route keyed by `skill="bash"`, preserving task status and observer behavior. Claude permission management is also implemented as a normal task route keyed by `skill="claude_permissions"` for this iteration because current agentserver does not expose the needed custom-agent peer/control proxy; the spec records that this should move to a special control channel in the future.
 
-**Tech Stack:** Go, agentserver `agentsdk`, existing driver MCP tool framework, slave `webui` HTTP handler, `encoding/json`, `os/exec`, `gopkg.in/yaml.v3` only where already used.
+**Tech Stack:** Go, agentserver `agentsdk`, existing driver MCP tool framework, slave task dispatchers, `encoding/json`, `os/exec`, `gopkg.in/yaml.v3` only where already used.
 
 ---
 
@@ -20,22 +20,22 @@
   - Reads, patches, and atomically writes Claude Code `.claude/settings.local.json`.
 - Create `multi-agent/internal/claudeperm/store_test.go`
   - Tests missing-file behavior, idempotent patching, preset expansion, sorting, and unknown-field preservation.
-- Modify `multi-agent/internal/webui/server.go`
-  - Adds `/claude/permissions` GET/PATCH endpoints and a refresh callback hook.
-- Modify `multi-agent/internal/webui/server_test.go`
-  - Tests auth, GET, PATCH, and refresh callback invocation.
+- Create `multi-agent/internal/executor/claude_permissions.go`
+  - Implements `skill="claude_permissions"` task execution for permission reads and patches.
+- Create `multi-agent/internal/executor/claude_permissions_test.go`
+  - Tests get, patch, invalid op, and invalid patch behavior.
 - Modify `multi-agent/internal/capabilitydoc/doc.go`
   - Adds "Claude Code Permissions" to `CAPABILITIES.md`.
 - Modify `multi-agent/internal/capabilitydoc/doc_test.go`
   - Tests rendered allow/deny permission entries.
 - Modify `multi-agent/cmd/slave-agent/main.go`
-  - Registers `bash` route only when advertised; wires permission refresh callback.
+  - Registers `bash` and `claude_permissions` routes only when advertised; wires permission refresh callback through the permission executor.
 - Modify `multi-agent/cmd/slave-agent/config.example.yaml`
-  - Documents `bash` as an optional skill.
+  - Documents `bash` and `claude_permissions` as optional skills.
 - Create `multi-agent/internal/driver/slave_tools.go`
   - Adds `run_slave_bash`, `get_slave_claude_permissions`, and `update_slave_claude_permissions`.
 - Create `multi-agent/internal/driver/slave_tools_test.go`
-  - Tests target resolution, Bash delegation, waiting, peer-proxy GET/PATCH, and errors.
+  - Tests target resolution, Bash delegation, permission task delegation, waiting, and errors.
 - Modify `multi-agent/internal/driver/tools.go`
   - Registers the three new driver MCP tools.
 - Modify `multi-agent/cmd/driver-agent/README.md`
@@ -440,70 +440,99 @@ git commit -m "feat: add claude permission store"
 
 ---
 
-### Task 3: Add Slave Permission HTTP Endpoints
+### Task 3: Add Slave Permission Task Executor
 
 **Files:**
-- Modify: `multi-agent/internal/webui/server.go`
-- Modify: `multi-agent/internal/webui/server_test.go`
+- Create: `multi-agent/internal/executor/claude_permissions_test.go`
+- Create: `multi-agent/internal/executor/claude_permissions.go`
 
-- [ ] **Step 1: Write failing endpoint tests**
+- [ ] **Step 1: Write failing executor tests**
 
-Append to `multi-agent/internal/webui/server_test.go`:
+Create `multi-agent/internal/executor/claude_permissions_test.go`:
 
 ```go
-func TestClaudePermissionsGetAndPatch(t *testing.T) {
+package executor
+
+import (
+	"context"
+	"encoding/json"
+	"path/filepath"
+	"testing"
+)
+
+func TestClaudePermissionsExecutorGetsAndPatches(t *testing.T) {
 	workdir := t.TempDir()
-	cfg := &config.Config{
-		Credentials: config.Credentials{ProxyToken: "tok"},
-		Claude:      config.Claude{WorkDir: workdir},
-	}
 	refreshCalled := false
-	h := NewHandler(openStore(t), t.TempDir(), cfg)
-	SetCapabilityRefresh(h, func(ctx context.Context, reason string) error {
-		refreshCalled = reason == "claude permission update"
-		return nil
+	exec := NewClaudePermissionsExecutor(ClaudePermissionsConfig{
+		WorkDir: workdir,
+		Refresh: func(ctx context.Context, reason string) error {
+			refreshCalled = reason == "claude permission update"
+			return nil
+		},
 	})
-	srv := httptest.NewServer(h)
-	defer srv.Close()
 
-	patchBody := []byte(`{"allow_add":["Bash(python3 *)","Bash(curl *)"],"deny_add":["Bash(rm *)"]}`)
-	req, _ := http.NewRequest(http.MethodPatch, srv.URL+"/claude/permissions", bytes.NewReader(patchBody))
-	req.Header.Set("Authorization", "Bearer tok")
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.Equal(t, 200, resp.StatusCode)
-	require.True(t, refreshCalled)
+	patchRes, err := exec.Run(context.Background(), Task{
+		ID: "task-1", Skill: "claude_permissions",
+		Prompt: `{"op":"patch","allow_add":["Bash(python3 *)","Bash(curl *)"],"deny_add":["Bash(rm *)"]}`,
+	}, noopSink{})
+	if err != nil {
+		t.Fatalf("patch failed: %v", err)
+	}
+	if !refreshCalled {
+		t.Fatal("refresh was not called")
+	}
+	var patched struct {
+		Path  string   `json:"path"`
+		Allow []string `json:"allow"`
+		Deny  []string `json:"deny"`
+	}
+	if err := json.Unmarshal([]byte(patchRes.Summary), &patched); err != nil {
+		t.Fatal(err)
+	}
+	if patched.Path != filepath.Join(workdir, ".claude", "settings.local.json") {
+		t.Fatalf("path=%q", patched.Path)
+	}
 
-	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/claude/permissions", nil)
-	req.Header.Set("Authorization", "Bearer tok")
-	resp, err = http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.Equal(t, 200, resp.StatusCode)
-
+	getRes, err := exec.Run(context.Background(), Task{
+		ID: "task-2", Skill: "claude_permissions",
+		Prompt: `{"op":"get"}`,
+	}, noopSink{})
+	if err != nil {
+		t.Fatalf("get failed: %v", err)
+	}
 	var got struct {
 		Allow []string `json:"allow"`
 		Deny  []string `json:"deny"`
-		Path  string   `json:"path"`
 	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
-	require.ElementsMatch(t, []string{"Bash(python3 *)", "Bash(curl *)"}, got.Allow)
-	require.ElementsMatch(t, []string{"Bash(rm *)"}, got.Deny)
-	require.Equal(t, filepath.Join(workdir, ".claude", "settings.local.json"), got.Path)
+	if err := json.Unmarshal([]byte(getRes.Summary), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !sameStrings(got.Allow, []string{"Bash(curl *)", "Bash(python3 *)"}) {
+		t.Fatalf("allow=%q", got.Allow)
+	}
+	if !sameStrings(got.Deny, []string{"Bash(rm *)"}) {
+		t.Fatalf("deny=%q", got.Deny)
+	}
 }
 
-func TestClaudePermissionsRejectsBadAuth(t *testing.T) {
-	cfg := &config.Config{
-		Credentials: config.Credentials{ProxyToken: "tok"},
-		Claude:      config.Claude{WorkDir: t.TempDir()},
+func TestClaudePermissionsExecutorRejectsInvalidOp(t *testing.T) {
+	exec := NewClaudePermissionsExecutor(ClaudePermissionsConfig{WorkDir: t.TempDir()})
+	_, err := exec.Run(context.Background(), Task{Prompt: `{"op":"delete"}`}, noopSink{})
+	if err == nil {
+		t.Fatal("Run succeeded, want invalid op error")
 	}
-	h := NewHandler(openStore(t), t.TempDir(), cfg)
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/claude/permissions", nil)
-	req.Header.Set("Authorization", "Bearer wrong")
-	h.ServeHTTP(rr, req)
-	require.Equal(t, http.StatusUnauthorized, rr.Code)
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 ```
 
@@ -516,101 +545,96 @@ docker run --rm --network host \
   -v /root/multi-agent/.worktrees/slave-bash-tools/multi-agent:/workspace/multi-agent \
   -w /workspace/multi-agent \
   multi-agent-e2e-runtime:latest \
-  go test ./internal/webui -run 'TestClaudePermissions'
+  go test ./internal/executor -run 'TestClaudePermissionsExecutor'
 ```
 
-Expected: FAIL because `SetCapabilityRefresh` and `/claude/permissions` do not exist.
+Expected: FAIL because `NewClaudePermissionsExecutor` and `ClaudePermissionsConfig` do not exist.
 
-- [ ] **Step 3: Implement endpoints**
+- [ ] **Step 3: Implement task executor**
 
-Modify `multi-agent/internal/webui/server.go`:
-
-- Add import `github.com/yourorg/multi-agent/internal/claudeperm`.
-- Add field to `muxWithBridge`:
+Create `multi-agent/internal/executor/claude_permissions.go`:
 
 ```go
-refresh func(context.Context, string) error
-```
+package executor
 
-- Add function:
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
 
-```go
-func SetCapabilityRefresh(h http.Handler, refresh func(context.Context, string) error) {
-	if hh, ok := h.(*muxWithBridge); ok {
-		hh.refresh = refresh
-	}
+	"github.com/yourorg/multi-agent/internal/claudeperm"
+)
+
+type ClaudePermissionsConfig struct {
+	WorkDir string
+	Refresh func(context.Context, string) error
 }
-```
 
-- In `NewHandler`, register:
+type ClaudePermissionsExecutor struct {
+	cfg ClaudePermissionsConfig
+}
 
-```go
-mux.HandleFunc("/claude/permissions", wrap.claudePermissions)
-```
+type claudePermissionsRequest struct {
+	Op string `json:"op"`
+	claudeperm.Patch
+}
 
-- Add method on `muxWithBridge`:
+func NewClaudePermissionsExecutor(cfg ClaudePermissionsConfig) *ClaudePermissionsExecutor {
+	return &ClaudePermissionsExecutor{cfg: cfg}
+}
 
-```go
-func (m *muxWithBridge) claudePermissions(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("Authorization") != "Bearer "+m.cfg.Credentials.ProxyToken {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
+func (e *ClaudePermissionsExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, error) {
+	defer sink.Close()
+	var req claudePermissionsRequest
+	if err := json.Unmarshal([]byte(t.Prompt), &req); err != nil {
+		return Result{}, fmt.Errorf("claude_permissions prompt must be JSON: %w", err)
 	}
-	workdir := m.cfg.Claude.WorkDir
+	workdir := e.cfg.WorkDir
 	if workdir == "" {
 		var err error
 		workdir, err = os.Getwd()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+			return Result{}, err
 		}
 	}
 	store := claudeperm.NewStore(workdir)
-	switch r.Method {
-	case http.MethodGet:
-		state, err := store.Read()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+	var state claudeperm.State
+	var err error
+	switch req.Op {
+	case "get":
+		state, err = store.Read()
+	case "patch":
+		state, err = store.Patch(req.Patch)
+		if err == nil && e.cfg.Refresh != nil {
+			err = e.cfg.Refresh(ctx, "claude permission update")
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(state)
-	case http.MethodPatch:
-		var patch claudeperm.Patch
-		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		state, err := store.Patch(patch)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if m.refresh != nil {
-			if err := m.refresh(r.Context(), "claude permission update"); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(state)
 	default:
-		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return Result{}, fmt.Errorf("unsupported claude_permissions op %q", req.Op)
 	}
+	if err != nil {
+		return Result{}, err
+	}
+	body, err := json.Marshal(state)
+	if err != nil {
+		return Result{}, err
+	}
+	sink.Write("chunk", string(body))
+	return Result{Summary: string(body)}, nil
 }
 ```
 
 - [ ] **Step 4: Run the green test**
 
-Run `go test ./internal/webui -run 'TestClaudePermissions'`.
+Run `go test ./internal/executor -run 'TestClaudePermissionsExecutor'`.
 
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add multi-agent/internal/webui/server.go multi-agent/internal/webui/server_test.go
-git commit -m "feat: expose slave claude permissions"
+git add multi-agent/internal/executor/claude_permissions.go multi-agent/internal/executor/claude_permissions_test.go
+git commit -m "feat: add claude permissions executor"
 ```
 
 ---
@@ -685,7 +709,7 @@ git commit -m "feat: document claude permissions"
 
 ---
 
-### Task 5: Wire Slave Bash Route and Permission Refresh
+### Task 5: Wire Slave Bash and Permission Routes
 
 **Files:**
 - Modify: `multi-agent/cmd/slave-agent/main.go`
@@ -718,6 +742,9 @@ func TestHasSkill(t *testing.T) {
 	if !hasSkill([]string{"chat", "bash"}, "bash") {
 		t.Fatal("expected bash skill")
 	}
+	if !hasSkill([]string{"chat", "claude_permissions"}, "claude_permissions") {
+		t.Fatal("expected claude_permissions skill")
+	}
 	if hasSkill([]string{"chat"}, "bash") {
 		t.Fatal("did not expect bash skill")
 	}
@@ -738,7 +765,7 @@ docker run --rm --network host \
 
 Expected before helper exists: FAIL with undefined `hasSkill`.
 
-- [ ] **Step 3: Wire route and refresh callback**
+- [ ] **Step 3: Wire routes and permission refresh callback**
 
 Modify `multi-agent/cmd/slave-agent/main.go`:
 
@@ -751,16 +778,21 @@ if hasSkill(cfg.Discovery.Skills, "bash") {
 }
 ```
 
-- After `ui := webui.NewHandler(s, journalDir, cfg)`, wire refresh:
+- Add `claude_permissions` only when advertised:
 
 ```go
-webui.SetCapabilityRefresh(ui, func(ctx context.Context, reason string) error {
-	refreshCapabilities(ctx, reason)
-	return tn.PublishCard(ctx)
-})
+if hasSkill(cfg.Discovery.Skills, "claude_permissions") {
+	routes["claude_permissions"] = executor.NewClaudePermissionsExecutor(executor.ClaudePermissionsConfig{
+		WorkDir: cfg.Claude.WorkDir,
+		Refresh: func(ctx context.Context, reason string) error {
+			refreshCapabilities(ctx, reason)
+			return tn.PublishCard(ctx)
+		},
+	})
+}
 ```
 
-Move this call to a point after `refreshCapabilities` and `tn` are defined if needed; keep `ui` construction before tunnel creation.
+Place this block after `refreshCapabilities` and `tn` are defined so the permission executor can refresh `CAPABILITIES.md` and republish the discovery card after a patch.
 
 Modify `multi-agent/cmd/slave-agent/config.example.yaml` skills comment or example:
 
@@ -770,6 +802,7 @@ discovery:
     - chat
     - mcp
     # - bash  # opt-in deterministic shell execution for trusted workspaces
+    # - claude_permissions  # opt-in task-channel Claude Code permission management
 ```
 
 - [ ] **Step 4: Run green tests**
@@ -790,7 +823,7 @@ Expected: PASS.
 
 ```bash
 git add multi-agent/cmd/slave-agent/main.go multi-agent/cmd/slave-agent/main_test.go multi-agent/cmd/slave-agent/config.example.yaml
-git commit -m "feat: wire slave bash skill"
+git commit -m "feat: wire slave control skills"
 ```
 
 ---
@@ -808,8 +841,9 @@ Create `multi-agent/internal/driver/slave_tools_test.go` with tests for:
 
 - `run_slave_bash` delegates `skill="bash"` and JSON prompt.
 - `run_slave_bash` rejects a target without `bash` skill.
-- `get_slave_claude_permissions` calls `PeerProxy(GET, short_id, "/claude/permissions")`.
-- `update_slave_claude_permissions` calls `PeerProxy(PATCH, short_id, "/claude/permissions")` with the patch body.
+- `get_slave_claude_permissions` delegates `skill="claude_permissions"` with prompt `{"op":"get"}` and waits for output.
+- `update_slave_claude_permissions` delegates `skill="claude_permissions"` with prompt `{"op":"patch",...}` and waits for output.
+- Permission tools reject a target without `claude_permissions` skill.
 
 Use the existing `fakeSDK`, `newTestTools`, and `toolByName` helpers from `tools_test.go`. The first test body should follow this shape:
 
@@ -890,7 +924,8 @@ agentsdk.DelegateTaskRequest{
 
 - Default `wait` to true by making the args field `*bool`; nil means true.
 - Reuse `sdkTaskOutput` to parse `TaskInfo`.
-- For permissions, call `t.sdk.PeerProxy(ctx, http.MethodGet/Patch, cardShortID(card), "/claude/permissions", body)`, read the response, close body, return non-2xx as `MCPToolError`.
+- For permission reads, require `hasSkill(card, "claude_permissions")`, submit `DelegateTaskRequest{TargetID: card.AgentID, Skill: "claude_permissions", Prompt: "{\"op\":\"get\"}"}`, wait for completion, and return the parsed task output.
+- For permission patches, require `hasSkill(card, "claude_permissions")`, marshal a prompt containing `op:"patch"` plus the requested allow/deny fields, submit it with `skill="claude_permissions"`, wait for completion, and return the parsed task output.
 
 Modify `multi-agent/internal/driver/tools.go` `All()` to include:
 
@@ -900,7 +935,7 @@ Modify `multi-agent/internal/driver/tools.go` `All()` to include:
 &updateSlaveClaudePermissionsTool{t},
 ```
 
-Place them after `inspect_capabilities` so Claude Code sees capability and control-plane tools together.
+Place them after `inspect_capabilities` so Claude Code sees capability and task-channel control tools together. Add a comment noting that permission tools intentionally use task delegation until agentserver exposes a dedicated control channel.
 
 - [ ] **Step 4: Run the green driver tests**
 
@@ -928,7 +963,9 @@ git commit -m "feat: add driver slave bash tools"
 
 Document:
 
-- `bash` is opt-in via `discovery.skills`.
+- `bash` and `claude_permissions` are opt-in via `discovery.skills`.
+- Permission tools currently use task delegation with `skill="claude_permissions"` because agentserver does not expose the needed custom-agent peer/control proxy.
+- Future work should migrate permission management to a special agentserver control channel when available.
 - Driver tools:
   - `run_slave_bash`
   - `get_slave_claude_permissions`
@@ -961,7 +998,7 @@ docker run --rm --network host \
   -v /root/multi-agent/.worktrees/slave-bash-tools/multi-agent:/workspace/multi-agent \
   -w /workspace/multi-agent \
   multi-agent-e2e-runtime:latest \
-  go test ./internal/executor ./internal/claudeperm ./internal/webui ./internal/capabilitydoc ./internal/driver ./cmd/slave-agent
+  go test ./internal/executor ./internal/claudeperm ./internal/capabilitydoc ./internal/driver ./cmd/slave-agent
 ```
 
 Expected: PASS for all listed packages. If `cmd/slave-agent` capability-doc E2E flakes on timing, rerun once and record the exact failure before changing code.
@@ -974,8 +1011,8 @@ From `multi-agent/tests/claude_driver`, ask Claude Code driver to:
 
 ```text
 Use driver tools to:
-1. list agents and choose two slaves with bash capability.
-2. update each slave's Claude Code permissions with python, curl, and file_write presets.
+1. list agents and choose two slaves with bash and claude_permissions capability.
+2. update each slave's Claude Code permissions with python, curl, and file_write presets through the task-channel permission tool.
 3. run a Python matrix multiplication script on slave A using numpy through run_slave_bash.
 4. run an equivalent Python matrix multiplication script on slave B using for loops through run_slave_bash.
 5. compare the result hashes and report whether they match.
@@ -998,6 +1035,6 @@ git commit -m "docs: document slave bash and permissions"
 
 ## Self-Review
 
-- Spec coverage: Bash executor, permission API, driver MCP tools, capability document, docs, and online E2E each map to a task.
+- Spec coverage: Bash executor, task-channel permission executor, driver MCP tools, capability document, docs, and online E2E each map to a task.
 - Placeholder scan: no `TBD`, `TODO`, or unspecified implementation steps are left in this plan.
 - Type consistency: public names are stable across tasks: `BashConfig`, `BashExecutor`, `BashRequest`, `BashResult`, `claudeperm.State`, `claudeperm.Patch`, `run_slave_bash`, `get_slave_claude_permissions`, and `update_slave_claude_permissions`.

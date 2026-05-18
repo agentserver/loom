@@ -2,29 +2,30 @@
 
 ## Goal
 
-Let a Claude Code driver execute explicit Bash scripts on selected slave agents, and let the driver inspect or adjust each slave's Claude Code project permissions in real time without relying on shared local filesystems.
+Let a Claude Code driver execute explicit Bash scripts on selected slave agents, and let the driver inspect or adjust each slave's Claude Code project permissions without relying on shared local filesystems.
 
 ## Context
 
-The current system already supports driver-to-slave task delegation through agentserver and slave task dispatch by `skill`. It also exposes each slave's local HTTP handler through agentserver peer proxy using the slave card's `short_id`. Recent E2E testing showed that Python scripts can be transferred and executed only after the slave's Claude Code workdir grants the right tools, for example `Bash(python3 *)`, `Bash(curl *)`, `Read`, and `Write`.
+The current system already supports driver-to-slave task delegation through agentserver and slave task dispatch by `skill`. Current agentserver does not expose a usable `/api/agent/peer/{short_id}/proxy` route for custom agent HTTP handlers, so permission management must use the existing task channel for this iteration. Recent E2E testing showed that Python scripts can be transferred and executed only after the slave's Claude Code workdir grants the right tools, for example `Bash(python3 *)`, `Bash(curl *)`, `Read`, and `Write`.
 
 ## Design Choices
 
-### Recommended Approach: Two Surfaces
+### Recommended Approach: Task Channel Now, Dedicated Control Channel Later
 
 1. Add a first-class slave `bash` skill for deterministic shell execution.
-2. Add peer-proxied slave HTTP endpoints for Claude Code permissions.
-3. Add driver MCP tools that wrap both surfaces for Claude Code users.
+2. Add a first-class slave `claude_permissions` skill for Claude Code permission reads and patches.
+3. Add driver MCP tools that wrap both task skills for Claude Code users.
+4. Record that permission management should move to a dedicated agentserver control channel when one exists.
 
-This keeps command execution inside the existing task lifecycle, so task status, logs, observer events, timeout handling, and agentserver ownership still work. Permission mutation is a control-plane operation and belongs on the slave HTTP surface rather than inside ordinary tasks.
+This keeps both command execution and permission mutation inside the existing task lifecycle, so task status, logs, observer events, timeout handling, and agentserver ownership still work today. Permission mutation is still conceptually a control-plane operation; using `skill="claude_permissions"` is an intentional compatibility bridge until agentserver provides a special peer/control channel.
 
 ### Alternatives Considered
 
 - Run Bash through the existing `chat` Claude executor only.
   This is flexible but nondeterministic and still depends on Claude Code's Bash permissions before execution can happen.
 
-- Expose Bash as peer-proxy HTTP only.
-  This avoids task polling latency but bypasses the task store and observer model, making E2E results harder to inspect.
+- Expose permission APIs through peer-proxy HTTP now.
+  This would be cleaner architecturally, but current agentserver does not expose the required custom-agent peer proxy route. The feature must not depend on unpublished agentserver changes.
 
 - Modify local files from driver.
   This is rejected because driver, master, and slaves run on different machines and must not share a local filesystem in the design.
@@ -60,14 +61,30 @@ The executor runs `/bin/bash -lc <script>` in `claude.workdir` if set, otherwise
 
 Non-zero exit returns the same JSON summary and an error, so the task is marked failed but the driver can still inspect stdout/stderr through task output where available.
 
-## Feature 2: Slave Claude Permission API
+## Feature 2: Slave Claude Permission Task Skill
 
-Each slave exposes authenticated HTTP endpoints through its existing web UI handler:
+Slaves may advertise `claude_permissions` in `discovery.skills`. When present, `slave-agent` registers `routes["claude_permissions"]` with a deterministic permission executor.
 
-- `GET /claude/permissions`
-- `PATCH /claude/permissions`
+The task prompt for `skill="claude_permissions"` is JSON. A read request is:
 
-Both require `Authorization: Bearer <slave proxy_token>`, matching `/bridge/call`.
+```json
+{
+  "op": "get"
+}
+```
+
+A patch request is:
+
+```json
+{
+  "op": "patch",
+  "allow_presets": ["python", "curl", "file_write"],
+  "allow_add": ["Bash(python3 *)"],
+  "allow_remove": [],
+  "deny_add": [],
+  "deny_remove": []
+}
+```
 
 The implementation reads and writes:
 
@@ -86,7 +103,7 @@ If `claude.workdir` is empty, it uses the slave process working directory. The f
 }
 ```
 
-`GET` returns:
+The `get` operation returns:
 
 ```json
 {
@@ -96,7 +113,7 @@ If `claude.workdir` is empty, it uses the slave process working directory. The f
 }
 ```
 
-`PATCH` accepts direct list operations:
+The `patch` operation accepts direct list operations:
 
 ```json
 {
@@ -126,6 +143,8 @@ Preset expansion:
 The patch operation is idempotent, sorts resulting lists for stable diffs, preserves unknown top-level settings fields, writes atomically, and returns the updated response shape.
 
 After a successful patch, `slave-agent` refreshes its persisted `CAPABILITIES.md` with reason `claude permission update` and republishes its discovery card. Capability documents should include a small "Claude Code Permissions" section listing current allow and deny entries.
+
+The task-channel implementation is not the long-term ideal. Future work should replace the `claude_permissions` task skill with a special agentserver control channel or peer proxy endpoint that can reach a slave's local control plane without consuming ordinary task capacity.
 
 ## Feature 3: Driver MCP Tools
 
@@ -167,9 +186,10 @@ Arguments:
 
 Behavior:
 
-1. Resolve target and read its `short_id` from the discovery card.
-2. Call `GET /claude/permissions` through `SDKClient.PeerProxy`.
-3. Return the slave response unchanged.
+1. Resolve target by id or display name.
+2. Require the target agent to be available and advertise `claude_permissions`.
+3. Submit a task with `skill="claude_permissions"` and prompt `{"op":"get"}`.
+4. Wait for terminal status and return the permission JSON result.
 
 ### `update_slave_claude_permissions`
 
@@ -188,28 +208,32 @@ Arguments:
 
 Behavior:
 
-1. Resolve target and `short_id`.
-2. Call `PATCH /claude/permissions` through peer proxy.
-3. Return the updated permission response unchanged.
+1. Resolve target by id or display name.
+2. Require the target agent to be available and advertise `claude_permissions`.
+3. Submit a task with `skill="claude_permissions"` and a patch prompt.
+4. Wait for terminal status and return the updated permission JSON result.
 
 ## Error Handling
 
 - Missing `script` returns MCP error for driver tool and executor error for direct slave tasks.
-- Unknown target, unavailable target, or missing `short_id` returns MCP error.
+- Unknown target or unavailable target returns MCP error.
 - `run_slave_bash` rejects targets that do not advertise `bash`.
-- Peer proxy non-2xx responses are returned as MCP errors with status and response body.
-- Permission JSON parse errors are returned as HTTP 500 on the slave endpoint, because they indicate corrupted local settings.
-- Invalid patch JSON returns HTTP 400.
+- Permission tools reject targets that do not advertise `claude_permissions`.
+- Permission task failures are returned as MCP errors with task id, status, and failure reason.
+- Permission JSON parse errors fail the permission task, because they indicate corrupted local settings.
+- Invalid patch JSON fails the permission task.
 
 ## Security Boundaries
 
 This feature is intentionally powerful. It does not make Bash safe; it makes Bash explicit, auditable, and opt-in.
 
 - Slaves must opt in by advertising `bash`.
-- Permission mutation is authenticated with the existing agent proxy token and only reachable through the agentserver peer proxy.
+- Slaves must opt in to permission management by advertising `claude_permissions`.
+- Permission mutation is routed through agentserver task delegation and inherits existing workspace/task authorization.
 - No direct filesystem dependency exists between driver and slave.
-- The permission API only edits the slave's Claude Code project settings file, not arbitrary paths.
+- The permission executor only edits the slave's Claude Code project settings file, not arbitrary paths.
 - The Bash executor does not run unless the task skill is exactly `bash`.
+- Future work should move permission management to a special control channel rather than ordinary tasks once agentserver supports it.
 
 Out of scope for this iteration:
 
@@ -226,12 +250,13 @@ Unit tests:
 - `executor.BashExecutor` returns structured output on non-zero exit.
 - Permission store reads missing settings as empty and writes valid Claude Code JSON.
 - Permission patch operations are idempotent, sorted, and preserve unknown settings fields.
-- Web UI permission endpoints enforce bearer auth and read/patch settings.
-- Driver tools resolve targets, require `bash`, delegate `skill="bash"`, wait for completion, and proxy permission reads/patches.
+- Permission executor reads and patches settings through `skill="claude_permissions"`.
+- Driver tools resolve targets, require `bash` or `claude_permissions`, delegate the correct skill, and wait for completion.
 
 Integration tests:
 
 - `slave-agent` only registers `bash` route when `discovery.skills` includes `bash`.
+- `slave-agent` only registers `claude_permissions` route when `discovery.skills` includes `claude_permissions`.
 - Capability document includes Claude Code permission entries after startup and after patch.
 
 Manual online E2E:
