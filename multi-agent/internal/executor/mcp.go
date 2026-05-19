@@ -62,6 +62,16 @@ type mcpToolResult struct {
 	ChangeHint        string          `json:"change_hint"`
 }
 
+// mcpStandardContent matches the MCP spec shape for tools/call results:
+// {"content":[{"type":"text","text":"..."}, ...], "isError"?: bool}.
+type mcpStandardContent struct {
+	Content []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+	IsError bool `json:"isError"`
+}
+
 func (e *MCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, error) {
 	defer sink.Close()
 	var p mcpPrompt
@@ -91,19 +101,34 @@ func (e *MCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, error
 	}
 
 	var tr mcpToolResult
-	if err := json.Unmarshal(raw, &tr); err != nil || len(tr.Result) == 0 {
-		return Result{}, fmt.Errorf("malformed mcp response")
+	if err := json.Unmarshal(raw, &tr); err == nil && len(tr.Result) > 0 {
+		summary := stringifyResult(tr.Result)
+		change := ""
+		if tr.CapabilityChanged {
+			change = tr.ChangeHint
+			if change == "" {
+				change = "unspecified"
+			}
+		}
+		return Result{Summary: summary, CapabilityChange: change}, nil
 	}
 
-	summary := stringifyResult(tr.Result)
-	change := ""
-	if tr.CapabilityChanged {
-		change = tr.ChangeHint
-		if change == "" {
-			change = "unspecified"
+	var std mcpStandardContent
+	if err := json.Unmarshal(raw, &std); err == nil && len(std.Content) > 0 {
+		var b strings.Builder
+		for _, c := range std.Content {
+			if c.Type == "text" {
+				b.WriteString(c.Text)
+			}
 		}
+		summary := b.String()
+		if std.IsError {
+			return Result{}, fmt.Errorf("%s", summary)
+		}
+		return Result{Summary: summary}, nil
 	}
-	return Result{Summary: summary, CapabilityChange: change}, nil
+
+	return Result{}, fmt.Errorf("malformed mcp response")
 }
 
 func stringifyResult(r json.RawMessage) string {

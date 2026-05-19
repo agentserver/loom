@@ -197,3 +197,70 @@ func TestMCPExecutor_RegisterStdioRejectsHTTP(t *testing.T) {
 	err := e.RegisterStdio("x", MCPServerCfg{Transport: "http", URL: "http://x"})
 	require.Error(t, err, "expected error for non-stdio transport")
 }
+
+// Standard-shape MCP servers (per the MCP spec) return tools/call results as
+// {"content":[{"type":"text","text":"..."}], "isError"?: bool}.
+// The slave executor must accept this shape, not only the internal
+// {result, capability_changed, change_hint} wrapper used by build_mcp.
+func TestMCP_Stdio_StandardContentShape(t *testing.T) {
+	dir := t.TempDir()
+	src := `
+import sys, json
+for line in sys.stdin:
+    req = json.loads(line)
+    if req.get("method") == "tools/call":
+        print(json.dumps({"jsonrpc":"2.0","id":req["id"],"result":{"content":[{"type":"text","text":"hello world"}]}}), flush=True)
+`
+	path := filepath.Join(dir, "std.py")
+	require.NoError(t, os.WriteFile(path, []byte(src), 0o600))
+	e := NewMCPExecutor(map[string]MCPServerCfg{"std": {Transport: "stdio", Command: "python3", Args: []string{path}}})
+	defer e.Close()
+
+	body, _ := json.Marshal(map[string]string{"server": "std", "tool": "echo"})
+	res, err := e.Run(context.Background(), Task{Prompt: string(body)}, &captureSink{})
+	require.NoError(t, err)
+	require.Equal(t, "hello world", res.Summary)
+	require.Equal(t, "", res.CapabilityChange)
+}
+
+func TestMCP_Stdio_StandardContent_IsError(t *testing.T) {
+	dir := t.TempDir()
+	src := `
+import sys, json
+for line in sys.stdin:
+    req = json.loads(line)
+    if req.get("method") == "tools/call":
+        print(json.dumps({"jsonrpc":"2.0","id":req["id"],"result":{"content":[{"type":"text","text":"oops"}],"isError":True}}), flush=True)
+`
+	path := filepath.Join(dir, "err.py")
+	require.NoError(t, os.WriteFile(path, []byte(src), 0o600))
+	e := NewMCPExecutor(map[string]MCPServerCfg{"x": {Transport: "stdio", Command: "python3", Args: []string{path}}})
+	defer e.Close()
+
+	body, _ := json.Marshal(map[string]string{"server": "x", "tool": "echo"})
+	_, err := e.Run(context.Background(), Task{Prompt: string(body)}, &captureSink{})
+	require.ErrorContains(t, err, "oops")
+}
+
+// Multi-block content concatenates text blocks in order.
+func TestMCP_Stdio_StandardContent_MultiText(t *testing.T) {
+	dir := t.TempDir()
+	src := `
+import sys, json
+for line in sys.stdin:
+    req = json.loads(line)
+    if req.get("method") == "tools/call":
+        print(json.dumps({"jsonrpc":"2.0","id":req["id"],"result":{"content":[
+            {"type":"text","text":"foo"},
+            {"type":"text","text":"bar"}
+        ]}}), flush=True)
+`
+	path := filepath.Join(dir, "multi.py")
+	require.NoError(t, os.WriteFile(path, []byte(src), 0o600))
+	e := NewMCPExecutor(map[string]MCPServerCfg{"m": {Transport: "stdio", Command: "python3", Args: []string{path}}})
+	defer e.Close()
+	body, _ := json.Marshal(map[string]string{"server": "m", "tool": "echo"})
+	res, err := e.Run(context.Background(), Task{Prompt: string(body)}, &captureSink{})
+	require.NoError(t, err)
+	require.Equal(t, "foobar", res.Summary)
+}
