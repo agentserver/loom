@@ -15,15 +15,23 @@ import (
 
 type fakeRunnerPlanner struct {
 	nodes       []planner.Node
+	nodePlans   [][]planner.Node
 	summary     string
 	reduceErr   error
 	reduceCalls int
 	gotResults  []planner.SubResult
 	gotPlanArgs []agentsdk.AgentCard
+	gotPrompts  []string
 }
 
 func (f *fakeRunnerPlanner) Plan(ctx context.Context, prompt string, agents []agentsdk.AgentCard) ([]planner.Node, error) {
 	f.gotPlanArgs = agents
+	f.gotPrompts = append(f.gotPrompts, prompt)
+	if len(f.nodePlans) > 0 {
+		nodes := f.nodePlans[0]
+		f.nodePlans = f.nodePlans[1:]
+		return nodes, nil
+	}
 	return f.nodes, nil
 }
 
@@ -253,4 +261,184 @@ func TestDriverRunnerFallsBackWhenReduceFails(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, strings.Contains(got.Summary, "reducer unavailable"))
 	require.True(t, strings.Contains(got.Summary, "preserved output"))
+}
+
+func TestDriverRunnerDelegatesBuildSpecAsCanonicalPrompt(t *testing.T) {
+	buildSpec := json.RawMessage(`{
+		"name":"row_sum",
+		"description":"sum rows",
+		"tools":[{
+			"name":"sum_rows",
+			"description":"sum numeric rows",
+			"args_schema":{"type":"object","properties":{"rows":{"type":"array"}},"required":["rows"]},
+			"result_description":"sum result"
+		}]
+	}`)
+	sdk := &fakeRunnerSDK{
+		cards: []agentsdk.AgentCard{{
+			AgentID: "builder", Status: "available",
+			Card: json.RawMessage(`{"skills":["build_mcp"]}`),
+		}},
+		tasks: []agentsdk.TaskInfo{{Status: "completed", Output: `{"type":"mcp_tool_set"}`}},
+	}
+	plannerFake := &fakeRunnerPlanner{
+		nodes: []planner.Node{{
+			ID: "build", TargetID: "builder", Skill: "build_mcp", Kind: "build_mcp", BuildSpec: buildSpec,
+		}},
+		summary: "built",
+	}
+	runner := NewDriverRunner(plannerFake, sdk, RunnerConfig{})
+
+	_, err := runner.Run(context.Background(), "build a rows tool")
+
+	require.NoError(t, err)
+	require.Len(t, sdk.delegated, 1)
+	require.Equal(t, "build_mcp", sdk.delegated[0].Skill)
+	require.JSONEq(t, `{
+		"name":"row_sum",
+		"description":"sum rows",
+		"tools":[{
+			"name":"sum_rows",
+			"description":"sum numeric rows",
+			"args_schema":{"type":"object","properties":{"rows":{"type":"array"}},"required":["rows"]},
+			"result_description":"sum result"
+		}],
+		"hints":"",
+		"allowed_packages":[],
+		"compose_servers":[],
+		"version":1,
+		"iteration":1,
+		"max_iterations":3
+	}`, sdk.delegated[0].Prompt)
+}
+
+func TestDriverRunnerReplansInvalidMCPArgsBeforeDispatch(t *testing.T) {
+	invalid := []planner.Node{{
+		ID:       "call",
+		TargetID: "slave-a",
+		Skill:    "mcp",
+		Prompt:   `{"server":"math","tool":"multiply","args":{"x":2,"y":3,"extra":99}}`,
+	}}
+	valid := []planner.Node{{
+		ID:       "call",
+		TargetID: "slave-a",
+		Skill:    "mcp",
+		Prompt:   `{"server":"math","tool":"multiply","args":{"x":2,"y":3}}`,
+	}}
+	sdk := &fakeRunnerSDK{
+		cards: []agentsdk.AgentCard{{
+			AgentID: "slave-a", Status: "available",
+			Card: json.RawMessage(`{
+				"skills":["mcp"],
+				"mcp_tools":[{
+					"server":"math",
+					"name":"multiply",
+					"input_schema":{
+						"type":"object",
+						"properties":{"x":{"type":"number"},"y":{"type":"number"}},
+						"required":["x","y"],
+						"additionalProperties":false
+					}
+				}]
+			}`),
+		}},
+		tasks: []agentsdk.TaskInfo{{Status: "completed", Output: `{"result":6}`}},
+	}
+	plannerFake := &fakeRunnerPlanner{
+		nodePlans: [][]planner.Node{invalid, valid},
+		summary:   "done",
+	}
+	runner := NewDriverRunner(plannerFake, sdk, RunnerConfig{})
+
+	_, err := runner.Run(context.Background(), "multiply")
+
+	require.NoError(t, err)
+	require.Len(t, plannerFake.gotPrompts, 2)
+	require.Contains(t, plannerFake.gotPrompts[1], "PLAN_VALIDATION_ERROR")
+	require.Contains(t, plannerFake.gotPrompts[1], "unexpected property")
+	require.Len(t, sdk.delegated, 1)
+	require.JSONEq(t, valid[0].Prompt, sdk.delegated[0].Prompt)
+}
+
+func TestDriverRunnerStopsAfterFiveInvalidPlanAttempts(t *testing.T) {
+	invalid := []planner.Node{{
+		ID:       "call",
+		TargetID: "slave-a",
+		Skill:    "mcp",
+		Prompt:   `{"server":"math","tool":"multiply","args":{"x":2}}`,
+	}}
+	sdk := &fakeRunnerSDK{
+		cards: []agentsdk.AgentCard{{
+			AgentID: "slave-a", Status: "available",
+			Card: json.RawMessage(`{
+				"skills":["mcp"],
+				"mcp_tools":[{
+					"server":"math",
+					"name":"multiply",
+					"input_schema":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"}},"required":["x","y"]}
+				}]
+			}`),
+		}},
+	}
+	plannerFake := &fakeRunnerPlanner{
+		nodePlans: [][]planner.Node{invalid, invalid, invalid, invalid, invalid},
+	}
+	runner := NewDriverRunner(plannerFake, sdk, RunnerConfig{})
+
+	_, err := runner.Run(context.Background(), "multiply")
+
+	require.ErrorContains(t, err, "invalid plan after 5 attempts")
+	require.ErrorContains(t, err, "missing required property")
+	require.Len(t, plannerFake.gotPrompts, 5)
+	require.Empty(t, sdk.delegated)
+}
+
+func TestDriverRunnerReplansRenderedMCPArgsBeforeDispatch(t *testing.T) {
+	invalidAfterRender := []planner.Node{
+		{ID: "produce", TargetID: "slave-a", Skill: "chat", Prompt: "produce rows"},
+		{
+			ID:        "call",
+			TargetID:  "slave-a",
+			Skill:     "mcp",
+			Prompt:    `{"server":"math","tool":"sum_rows","args":{"rows":{{produce.output.rows}}}}`,
+			DependsOn: []string{"produce"},
+		},
+	}
+	replanned := []planner.Node{{
+		ID:       "explain",
+		TargetID: "slave-a",
+		Skill:    "chat",
+		Prompt:   "explain rows were invalid",
+	}}
+	sdk := &fakeRunnerSDK{
+		cards: []agentsdk.AgentCard{{
+			AgentID: "slave-a", Status: "available",
+			Card: json.RawMessage(`{
+				"skills":["chat","mcp"],
+				"mcp_tools":[{
+					"server":"math",
+					"name":"sum_rows",
+					"input_schema":{"type":"object","properties":{"rows":{"type":"array"}},"required":["rows"]}
+				}]
+			}`),
+		}},
+		tasks: []agentsdk.TaskInfo{
+			{Status: "completed", Output: `{"rows":123}`},
+			{Status: "completed", Output: "explained"},
+		},
+	}
+	plannerFake := &fakeRunnerPlanner{
+		nodePlans: [][]planner.Node{invalidAfterRender, replanned},
+		summary:   "done",
+	}
+	runner := NewDriverRunner(plannerFake, sdk, RunnerConfig{MaxConcurrency: 1})
+
+	_, err := runner.Run(context.Background(), "sum rows")
+
+	require.NoError(t, err)
+	require.Len(t, plannerFake.gotPrompts, 2)
+	require.Contains(t, plannerFake.gotPrompts[1], "args.rows has wrong type")
+	require.Len(t, sdk.delegated, 2)
+	require.Equal(t, "produce rows", sdk.delegated[0].Prompt)
+	require.Equal(t, "explain rows were invalid", sdk.delegated[1].Prompt)
 }
