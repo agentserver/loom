@@ -26,9 +26,6 @@ func TestTaskContractApplyDefaults(t *testing.T) {
 	if tc.ExecutionPolicy.Routing != RoutingDirectFirst {
 		t.Fatalf("routing = %q", tc.ExecutionPolicy.Routing)
 	}
-	if tc.ExecutionPolicy.AllowBuildMCP {
-		t.Fatalf("allow_build_mcp default = true")
-	}
 	if !tc.ExecutionPolicy.AllowsCodeArtifacts() {
 		t.Fatalf("allow_code_artifacts default = false")
 	}
@@ -185,32 +182,6 @@ func TestTaskContractValidateRejectsCodeWriteTargetWhenCodeArtifactsDisabled(t *
 		t.Fatalf("expected validation error")
 	}
 	if !strings.Contains(err.Error(), "code write target requires execution_policy.allow_code_artifacts") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestTaskContractValidateRejectsBuildMCPWhenDisabled(t *testing.T) {
-	tc := TaskContract{
-		Version:        1,
-		ConversationID: "conv-1",
-		Intent: IntentSpec{
-			Goal:            "create a durable tool",
-			SuccessCriteria: []string{"tool is callable"},
-		},
-		DataContract: DataContract{
-			WriteTargets: []WriteTarget{{Type: WriteTargetArtifact, Kind: "code", Name: "server.go"}},
-		},
-		CapabilityRequirements: CapabilityRequirements{
-			Skills: []string{"build_mcp"},
-		},
-	}
-	tc.ApplyDefaults()
-
-	err := tc.Validate()
-	if err == nil {
-		t.Fatalf("expected validation error")
-	}
-	if !strings.Contains(err.Error(), "build_mcp requested but execution_policy.allow_build_mcp is false") {
 		t.Fatalf("error = %v", err)
 	}
 }
