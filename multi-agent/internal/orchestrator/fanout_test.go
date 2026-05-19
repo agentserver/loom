@@ -79,11 +79,13 @@ func (f *cancelAwareSDK) WaitForTask(ctx context.Context, id string, _ time.Dura
 }
 
 type nonCooperativeSDK struct {
-	mu          sync.Mutex
-	agents      []agentsdk.AgentCard
-	dispatched  []agentsdk.DelegateTaskRequest
-	slowStarted chan struct{}
-	slowOnce    sync.Once
+	mu           sync.Mutex
+	agents       []agentsdk.AgentCard
+	dispatched   []agentsdk.DelegateTaskRequest
+	slowStarted  chan struct{}
+	failReturned chan struct{}
+	slowOnce     sync.Once
+	failOnce     sync.Once
 }
 
 func (f *nonCooperativeSDK) DiscoverAgents(_ context.Context) ([]agentsdk.AgentCard, error) {
@@ -99,6 +101,9 @@ func (f *nonCooperativeSDK) DelegateTask(_ context.Context, req agentsdk.Delegat
 
 func (f *nonCooperativeSDK) WaitForTask(_ context.Context, id string, _ time.Duration) (*agentsdk.TaskInfo, error) {
 	if id == "fail" {
+		if f.failReturned != nil {
+			f.failOnce.Do(func() { close(f.failReturned) })
+		}
 		return &agentsdk.TaskInfo{TaskID: id, Status: "failed", FailureReason: "boom"}, nil
 	}
 	if id == "slow" && f.slowStarted != nil {
@@ -308,7 +313,8 @@ func TestFanout_RequiredFailureDrainBoundedForNonCooperativeSibling(t *testing.T
 			{AgentID: "agent-a", Status: "available"},
 			{AgentID: "agent-b", Status: "available"},
 		},
-		slowStarted: make(chan struct{}),
+		slowStarted:  make(chan struct{}),
+		failReturned: make(chan struct{}),
 	}
 	o := newOrch(t, sdk, "plan_parallel")
 
@@ -321,16 +327,21 @@ func TestFanout_RequiredFailureDrainBoundedForNonCooperativeSibling(t *testing.T
 		done <- err
 	}()
 
-	select {
-	case <-sdk.slowStarted:
-		cancel()
-	case err := <-done:
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "required node fail failed")
-		return
-	case <-time.After(2 * time.Second):
-		t.Fatal("slow sibling was not started")
+	for slowSeen, failSeen := false, false; !slowSeen || !failSeen; {
+		select {
+		case <-sdk.slowStarted:
+			slowSeen = true
+		case <-sdk.failReturned:
+			failSeen = true
+		case err := <-done:
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "required node fail failed")
+			return
+		case <-time.After(5 * time.Second):
+			t.Fatalf("test setup did not reach required state: slow_seen=%v fail_seen=%v", slowSeen, failSeen)
+		}
 	}
+	cancel()
 
 	select {
 	case err := <-done:
