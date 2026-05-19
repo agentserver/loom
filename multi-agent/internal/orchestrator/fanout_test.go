@@ -79,9 +79,11 @@ func (f *cancelAwareSDK) WaitForTask(ctx context.Context, id string, _ time.Dura
 }
 
 type nonCooperativeSDK struct {
-	mu         sync.Mutex
-	agents     []agentsdk.AgentCard
-	dispatched []agentsdk.DelegateTaskRequest
+	mu          sync.Mutex
+	agents      []agentsdk.AgentCard
+	dispatched  []agentsdk.DelegateTaskRequest
+	slowStarted chan struct{}
+	slowOnce    sync.Once
 }
 
 func (f *nonCooperativeSDK) DiscoverAgents(_ context.Context) ([]agentsdk.AgentCard, error) {
@@ -98,6 +100,9 @@ func (f *nonCooperativeSDK) DelegateTask(_ context.Context, req agentsdk.Delegat
 func (f *nonCooperativeSDK) WaitForTask(_ context.Context, id string, _ time.Duration) (*agentsdk.TaskInfo, error) {
 	if id == "fail" {
 		return &agentsdk.TaskInfo{TaskID: id, Status: "failed", FailureReason: "boom"}, nil
+	}
+	if id == "slow" && f.slowStarted != nil {
+		f.slowOnce.Do(func() { close(f.slowStarted) })
 	}
 	select {}
 }
@@ -303,10 +308,11 @@ func TestFanout_RequiredFailureDrainBoundedForNonCooperativeSibling(t *testing.T
 			{AgentID: "agent-a", Status: "available"},
 			{AgentID: "agent-b", Status: "available"},
 		},
+		slowStarted: make(chan struct{}),
 	}
 	o := newOrch(t, sdk, "plan_parallel")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	done := make(chan error, 1)
@@ -316,10 +322,21 @@ func TestFanout_RequiredFailureDrainBoundedForNonCooperativeSibling(t *testing.T
 	}()
 
 	select {
+	case <-sdk.slowStarted:
+		cancel()
 	case err := <-done:
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "required node fail failed")
-	case <-time.After(300 * time.Millisecond):
+		return
+	case <-time.After(2 * time.Second):
+		t.Fatal("slow sibling was not started")
+	}
+
+	select {
+	case err := <-done:
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "required node fail failed")
+	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after required failure and context cancellation")
 	}
 }

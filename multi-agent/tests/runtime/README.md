@@ -77,6 +77,56 @@ URL immediately; device codes expire quickly. After login succeeds, keep the
 role's generated `config.yaml` and container directory in place so later runs can
 reuse the same authorization.
 
+For Bash and Claude Code permission tests, each slave config must opt in:
+
+```yaml
+discovery:
+  skills:
+    - chat
+    - mcp
+    - build_mcp
+    - bash
+    - claude_permissions
+```
+
+The driver exposes:
+
+- `run_slave_bash`
+- `get_slave_claude_permissions`
+- `update_slave_claude_permissions`
+
+Permission tools currently use task delegation with `skill="claude_permissions"` because agentserver does not expose the needed custom-agent peer/control proxy. The permission task is handled by native `slave-agent` Go code, not by asking slave Claude Code to edit its own permissions. Future work should move this to a dedicated agentserver control channel.
+
+Example permission patch:
+
+```json
+{
+  "target_display_name": "slave-a-online-dag-160628",
+  "allow_presets": ["python", "curl", "file_write"]
+}
+```
+
+Example Bash execution:
+
+```json
+{
+  "target_display_name": "slave-a-online-dag-160628",
+  "script": "python3 - <<'PY'\nprint('ok')\nPY",
+  "timeout_sec": 60
+}
+```
+
+Manual online E2E prompt for Claude Code driver:
+
+```text
+Use driver tools to:
+1. list agents and choose two slaves with bash and claude_permissions capability.
+2. update each slave's Claude Code permissions with python, curl, and file_write presets through the task-channel permission tool.
+3. run a Python matrix multiplication script on slave A using numpy through run_slave_bash.
+4. run an equivalent Python matrix multiplication script on slave B using for loops through run_slave_bash.
+5. compare the result hashes and report whether they match.
+```
+
 If Claude/VS Code is running inside WSL, use the Linux paths:
 
 ```json

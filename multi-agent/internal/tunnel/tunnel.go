@@ -107,13 +107,15 @@ func (t *Tunnel) EnsureRegistered(ctx context.Context) error {
 // Best-effort: caller may log+ignore failure.
 func (t *Tunnel) PublishCard(ctx context.Context) error {
 	cardBody := map[string]interface{}{
-		"skills":        t.cfg.Discovery.Skills,
-		"tools":         t.tools,
-		"mcp_tools":     t.mcpTools,
-		"short_id":      t.cfg.Credentials.ShortID,
-		"accepts_tasks": true,
-		"has_web_ui":    true,
-		"version":       "0.1.0",
+		"skills":              t.cfg.Discovery.Skills,
+		"tools":               t.tools,
+		"mcp_tools":           t.mcpTools,
+		"short_id":            t.cfg.Credentials.ShortID,
+		"accepts_tasks":       true,
+		"has_web_ui":          true,
+		"state_path":          "/state",
+		"capability_doc_path": "/capabilities",
+		"version":             "0.1.0",
 	}
 	if t.cfg.Resources != nil {
 		cardBody["resources"] = t.cfg.Resources

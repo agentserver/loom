@@ -66,6 +66,7 @@ func NewHandler(s *store.Store, journalDir string, cfg *config.Config) http.Hand
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", h.healthz)
 	mux.HandleFunc("/state", h.state)
+	mux.HandleFunc("/capabilities", h.capabilities)
 	mux.HandleFunc("/tasks", h.listTasks)
 	mux.HandleFunc("/tasks/", h.taskRouter)
 	mux.HandleFunc("/", h.dashboard)
@@ -118,6 +119,20 @@ func (h *Handler) state(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data, err := os.ReadFile(filepath.Join(h.journalDir, "CURRENT_STATE.md"))
+	if err != nil && !os.IsNotExist(err) {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	w.Write(data)
+}
+
+func (h *Handler) capabilities(w http.ResponseWriter, r *http.Request) {
+	if h.journalDir == "" {
+		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(h.journalDir, "CAPABILITIES.md"))
 	if err != nil && !os.IsNotExist(err) {
 		http.Error(w, err.Error(), 500)
 		return
@@ -240,18 +255,22 @@ func (h *Handler) dashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	tasks, _ := h.s.ListTasks(20, 0)
 	state := ""
+	capabilities := ""
 	if h.journalDir != "" {
 		b, _ := os.ReadFile(filepath.Join(h.journalDir, "CURRENT_STATE.md"))
 		state = string(b)
+		c, _ := os.ReadFile(filepath.Join(h.journalDir, "CAPABILITIES.md"))
+		capabilities = string(c)
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, "<!doctype html><meta charset=utf-8><title>%s</title><h1>%s</h1>", h.cfg.Discovery.DisplayName, h.cfg.Discovery.DisplayName)
+	fmt.Fprintf(w, "<p><a href=\"/capabilities\">Capability Document</a></p>")
 	fmt.Fprintf(w, "<h2>Tasks</h2><ul>")
 	for _, t := range tasks {
 		fmt.Fprintf(w, "<li><a href=\"%s\">%s</a> [%s] %s</li>",
 			path.Join("/tasks", t.ID), t.ID, t.Status, htmlEscape(t.Skill))
 	}
-	fmt.Fprintf(w, "</ul><h2>State</h2><pre>%s</pre>", htmlEscape(state))
+	fmt.Fprintf(w, "</ul><h2>Capabilities</h2><pre>%s</pre><h2>State</h2><pre>%s</pre>", htmlEscape(capabilities), htmlEscape(state))
 }
 
 func htmlEscape(s string) string {

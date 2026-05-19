@@ -3,6 +3,7 @@ package orchestration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -47,14 +48,46 @@ func (r *DriverRunner) Run(ctx context.Context, prompt string) (RunnerResult, er
 	if err != nil {
 		return RunnerResult{}, fmt.Errorf("discover agents: %w", err)
 	}
-	nodes, err := r.planner.Plan(ctx, prompt, plannerCandidates(agents, r.cfg.SelfID))
-	if err != nil {
-		return RunnerResult{}, fmt.Errorf("planner plan: %w", err)
+	candidates := plannerCandidates(agents, r.cfg.SelfID)
+	planPrompt := prompt
+	var lastValidationErr error
+	for attempt := 1; attempt <= 5; attempt++ {
+		nodes, err := r.planner.Plan(ctx, planPrompt, candidates)
+		if err != nil {
+			return RunnerResult{}, fmt.Errorf("planner plan: %w", err)
+		}
+		prepared, err := preparePlanForDispatch(nodes, candidates)
+		if err != nil {
+			var validationErr planValidationError
+			if !errors.As(err, &validationErr) {
+				return RunnerResult{}, err
+			}
+			lastValidationErr = validationErr
+			if attempt == 5 {
+				return RunnerResult{}, fmt.Errorf("invalid plan after 5 attempts: %w", validationErr)
+			}
+			planPrompt = replanPrompt(prompt, nodes, validationErr, attempt)
+			continue
+		}
+		result, err := r.runPreparedPlan(ctx, prompt, prepared, candidates)
+		if err != nil {
+			var validationErr planValidationError
+			if !errors.As(err, &validationErr) {
+				return RunnerResult{}, err
+			}
+			lastValidationErr = validationErr
+			if attempt == 5 {
+				return RunnerResult{}, fmt.Errorf("invalid plan after 5 attempts: %w", validationErr)
+			}
+			planPrompt = replanPrompt(prompt, prepared, validationErr, attempt)
+			continue
+		}
+		return result, nil
 	}
-	if err := Validate(nodes); err != nil {
-		return RunnerResult{}, fmt.Errorf("invalid plan: %w", err)
-	}
+	return RunnerResult{}, fmt.Errorf("invalid plan after 5 attempts: %w", lastValidationErr)
+}
 
+func (r *DriverRunner) runPreparedPlan(ctx context.Context, prompt string, nodes []planner.Node, agents []agentsdk.AgentCard) (RunnerResult, error) {
 	sched := NewScheduler(nodes, r.cfg.MaxConcurrency)
 	outputs := make(map[string]string, len(nodes))
 	renderedPrompts := make(map[string]string, len(nodes))
@@ -70,7 +103,7 @@ func (r *DriverRunner) Run(ctx context.Context, prompt string) (RunnerResult, er
 		}
 		for _, n := range ready {
 			sched.MarkDispatched(n.ID)
-			result, err := r.runNode(ctx, n, outputs)
+			result, err := r.runNode(ctx, n, outputs, agents)
 			if err != nil {
 				return RunnerResult{}, err
 			}
@@ -116,9 +149,12 @@ func plannerCandidates(agents []agentsdk.AgentCard, selfID string) []agentsdk.Ag
 	return out
 }
 
-func (r *DriverRunner) runNode(ctx context.Context, n planner.Node, outputs map[string]string) (planner.SubResult, error) {
+func (r *DriverRunner) runNode(ctx context.Context, n planner.Node, outputs map[string]string, agents []agentsdk.AgentCard) (planner.SubResult, error) {
 	rendered, err := Render(n.Prompt, outputs)
 	if err != nil {
+		return planner.SubResult{}, err
+	}
+	if err := validateRenderedNodePrompt(n, rendered, agents); err != nil {
 		return planner.SubResult{}, err
 	}
 	resp, err := r.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
@@ -153,6 +189,18 @@ func (r *DriverRunner) runNode(ctx context.Context, n planner.Node, outputs map[
 		Output:   output,
 		Error:    errorMessage,
 	}, nil
+}
+
+func replanPrompt(original string, nodes []planner.Node, validationErr error, attempt int) string {
+	rawNodes, _ := json.MarshalIndent(nodes, "", "  ")
+	return fmt.Sprintf(`%s
+
+<PLAN_VALIDATION_ERROR attempt="%d" max_attempts="5">
+The previous DAG plan was rejected before dispatch. Re-plan the invalid step(s), keeping valid intent intact.
+Validation error: %s
+Rejected plan:
+%s
+</PLAN_VALIDATION_ERROR>`, original, attempt, validationErr.Error(), string(rawNodes))
 }
 
 func (r *DriverRunner) waitTask(ctx context.Context, taskID string) (*agentsdk.TaskInfo, error) {

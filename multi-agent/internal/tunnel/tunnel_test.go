@@ -154,6 +154,9 @@ func TestPublishCard_IncludesToolsAndResources(t *testing.T) {
 	if len(tools) != 2 || tools[0] != "echo" || tools[1] != "raise" {
 		t.Fatalf("tools = %v", tools)
 	}
+	if card["capability_doc_path"] != "/capabilities" {
+		t.Fatalf("capability_doc_path = %v", card["capability_doc_path"])
+	}
 	mcpTools, _ := card["mcp_tools"].([]interface{})
 	if len(mcpTools) != 1 {
 		t.Fatalf("mcp_tools = %v", mcpTools)

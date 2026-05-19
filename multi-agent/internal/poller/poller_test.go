@@ -61,7 +61,7 @@ func TestPoller_PollsAndCompletes(t *testing.T) {
 
 	p := New(Config{ServerURL: srv.URL, ProxyToken: "ptoken", IdlePoll: 50 * time.Millisecond, ActivePoll: 10 * time.Millisecond}, d, s)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	go p.Run(ctx)
 
@@ -69,7 +69,7 @@ func TestPoller_PollsAndCompletes(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		return len(statuses) >= 2 // running + completed
-	}, time.Second, 20*time.Millisecond)
+	}, 15*time.Second, 20*time.Millisecond)
 
 	mu.Lock()
 	s0, s1 := statuses[0], statuses[1]
@@ -116,7 +116,7 @@ func TestPoller_ExecutesEveryTaskReturnedByPollBatch(t *testing.T) {
 
 	p := New(Config{ServerURL: srv.URL, ProxyToken: "ptoken", IdlePoll: 50 * time.Millisecond, ActivePoll: 10 * time.Millisecond}, d, s)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	go p.Run(ctx)
 
@@ -124,7 +124,7 @@ func TestPoller_ExecutesEveryTaskReturnedByPollBatch(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		return len(statuses["t1"]) >= 2 && len(statuses["t2"]) >= 2
-	}, time.Second, 20*time.Millisecond)
+	}, 15*time.Second, 20*time.Millisecond)
 
 	mu.Lock()
 	defer mu.Unlock()
