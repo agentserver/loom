@@ -19,6 +19,10 @@ import (
 
 const fanoutFailureDrainTimeout = 5 * time.Second
 
+// maxValidationReplans bounds how many mcp call validation-failure replans
+// the orchestrator will tolerate for a single node before failing it.
+const maxValidationReplans = 3
+
 func fanoutNoProgressTimeout(cfg config.Fanout) time.Duration {
 	if cfg.SubTaskDefaults.TimeoutSec > 0 {
 		return time.Duration(cfg.SubTaskDefaults.TimeoutSec+30) * time.Second
@@ -551,7 +555,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 					}),
 				})
 				validationReplans++
-				if validationReplans >= 3 {
+				if validationReplans >= maxValidationReplans {
 					sched.MarkDispatched(n.ID)
 					inFlight++
 					go func(n planner.Node, e error) {
@@ -616,55 +620,52 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 		sched.Report(d.NodeID, d.Status, d.Output, d.Error)
 		recordTerminalDone(d)
 		if d.Status == "completed" {
-			if hType, hMeta, hOk := parseOutputHandle(d.Output); hOk {
-				switch hType {
-				case "mcp_tool_set":
-					o.emit(observer.Event{
-						Type:          observer.EventMasterMCPReplan,
-						TaskID:        t.ID,
-						SubtaskID:     d.NodeID,
-						ChildTaskID:   d.ChildTaskID,
-						Status:        hType,
-						MCPServerName: hMeta["name"],
-						Payload:       observerPayload(map[string]interface{}{"type": hType, "meta": hMeta}),
-					})
-					freshAgents, derr := o.discoverFiltered(fanoutCtx)
-					if derr == nil {
-						agents = freshAgents
-					}
-					// Spell out the server/tool relationship explicitly so
-					// the planner doesn't have to infer it from the raw
-					// handle JSON. mcpExec routes by server name; the tools
-					// list is what's INSIDE that server.
-					builtMsg := fmt.Sprintf(
-						"BUILT a new MCP server. Now use it via skill='mcp' with "+
-							"prompt JSON {\"server\":%q,\"tool\":\"<one of: %s>\",\"args\":{...}}.",
-						hMeta["name"], hMeta["tools"])
-					ctx2 := t.Prompt + "\n\n" + builtMsg
-					newPlan, perr := planWithProgress(fanoutCtx, ctx2, agents)
-					if perr != nil {
-						cancelAll()
-						return executor.Result{}, fmt.Errorf("replan after build: %w", perr)
-					}
-					if len(newPlan) == 0 {
-						continue
-					}
-					newPlan = renamePlanIDs(newPlan, d.NodeID)
-					if err := validateAppendPlanForContract(allNodes, newPlan, tc, agents); err != nil {
-						cancelAll()
-						return executor.Result{}, fmt.Errorf("invalid post-build plan: %w", err)
-					}
-					emitPlanningCompleted(newPlan)
-					if err := sched.Append(newPlan); err != nil {
-						cancelAll()
-						return executor.Result{}, fmt.Errorf("append post-build plan: %w", err)
-					}
-					allNodes = append(allNodes, newPlan...)
-					for _, n := range newPlan {
-						optionalByID[n.ID] = n.Optional
-					}
-					appendSubTaskRows(o.store, t.ID, newPlan)
+			if hType, hMeta, hOk := parseOutputHandle(d.Output); hOk && hType == "mcp_tool_set" {
+				o.emit(observer.Event{
+					Type:          observer.EventMasterMCPReplan,
+					TaskID:        t.ID,
+					SubtaskID:     d.NodeID,
+					ChildTaskID:   d.ChildTaskID,
+					Status:        hType,
+					MCPServerName: hMeta["name"],
+					Payload:       observerPayload(map[string]interface{}{"type": hType, "meta": hMeta}),
+				})
+				freshAgents, derr := o.discoverFiltered(fanoutCtx)
+				if derr == nil {
+					agents = freshAgents
 				}
+				// Spell out the server/tool relationship explicitly so
+				// the planner doesn't have to infer it from the raw
+				// handle JSON. mcpExec routes by server name; the tools
+				// list is what's INSIDE that server.
+				builtMsg := fmt.Sprintf(
+					"BUILT a new MCP server. Now use it via skill='mcp' with "+
+						"prompt JSON {\"server\":%q,\"tool\":\"<one of: %s>\",\"args\":{...}}.",
+					hMeta["name"], hMeta["tools"])
+				ctx2 := t.Prompt + "\n\n" + builtMsg
+				newPlan, perr := planWithProgress(fanoutCtx, ctx2, agents)
+				if perr != nil {
+					cancelAll()
+					return executor.Result{}, fmt.Errorf("replan after build: %w", perr)
+				}
+				if len(newPlan) == 0 {
+					continue
+				}
+				newPlan = renamePlanIDs(newPlan, d.NodeID)
+				if err := validateAppendPlanForContract(allNodes, newPlan, tc, agents); err != nil {
+					cancelAll()
+					return executor.Result{}, fmt.Errorf("invalid post-build plan: %w", err)
+				}
+				emitPlanningCompleted(newPlan)
+				if err := sched.Append(newPlan); err != nil {
+					cancelAll()
+					return executor.Result{}, fmt.Errorf("append post-build plan: %w", err)
+				}
+				allNodes = append(allNodes, newPlan...)
+				for _, n := range newPlan {
+					optionalByID[n.ID] = n.Optional
+				}
+				appendSubTaskRows(o.store, t.ID, newPlan)
 			}
 		} else {
 			if !optionalByID[d.NodeID] || policy == "all_or_nothing" {
