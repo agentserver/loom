@@ -263,55 +263,6 @@ func TestDriverRunnerFallsBackWhenReduceFails(t *testing.T) {
 	require.True(t, strings.Contains(got.Summary, "preserved output"))
 }
 
-func TestDriverRunnerDelegatesBuildSpecAsCanonicalPrompt(t *testing.T) {
-	buildSpec := json.RawMessage(`{
-		"name":"row_sum",
-		"description":"sum rows",
-		"tools":[{
-			"name":"sum_rows",
-			"description":"sum numeric rows",
-			"args_schema":{"type":"object","properties":{"rows":{"type":"array"}},"required":["rows"]},
-			"result_description":"sum result"
-		}]
-	}`)
-	sdk := &fakeRunnerSDK{
-		cards: []agentsdk.AgentCard{{
-			AgentID: "builder", Status: "available",
-			Card: json.RawMessage(`{"skills":["build_mcp"]}`),
-		}},
-		tasks: []agentsdk.TaskInfo{{Status: "completed", Output: `{"type":"mcp_tool_set"}`}},
-	}
-	plannerFake := &fakeRunnerPlanner{
-		nodes: []planner.Node{{
-			ID: "build", TargetID: "builder", Skill: "build_mcp", Kind: "build_mcp", BuildSpec: buildSpec,
-		}},
-		summary: "built",
-	}
-	runner := NewDriverRunner(plannerFake, sdk, RunnerConfig{})
-
-	_, err := runner.Run(context.Background(), "build a rows tool")
-
-	require.NoError(t, err)
-	require.Len(t, sdk.delegated, 1)
-	require.Equal(t, "build_mcp", sdk.delegated[0].Skill)
-	require.JSONEq(t, `{
-		"name":"row_sum",
-		"description":"sum rows",
-		"tools":[{
-			"name":"sum_rows",
-			"description":"sum numeric rows",
-			"args_schema":{"type":"object","properties":{"rows":{"type":"array"}},"required":["rows"]},
-			"result_description":"sum result"
-		}],
-		"hints":"",
-		"allowed_packages":[],
-		"compose_servers":[],
-		"version":1,
-		"iteration":1,
-		"max_iterations":3
-	}`, sdk.delegated[0].Prompt)
-}
-
 func TestDriverRunnerReplansInvalidMCPArgsBeforeDispatch(t *testing.T) {
 	invalid := []planner.Node{{
 		ID:       "call",

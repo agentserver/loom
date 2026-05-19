@@ -227,7 +227,7 @@ func (s *Scheduler) AllFinished() []FinishedNode {
 }
 
 // Append adds new nodes to a running scheduler. Used by runFanout's
-// phase-boundary handler when re-planning after a build_mcp completes.
+// phase-boundary handler when re-planning after an mcp_tool_set output.
 //
 // Caller is responsible for unique node ids; Append errors if any new node
 // shares an id with an existing one. depends_on may reference either

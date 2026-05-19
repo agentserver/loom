@@ -32,13 +32,6 @@ func ValidateWithContractPolicy(nodes []planner.Node, policy contract.ExecutionP
 	if err := validateContractDepth(nodes, policy); err != nil {
 		return err
 	}
-	if !policy.AllowBuildMCP {
-		for _, n := range nodes {
-			if n.Skill == "build_mcp" || n.Kind == "build_mcp" {
-				return fmt.Errorf("build_mcp node %s rejected by contract policy", n.ID)
-			}
-		}
-	}
 	return nil
 }
 
@@ -64,13 +57,6 @@ func ValidateAppendWithContractPolicy(existing []planner.Node, appended []planne
 	}
 	if err := validateContractDepth(combined, policy); err != nil {
 		return err
-	}
-	if !policy.AllowBuildMCP {
-		for _, n := range appended {
-			if n.Skill == "build_mcp" || n.Kind == "build_mcp" {
-				return fmt.Errorf("build_mcp node %s rejected by contract policy", n.ID)
-			}
-		}
 	}
 	return nil
 }
