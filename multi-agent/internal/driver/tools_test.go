@@ -1526,3 +1526,94 @@ func TestTool_CancelTask_StubReturnsNotSupported(t *testing.T) {
 		}
 	}
 }
+
+// TestSubmitTask_JSONSkill_NoManifestPrefix verifies that submit_task with a
+// JSON-prompt skill (mcp/bash/register_mcp/claude_permissions) sends the
+// caller's prompt downstream verbatim. Slave executors for these skills
+// json.Unmarshal the prompt; the USER_FILES_MANIFEST prefix would break that
+// with `invalid character '<'`.
+func TestSubmitTask_JSONSkill_NoManifestPrefix(t *testing.T) {
+	for _, skill := range []string{"mcp", "bash", "register_mcp", "claude_permissions"} {
+		t.Run(skill, func(t *testing.T) {
+			var gotPrompt string
+			sdk := &fakeSDK{
+				discoverFunc: func() ([]agentsdk.AgentCard, error) {
+					return []agentsdk.AgentCard{
+						{AgentID: "slave-1", DisplayName: "slave-1", Status: "available",
+							Card: json.RawMessage(`{"skills":["` + skill + `"]}`)},
+					}, nil
+				},
+				delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+					gotPrompt = req.Prompt
+					return &agentsdk.DelegateTaskResponse{TaskID: "t"}, nil
+				},
+			}
+			tools := newTestTools(t, sdk)
+			args := json.RawMessage(`{
+                "prompt": "{\"server\":\"x\",\"tool\":\"y\",\"args\":{}}",
+                "target_display_name": "slave-1",
+                "skill": "` + skill + `"
+            }`)
+			_, err := toolByName(t, tools, "submit_task").Call(context.Background(), args)
+			require.NoError(t, err)
+			require.NotContains(t, gotPrompt, "<USER_FILES_MANIFEST",
+				"skill %s must not receive a USER_FILES_MANIFEST prefix", skill)
+			require.Equal(t, `{"server":"x","tool":"y","args":{}}`, gotPrompt)
+		})
+	}
+}
+
+// TestSubmitTask_JSONSkill_RejectsReadPaths verifies that read_paths or
+// write_paths with a JSON-prompt skill returns a clear error: the manifest
+// cannot be conveyed without breaking the slave's json.Unmarshal.
+func TestSubmitTask_JSONSkill_RejectsReadPaths(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "slave-1", DisplayName: "slave-1", Status: "available",
+					Card: json.RawMessage(`{"skills":["mcp"]}`)},
+			}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "x.txt")
+	require.NoError(t, os.WriteFile(file, []byte("x"), 0o644))
+	args := json.RawMessage(`{
+        "prompt": "{}",
+        "read_paths": ["` + file + `"],
+        "target_display_name": "slave-1",
+        "skill": "mcp"
+    }`)
+	_, err := toolByName(t, tools, "submit_task").Call(context.Background(), args)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "JSON-only")
+}
+
+// TestSubmitTask_ChatStillGetsManifest regression-guards that chat-style
+// skills still receive the manifest prefix (so Claude can see read/write
+// handles even when none are present).
+func TestSubmitTask_ChatStillGetsManifest(t *testing.T) {
+	var gotPrompt string
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "slave-1", DisplayName: "slave-1", Status: "available",
+					Card: json.RawMessage(`{"skills":["chat"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			gotPrompt = req.Prompt
+			return &agentsdk.DelegateTaskResponse{TaskID: "t"}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	args := json.RawMessage(`{
+        "prompt": "do the thing",
+        "target_display_name": "slave-1",
+        "skill": "chat"
+    }`)
+	_, err := toolByName(t, tools, "submit_task").Call(context.Background(), args)
+	require.NoError(t, err)
+	require.Contains(t, gotPrompt, "<USER_FILES_MANIFEST")
+}
