@@ -208,7 +208,7 @@ func TestContractEnvelope_StrippedForChat(t *testing.T) {
 }
 
 // TestContractEnvelope_StrippedForBash verifies the strip works for skills
-// whose prompts are JSON: without stripping, bash/mcp/build_mcp executors call
+// whose prompts are JSON: without stripping, bash/mcp/register_mcp executors call
 // json.Unmarshal on the envelope and immediately fail with "prompt must be JSON".
 func TestContractEnvelope_StrippedForBash(t *testing.T) {
 	exec := &stubExec{res: executor.Result{Summary: "ok"}}

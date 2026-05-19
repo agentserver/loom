@@ -33,7 +33,6 @@ Contracts make driver-side clarification and routing deterministic. Always apply
   },
   "execution_policy": {
     "routing": "direct_first",
-    "allow_build_mcp": false,
     "allow_code_artifacts": true,
     "code_persistence": "observer_artifact_store",
     "expose_code_to_user": "on_request",
@@ -77,7 +76,6 @@ Contracts make driver-side clarification and routing deterministic. Always apply
 - `write_mode` supports `artifact_only`, `patch`, and `repo_commit`.
 - `repo_commit` requires `require_user_approval_for_repo_writes:true`.
 - Numeric DAG limits must be at least 1.
-- If `allow_build_mcp:false`, do not require `build_mcp`.
 
 ## Envelope Format
 
@@ -92,12 +90,3 @@ Prompt body for the selected agent.
 ```
 
 Agents decode the envelope before execution. The body defaults to `intent.goal` when no explicit prompt is supplied.
-
-## Build MCP Policy
-
-`allow_build_mcp` defaults to false. Set it true only when:
-
-- no visible MCP tool satisfies the required tool contract;
-- a slave advertises `build_mcp`;
-- generated code should be preserved in observer artifacts or the slave generated MCP registry;
-- later conversations may need to inspect or revise the generated code.

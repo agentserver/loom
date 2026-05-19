@@ -16,12 +16,12 @@ mcp_servers: {}
 discovery:
   display_name: dynmcp-builder
   description: |
-    Builder agent. Has skill build_mcp; can author Python MCP servers
-    on demand. Resources tagged "crypto" and python3-capable.
+    Builder agent. Has skill register_mcp; can register pre-built Python MCP servers.
+    Resources tagged "crypto" and python3-capable.
   skills:
     - chat
     - mcp
-    - build_mcp
+    - register_mcp
 
 resources:
   cpu:

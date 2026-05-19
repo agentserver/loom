@@ -61,14 +61,14 @@ func ParseJSON(raw string) (Spec, error) {
 	dec := json.NewDecoder(strings.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&spec); err != nil {
-		return Spec{}, fmt.Errorf("malformed build_mcp spec: %w", err)
+		return Spec{}, fmt.Errorf("malformed mcp build spec: %w", err)
 	}
 	var trailing any
 	if err := dec.Decode(&trailing); err != io.EOF {
 		if err == nil {
-			return Spec{}, fmt.Errorf("malformed build_mcp spec: trailing content")
+			return Spec{}, fmt.Errorf("malformed mcp build spec: trailing content")
 		}
-		return Spec{}, fmt.Errorf("malformed build_mcp spec: %w", err)
+		return Spec{}, fmt.Errorf("malformed mcp build spec: %w", err)
 	}
 	spec = Normalize(spec)
 	if err := Validate(spec); err != nil {

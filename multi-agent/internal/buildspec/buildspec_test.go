@@ -43,7 +43,7 @@ func TestParseJSON_NormalizesDefaultsAndLists(t *testing.T) {
 func TestParseJSON_RejectsNaturalLanguage(t *testing.T) {
 	_, err := ParseJSON("please build a reusable MCP server")
 	require.Error(t, err)
-	require.ErrorContains(t, err, "malformed build_mcp spec")
+	require.ErrorContains(t, err, "malformed mcp build spec")
 }
 
 func TestParseJSON_RejectsTrailingProse(t *testing.T) {
@@ -56,7 +56,7 @@ func TestParseJSON_RejectsTrailingProse(t *testing.T) {
 
 	_, err := ParseJSON(raw)
 	require.Error(t, err)
-	require.ErrorContains(t, err, "malformed build_mcp spec")
+	require.ErrorContains(t, err, "malformed mcp build spec")
 }
 
 func TestValidate_RejectsInvalidNameAndMissingTools(t *testing.T) {

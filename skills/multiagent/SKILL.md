@@ -16,16 +16,16 @@ Do not assume driver and slaves share a local filesystem. Move user files throug
 ## Default Workflow
 
 1. Call `inspect_capabilities` before planning nontrivial work.
-2. Clarify missing intent: goal, success criteria, inputs, outputs, allowed targets, and whether generated MCP code is allowed.
+2. Clarify missing intent: goal, success criteria, inputs, outputs, and allowed targets.
 3. Draft a `TaskContract` with `draft_task_contract`, then adjust it if needed.
-4. Call `dry_run_contract`. If blocked, ask for missing permission/capability or build an MCP server only when `allow_build_mcp` is true.
+4. Call `dry_run_contract`. If blocked, ask for missing permission/capability or pair the bash skill with `register_mcp` to add a new MCP server.
 5. Submit with `submit_contract_task` unless a simple direct helper is more appropriate.
 6. Monitor with `get_task`, `wait_task`, and `tail_subtasks`.
 
 ## Route Choice
 
 - `direct_slave`: one slave already satisfies the task and no DAG is needed.
-- `driver_fanout`: driver should orchestrate multiple slaves, staged MCP calls, generated MCP, or clarification-friendly DAGs.
+- `driver_fanout`: driver should orchestrate multiple slaves, staged MCP calls, or clarification-friendly DAGs.
 - `blocked`: do not submit; fix missing skills, tools, resources, targets, or build policy first.
 
 ## Interface References
@@ -40,7 +40,7 @@ Read only the reference needed for the task:
 ## Common Mistakes
 
 - Skipping `dry_run_contract` and submitting an under-specified contract.
-- Setting `allow_build_mcp: true` without requiring generated code to persist as artifacts.
+- Calling `register_mcp` without first validating the generated source via bash (smoke + acceptance).
 - Calling `skill:"mcp"` with natural language instead of JSON `{server, tool, args}`.
 - Asking slave Claude Code to edit its own permissions; permission changes go through native `skill:"claude_permissions"` for now.
 - Using `127.0.0.1` or local file paths as if they were reachable from other machines.

@@ -21,7 +21,7 @@ Returns visible agents excluding driver self:
       "agent_id": "sandbox-id",
       "display_name": "slave-a",
       "short_id": "abc123",
-      "skills": ["chat", "mcp", "build_mcp", "bash", "claude_permissions"],
+      "skills": ["chat", "mcp", "register_mcp", "bash", "claude_permissions"],
       "tools": ["legacy_tool_name"],
       "mcp_tools": [{"server": "srv", "name": "tool", "input_schema": {}}],
       "resources": {"tags": ["python3"]}
@@ -56,7 +56,6 @@ Input:
   "required_tools": [],
   "resources": {"tags": ["python3"]},
   "routing": "direct_first",
-  "allow_build_mcp": false,
   "max_concurrency": 2,
   "allowed_targets": []
 }
@@ -77,7 +76,6 @@ Returns:
 ```json
 {
   "runnable": true,
-  "requires_build_mcp": false,
   "recommended_route": "driver_fanout",
   "recommended_target_id": "",
   "recommended_target_display_name": "",
@@ -85,7 +83,6 @@ Returns:
   "satisfied_tools": [],
   "missing_tools": [],
   "missing_skills": [],
-  "candidate_build_targets": [],
   "reasons": ["driver can orchestrate with currently advertised tools"]
 }
 ```
@@ -189,6 +186,35 @@ Input:
 ```
 
 Requires target skill `bash`. Delegates `skill:"bash"` with JSON prompt.
+
+### `register_slave_mcp`
+
+Input:
+
+```json
+{
+  "target_agent_id": "optional",
+  "target_display_name": "slave-a",
+  "spec": {
+    "name": "row_stats",
+    "description": "Compute statistics for rows",
+    "version": 1,
+    "tools": [
+      {
+        "name": "summarize_rows",
+        "description": "Summarize numeric row values",
+        "args_schema": {"type":"object","properties":{"rows":{"type":"array"}},"required":["rows"]},
+        "result_description": "JSON summary"
+      }
+    ],
+    "allowed_packages": []
+  },
+  "source_path": "generated_mcp/row_stats/v1.py",
+  "timeout_sec": 60
+}
+```
+
+Requires target skill `register_mcp`. Delegates `skill:"register_mcp"` with the JSON above. Use after a bash task has written and validated the source.
 
 ### `get_slave_claude_permissions`
 

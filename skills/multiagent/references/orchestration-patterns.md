@@ -20,16 +20,15 @@ Pattern:
 2. Draft and dry-run the contract.
 3. If runnable with `driver_fanout`, submit without target override.
 4. Driver planner creates DAG nodes for slaves.
-5. Driver validates DAG shape, target skill, `build_mcp` specs, and `mcp` server/tool/args before dispatch.
+5. Driver validates DAG shape, target skill, and `mcp` server/tool/args before dispatch.
 6. On validation failure, driver feeds `PLAN_VALIDATION_ERROR` back to planner up to 5 attempts.
 
 ## Dynamic MCP
 
-Use when the task needs a reusable deterministic tool that is not currently advertised.
+Use when the task needs a reusable deterministic tool that is not currently advertised. Use `bash` to generate and validate the source, then `register_mcp` (or `register_slave_mcp`) to install it.
 
 Rules:
 
-- First phase should contain independent `build_mcp` root nodes only.
 - Do not emit dependent use nodes until the generated server/tool is visible in refreshed capabilities.
 - Prefer narrow MCP servers with one coherent tool contract.
 - Keep `allowed_packages` minimal. If blocked by imports, replan with explicit user or policy approval.
@@ -57,7 +56,7 @@ Do not ask slave Claude Code to edit its own permissions.
 ## Failure Handling
 
 - `dry_run_contract` blocked: change the contract or ask for missing authorization before submit.
-- `build_mcp` malformed: fix the spec; do not send natural language to `skill:"build_mcp"`.
+- `register_mcp` rejected: validate source syntax and imports before submitting; do not send natural language to `skill:"register_mcp"`.
 - `mcp` schema mismatch: pass only fields in `input_schema`; use rendered JSON paths like `{{node.output.rows}}` for nested outputs.
 - Required DAG node failed: report which node failed and which downstream nodes were skipped.
 - Reducer uncertainty: preserve evidence from subtask outputs and ask a follow-up instead of inventing conclusions.

@@ -38,7 +38,6 @@
     "execution_policy": {
       "routing": "direct_first",
       "allow_master": true,
-      "allow_build_mcp": true,
       "allow_code_artifacts": true,
       "code_persistence": "observer_artifact_store",
       "expose_code_to_user": "on_request",

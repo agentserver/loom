@@ -64,7 +64,7 @@ func extractTopLevelModules(src string) map[string]bool {
 }
 
 // packageAliases maps Python import names to their pip/wheel package names
-// where the two differ. Used so that allowed_packages in a build_mcp spec
+// where the two differ. Used so that allowed_packages in a register_mcp spec
 // can use the wheel name (more familiar) while we still allow the
 // corresponding import.
 var packageAliases = map[string]string{

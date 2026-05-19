@@ -145,11 +145,11 @@ func run(cfgPath string) error {
 		routes["register_mcp"] = executor.NewRegisterMCPExecutor(executor.RegisterMCPConfig{
 			WorkDir: workdir,
 			MCPExec: mcpExec,
-			Observer: obs,
 			Republish: func(ctx context.Context) error {
 				refreshCapabilities(ctx, "register_mcp registered or updated MCP server")
 				return tn.PublishCard(ctx)
 			},
+			Observer: obs,
 		})
 	}
 	d := dispatch.New(routes, refreshingJournal{

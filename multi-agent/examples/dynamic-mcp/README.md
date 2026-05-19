@@ -6,18 +6,7 @@ End-to-end example for the autonomous build-and-register loop.
 
 The master receives a task that needs a tool no agent in the workspace
 advertises (compute SHA-256 of an image and report parity of last hex digit).
-Master's planner sees that no agent has a `sha256_parity` tool, but the
-`dynmcp-builder` agent has skill `build_mcp` and resources tagged
-`[crypto, python3]`. It emits a `kind: "build_mcp"` node first; the builder
-authors a Python MCP server via claude, validates and registers it, and the
-orchestrator re-plans phase 2 with the new tool visible. Phase 2 emits a
-`skill: "mcp"` use node that calls the freshly-registered tool. The reducer
-summarizes.
-
-If the first build attempt is blocked (e.g., claude wrote `import requests`
-but the spec only allowed stdlib), the orchestrator re-calls the planner
-with `BUILD_MCP_BLOCKED:` context appended; the planner can expand
-`allowed_packages`, revise the spec, or abandon. Iteration is bounded at 3.
+The driver uses `bash` (or `run_slave_bash`) to write and validate the Python source on the `dynmcp-builder` agent, then calls `register_mcp` to install it. The orchestrator re-plans phase 2 with the new tool visible. Phase 2 emits a `skill: "mcp"` use node that calls the freshly-registered tool. The reducer summarizes.
 
 ### Routing Note
 
@@ -27,7 +16,7 @@ using the master `fanout` executor for compatibility or batch-style execution.
 
 ## Layout
 
-- `agent-builder/config.example.yaml` — slave-agent config with `build_mcp` skill + `resources:` advertising `tags: [crypto, python3]`
+- `agent-builder/config.example.yaml` — slave-agent config with `register_mcp` skill + `resources:` advertising `tags: [crypto, python3]`
 - `e2e-driver/main.go` — Go binary that DelegateTasks the master and asserts the reducer output + checks the generated file landed on disk with the AUTO-GENERATED header
 - `scripts/e2e.sh` — bash wrapper that builds, launches master + builder slave, runs the driver, and reports
 - `scenarios/driver-files-multi-mcp/` — fixture-level scenario showing a driver-side file task that should build multiple independent MCP services in the first phase

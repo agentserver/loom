@@ -8,7 +8,7 @@
 #   - Three pre-registered config files (with credentials filled in by prior
 #     interactive device-flow registration), paths supplied via env:
 #       MASTER_CONFIG    config.yaml for cmd/master-agent
-#       BUILDER_CONFIG   config.yaml for cmd/slave-agent (with build_mcp skill)
+#       BUILDER_CONFIG   config.yaml for cmd/slave-agent (with register_mcp skill)
 #       DRIVER_CONFIG    config.yaml for examples/dynamic-mcp/e2e-driver
 #
 # See README.md in this directory for first-time setup.

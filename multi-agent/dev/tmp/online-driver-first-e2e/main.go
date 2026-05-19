@@ -155,7 +155,6 @@ func main() {
 		"execution_policy": map[string]any{
 			"routing":                               "direct_first",
 			"allow_master":                          false,
-			"allow_build_mcp":                       false,
 			"allow_code_artifacts":                  true,
 			"code_persistence":                      "observer_artifact_store",
 			"expose_code_to_user":                   "on_request",
@@ -196,7 +195,7 @@ func main() {
 		"Create exactly two root chat nodes and no master node.",
 		"Node A must target agent_id " + slaveAID + " (display_name slave-a-online-dag-160628). Ask it to answer with the sentence: slave-a-online-dag-160628 completed its direct driver-first DAG task.",
 		"Node B must target agent_id " + slaveBID + " (display_name slave-b-online-dag-160628). Ask it to answer with the sentence: slave-b-online-dag-160628 completed its direct driver-first DAG task.",
-		"Do not use build_mcp. Do not use skill mcp. Ordinary chat nodes only.",
+		"Do not use register_mcp. Do not use skill mcp. Ordinary chat nodes only.",
 		"After both nodes complete, reduce the two outputs into one concise final summary that names both display names.",
 	}, "\n")
 

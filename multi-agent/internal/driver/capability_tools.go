@@ -79,7 +79,6 @@ func (d *draftTaskContractTool) InputSchema() json.RawMessage {
 			"required_tools":{"type":"array","items":{"type":"string"}},
 			"resources":{"type":"object"},
 			"routing":{"type":"string"},
-			"allow_build_mcp":{"type":"boolean"},
 			"max_concurrency":{"type":"integer"},
 			"allowed_targets":{"type":"array","items":{"type":"string"}}
 		},
@@ -97,7 +96,6 @@ func (d *draftTaskContractTool) Call(ctx context.Context, raw json.RawMessage) (
 		RequiredTools   []string               `json:"required_tools"`
 		Resources       json.RawMessage        `json:"resources"`
 		Routing         string                 `json:"routing"`
-		AllowBuildMCP   bool                   `json:"allow_build_mcp"`
 		MaxConcurrency  int                    `json:"max_concurrency"`
 		AllowedTargets  []string               `json:"allowed_targets"`
 	}
@@ -133,7 +131,6 @@ func (d *draftTaskContractTool) Call(ctx context.Context, raw json.RawMessage) (
 		DataContract: contract.DataContract{WriteTargets: args.WriteTargets},
 		ExecutionPolicy: contract.ExecutionPolicy{
 			Routing:        routing,
-			AllowBuildMCP:  args.AllowBuildMCP,
 			AllowedTargets: args.AllowedTargets,
 		},
 		CapabilityRequirements: contract.CapabilityRequirements{
@@ -193,18 +190,16 @@ func (d *dryRunContractTool) Call(ctx context.Context, raw json.RawMessage) (jso
 }
 
 type dryRunReport struct {
-	Runnable              bool                     `json:"runnable"`
-	RequiresBuildMCP      bool                     `json:"requires_build_mcp"`
-	RecommendedRoute      string                   `json:"recommended_route"`
-	RecommendedTargetID   string                   `json:"recommended_target_id,omitempty"`
-	RecommendedTargetName string                   `json:"recommended_target_display_name,omitempty"`
-	RecommendedSkill      string                   `json:"recommended_skill,omitempty"`
-	SatisfiedTools        []string                 `json:"satisfied_tools"`
-	MissingTools          []string                 `json:"missing_tools"`
-	MissingSkills         []string                 `json:"missing_skills"`
-	MissingResources      json.RawMessage          `json:"missing_resources,omitempty"`
-	CandidateBuildTargets []contract.ResourceAgent `json:"candidate_build_targets,omitempty"`
-	Reasons               []string                 `json:"reasons"`
+	Runnable              bool            `json:"runnable"`
+	RecommendedRoute      string          `json:"recommended_route"`
+	RecommendedTargetID   string          `json:"recommended_target_id,omitempty"`
+	RecommendedTargetName string          `json:"recommended_target_display_name,omitempty"`
+	RecommendedSkill      string          `json:"recommended_skill,omitempty"`
+	SatisfiedTools        []string        `json:"satisfied_tools"`
+	MissingTools          []string        `json:"missing_tools"`
+	MissingSkills         []string        `json:"missing_skills"`
+	MissingResources      json.RawMessage `json:"missing_resources,omitempty"`
+	Reasons               []string        `json:"reasons"`
 }
 
 func analyzeContractCapabilities(cards []agentsdk.AgentCard, selfID string, tc contract.TaskContract) dryRunReport {
@@ -212,8 +207,6 @@ func analyzeContractCapabilities(cards []agentsdk.AgentCard, selfID string, tc c
 	report := dryRunReport{RecommendedRoute: routeBlocked}
 	report.SatisfiedTools, report.MissingTools = matchRequiredTools(snapshot.Agents, tc.CapabilityRequirements.Tools, tc.ExecutionPolicy.AllowedTargets)
 	report.MissingSkills = missingRequiredSkills(snapshot.Agents, tc.CapabilityRequirements.Skills, tc.ExecutionPolicy.AllowedTargets)
-	buildTargets := candidateBuildMCPAgents(snapshot.Agents, tc.CapabilityRequirements.Resources, tc.ExecutionPolicy.AllowedTargets)
-	report.CandidateBuildTargets = buildTargets
 	if len(report.MissingSkills) > 0 {
 		report.Reasons = append(report.Reasons, "required skills are missing or unavailable")
 		return report
@@ -236,7 +229,6 @@ func analyzeContractCapabilities(cards []agentsdk.AgentCard, selfID string, tc c
 	}
 
 	master := firstAllowedMaster(snapshot.Agents, tc)
-	buildableMissingTools := len(report.MissingTools) > 0 && tc.ExecutionPolicy.AllowBuildMCP && len(buildTargets) > 0
 	if tc.ExecutionPolicy.Routing == contract.RoutingMasterOnly {
 		if master.AgentID != "" && len(report.MissingTools) == 0 {
 			report.Runnable = true
@@ -247,16 +239,6 @@ func analyzeContractCapabilities(cards []agentsdk.AgentCard, selfID string, tc c
 			report.Reasons = append(report.Reasons, "master can orchestrate with currently advertised tools")
 			return report
 		}
-		if master.AgentID != "" && buildableMissingTools {
-			report.Runnable = true
-			report.RequiresBuildMCP = true
-			report.RecommendedRoute = routeMasterFanout
-			report.RecommendedTargetID = master.AgentID
-			report.RecommendedTargetName = master.DisplayName
-			report.RecommendedSkill = "fanout"
-			report.Reasons = append(report.Reasons, "missing tools can be built by available build_mcp slaves during master orchestration")
-			return report
-		}
 	} else if tc.ExecutionPolicy.Routing == contract.RoutingDirectFirst {
 		if len(report.MissingTools) == 0 {
 			report.Runnable = true
@@ -265,21 +247,9 @@ func analyzeContractCapabilities(cards []agentsdk.AgentCard, selfID string, tc c
 			report.Reasons = append(report.Reasons, "driver can orchestrate with currently advertised tools")
 			return report
 		}
-		if buildableMissingTools {
-			report.Runnable = true
-			report.RequiresBuildMCP = true
-			report.RecommendedRoute = routeDriverFanout
-			report.RecommendedSkill = "fanout"
-			report.Reasons = append(report.Reasons, "missing tools can be built by available build_mcp slaves during driver orchestration")
-			return report
-		}
 	}
 	if len(report.MissingTools) > 0 {
-		if !tc.ExecutionPolicy.AllowBuildMCP {
-			report.Reasons = append(report.Reasons, "required tools are missing and allow_build_mcp is false")
-		} else if len(buildTargets) == 0 {
-			report.Reasons = append(report.Reasons, "required tools are missing and no allowed build_mcp slave is available")
-		}
+		report.Reasons = append(report.Reasons, "required tools are missing or unavailable")
 	}
 	if master.AgentID == "" && tc.ExecutionPolicy.AllowsMaster() {
 		report.Reasons = append(report.Reasons, "no allowed available master with fanout skill is visible")
@@ -413,20 +383,6 @@ func resourcesAvailable(agents []contract.ResourceAgent, required json.RawMessag
 		}
 	}
 	return false
-}
-
-func candidateBuildMCPAgents(agents []contract.ResourceAgent, requiredResources json.RawMessage, allowedTargets []string) []contract.ResourceAgent {
-	candidates := candidateAgentsWithSkill(agents, "build_mcp", allowedTargets)
-	if resourcesRequirementEmpty(requiredResources) {
-		return candidates
-	}
-	out := []contract.ResourceAgent{}
-	for _, candidate := range candidates {
-		if resourceJSONContains(candidate.Resources, requiredResources) {
-			out = append(out, candidate)
-		}
-	}
-	return out
 }
 
 func resourcesRequirementEmpty(required json.RawMessage) bool {

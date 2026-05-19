@@ -58,7 +58,7 @@ func main() {
 	cfg := flag.String("config", "", "driver agent config (must have credentials)")
 	target := flag.String("target-display-name", "master-dynmcp", "master display_name to discover")
 	expect := flag.String("expect-agents", "dynmcp-builder", "comma-separated display_names that must also be visible")
-	prompt := flag.String("prompt", `Compute SHA-256 of the body returned by GET https://www.example.com/ and tell me whether the last hex digit is even or odd. No agent in this workspace currently has a sha256+parity tool, but the dynmcp-builder agent has skill build_mcp. Build the tool first.`, "task prompt")
+	prompt := flag.String("prompt", `Compute SHA-256 of the body returned by GET https://www.example.com/ and tell me whether the last hex digit is even or odd. No agent in this workspace currently has a sha256+parity tool; use bash to generate it on the dynmcp-builder agent and register it with register_mcp.`, "task prompt")
 	timeout := flag.Duration("timeout", 600*time.Second, "overall driver timeout")
 	builderDir := flag.String("builder-dir", "", "path to builder agent's working directory (for file-existence assertions)")
 	flag.Parse()

@@ -24,7 +24,7 @@ type RegisterMCPConfig struct {
 }
 
 // RegisterMCPExecutor validates and registers a pre-written MCP Python file
-// without calling Claude. It is the simpler replacement for BuildMCPExecutor.
+// without calling Claude.
 type RegisterMCPExecutor struct {
 	cfg RegisterMCPConfig
 

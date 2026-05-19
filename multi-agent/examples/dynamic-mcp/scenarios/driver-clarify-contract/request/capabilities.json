@@ -45,7 +45,7 @@
         "short_id": "builder-short",
         "display_name": "builder-slave",
         "status": "available",
-        "skills": ["chat", "build_mcp"],
+        "skills": ["chat", "register_mcp"],
         "resources": {
           "tags": ["python3", "data", "policy"]
         }
@@ -98,7 +98,7 @@
       "short_id": "builder-short",
       "display_name": "builder-slave",
       "status": "available",
-      "skills": ["chat", "build_mcp"],
+      "skills": ["chat", "register_mcp"],
       "resources": {
         "tags": ["python3", "data", "policy"]
       }

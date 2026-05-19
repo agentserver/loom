@@ -227,9 +227,12 @@ func TestSubmitContractTaskMasterOnlyStillDelegatesToMasterFanout(t *testing.T) 
 func TestSubmitContractTaskUsesDriverFanoutWhenRecommended(t *testing.T) {
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			// Two slaves both satisfy the tool, so directContractCapabilityMatches returns >1
+			// and the route becomes driver_fanout (direct_first routing, no missing tools).
 			return []agentsdk.AgentCard{
 				{AgentID: "sbx-driver", DisplayName: "driver", Status: "available"},
-				{AgentID: "builder", DisplayName: "builder", Status: "available", Card: json.RawMessage(`{"skills":["build_mcp"],"resources":{"tags":["python3"]}}`)},
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["chat"],"mcp_tools":[{"server":"csv_profiler","name":"profile_orders_csv"}]}`)},
+				{AgentID: "slave-b", DisplayName: "slave-b", Status: "available", Card: json.RawMessage(`{"skills":["chat"],"mcp_tools":[{"server":"csv_profiler","name":"profile_orders_csv"}]}`)},
 			}, nil
 		},
 		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
@@ -239,7 +242,6 @@ func TestSubmitContractTaskUsesDriverFanoutWhenRecommended(t *testing.T) {
 	}
 	tc := testTaskContract()
 	tc.ExecutionPolicy.Routing = contract.RoutingDirectFirst
-	tc.ExecutionPolicy.AllowBuildMCP = true
 	tc.CapabilityRequirements.Skills = nil
 	tc.CapabilityRequirements.Tools = []string{"csv_profiler/profile_orders_csv"}
 	raw, err := json.Marshal(map[string]interface{}{
@@ -263,9 +265,11 @@ func TestSubmitContractTaskDriverFanoutRequiresConfiguredRunner(t *testing.T) {
 	var delegated bool
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			// Two slaves satisfy the tool → driver_fanout route, but no runner is configured.
 			return []agentsdk.AgentCard{
 				{AgentID: "sbx-driver", DisplayName: "driver", Status: "available"},
-				{AgentID: "builder", DisplayName: "builder", Status: "available", Card: json.RawMessage(`{"skills":["build_mcp"],"resources":{"tags":["python3"]}}`)},
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["chat"],"mcp_tools":[{"server":"csv_profiler","name":"profile_orders_csv"}]}`)},
+				{AgentID: "slave-b", DisplayName: "slave-b", Status: "available", Card: json.RawMessage(`{"skills":["chat"],"mcp_tools":[{"server":"csv_profiler","name":"profile_orders_csv"}]}`)},
 			}, nil
 		},
 		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
@@ -275,7 +279,6 @@ func TestSubmitContractTaskDriverFanoutRequiresConfiguredRunner(t *testing.T) {
 	}
 	tc := testTaskContract()
 	tc.ExecutionPolicy.Routing = contract.RoutingDirectFirst
-	tc.ExecutionPolicy.AllowBuildMCP = true
 	tc.CapabilityRequirements.Skills = nil
 	tc.CapabilityRequirements.Tools = []string{"csv_profiler/profile_orders_csv"}
 	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
@@ -345,7 +348,6 @@ func TestSubmitContractTaskExplicitMasterTargetBypassesDriverFanoutBlock(t *test
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
 			return []agentsdk.AgentCard{
 				{AgentID: "m1", DisplayName: "master", Status: "available", Card: json.RawMessage(`{"skills":["fanout"]}`)},
-				{AgentID: "builder", DisplayName: "builder", Status: "available", Card: json.RawMessage(`{"skills":["build_mcp"],"resources":{"tags":["python3"]}}`)},
 			}, nil
 		},
 		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
@@ -355,7 +357,6 @@ func TestSubmitContractTaskExplicitMasterTargetBypassesDriverFanoutBlock(t *test
 	}
 	tc := testTaskContract()
 	tc.ExecutionPolicy.Routing = contract.RoutingDirectFirst
-	tc.ExecutionPolicy.AllowBuildMCP = true
 	tc.CapabilityRequirements.Skills = nil
 	tc.CapabilityRequirements.Tools = []string{"csv_profiler/profile_orders_csv"}
 	raw, err := json.Marshal(map[string]interface{}{
@@ -620,7 +621,7 @@ func TestTool_InspectCapabilitiesReturnsSnapshotAndSavesIt(t *testing.T) {
 			return []agentsdk.AgentCard{
 				{AgentID: "sbx-driver", DisplayName: "driver", Status: "available"},
 				{AgentID: "m1", DisplayName: "master", Status: "available", Card: json.RawMessage(`{"skills":["fanout"],"mcp_tools":[{"server":"policy","name":"evaluate_rows"}]}`)},
-				{AgentID: "s1", DisplayName: "slave", Status: "available", Card: json.RawMessage(`{"skills":["build_mcp"],"resources":{"tags":["python3"]}}`)},
+				{AgentID: "s1", DisplayName: "slave", Status: "available", Card: json.RawMessage(`{"skills":["register_mcp"],"resources":{"tags":["python3"]}}`)},
 			}, nil
 		},
 	}
@@ -638,7 +639,7 @@ func TestTool_InspectCapabilitiesReturnsSnapshotAndSavesIt(t *testing.T) {
 	require.Contains(t, string(out), `"masters"`)
 	require.Contains(t, string(out), `"slaves"`)
 	require.Contains(t, string(out), "evaluate_rows")
-	require.Contains(t, string(out), "build_mcp")
+	require.Contains(t, string(out), "register_mcp")
 }
 
 func TestTool_DraftTaskContractBuildsContractAndClarificationQuestions(t *testing.T) {
@@ -646,15 +647,13 @@ func TestTool_DraftTaskContractBuildsContractAndClarificationQuestions(t *testin
 	out, err := toolByName(t, tools, "draft_task_contract").Call(context.Background(), json.RawMessage(`{
 		"goal":"Analyze refunds and write a report",
 		"write_targets":[{"kind":"markdown","name":"refund-risk-report.md"}],
-		"required_tools":["csv_profiler/profile_orders_csv","refund_policy_checker/evaluate_rows"],
-		"allow_build_mcp":true
+		"required_tools":["csv_profiler/profile_orders_csv","refund_policy_checker/evaluate_rows"]
 	}`))
 	require.NoError(t, err)
 	require.Contains(t, string(out), `"contract"`)
 	require.Contains(t, string(out), `"conversation_id"`)
 	require.Contains(t, string(out), `"Analyze refunds and write a report"`)
 	require.Contains(t, string(out), `"csv_profiler/profile_orders_csv"`)
-	require.Contains(t, string(out), `"allow_build_mcp":true`)
 	require.Contains(t, string(out), `"clarification_questions"`)
 }
 
@@ -679,7 +678,6 @@ func TestTool_DryRunContractReportsExistingMCPToolsSatisfyRequirements(t *testin
 	out, err := toolByName(t, newTestTools(t, sdk), "dry_run_contract").Call(context.Background(), raw)
 	require.NoError(t, err)
 	require.Contains(t, string(out), `"runnable":true`)
-	require.Contains(t, string(out), `"requires_build_mcp":false`)
 	require.Contains(t, string(out), `"satisfied_tools"`)
 	require.Contains(t, string(out), "refund_policy_checker/evaluate_rows")
 }
@@ -703,7 +701,6 @@ func TestTool_DryRunContractRecommendsDirectSlaveRoute(t *testing.T) {
 	report := callDryRunContractForTest(t, sdk, tc)
 
 	require.True(t, report.Runnable)
-	require.False(t, report.RequiresBuildMCP)
 	require.Equal(t, "direct_slave", report.RecommendedRoute)
 	require.Equal(t, "slave-a", report.RecommendedTargetID)
 	require.Equal(t, "chat", report.RecommendedSkill)
@@ -783,47 +780,45 @@ func TestTool_DryRunContractMatchesEquivalentNumericResources(t *testing.T) {
 func TestTool_DryRunContractRecommendsDriverFanoutRoute(t *testing.T) {
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			// Two slaves both have the tool; no single-direct-slave match → driver_fanout.
 			return []agentsdk.AgentCard{
 				{AgentID: "sbx-driver", DisplayName: "driver", Status: "available"},
-				{AgentID: "builder", DisplayName: "builder", Status: "available", Card: json.RawMessage(`{"skills":["build_mcp"],"resources":{"tags":["python3"]}}`)},
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["chat"],"mcp_tools":[{"server":"csv_profiler","name":"profile_orders_csv"}]}`)},
+				{AgentID: "slave-b", DisplayName: "slave-b", Status: "available", Card: json.RawMessage(`{"skills":["chat"],"mcp_tools":[{"server":"csv_profiler","name":"profile_orders_csv"}]}`)},
 			}, nil
 		},
 	}
 	tc := testTaskContract()
-	tc.ExecutionPolicy.AllowBuildMCP = true
+	tc.ExecutionPolicy.Routing = contract.RoutingDirectFirst
 	tc.CapabilityRequirements.Skills = nil
 	tc.CapabilityRequirements.Tools = []string{"csv_profiler/profile_orders_csv"}
 
 	report := callDryRunContractForTest(t, sdk, tc)
 
 	require.True(t, report.Runnable)
-	require.True(t, report.RequiresBuildMCP)
 	require.Equal(t, "driver_fanout", report.RecommendedRoute)
 	require.Empty(t, report.RecommendedTargetID)
 	require.Equal(t, "fanout", report.RecommendedSkill)
 }
 
-func TestTool_DryRunContractBlocksBuildWhenBuilderLacksRequiredResources(t *testing.T) {
+func TestTool_DryRunContractBlocksWhenToolsMissingAndNoSatisfyingAgent(t *testing.T) {
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
 			return []agentsdk.AgentCard{
 				{AgentID: "resource-slave", DisplayName: "resource-slave", Status: "available", Card: json.RawMessage(`{"skills":["chat"],"resources":{"tags":["gpu"]}}`)},
-				{AgentID: "builder", DisplayName: "builder", Status: "available", Card: json.RawMessage(`{"skills":["build_mcp"],"resources":{"tags":["python3"]}}`)},
 			}, nil
 		},
 	}
 	tc := testTaskContract()
-	tc.ExecutionPolicy.AllowBuildMCP = true
+	tc.ExecutionPolicy.Routing = contract.RoutingDirectFirst
 	tc.CapabilityRequirements.Skills = nil
 	tc.CapabilityRequirements.Tools = []string{"csv_profiler/profile_orders_csv"}
-	tc.CapabilityRequirements.Resources = json.RawMessage(`{"tags":["gpu"]}`)
 
 	report := callDryRunContractForTest(t, sdk, tc)
 
 	require.False(t, report.Runnable)
 	require.Equal(t, "blocked", report.RecommendedRoute)
 	require.Contains(t, report.MissingTools, "csv_profiler/profile_orders_csv")
-	require.Empty(t, report.CandidateBuildTargets)
 }
 
 func TestTool_DryRunContractRecommendsMasterFanoutRoute(t *testing.T) {
@@ -842,23 +837,21 @@ func TestTool_DryRunContractRecommendsMasterFanoutRoute(t *testing.T) {
 	report := callDryRunContractForTest(t, sdk, tc)
 
 	require.True(t, report.Runnable)
-	require.False(t, report.RequiresBuildMCP)
 	require.Equal(t, "master_fanout", report.RecommendedRoute)
 	require.Equal(t, "m1", report.RecommendedTargetID)
 	require.Equal(t, "fanout", report.RecommendedSkill)
 }
 
-func TestTool_DryRunContractSuggestsBuildMCPWhenToolsMissing(t *testing.T) {
+func TestTool_DryRunContractReportsBlockedWhenToolsMissingNoCandidate(t *testing.T) {
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
 			return []agentsdk.AgentCard{
 				{AgentID: "m1", DisplayName: "master", Status: "available", Card: json.RawMessage(`{"skills":["fanout"]}`)},
-				{AgentID: "builder", DisplayName: "builder", Status: "available", Card: json.RawMessage(`{"skills":["build_mcp"],"resources":{"tags":["python3"]}}`)},
 			}, nil
 		},
 	}
 	tc := testTaskContract()
-	tc.ExecutionPolicy.AllowBuildMCP = true
+	tc.ExecutionPolicy.Routing = contract.RoutingMasterOnly
 	tc.CapabilityRequirements.Skills = nil
 	tc.CapabilityRequirements.Tools = []string{"csv_profiler/profile_orders_csv"}
 	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
@@ -866,11 +859,8 @@ func TestTool_DryRunContractSuggestsBuildMCPWhenToolsMissing(t *testing.T) {
 
 	out, err := toolByName(t, newTestTools(t, sdk), "dry_run_contract").Call(context.Background(), raw)
 	require.NoError(t, err)
-	require.Contains(t, string(out), `"runnable":true`)
-	require.Contains(t, string(out), `"requires_build_mcp":true`)
+	require.Contains(t, string(out), `"runnable":false`)
 	require.Contains(t, string(out), `"missing_tools":["csv_profiler/profile_orders_csv"]`)
-	require.Contains(t, string(out), `"candidate_build_targets"`)
-	require.Contains(t, string(out), "builder")
 }
 
 func TestTool_DryRunContractReportsBlockedRoute(t *testing.T) {
@@ -888,12 +878,11 @@ func TestTool_DryRunContractReportsBlockedRoute(t *testing.T) {
 	report := callDryRunContractForTest(t, sdk, tc)
 
 	require.False(t, report.Runnable)
-	require.False(t, report.RequiresBuildMCP)
 	require.Equal(t, "blocked", report.RecommendedRoute)
 	require.Contains(t, report.MissingTools, "missing/tool")
 }
 
-func TestTool_DryRunContractRejectsMissingToolsWhenBuildMCPDisabled(t *testing.T) {
+func TestTool_DryRunContractReportsMissingToolsAsBlocked(t *testing.T) {
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
 			return []agentsdk.AgentCard{
@@ -909,7 +898,6 @@ func TestTool_DryRunContractRejectsMissingToolsWhenBuildMCPDisabled(t *testing.T
 	out, err := toolByName(t, newTestTools(t, sdk), "dry_run_contract").Call(context.Background(), raw)
 	require.NoError(t, err)
 	require.Contains(t, string(out), `"runnable":false`)
-	require.Contains(t, string(out), `"requires_build_mcp":false`)
 	require.Contains(t, string(out), "missing/tool")
 }
 
