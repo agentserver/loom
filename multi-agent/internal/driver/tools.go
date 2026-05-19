@@ -65,6 +65,7 @@ func (t *Tools) All() []Tool {
 		&listAgentsTool{t},
 		&inspectCapabilitiesTool{t},
 		&runSlaveBashTool{t},
+		&registerSlaveMCPTool{t},
 		// Permission tools use task delegation until agentserver exposes a dedicated control channel.
 		&getSlaveClaudePermissionsTool{t},
 		&updateSlaveClaudePermissionsTool{t},
