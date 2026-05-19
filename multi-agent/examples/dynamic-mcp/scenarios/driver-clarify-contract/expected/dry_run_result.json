@@ -1,6 +1,5 @@
 {
   "runnable": true,
-  "requires_build_mcp": true,
   "recommended_route": "driver_fanout",
   "recommended_skill": "fanout",
   "satisfied_tools": [
@@ -10,19 +9,7 @@
     "refund_policy_checker/evaluate_rows"
   ],
   "missing_skills": [],
-  "candidate_build_targets": [
-    {
-      "agent_id": "builder-slave",
-      "short_id": "builder-short",
-      "display_name": "builder-slave",
-      "status": "available",
-      "skills": ["chat", "build_mcp"],
-      "resources": {
-        "tags": ["python3", "data", "policy"]
-      }
-    }
-  ],
   "reasons": [
-    "missing tools can be built by available build_mcp slaves during driver orchestration"
+    "required tools are missing or unavailable"
   ]
 }

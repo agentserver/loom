@@ -40,7 +40,7 @@ servers:
 			Discovery: config.Discovery{
 				DisplayName: "slave-a",
 				Description: "test slave",
-				Skills:      []string{"chat", "mcp", "build_mcp"},
+				Skills:      []string{"chat", "mcp", "register_mcp"},
 			},
 			MCPServers: map[string]config.MCPServer{
 				"static_csv": {Transport: "stdio", Command: "python3", Args: []string{"csv.py"}},

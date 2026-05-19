@@ -16,31 +16,31 @@ const (
 	EventDriverTaskSubmitted = "driver_task_submitted"
 	EventDriverTaskStatus    = "driver_task_status"
 
-	EventMasterTaskReceived             = "master_task_received"
-	EventMasterPlanCreated              = "master_plan_created"
-	EventMasterSubtaskDispatched        = "master_subtask_dispatched"
-	EventMasterSubtaskDone              = "master_subtask_done"
-	EventMasterTaskCompleted            = "master_task_completed"
-	EventMasterTaskFailed               = "master_task_failed"
-	EventMasterPlanningProgress         = "master_planning_progress"
-	EventMasterPlanningCompleted        = "master_planning_completed"
-	EventMasterMCPReplan                = "master_mcp_replan"
-	EventMasterMCPCallValidationFailed  = "master_mcp_call_validation_failed"
-	EventMasterBuildMCPValidationFailed = "master_build_mcp_validation_failed"
-	EventMasterRequiredNodeFailed       = "master_required_node_failed"
+	EventMasterTaskReceived               = "master_task_received"
+	EventMasterPlanCreated                = "master_plan_created"
+	EventMasterSubtaskDispatched          = "master_subtask_dispatched"
+	EventMasterSubtaskDone                = "master_subtask_done"
+	EventMasterTaskCompleted              = "master_task_completed"
+	EventMasterTaskFailed                 = "master_task_failed"
+	EventMasterPlanningProgress           = "master_planning_progress"
+	EventMasterPlanningCompleted          = "master_planning_completed"
+	EventMasterMCPReplan                  = "master_mcp_replan"
+	EventMasterMCPCallValidationFailed    = "master_mcp_call_validation_failed"
+	EventMasterDynamicMCPValidationFailed = "master_dynamic_mcp_validation_failed"
+	EventMasterRequiredNodeFailed         = "master_required_node_failed"
 
-	EventSlaveTaskStarted      = "slave_task_started"
-	EventSlaveTaskProgress     = "slave_task_progress"
-	EventSlaveTaskCompleted    = "slave_task_completed"
-	EventSlaveTaskFailed       = "slave_task_failed"
-	EventSlaveBuildMCPProgress = "slave_build_mcp_progress"
-	EventMCPServerCreated      = "mcp_server_created"
-	EventMCPServerBlocked      = "mcp_server_blocked"
+	EventSlaveTaskStarted         = "slave_task_started"
+	EventSlaveTaskProgress        = "slave_task_progress"
+	EventSlaveTaskCompleted       = "slave_task_completed"
+	EventSlaveTaskFailed          = "slave_task_failed"
+	EventSlaveRegisterMCPProgress = "slave_register_mcp_progress"
+	EventMCPServerCreated         = "mcp_server_created"
+	EventMCPServerBlocked         = "mcp_server_blocked"
 )
 
 func IsProgressEvent(eventType string) bool {
 	switch eventType {
-	case EventMasterPlanningProgress, EventMasterPlanningCompleted, EventSlaveTaskProgress, EventSlaveBuildMCPProgress:
+	case EventMasterPlanningProgress, EventMasterPlanningCompleted, EventSlaveTaskProgress, EventSlaveRegisterMCPProgress:
 		return true
 	default:
 		return false

@@ -32,7 +32,7 @@ discovery:
   skills:
     - chat
     - mcp
-    # - build_mcp  # opt-in dynamic MCP server generation
+    # - register_mcp  # opt-in: register pre-built MCP server files; pair with bash skill for generation
     # - bash  # opt-in deterministic shell execution for trusted workspaces
     # - claude_permissions  # opt-in task-channel Claude Code permission management
 
@@ -45,7 +45,7 @@ observer:
 
 # Optional: hardware / runtime resources advertised on the agent card.
 # All fields optional. The planner uses these literally to pick a slave for
-# build_mcp tasks (e.g., a "needs camera" tool goes to a slave that
+# register_mcp tasks (e.g., a "needs camera" tool goes to a slave that
 # advertises devices: [camera]).
 resources:
   cpu:

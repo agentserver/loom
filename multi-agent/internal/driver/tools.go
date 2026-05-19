@@ -65,6 +65,7 @@ func (t *Tools) All() []Tool {
 		&listAgentsTool{t},
 		&inspectCapabilitiesTool{t},
 		&runSlaveBashTool{t},
+		&registerSlaveMCPTool{t},
 		// Permission tools use task delegation until agentserver exposes a dedicated control channel.
 		&getSlaveClaudePermissionsTool{t},
 		&updateSlaveClaudePermissionsTool{t},
@@ -149,6 +150,18 @@ func (t *Tools) resolveTarget(ctx context.Context, override string) (id, display
 
 func agentAvailable(c agentsdk.AgentCard) bool {
 	return c.Status == "available"
+}
+
+// jsonPromptSkill reports whether the named skill's slave-side executor
+// json.Unmarshals t.Prompt directly and therefore cannot tolerate any
+// preamble (USER_FILES_MANIFEST, TASK_CONTRACT envelope, etc.). For these
+// skills submit_task forwards the caller's prompt verbatim.
+func jsonPromptSkill(skill string) bool {
+	switch skill {
+	case "mcp", "bash", "register_mcp", "claude_permissions":
+		return true
+	}
+	return false
 }
 
 func hasSkill(c agentsdk.AgentCard, want string) bool {
@@ -276,6 +289,14 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		return nil, &MCPToolError{Message: "prompt is required"}
 	}
 
+	skill := args.Skill
+	if skill == "" {
+		skill = "fanout"
+	}
+	if jsonPromptSkill(skill) && (len(args.ReadPaths) > 0 || len(args.WritePaths) > 0) {
+		return nil, &MCPToolError{Message: "skill " + skill + " takes JSON-only prompts; read_paths/write_paths cannot be conveyed"}
+	}
+
 	manifest := Manifest{}
 	for _, p := range args.ReadPaths {
 		absP, err := filepath.Abs(p)
@@ -367,16 +388,22 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		return nil, err
 	}
 
-	skill := args.Skill
-	if skill == "" {
-		skill = "fanout"
-	}
 	timeout := args.TimeoutSec
 	if timeout == 0 {
 		timeout = s.t.cfg.DriverDefaults.TaskTimeoutSec
 	}
 
-	finalPrompt := manifest.Encode() + "\n\n" + args.Prompt
+	// JSON-prompt skills (mcp, bash, register_mcp, claude_permissions) parse
+	// t.Prompt with json.Unmarshal in the slave executor; a USER_FILES_MANIFEST
+	// prefix breaks them with "invalid character '<'". For those skills send
+	// the caller's prompt verbatim; the early guard above already rejected any
+	// read/write paths that would have needed to live in the manifest.
+	var finalPrompt string
+	if jsonPromptSkill(skill) {
+		finalPrompt = args.Prompt
+	} else {
+		finalPrompt = manifest.Encode() + "\n\n" + args.Prompt
+	}
 	resp, err := s.t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
 		TargetID:       targetID,
 		Skill:          skill,

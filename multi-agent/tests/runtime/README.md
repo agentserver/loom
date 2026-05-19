@@ -84,7 +84,7 @@ discovery:
   skills:
     - chat
     - mcp
-    - build_mcp
+    - register_mcp
     - bash
     - claude_permissions
 ```

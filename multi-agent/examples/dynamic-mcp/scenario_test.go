@@ -43,9 +43,7 @@ func TestDriverFilesMultiMCPScenarioFixtures(t *testing.T) {
 	tc.ApplyDefaults()
 	require.NoError(t, tc.Validate())
 	require.Equal(t, contract.RoutingMasterOnly, tc.ExecutionPolicy.Routing)
-	require.True(t, tc.ExecutionPolicy.AllowBuildMCP)
 	require.GreaterOrEqual(t, tc.ExecutionPolicy.ConcurrencyLimit(), 2)
-	require.Contains(t, tc.CapabilityRequirements.Skills, "build_mcp")
 
 	promptBytes, err := os.ReadFile(filepath.Join(root, "request", "prompt.txt"))
 	require.NoError(t, err)
@@ -65,10 +63,8 @@ func TestDriverFilesMultiMCPExpectedPlan(t *testing.T) {
 	require.Len(t, nodes, 2)
 	seenNames := map[string]bool{}
 	for _, n := range nodes {
-		require.Empty(t, n.DependsOn, "first phase build_mcp nodes should be independently dispatchable")
+		require.Empty(t, n.DependsOn, "first phase nodes should be independently dispatchable")
 		require.Equal(t, "builder-slave", n.TargetID)
-		require.Equal(t, "build_mcp", n.Kind)
-		require.Equal(t, "build_mcp", n.Skill)
 		require.NotEmpty(t, n.BuildSpec)
 		spec, err := buildspec.ParseJSON(string(n.BuildSpec))
 		require.NoError(t, err)
@@ -120,7 +116,6 @@ func TestDriverClarifyContractScenarioFixtures(t *testing.T) {
 	readJSON(t, filepath.Join(root, "request", "drafted_contract.json"), &drafted)
 	drafted.Contract.ApplyDefaults()
 	require.NoError(t, drafted.Contract.Validate())
-	require.True(t, drafted.Contract.ExecutionPolicy.AllowBuildMCP)
 	require.Contains(t, drafted.Contract.CapabilityRequirements.Tools, "csv_profiler/profile_orders_csv")
 	require.Contains(t, drafted.Contract.CapabilityRequirements.Tools, "refund_policy_checker/evaluate_rows")
 	require.NotEmpty(t, drafted.ClarificationQuestions)
@@ -134,25 +129,19 @@ func TestDriverClarifyContractDryRunExpectation(t *testing.T) {
 	root := filepath.Join("scenarios", "driver-clarify-contract")
 
 	var dryRun struct {
-		Runnable              bool                     `json:"runnable"`
-		RequiresBuildMCP      bool                     `json:"requires_build_mcp"`
-		RecommendedRoute      string                   `json:"recommended_route"`
-		RecommendedSkill      string                   `json:"recommended_skill"`
-		SatisfiedTools        []string                 `json:"satisfied_tools"`
-		MissingTools          []string                 `json:"missing_tools"`
-		CandidateBuildTargets []contract.ResourceAgent `json:"candidate_build_targets"`
-		Reasons               []string                 `json:"reasons"`
+		Runnable         bool     `json:"runnable"`
+		RecommendedRoute string   `json:"recommended_route"`
+		RecommendedSkill string   `json:"recommended_skill"`
+		SatisfiedTools   []string `json:"satisfied_tools"`
+		MissingTools     []string `json:"missing_tools"`
+		Reasons          []string `json:"reasons"`
 	}
 	readJSON(t, filepath.Join(root, "expected", "dry_run_result.json"), &dryRun)
 	require.True(t, dryRun.Runnable)
-	require.True(t, dryRun.RequiresBuildMCP)
 	require.Equal(t, "driver_fanout", dryRun.RecommendedRoute)
 	require.Equal(t, "fanout", dryRun.RecommendedSkill)
 	require.Equal(t, []string{"csv_profiler/profile_orders_csv"}, dryRun.SatisfiedTools)
 	require.Equal(t, []string{"refund_policy_checker/evaluate_rows"}, dryRun.MissingTools)
-	require.Len(t, dryRun.CandidateBuildTargets, 1)
-	require.Equal(t, "builder-slave", dryRun.CandidateBuildTargets[0].AgentID)
-	require.Contains(t, dryRun.Reasons[0], "missing tools can be built")
 }
 
 func readJSON(t *testing.T, path string, dst interface{}) {

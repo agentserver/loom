@@ -15,12 +15,11 @@ The visible resources include:
 - `master-online-e2e`: a master with `fanout`.
 - `analytics-slave`: a slave with an existing `csv_profiler/profile_orders_csv`
   MCP tool.
-- `builder-slave`: a slave with `build_mcp`.
+- `builder-slave`: a slave with `register_mcp`.
 
 The dry run shows that CSV profiling is already available, but
-`refund_policy_checker/evaluate_rows` is missing. Because the contract allows
-`build_mcp`, the task is runnable via driver fanout and requires one MCP build
-during driver orchestration.
+`refund_policy_checker/evaluate_rows` is missing. The driver can use `bash` to
+generate the MCP source on the builder slave and `register_mcp` to install it.
 
 ## What This Example Tests
 

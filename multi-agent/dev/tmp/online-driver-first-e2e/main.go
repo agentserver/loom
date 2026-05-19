@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,12 +11,13 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/yourorg/multi-agent/dev/tmp/e2eworkspace"
 )
 
 const (
-	runtimeRoot = "/tmp/multi-agent-driver-first-e2e"
-	slaveAID    = "a4811483-6f8e-4494-a132-2da139469221"
-	slaveBID    = "ab268a1b-6482-4d71-9de8-04ee6e1e3610"
+	slaveAID = "a4811483-6f8e-4494-a132-2da139469221"
+	slaveBID = "ab268a1b-6482-4d71-9de8-04ee6e1e3610"
 )
 
 type rpcClient struct {
@@ -84,12 +86,17 @@ func (c *rpcClient) callTool(name string, args any) (json.RawMessage, error) {
 
 func main() {
 	timeoutSec := flag.Int("timeout-sec", 1200, "overall helper timeout")
+	skipPrepare := flag.Bool("skip-prepare", false, "skip rebuilding binaries and restarting slave containers")
 	flag.Parse()
 
+	if !*skipPrepare {
+		prepareWorkspace()
+	}
+
 	cmd := exec.Command("docker", "run", "--rm", "-i", "--network", "host",
-		"-v", runtimeRoot+":/e2e",
+		"-v", e2eworkspace.RuntimeRoot+":/e2e",
 		"-v", "/root/.zshrc:/root/.zshrc:ro",
-		"multi-agent-e2e-runtime:latest",
+		e2eworkspace.RuntimeImage,
 		"zsh", "-lc", "cd /e2e/driver && /e2e/bin/driver-agent serve-mcp --config config.yaml")
 	stdin, _ := cmd.StdinPipe()
 	stdout, _ := cmd.StdoutPipe()
@@ -155,7 +162,6 @@ func main() {
 		"execution_policy": map[string]any{
 			"routing":                               "direct_first",
 			"allow_master":                          false,
-			"allow_build_mcp":                       false,
 			"allow_code_artifacts":                  true,
 			"code_persistence":                      "observer_artifact_store",
 			"expose_code_to_user":                   "on_request",
@@ -196,7 +202,7 @@ func main() {
 		"Create exactly two root chat nodes and no master node.",
 		"Node A must target agent_id " + slaveAID + " (display_name slave-a-online-dag-160628). Ask it to answer with the sentence: slave-a-online-dag-160628 completed its direct driver-first DAG task.",
 		"Node B must target agent_id " + slaveBID + " (display_name slave-b-online-dag-160628). Ask it to answer with the sentence: slave-b-online-dag-160628 completed its direct driver-first DAG task.",
-		"Do not use build_mcp. Do not use skill mcp. Ordinary chat nodes only.",
+		"Do not use register_mcp. Do not use skill mcp. Ordinary chat nodes only.",
 		"After both nodes complete, reduce the two outputs into one concise final summary that names both display names.",
 	}, "\n")
 
@@ -235,4 +241,28 @@ func main() {
 func die(msg string) {
 	fmt.Fprintln(os.Stderr, "online driver-first e2e FAIL:", msg)
 	os.Exit(1)
+}
+
+// prepareWorkspace makes a single test run idempotent across branches by
+// delegating to the e2eworkspace package: build binaries from the invoking
+// worktree, migrate persistent slave configs to the current skill names,
+// then bounce the long-lived slave containers so they reload the binary.
+func prepareWorkspace() {
+	moduleRoot, err := e2eworkspace.FindModuleRoot()
+	if err != nil {
+		die(err.Error())
+	}
+	fmt.Println("PREPARE_BUILT_FROM=" + moduleRoot)
+	if err := e2eworkspace.BuildBinaries(context.Background(), moduleRoot, os.Stderr); err != nil {
+		die(err.Error())
+	}
+	if err := e2eworkspace.MigrateRuntimeConfigs(os.Stdout); err != nil {
+		die(err.Error())
+	}
+	for _, s := range e2eworkspace.SlaveContainers() {
+		if err := e2eworkspace.RestartSlaveContainer(s.Name, s.Workdir, os.Stderr); err != nil {
+			die(err.Error())
+		}
+	}
+	fmt.Println("PREPARE_OK=slaves_restarted")
 }

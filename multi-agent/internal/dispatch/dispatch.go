@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/yourorg/multi-agent/internal/contract"
 	"github.com/yourorg/multi-agent/internal/executor"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/store"
@@ -60,6 +61,23 @@ func (d *Dispatcher) Run(ctx context.Context, t executor.Task) (executor.Result,
 		Summary: summary,
 		Status:  "running",
 	})
+
+	// Strip TASK_CONTRACT envelope before executor dispatch so chat sees only
+	// the body and bash/mcp/register_mcp can json.Unmarshal it cleanly. Only
+	// master orchestrator needs the decoded contract; slave executors don't.
+	if _, body, ok, err := contract.DecodeEnvelope(t.Prompt); err != nil {
+		_ = d.store.Fail(t.ID, err.Error())
+		d.emit(observer.Event{
+			Type:    observer.EventSlaveTaskFailed,
+			TaskID:  t.ID,
+			Summary: summary,
+			Status:  "failed",
+			Payload: observerPayload(map[string]string{"error": err.Error()}),
+		})
+		return executor.Result{}, err
+	} else if ok {
+		t.Prompt = body
+	}
 
 	exec, ok := d.routes[t.Skill]
 	if !ok {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/yourorg/multi-agent/internal/contract"
 	"github.com/yourorg/multi-agent/internal/executor"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/store"
@@ -18,10 +19,12 @@ type stubExec struct {
 	res    executor.Result
 	err    error
 	called bool
+	gotTask executor.Task
 }
 
 func (s *stubExec) Run(ctx context.Context, t executor.Task, sink executor.Sink) (executor.Result, error) {
 	s.called = true
+	s.gotTask = t
 	sink.Close()
 	return s.res, s.err
 }
@@ -166,6 +169,87 @@ func TestDispatcher_EmitsObserverFailurePayloadForMissingExecutor(t *testing.T) 
 	var payload map[string]string
 	require.NoError(t, json.Unmarshal(obs.events[1].Payload, &payload))
 	require.Contains(t, payload["error"], `no executor for skill "missing"`)
+}
+
+func envelopedPrompt(t *testing.T, body string) string {
+	t.Helper()
+	tc := contract.TaskContract{
+		Version:        1,
+		ConversationID: "conv-test",
+		Intent: contract.IntentSpec{
+			Goal:            "do the thing",
+			SuccessCriteria: []string{"thing is done"},
+		},
+		DataContract: contract.DataContract{
+			WriteTargets: []contract.WriteTarget{{Type: contract.WriteTargetArtifact, Kind: "document", Name: "out.md"}},
+		},
+	}
+	tc.ApplyDefaults()
+	p, err := contract.EncodeEnvelope(tc, body)
+	require.NoError(t, err)
+	return p
+}
+
+// TestContractEnvelope_StrippedForChat verifies that a chat-skill prompt wrapped
+// in a TASK_CONTRACT envelope is decoded by the dispatcher: the executor sees
+// only the body, not the envelope. Without this, slave Claude Code receives the
+// raw envelope as natural-language preamble.
+func TestContractEnvelope_StrippedForChat(t *testing.T) {
+	exec := &stubExec{res: executor.Result{Summary: "ok"}}
+	d := New(map[string]executor.Executor{"": exec}, &stubJournal{}, newStore(t), nil)
+
+	prompt := envelopedPrompt(t, "Use this contract.")
+	_, err := d.Run(context.Background(), executor.Task{ID: "t", Skill: "chat", Prompt: prompt})
+
+	require.NoError(t, err)
+	require.True(t, exec.called)
+	require.Equal(t, "Use this contract.", exec.gotTask.Prompt,
+		"executor should receive only the body, not the envelope")
+}
+
+// TestContractEnvelope_StrippedForBash verifies the strip works for skills
+// whose prompts are JSON: without stripping, bash/mcp/register_mcp executors call
+// json.Unmarshal on the envelope and immediately fail with "prompt must be JSON".
+func TestContractEnvelope_StrippedForBash(t *testing.T) {
+	exec := &stubExec{res: executor.Result{Summary: "ok"}}
+	d := New(map[string]executor.Executor{"bash": exec}, &stubJournal{}, newStore(t), nil)
+
+	jsonBody := `{"script":"echo hi","timeout_sec":5}`
+	prompt := envelopedPrompt(t, jsonBody)
+	_, err := d.Run(context.Background(), executor.Task{ID: "t", Skill: "bash", Prompt: prompt})
+
+	require.NoError(t, err)
+	require.True(t, exec.called)
+	require.Equal(t, jsonBody, exec.gotTask.Prompt)
+}
+
+// TestContractEnvelope_MalformedFailsTask verifies that a half-formed envelope
+// (start marker present, end marker missing) fails the task with a clear error
+// before invoking any executor, rather than passing garbage downstream.
+func TestContractEnvelope_MalformedFailsTask(t *testing.T) {
+	exec := &stubExec{}
+	d := New(map[string]executor.Executor{"": exec}, &stubJournal{}, newStore(t), nil)
+
+	malformed := contract.EnvelopeStart + "\n{\"version\":1}\n" // missing end marker
+	_, err := d.Run(context.Background(), executor.Task{ID: "t", Skill: "chat", Prompt: malformed})
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "task contract envelope")
+	require.False(t, exec.called, "executor must not run on malformed envelope")
+}
+
+// TestContractEnvelope_AbsentPassesThrough verifies that plain prompts without
+// an envelope reach the executor verbatim (regression guard for non-contract
+// tasks).
+func TestContractEnvelope_AbsentPassesThrough(t *testing.T) {
+	exec := &stubExec{res: executor.Result{Summary: "ok"}}
+	d := New(map[string]executor.Executor{"": exec}, &stubJournal{}, newStore(t), nil)
+
+	plain := "just do the thing"
+	_, err := d.Run(context.Background(), executor.Task{ID: "t", Skill: "chat", Prompt: plain})
+
+	require.NoError(t, err)
+	require.Equal(t, plain, exec.gotTask.Prompt)
 }
 
 // TestRespectsTaskTimeout verifies that a per-task TimeoutSec is enforced: the

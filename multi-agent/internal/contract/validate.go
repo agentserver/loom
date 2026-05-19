@@ -74,13 +74,6 @@ func (tc TaskContract) Validate() error {
 	if err := validatePolicy(tc.ExecutionPolicy); err != nil {
 		return err
 	}
-	if !tc.ExecutionPolicy.AllowBuildMCP {
-		for _, s := range tc.CapabilityRequirements.Skills {
-			if s == "build_mcp" {
-				return fmt.Errorf("build_mcp requested but execution_policy.allow_build_mcp is false")
-			}
-		}
-	}
 	return nil
 }
 

@@ -131,7 +131,7 @@ func TestPublishCard_IncludesToolsAndResources(t *testing.T) {
 	cfg := &config.Config{
 		Server:      config.Server{URL: srv.URL, Name: "n"},
 		Credentials: config.Credentials{ProxyToken: "ptoken"},
-		Discovery:   config.Discovery{DisplayName: "dn", Description: "d", Skills: []string{"chat", "build_mcp"}},
+		Discovery:   config.Discovery{DisplayName: "dn", Description: "d", Skills: []string{"chat", "register_mcp"}},
 		Resources:   &config.Resources{Devices: []string{"camera"}, Tags: []string{"x"}},
 	}
 	tn := NewWithDeps(cfg, "/tmp/none", nil, Deps{})

@@ -26,12 +26,12 @@ discovery:
   skills:
     - chat
     - mcp
-    - build_mcp
+    - register_mcp
     - bash
     - claude_permissions
 ```
 
-`build_mcp` enables dynamic MCP server generation. `bash` enables deterministic shell execution through a native `slave-agent` executor. `claude_permissions` enables driver-side permission inspection and patching through the existing task channel. Permission patching is also native `slave-agent` Go code; it must not be implemented by asking the slave's Claude Code process to modify its own `.claude/settings.local.json`, because Claude Code may not yet have the required `Write`, `Edit`, or `Bash` permission.
+`register_mcp` registers a pre-built MCP server file written by a prior bash task. `bash` enables deterministic shell execution through a native `slave-agent` executor. `claude_permissions` enables driver-side permission inspection and patching through the existing task channel. Permission patching is also native `slave-agent` Go code; it must not be implemented by asking the slave's Claude Code process to modify its own `.claude/settings.local.json`, because Claude Code may not yet have the required `Write`, `Edit`, or `Bash` permission.
 
 This task-channel permission path is a compatibility bridge. When agentserver exposes a dedicated control channel for custom agents, permission management should move there.
 
@@ -53,7 +53,7 @@ journal/CAPABILITIES.md
 
 The document survives restarts because it is stored in the slave role directory. Startup refreshes it from the latest config and generated MCP registry. It is refreshed again when:
 
-- a generated MCP server is built or updated by `build_mcp`;
+- a generated MCP server is registered via `register_mcp`;
 - an MCP tool reports `capability_changed`;
 - a Claude task reports a persistent capability change, such as a new skill or ordinary service.
 - `claude_permissions` patches Claude Code project permissions.

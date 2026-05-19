@@ -23,8 +23,7 @@
   "execution_policy": {
     "routing": "master_only",
     "allow_master": true,
-    "allow_build_mcp": true,
-    "allow_code_artifacts": true,
+        "allow_code_artifacts": true,
     "code_persistence": "observer_artifact_store",
     "expose_code_to_user": "on_request",
     "write_mode": "artifact_only",
@@ -39,7 +38,7 @@
   },
   "capability_requirements": {
     "skills": [
-      "build_mcp"
+      "register_mcp"
     ],
     "tools": [],
     "resources": {

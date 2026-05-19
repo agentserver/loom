@@ -661,20 +661,6 @@ func TestFanout_ValidMCPArgsDispatchesOnce(t *testing.T) {
 	require.Equal(t, "mcp", sdk.dispatched[0].Skill)
 }
 
-func TestFanout_BuildMCPSpecPreflightRejectsBeforeDispatch(t *testing.T) {
-	sdk := &fakeSDKQueue{
-		agents: []agentsdk.AgentCard{{AgentID: "agent-a", Status: "available", Card: json.RawMessage(`{"skills":["build_mcp"]}`)}},
-	}
-	obs := &fakeObserver{}
-	o := newOrchWithObserver(t, sdk, "plan_build_mcp_bad_text", obs)
-
-	_, err := o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: "build reusable server"})
-
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "build_mcp")
-	require.Empty(t, sdk.dispatched)
-}
-
 func TestFanout_RequiredFailureFailsParentUnderBestEffort(t *testing.T) {
 	sdk := &fakeSDKQueue{
 		agents: []agentsdk.AgentCard{
@@ -748,138 +734,6 @@ func TestFanout_OptionalFailureReducedUnderBestEffort(t *testing.T) {
 	require.Len(t, sdk.dispatched, 2)
 }
 
-func TestFanout_BuildMCPBlocked_TriggersReplan(t *testing.T) {
-	// negotiate_then_succeed: round 0 emits build n0; round 1 emits build n1;
-	// round 2 emits use n2. SDK returns blocked, then tool_set, then ok.
-	rf := filepath.Join(t.TempDir(), "round")
-	t.Setenv("FAKE_PLANNER_ROUND_FILE", rf)
-
-	blocked := `{"type":"build_mcp_blocked","url":"","meta":{"spec_name":"foo","iteration":"1","needed_packages":"requests","reason":"r"}}`
-	toolSet := `{"type":"mcp_tool_set","url":"file:///x","meta":{"name":"foo","version":"1","tools":"a","iteration":"2"}}`
-
-	sdk := &fakeSDKQueue{
-		agents: []agentsdk.AgentCard{agentWithTool(t, "foo", "a")},
-		queue: []agentsdk.TaskInfo{
-			{Status: "completed", Output: blocked}, // n0
-			{Status: "completed", Output: toolSet}, // n1
-			{Status: "completed", Output: "ok"},    // n2 (use)
-		},
-	}
-	o := newOrch(t, sdk, "negotiate_then_succeed")
-	_, err := o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: "do"})
-	require.NoError(t, err)
-	require.Len(t, sdk.dispatched, 3, "n0 build, n1 build, n2 use")
-}
-
-func TestFanout_HandlesBuildMCPToolSetFromTaskResultOutput(t *testing.T) {
-	rf := filepath.Join(t.TempDir(), "round")
-	t.Setenv("FAKE_PLANNER_ROUND_FILE", rf)
-
-	blocked := `{"type":"build_mcp_blocked","url":"","meta":{"spec_name":"foo","iteration":"1","needed_packages":"requests","reason":"r"}}`
-	toolSet := `{"type":"mcp_tool_set","url":"file:///x","meta":{"name":"foo","version":"1","tools":"a","iteration":"2"}}`
-
-	sdk := &fakeSDKQueue{
-		agents: []agentsdk.AgentCard{agentWithTool(t, "foo", "a")},
-		queue: []agentsdk.TaskInfo{
-			{Status: "completed", Result: json.RawMessage(`{"output":` + strconv.Quote(blocked) + `}`)},
-			{Status: "completed", Result: json.RawMessage(`{"output":` + strconv.Quote(toolSet) + `}`)},
-			{Status: "completed", Result: json.RawMessage(`{"output":"ok"}`)},
-		},
-	}
-	o := newOrch(t, sdk, "negotiate_then_succeed")
-
-	_, err := o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: "do"})
-
-	require.NoError(t, err)
-	require.Len(t, sdk.dispatched, 3, "n0 build, n1 build, n2 use")
-}
-
-func TestFanout_BuildMCPBlocked_HitsIterationCap(t *testing.T) {
-	rf := filepath.Join(t.TempDir(), "round")
-	t.Setenv("FAKE_PLANNER_ROUND_FILE", rf)
-
-	blocked := `{"type":"build_mcp_blocked","url":"","meta":{"spec_name":"foo","iteration":"X","needed_packages":"y","reason":"r"}}`
-
-	sdk := &fakeSDKQueue{
-		agents: []agentsdk.AgentCard{{AgentID: "agent-a", Status: "available"}},
-		queue: []agentsdk.TaskInfo{
-			{Status: "completed", Output: blocked},
-			{Status: "completed", Output: blocked},
-			{Status: "completed", Output: blocked},
-			{Status: "completed", Output: blocked},
-		},
-	}
-	o := newOrch(t, sdk, "negotiate_forever")
-	_, err := o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: "do"})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "exhausted")
-	// 3 build_mcp dispatches before giving up.
-	require.Len(t, sdk.dispatched, 3)
-}
-
-func TestFanout_BuildMCPSpecValidationReplans(t *testing.T) {
-	t.Setenv("FAKE_PLANNER_ROUND_FILE", filepath.Join(t.TempDir(), "round"))
-	sdk := &fakeSDKQueue{
-		agents: []agentsdk.AgentCard{{AgentID: "agent-a", Status: "available", Card: json.RawMessage(`{"skills":["build_mcp"]}`)}},
-		queue:  []agentsdk.TaskInfo{{Status: "completed", Output: `{"type":"mcp_tool_set","meta":{"name":"foo","tools":"render"}}`}},
-	}
-	obs := &fakeObserver{}
-	o := newOrchWithObserver(t, sdk, "plan_build_mcp_repair", obs)
-
-	_, err := o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: "build reusable server"})
-
-	require.NoError(t, err)
-	require.Len(t, sdk.dispatched, 1)
-	require.JSONEq(t, `{"name":"foo","description":"d","tools":[{"name":"render","description":"d","args_schema":{"type":"object"},"result_description":"r"}],"hints":"","allowed_packages":[],"compose_servers":[],"version":1,"iteration":1,"max_iterations":3}`, sdk.dispatched[0].Prompt)
-	require.Contains(t, sdk.dispatched[0].SystemContext, buildMCPLegacyHashesContextKey)
-	require.NotEmpty(t, eventsOfType(obs.events, observer.EventMasterBuildMCPValidationFailed))
-}
-
-func TestFanout_BuildMCPSpecValidationReplanRejectsDisallowedContractTarget(t *testing.T) {
-	dir := t.TempDir()
-	roundFile := filepath.Join(dir, "round")
-	bin := filepath.Join(dir, "planner.sh")
-	err := os.WriteFile(bin, []byte(`#!/usr/bin/env bash
-round=$(cat "$ROUND_FILE" 2>/dev/null || echo 0)
-case "$round" in
-  0)
-    cat <<'EOF'
-[{"id":"n0","target_id":"agent-a","kind":"build_mcp","skill":"build_mcp","prompt":"build a reusable server"}]
-EOF
-    ;;
-  1)
-    cat <<'EOF'
-[{"id":"n1","target_id":"agent-b","skill":"chat","prompt":"bypass"}]
-EOF
-    ;;
-  *) echo "REDUCED";;
-esac
-echo $((round+1)) > "$ROUND_FILE"
-`), 0o755)
-	require.NoError(t, err)
-	t.Setenv("ROUND_FILE", roundFile)
-
-	sdk := &fakeSDKQueue{
-		agents: []agentsdk.AgentCard{{AgentID: "agent-a", Status: "available", Card: json.RawMessage(`{"skills":["build_mcp"]}`)}},
-		queue:  []agentsdk.TaskInfo{{Status: "completed", Output: "bypass"}},
-	}
-	p := planner.New(config.Planner{Bin: bin, TimeoutSec: 5})
-	s, err := store.Open(filepath.Join(t.TempDir(), "x.db"))
-	require.NoError(t, err)
-	t.Cleanup(func() { s.Close() })
-	o := New(s, p, sdk, config.Fanout{MaxConcurrency: 4, DefaultPolicy: "best_effort"}, "self-id", nil)
-	tc := contract.TaskContract{}
-	tc.ExecutionPolicy.AllowBuildMCP = true
-	prompt := fanoutContractPrompt(t, tc, "build reusable server")
-
-	_, err = o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: prompt})
-
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "invalid build_mcp spec validation replan")
-	require.Contains(t, err.Error(), "target agent-b is not allowed")
-	require.Empty(t, sdk.dispatched)
-}
-
 func TestFanout_EmitsPlanDispatchAndDoneEvents(t *testing.T) {
 	sdk := &fakeSDKQueue{
 		agents: []agentsdk.AgentCard{agentWithTool(t, "x", "y")},
@@ -916,43 +770,6 @@ func TestFanout_EmitsPlanDispatchAndDoneEvents(t *testing.T) {
 	var donePayload map[string]string
 	require.NoError(t, json.Unmarshal(done.Payload, &donePayload))
 	require.Equal(t, "ok", donePayload["output"])
-}
-
-func TestFanout_EmitsMCPReplanForHandleOutputs(t *testing.T) {
-	rf := filepath.Join(t.TempDir(), "round")
-	t.Setenv("FAKE_PLANNER_ROUND_FILE", rf)
-
-	blocked := `{"type":"build_mcp_blocked","url":"","meta":{"spec_name":"foo","iteration":"1","needed_packages":"requests","reason":"r"}}`
-	toolSet := `{"type":"mcp_tool_set","url":"file:///x","meta":{"name":"foo","version":"1","tools":"a","iteration":"2"}}`
-
-	sdk := &fakeSDKQueue{
-		agents: []agentsdk.AgentCard{agentWithTool(t, "foo", "a")},
-		queue: []agentsdk.TaskInfo{
-			{Status: "completed", Output: blocked},
-			{Status: "completed", Output: toolSet},
-			{Status: "completed", Output: "ok"},
-		},
-	}
-	obs := &fakeObserver{}
-	o := newOrchWithObserver(t, sdk, "negotiate_then_succeed", obs)
-
-	_, err := o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: "do"})
-	require.NoError(t, err)
-
-	replans := eventsOfType(obs.events, observer.EventMasterMCPReplan)
-	require.Len(t, replans, 2)
-	require.Equal(t, "build_mcp_blocked", replans[0].Status)
-	require.Equal(t, "foo", replans[0].MCPServerName)
-	require.Equal(t, "n0", replans[0].SubtaskID)
-	require.Equal(t, "c1", replans[0].ChildTaskID)
-	var blockedPayload map[string]interface{}
-	require.NoError(t, json.Unmarshal(replans[0].Payload, &blockedPayload))
-	require.Equal(t, "build_mcp_blocked", blockedPayload["type"])
-
-	require.Equal(t, "mcp_tool_set", replans[1].Status)
-	require.Equal(t, "foo", replans[1].MCPServerName)
-	require.Equal(t, "n0_n1", replans[1].SubtaskID)
-	require.Equal(t, "c2", replans[1].ChildTaskID)
 }
 
 func eventsOfType(events []observer.Event, typ string) []observer.Event {

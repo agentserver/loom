@@ -11,25 +11,23 @@ The user uploads two files to the driver:
 - `driver-files/refund-policy.md`: business policy for deciding refund risk.
 
 No current slave advertises tools for CSV profiling or policy checking. The
-master should use the contract and resource snapshot to send two independent
-`build_mcp` tasks to the builder slave in the same first phase:
+driver uses `bash` to generate Python sources on the builder slave and
+`register_mcp` to install two independent services in the same first phase:
 
 - `csv_profile`: read CSV text and return typed column stats, refund totals,
   and suspicious rows.
 - `refund_policy_check`: read policy markdown plus structured order facts and
   return policy violations and recommended actions.
 
-After both services are built and advertised, the master replans use-phase MCP
-calls, then writes a concise report to the driver write target.
+After both services are registered and advertised, the master replans use-phase
+MCP calls, then writes a concise report to the driver write target.
 
 ## What This Example Tests
 
 - Driver files are represented as `USER_FILES_MANIFEST` URL handles, not local
   filesystem paths on the master or slaves.
-- The task contract enables `allow_build_mcp` and keeps generated code in the
-  observer artifact store.
-- Independent MCP builds are represented as separate first-phase DAG roots so
-  the orchestrator can dispatch them concurrently.
+- Independent MCP registrations are represented as separate first-phase DAG
+  roots so the orchestrator can dispatch them concurrently.
 
 This is a fixture-level example. It does not require a live agentserver; the
 Go test in `examples/dynamic-mcp/scenario_test.go` validates that the files,

@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
-	"github.com/yourorg/multi-agent/internal/buildspec"
 	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/planner"
 )
@@ -46,22 +45,10 @@ func prepareNodeForDispatch(n planner.Node, agents []agentsdk.AgentCard) (planne
 	if err := validateAdvertisedSkill(n, caps); err != nil {
 		return n, err
 	}
-	switch {
-	case n.Skill == "build_mcp" || n.Kind == "build_mcp":
-		if n.Skill != "build_mcp" {
-			return n, fmt.Errorf("build_mcp node must set skill %q", "build_mcp")
-		}
-		prompt, err := canonicalBuildMCPPrompt(n)
-		if err != nil {
-			return n, err
-		}
-		n.Prompt = prompt
-		return n, nil
-	case n.Skill == "mcp":
+	if n.Skill == "mcp" {
 		return n, validateMCPPrompt(n.Prompt, caps, !containsTemplate(n.Prompt))
-	default:
-		return n, nil
 	}
+	return n, nil
 }
 
 func validateRenderedNodePrompt(n planner.Node, rendered string, agents []agentsdk.AgentCard) error {
@@ -75,25 +62,6 @@ func validateRenderedNodePrompt(n planner.Node, rendered string, agents []agents
 		}
 	}
 	return nil
-}
-
-func canonicalBuildMCPPrompt(n planner.Node) (string, error) {
-	raw := strings.TrimSpace(string(n.BuildSpec))
-	if raw == "" {
-		raw = strings.TrimSpace(n.Prompt)
-	}
-	if raw == "" {
-		return "", fmt.Errorf("build_mcp requires build_spec or legacy JSON prompt")
-	}
-	spec, err := buildspec.ParseJSON(raw)
-	if err != nil {
-		return "", fmt.Errorf("invalid build_spec: %w", err)
-	}
-	canonical, err := buildspec.MarshalCanonical(spec)
-	if err != nil {
-		return "", fmt.Errorf("invalid build_spec: %w", err)
-	}
-	return canonical, nil
 }
 
 type agentCapabilities struct {

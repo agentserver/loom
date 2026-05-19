@@ -141,18 +141,16 @@ func run(cfgPath string) error {
 			},
 		})
 	}
-	if hasSkill(cfg.Discovery.Skills, "build_mcp") {
-		buildExec := executor.NewBuildMCPExecutor(executor.BuildMCPConfig{
-			WorkDir:   workdir,
-			ClaudeBin: cfg.Claude.Bin,
-			MCPExec:   mcpExec,
-			Observer:  obs,
+	if hasSkill(cfg.Discovery.Skills, "register_mcp") {
+		routes["register_mcp"] = executor.NewRegisterMCPExecutor(executor.RegisterMCPConfig{
+			WorkDir: workdir,
+			MCPExec: mcpExec,
 			Republish: func(ctx context.Context) error {
-				refreshCapabilities(ctx, "build_mcp generated or updated MCP server")
+				refreshCapabilities(ctx, "register_mcp registered or updated MCP server")
 				return tn.PublishCard(ctx)
 			},
+			Observer: obs,
 		})
-		routes["build_mcp"] = buildExec
 	}
 	d := dispatch.New(routes, refreshingJournal{
 		base: j,

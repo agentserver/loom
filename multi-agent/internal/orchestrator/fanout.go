@@ -17,13 +17,11 @@ import (
 	"github.com/yourorg/multi-agent/internal/store"
 )
 
-// maxBuildIterations bounds how many build_mcp_blocked → replan cycles the
-// orchestrator will tolerate per spec name before failing the master task.
-// Hardcoded for v1; documented as a future-extension in
-// docs/superpowers/specs/2026-05-09-dynamic-mcp-design.md.
-const maxBuildIterations = 3
-
 const fanoutFailureDrainTimeout = 5 * time.Second
+
+// maxValidationReplans bounds how many mcp call validation-failure replans
+// the orchestrator will tolerate for a single node before failing it.
+const maxValidationReplans = 3
 
 func fanoutNoProgressTimeout(cfg config.Fanout) time.Duration {
 	if cfg.SubTaskDefaults.TimeoutSec > 0 {
@@ -34,7 +32,7 @@ func fanoutNoProgressTimeout(cfg config.Fanout) time.Duration {
 
 // parseOutputHandle attempts to interpret s as a phase-boundary handle JSON
 // document. Unlike transport.ParseHandle, it does not require a non-empty URL
-// field — build_mcp_blocked outputs have url:"" by convention.
+// field — phase-boundary handles may carry url:"" by convention.
 func parseOutputHandle(s string) (typ string, meta map[string]string, ok bool) {
 	var h struct {
 		Type string            `json:"type"`
@@ -177,7 +175,7 @@ func mcpValidationReplanContext(n planner.Node, agents []agentsdk.AgentCard, pro
 
 	return fmt.Sprintf(
 		"MCP_CALL_VALIDATION_FAILED:\nnode_id=%s\nserver=%s\ntool=%s\nfailed_node_prompt_template=%s\nargs=%s\nerror=%s\ninput_schema=%s\n"+
-			"Replan with schema-conformant arguments, or add/evolve a build_mcp node if the needed argument is not in the schema. "+
+			"Replan with schema-conformant arguments. "+
 			"If an upstream JSON output contains the needed nested value, use JSON field path templates such as {{n1.output.rows}} instead of the whole {{n1.output}}. "+
 			"Do not replace a direct MCP call with an ordinary chat node.",
 		n.ID, call.Server, call.Tool, n.Prompt, string(argsJSON), validationErr.Error(), schema)
@@ -264,7 +262,6 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 	sched := NewScheduler(plan, effectiveFanoutConcurrency(o.cfg.MaxConcurrency, tc.ExecutionPolicy, tc.Version != 0))
 	outputs := map[string]string{}
 	var outputsMu sync.Mutex
-	iterCount := map[string]int{}
 	validationReplans := 0
 	noProgressTimeout := fanoutNoProgressTimeout(o.cfg)
 	writeURLs, err := parseManifestWriteURLs(t.Prompt)
@@ -287,12 +284,11 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 		FinishedNode
 		ChildTaskID string
 	}
-	// Sized for: initial plan (≤ MaxNodes) + up to maxBuildIterations replans
-	// after build_mcp_blocked + one phase-2 replan after mcp_tool_set, each up
-	// to MaxNodes. Bounded so the goroutine sends never block the main loop
-	// even under deep negotiation; otherwise a slow drain could spuriously
-	// trip the 60s no-progress guard.
-	doneCh := make(chan done, MaxNodes*(maxBuildIterations+2))
+	// Sized for: initial plan (≤ MaxNodes) + mcp validation replans + one
+	// phase-2 replan after mcp_tool_set, each up to MaxNodes. Bounded so
+	// goroutine sends never block the main loop even under deep negotiation;
+	// otherwise a slow drain could spuriously trip the 60s no-progress guard.
+	doneCh := make(chan done, MaxNodes*4)
 	fanoutCtx, cancelAll := context.WithCancel(ctx)
 	defer cancelAll()
 
@@ -518,58 +514,6 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 
 	for !sched.Done() {
 		for _, n := range sched.Ready() {
-			if n.Kind == "build_mcp" || n.Skill == "build_mcp" {
-				prepared, err := prepareBuildMCPNode(n)
-				if err != nil {
-					o.emit(observer.Event{
-						Type:      observer.EventMasterBuildMCPValidationFailed,
-						TaskID:    t.ID,
-						SubtaskID: n.ID,
-						Status:    "failed",
-						Payload: observerPayload(map[string]interface{}{
-							"error":    err.Error(),
-							"required": !n.Optional,
-							"prompt":   n.Prompt,
-						}),
-					})
-					validationReplans++
-					if validationReplans >= maxBuildIterations {
-						sched.MarkDispatched(n.ID)
-						inFlight++
-						go func(n planner.Node, err error) {
-							doneCh <- done{FinishedNode: FinishedNode{NodeID: n.ID, Status: "failed", Error: "build_mcp spec preflight: " + err.Error()}}
-						}(n, err)
-						continue
-					}
-					ctx2 := t.Prompt + "\n\n" + buildMCPSpecInvalidReplanContext(n, err)
-					newPlan, perr := planWithProgress(fanoutCtx, ctx2, agents)
-					if perr != nil {
-						cancelAll()
-						return executor.Result{}, fmt.Errorf("replan after build_mcp spec validation failure: %w", perr)
-					}
-					newPlan = renamePlanIDs(newPlan, n.ID)
-					if err := validateAppendPlanForContract(allNodes, newPlan, tc, agents); err != nil {
-						cancelAll()
-						return executor.Result{}, fmt.Errorf("invalid build_mcp spec validation replan: %w", err)
-					}
-					emitPlanningCompleted(newPlan)
-					if err := sched.Append(newPlan); err != nil {
-						cancelAll()
-						return executor.Result{}, fmt.Errorf("append build_mcp spec validation replan: %w", err)
-					}
-					allNodes = append(allNodes, newPlan...)
-					for _, appended := range newPlan {
-						optionalByID[appended.ID] = appended.Optional
-					}
-					appendSubTaskRows(o.store, t.ID, newPlan)
-					for _, skipped := range sched.MarkSuperseded(n.ID, "superseded by build_mcp spec validation replan") {
-						optionalByID[skipped.NodeID] = true
-						recordSkippedDone(skipped)
-					}
-					continue
-				}
-				n = prepared
-			}
 			outputsMu.Lock()
 			prompt, rerr := Render(n.Prompt, outputs)
 			outputsMu.Unlock()
@@ -611,7 +555,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 					}),
 				})
 				validationReplans++
-				if validationReplans >= maxBuildIterations {
+				if validationReplans >= maxValidationReplans {
 					sched.MarkDispatched(n.ID)
 					inFlight++
 					go func(n planner.Node, e error) {
@@ -676,96 +620,52 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 		sched.Report(d.NodeID, d.Status, d.Output, d.Error)
 		recordTerminalDone(d)
 		if d.Status == "completed" {
-			if hType, hMeta, hOk := parseOutputHandle(d.Output); hOk {
-				switch hType {
-				case "build_mcp_blocked":
-					o.emit(observer.Event{
-						Type:          observer.EventMasterMCPReplan,
-						TaskID:        t.ID,
-						SubtaskID:     d.NodeID,
-						ChildTaskID:   d.ChildTaskID,
-						Status:        hType,
-						MCPServerName: hMeta["spec_name"],
-						Payload:       observerPayload(map[string]interface{}{"type": hType, "meta": hMeta}),
-					})
-					specName := hMeta["spec_name"]
-					iterCount[specName]++
-					if iterCount[specName] >= maxBuildIterations {
-						cancelAll()
-						return executor.Result{}, fmt.Errorf(
-							"build_mcp '%s' exhausted %d iterations; last need=%q reason=%q",
-							specName, maxBuildIterations,
-							hMeta["needed_packages"], hMeta["reason"])
-					}
-					ctx2 := t.Prompt + "\n\nBUILD_MCP_BLOCKED: " + d.Output
-					newPlan, perr := planWithProgress(fanoutCtx, ctx2, agents)
-					if perr != nil {
-						cancelAll()
-						return executor.Result{}, fmt.Errorf("replan after blocked: %w", perr)
-					}
-					newPlan = renamePlanIDs(newPlan, d.NodeID)
-					if err := validateAppendPlanForContract(allNodes, newPlan, tc, agents); err != nil {
-						cancelAll()
-						return executor.Result{}, fmt.Errorf("invalid replan: %w", err)
-					}
-					emitPlanningCompleted(newPlan)
-					if err := sched.Append(newPlan); err != nil {
-						cancelAll()
-						return executor.Result{}, fmt.Errorf("append replan: %w", err)
-					}
-					allNodes = append(allNodes, newPlan...)
-					for _, n := range newPlan {
-						optionalByID[n.ID] = n.Optional
-					}
-					appendSubTaskRows(o.store, t.ID, newPlan)
-
-				case "mcp_tool_set":
-					o.emit(observer.Event{
-						Type:          observer.EventMasterMCPReplan,
-						TaskID:        t.ID,
-						SubtaskID:     d.NodeID,
-						ChildTaskID:   d.ChildTaskID,
-						Status:        hType,
-						MCPServerName: hMeta["name"],
-						Payload:       observerPayload(map[string]interface{}{"type": hType, "meta": hMeta}),
-					})
-					freshAgents, derr := o.discoverFiltered(fanoutCtx)
-					if derr == nil {
-						agents = freshAgents
-					}
-					// Spell out the server/tool relationship explicitly so
-					// the planner doesn't have to infer it from the raw
-					// handle JSON. mcpExec routes by server name; the tools
-					// list is what's INSIDE that server.
-					builtMsg := fmt.Sprintf(
-						"BUILT a new MCP server. Now use it via skill='mcp' with "+
-							"prompt JSON {\"server\":%q,\"tool\":\"<one of: %s>\",\"args\":{...}}.",
-						hMeta["name"], hMeta["tools"])
-					ctx2 := t.Prompt + "\n\n" + builtMsg
-					newPlan, perr := planWithProgress(fanoutCtx, ctx2, agents)
-					if perr != nil {
-						cancelAll()
-						return executor.Result{}, fmt.Errorf("replan after build: %w", perr)
-					}
-					if len(newPlan) == 0 {
-						continue
-					}
-					newPlan = renamePlanIDs(newPlan, d.NodeID)
-					if err := validateAppendPlanForContract(allNodes, newPlan, tc, agents); err != nil {
-						cancelAll()
-						return executor.Result{}, fmt.Errorf("invalid post-build plan: %w", err)
-					}
-					emitPlanningCompleted(newPlan)
-					if err := sched.Append(newPlan); err != nil {
-						cancelAll()
-						return executor.Result{}, fmt.Errorf("append post-build plan: %w", err)
-					}
-					allNodes = append(allNodes, newPlan...)
-					for _, n := range newPlan {
-						optionalByID[n.ID] = n.Optional
-					}
-					appendSubTaskRows(o.store, t.ID, newPlan)
+			if hType, hMeta, hOk := parseOutputHandle(d.Output); hOk && hType == "mcp_tool_set" {
+				o.emit(observer.Event{
+					Type:          observer.EventMasterMCPReplan,
+					TaskID:        t.ID,
+					SubtaskID:     d.NodeID,
+					ChildTaskID:   d.ChildTaskID,
+					Status:        hType,
+					MCPServerName: hMeta["name"],
+					Payload:       observerPayload(map[string]interface{}{"type": hType, "meta": hMeta}),
+				})
+				freshAgents, derr := o.discoverFiltered(fanoutCtx)
+				if derr == nil {
+					agents = freshAgents
 				}
+				// Spell out the server/tool relationship explicitly so
+				// the planner doesn't have to infer it from the raw
+				// handle JSON. mcpExec routes by server name; the tools
+				// list is what's INSIDE that server.
+				builtMsg := fmt.Sprintf(
+					"BUILT a new MCP server. Now use it via skill='mcp' with "+
+						"prompt JSON {\"server\":%q,\"tool\":\"<one of: %s>\",\"args\":{...}}.",
+					hMeta["name"], hMeta["tools"])
+				ctx2 := t.Prompt + "\n\n" + builtMsg
+				newPlan, perr := planWithProgress(fanoutCtx, ctx2, agents)
+				if perr != nil {
+					cancelAll()
+					return executor.Result{}, fmt.Errorf("replan after build: %w", perr)
+				}
+				if len(newPlan) == 0 {
+					continue
+				}
+				newPlan = renamePlanIDs(newPlan, d.NodeID)
+				if err := validateAppendPlanForContract(allNodes, newPlan, tc, agents); err != nil {
+					cancelAll()
+					return executor.Result{}, fmt.Errorf("invalid post-build plan: %w", err)
+				}
+				emitPlanningCompleted(newPlan)
+				if err := sched.Append(newPlan); err != nil {
+					cancelAll()
+					return executor.Result{}, fmt.Errorf("append post-build plan: %w", err)
+				}
+				allNodes = append(allNodes, newPlan...)
+				for _, n := range newPlan {
+					optionalByID[n.ID] = n.Optional
+				}
+				appendSubTaskRows(o.store, t.ID, newPlan)
 			}
 		} else {
 			if !optionalByID[d.NodeID] || policy == "all_or_nothing" {

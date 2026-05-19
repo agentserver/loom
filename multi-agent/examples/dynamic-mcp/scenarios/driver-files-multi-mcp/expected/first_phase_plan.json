@@ -2,8 +2,8 @@
   {
     "id": "build_csv_profile",
     "target_id": "builder-slave",
-    "kind": "build_mcp",
-    "skill": "build_mcp",
+    "kind": "register_mcp",
+    "skill": "register_mcp",
     "build_spec": {
       "name": "csv_profile",
       "description": "Profile small CSV files supplied through driver manifest file URLs.",
@@ -37,8 +37,8 @@
   {
     "id": "build_refund_policy_check",
     "target_id": "builder-slave",
-    "kind": "build_mcp",
-    "skill": "build_mcp",
+    "kind": "register_mcp",
+    "skill": "register_mcp",
     "build_spec": {
       "name": "refund_policy_check",
       "description": "Evaluate profiled order/refund facts against a markdown refund policy.",

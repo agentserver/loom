@@ -302,7 +302,7 @@ func (e *MCPExecutor) RegisterStdio(name string, cfg MCPServerCfg) error {
 
 // Servers returns the names of all currently-registered MCP servers (both
 // static config + any RegisterStdio'd at runtime). Used by the slave-agent
-// main's Republish callback to re-enumerate tools after build_mcp adds a
+// main's Republish callback to re-enumerate tools after register_mcp adds a
 // new server.
 func (e *MCPExecutor) Servers() []string {
 	e.mu.Lock()

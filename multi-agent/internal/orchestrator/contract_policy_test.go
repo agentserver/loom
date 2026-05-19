@@ -36,69 +36,6 @@ func TestContractFromPromptRejectsAllowMasterFalse(t *testing.T) {
 	}
 }
 
-func TestValidatePlanWithPolicyRejectsBuildMCP(t *testing.T) {
-	tc := contract.TaskContract{
-		Version:        1,
-		ConversationID: "conv-1",
-		Intent: contract.IntentSpec{
-			Goal:            "generate code",
-			SuccessCriteria: []string{"artifact saved"},
-		},
-		DataContract: contract.DataContract{
-			WriteTargets: []contract.WriteTarget{{Type: contract.WriteTargetArtifact, Kind: "code", Name: "helper.go"}},
-		},
-	}
-	tc.ApplyDefaults()
-	cases := []struct {
-		name string
-		node planner.Node
-	}{
-		{
-			name: "skill",
-			node: planner.Node{ID: "n1", TargetID: "slave", Skill: "build_mcp"},
-		},
-		{
-			name: "kind",
-			node: planner.Node{ID: "n1", TargetID: "slave", Kind: "build_mcp"},
-		},
-	}
-	for _, tt := range cases {
-		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateWithContractPolicy([]planner.Node{tt.node}, tc.ExecutionPolicy)
-			if err == nil {
-				t.Fatalf("expected policy error")
-			}
-			if err.Error() != "build_mcp node n1 rejected by contract policy" {
-				t.Fatalf("error = %v", err)
-			}
-		})
-	}
-}
-
-func TestValidatePlanForContractRejectsBuildMCPReplan(t *testing.T) {
-	tc := contract.TaskContract{
-		Version:        1,
-		ConversationID: "conv-1",
-		Intent: contract.IntentSpec{
-			Goal:            "repair plan",
-			SuccessCriteria: []string{"done"},
-		},
-		DataContract: contract.DataContract{
-			WriteTargets: []contract.WriteTarget{{Type: contract.WriteTargetArtifact, Kind: "document", Name: "out.md"}},
-		},
-	}
-	tc.ApplyDefaults()
-	replan := []planner.Node{{ID: "n1", TargetID: "slave", Kind: "build_mcp"}}
-
-	err := validatePlanForContract(replan, tc)
-	if err == nil {
-		t.Fatalf("expected policy error")
-	}
-	if err.Error() != "build_mcp node n1 rejected by contract policy" {
-		t.Fatalf("error = %v", err)
-	}
-}
-
 func TestValidatePlanWithPolicyRejectsTooManyNodes(t *testing.T) {
 	p := contract.ExecutionPolicy{
 		AllowMaster:        contract.Bool(true),
