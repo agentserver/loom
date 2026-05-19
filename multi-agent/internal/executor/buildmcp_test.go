@@ -150,7 +150,7 @@ func TestBuildMCP_HappyPath(t *testing.T) {
 	if !strings.Contains(string(dy), "foo:") {
 		t.Fatalf("dynamic_mcp.yaml missing entry:\n%s", string(dy))
 	}
-	var df dynamicFile
+	var df DynamicFile
 	if err := yaml.Unmarshal(dy, &df); err != nil {
 		t.Fatalf("dynamic_mcp.yaml unmarshal: %v", err)
 	}
@@ -339,10 +339,10 @@ func TestBuildMCP_ReadDynamicYAMLConvertsOldToolNamesToDescriptors(t *testing.T)
 		t.Fatalf("write old yaml: %v", err)
 	}
 
-	df, err := be.readDynamicYAML()
+	df, err := ReadDynamicYAML(DynamicYAMLPath(work))
 
 	if err != nil {
-		t.Fatalf("readDynamicYAML: %v", err)
+		t.Fatalf("ReadDynamicYAML: %v", err)
 	}
 	tools := df.Servers["legacy"].Tools
 	if len(tools) != 1 {

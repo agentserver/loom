@@ -20,7 +20,6 @@ import (
 	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/progress"
-	"gopkg.in/yaml.v3"
 )
 
 type Observer interface {
@@ -125,7 +124,7 @@ func (e *BuildMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, 
 
 	// Idempotency: if dynamic_mcp.yaml has a matching entry that points at an
 	// existing file, short-circuit.
-	if existing, ok := e.lookupExistingEntry(spec.Name); ok && existing.Version == spec.Version && specHashMatches(existing.SpecHash, specHash, legacySpecHashes) {
+	if existing, ok := LookupDynamicEntry(DynamicYAMLPath(e.cfg.WorkDir), spec.Name); ok && existing.Version == spec.Version && specHashMatches(existing.SpecHash, specHash, legacySpecHashes) {
 		if _, err := os.Stat(filepath.Join(e.cfg.WorkDir, existing.Args[0])); err == nil {
 			e.progress(t, "reuse", "reusing existing generated MCP server", map[string]interface{}{"name": spec.Name})
 			return Result{Summary: e.successHandle(spec, existing.Args[0], existing.Tools, 0).Marshal()}, nil
@@ -197,7 +196,7 @@ func (e *BuildMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, 
 		return Result{}, fmt.Errorf("buildmcp: register: %w", err)
 	}
 	// Persist to dynamic_mcp.yaml.
-	if err := e.upsertDynamicYAML(dynamicEntry{
+	if err := UpsertDynamicYAML(DynamicYAMLPath(e.cfg.WorkDir), DynamicEntry{
 		Name: spec.Name, Transport: "stdio", Command: "python3",
 		Args: []string{relPath}, Version: spec.Version,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
@@ -617,113 +616,4 @@ func specHashMatches(existing, canonical string, legacy []string) bool {
 		}
 	}
 	return false
-}
-
-type dynamicEntry struct {
-	Name      string                         `yaml:"-"`
-	Transport string                         `yaml:"transport"`
-	Command   string                         `yaml:"command"`
-	Args      []string                       `yaml:"args"`
-	Version   int                            `yaml:"version"`
-	CreatedAt string                         `yaml:"created_at"`
-	SpecHash  string                         `yaml:"spec_hash"`
-	Tools     []capability.MCPToolDescriptor `yaml:"tools,omitempty"`
-}
-
-func (d *dynamicEntry) UnmarshalYAML(value *yaml.Node) error {
-	var raw struct {
-		Transport string    `yaml:"transport"`
-		Command   string    `yaml:"command"`
-		Args      []string  `yaml:"args"`
-		Version   int       `yaml:"version"`
-		CreatedAt string    `yaml:"created_at"`
-		SpecHash  string    `yaml:"spec_hash"`
-		Tools     yaml.Node `yaml:"tools"`
-	}
-	if err := value.Decode(&raw); err != nil {
-		return err
-	}
-	d.Transport = raw.Transport
-	d.Command = raw.Command
-	d.Args = raw.Args
-	d.Version = raw.Version
-	d.CreatedAt = raw.CreatedAt
-	d.SpecHash = raw.SpecHash
-	if raw.Tools.Kind == 0 {
-		return nil
-	}
-	var descriptors []capability.MCPToolDescriptor
-	if err := raw.Tools.Decode(&descriptors); err == nil {
-		d.Tools = descriptors
-		return nil
-	}
-	var names []string
-	if err := raw.Tools.Decode(&names); err != nil {
-		return err
-	}
-	d.Tools = make([]capability.MCPToolDescriptor, 0, len(names))
-	for _, name := range names {
-		if name == "" {
-			continue
-		}
-		d.Tools = append(d.Tools, capability.MCPToolDescriptor{Name: name})
-	}
-	return nil
-}
-
-type dynamicFile struct {
-	Servers map[string]dynamicEntry `yaml:"servers"`
-}
-
-func (e *BuildMCPExecutor) yamlPath() string {
-	return filepath.Join(e.cfg.WorkDir, "dynamic_mcp.yaml")
-}
-
-func (e *BuildMCPExecutor) lookupExistingEntry(name string) (dynamicEntry, bool) {
-	df, err := e.readDynamicYAML()
-	if err != nil {
-		return dynamicEntry{}, false
-	}
-	d, ok := df.Servers[name]
-	return d, ok
-}
-
-func (e *BuildMCPExecutor) readDynamicYAML() (dynamicFile, error) {
-	b, err := os.ReadFile(e.yamlPath())
-	if err != nil {
-		if os.IsNotExist(err) {
-			return dynamicFile{Servers: map[string]dynamicEntry{}}, nil
-		}
-		return dynamicFile{}, err
-	}
-	var df dynamicFile
-	if err := yaml.Unmarshal(b, &df); err != nil {
-		return dynamicFile{}, err
-	}
-	if df.Servers == nil {
-		df.Servers = map[string]dynamicEntry{}
-	}
-	for name, entry := range df.Servers {
-		entry.Name = name
-		entry.Tools = capability.WithServer(name, entry.Tools)
-		df.Servers[name] = entry
-	}
-	return df, nil
-}
-
-func (e *BuildMCPExecutor) upsertDynamicYAML(entry dynamicEntry) error {
-	df, err := e.readDynamicYAML()
-	if err != nil {
-		return err
-	}
-	df.Servers[entry.Name] = entry
-	out, err := yaml.Marshal(df)
-	if err != nil {
-		return err
-	}
-	tmp := e.yamlPath() + ".tmp"
-	if err := os.WriteFile(tmp, out, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, e.yamlPath())
 }
