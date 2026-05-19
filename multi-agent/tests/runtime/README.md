@@ -144,6 +144,40 @@ If Claude/VS Code is running inside WSL, use the Linux paths:
 }
 ```
 
+## Claude Code Runtime Permissions
+
+Online E2E slaves execute user-created scripts through Claude Code, so each
+slave's stable workdir must preserve Claude Code project permissions. Keep this
+file in every mounted slave directory, for example
+`/tmp/multi-agent-driver-first-e2e/slave-a/.claude/settings.local.json` and
+`/tmp/multi-agent-driver-first-e2e/slave-b/.claude/settings.local.json`:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Write",
+      "Edit",
+      "Bash(python *)",
+      "Bash(python3 *)",
+      "Bash(curl *)",
+      "Bash(chmod *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(pwd)",
+      "Bash(mkdir *)"
+    ],
+    "deny": []
+  }
+}
+```
+
+The runtime image also installs `python3-numpy` and includes the same user-level
+Claude Code allowlist for newly created containers. The per-workdir settings are
+still useful because those directories are intentionally reused across test runs
+to preserve login and project authorization state.
+
 If Claude/VS Code is running on the Windows side rather than inside WSL, start
 the WSL binary through `wsl.exe`:
 

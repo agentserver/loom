@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y \
     git \
     nodejs \
     npm \
+    python3-numpy \
     sqlite3 \
     zsh \
   && rm -rf /var/lib/apt/lists/*
@@ -16,6 +17,27 @@ ENV ANTHROPIC_BASE_URL=https://code.ai.cs.ac.cn
 
 RUN mkdir -p /root \
   && printf '{"hasCompletedOnboarding":true}\n' > /root/.claude.json
+
+RUN mkdir -p /root/.claude \
+  && printf '%s\n' \
+    '{' \
+    '  "permissions": {' \
+    '    "allow": [' \
+    '      "Read",' \
+    '      "Write",' \
+    '      "Edit",' \
+    '      "Bash(python *)",' \
+    '      "Bash(python3 *)",' \
+    '      "Bash(curl *)",' \
+    '      "Bash(chmod *)",' \
+    '      "Bash(ls *)",' \
+    '      "Bash(cat *)",' \
+    '      "Bash(pwd)",' \
+    '      "Bash(mkdir *)"' \
+    '    ],' \
+    '    "deny": []' \
+    '  }' \
+    '}' > /root/.claude/settings.json
 
 # Test/runtime containers can mount a host-provided /root/.zshrc containing:
 #   export ANTHROPIC_BASE_URL=https://code.ai.cs.ac.cn
