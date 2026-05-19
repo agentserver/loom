@@ -77,7 +77,7 @@ mcp_servers:
 discovery:
   display_name: slave-capdoc-e2e
   description: capability doc e2e
-  skills: [chat, mcp, build_mcp]
+  skills: [chat, mcp, register_mcp]
 resources:
   memory_gb: 12
   tags: [e2e, capability-doc]

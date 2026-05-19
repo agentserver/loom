@@ -32,7 +32,7 @@ discovery:
   skills:
     - chat
     - mcp
-    # - build_mcp  # opt-in dynamic MCP server generation
+    # - register_mcp  # opt-in: register pre-built MCP server files; pair with bash skill for generation
     # - bash  # opt-in deterministic shell execution for trusted workspaces
     # - claude_permissions  # opt-in task-channel Claude Code permission management
 
