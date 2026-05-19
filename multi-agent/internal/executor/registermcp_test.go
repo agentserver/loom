@@ -2,8 +2,8 @@ package executor
 
 import (
 	"context"
-	"os/exec"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
