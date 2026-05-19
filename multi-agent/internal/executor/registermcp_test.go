@@ -155,6 +155,9 @@ func TestRegisterMCP_IdempotentReRegister(t *testing.T) {
 	// Second call with same spec + same file: must succeed (overwrite is fine).
 	_, err = r.Run(context.Background(), Task{ID: "t2", Prompt: prompt}, &nopSink{})
 	require.NoError(t, err)
+	df, err := ReadDynamicYAML(DynamicYAMLPath(work))
+	require.NoError(t, err)
+	require.Len(t, df.Servers, 1)
 }
 
 func TestRegisterMCP_RepublishCalled(t *testing.T) {

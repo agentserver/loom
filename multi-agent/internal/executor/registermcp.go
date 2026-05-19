@@ -26,8 +26,18 @@ type RegisterMCPConfig struct {
 // RegisterMCPExecutor validates and registers a pre-written MCP Python file
 // without calling Claude. It is the simpler replacement for BuildMCPExecutor.
 type RegisterMCPExecutor struct {
-	cfg     RegisterMCPConfig
+	cfg RegisterMCPConfig
+
+	// Exposed for tests.
 	MCPExec *MCPExecutor
+}
+
+func (e *RegisterMCPExecutor) emit(ev observer.Event) {
+	if e.cfg.Observer == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	e.cfg.Observer.Emit(ev)
 }
 
 // NewRegisterMCPExecutor creates a new RegisterMCPExecutor with the given config.
@@ -109,16 +119,14 @@ func (e *RegisterMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Resul
 		}
 	}
 
-	if e.cfg.Observer != nil {
-		toolNames := capability.FlatNames(tools)
-		e.cfg.Observer.Emit(observer.Event{
-			Type:          observer.EventMCPServerCreated,
-			TaskID:        t.ID,
-			MCPServerName: p.Spec.Name,
-			MCPTools:      toolNames,
-			Status:        "completed",
-		})
-	}
+	toolNames := capability.FlatNames(tools)
+	e.emit(observer.Event{
+		Type:          observer.EventMCPServerCreated,
+		TaskID:        t.ID,
+		MCPServerName: p.Spec.Name,
+		MCPTools:      toolNames,
+		Status:        "completed",
+	})
 
 	handle := handleJSON{
 		Type: "mcp_tool_set",
