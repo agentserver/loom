@@ -192,36 +192,26 @@ func TestPlan_DecodeNodeKindAndSkill(t *testing.T) {
 	}
 }
 
-func TestPlanPrompt_MentionsBuildMCPAndKindSkill(t *testing.T) {
+func TestPlanPrompt_MentionsKindAndMCPSkill(t *testing.T) {
 	p := planPrompt("do something", []agentsdk.AgentCard{
 		{AgentID: "a1", DisplayName: "x", Description: "y"},
 	})
 	for _, want := range []string{
-		"build_mcp",         // skill name appears
-		`kind: "build_mcp"`, // node attribute documented
-		`skill: "mcp"`,      // phase-2 use-node guidance
-		"BUILD_MCP_BLOCKED", // negotiation marker
-		"resources",         // resources keyword referenced
-		"tools",             // tools field referenced
+		`"kind"`,       // node attribute documented
+		`skill: "mcp"`, // phase-2 use-node guidance
+		"resources",    // resources keyword referenced
+		"tools",        // tools field referenced
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("planPrompt missing %q", want)
 		}
 	}
-}
-
-func TestPlanPrompt_AllowsParallelIndependentBuildMCPServices(t *testing.T) {
-	p := planPrompt("build two missing tools", []agentsdk.AgentCard{
-		{AgentID: "builder", DisplayName: "Builder", Status: "available", Card: []byte(`{"skills":["build_mcp"],"resources":{"tags":["python3"]}}`)},
-	})
-	for _, want := range []string{
-		"multiple independent build_mcp services",
-		"same first-phase plan",
-		"run them concurrently",
-		"Do not emit dependent use nodes until a build has completed",
+	for _, absent := range []string{
+		"build_mcp",
+		"BUILD_MCP_BLOCKED",
 	} {
-		if !strings.Contains(p, want) {
-			t.Errorf("planPrompt missing %q\n----\n%s", want, p)
+		if strings.Contains(p, absent) {
+			t.Errorf("planPrompt should not mention %q", absent)
 		}
 	}
 }
