@@ -8,14 +8,18 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
 
 const (
-	runtimeRoot = "/tmp/multi-agent-driver-first-e2e"
-	slaveAID    = "a4811483-6f8e-4494-a132-2da139469221"
-	slaveBID    = "ab268a1b-6482-4d71-9de8-04ee6e1e3610"
+	runtimeRoot     = "/tmp/multi-agent-driver-first-e2e"
+	runtimeImage    = "multi-agent-e2e-runtime:latest"
+	slaveContainerA = "ma-e2e-slave-a"
+	slaveContainerB = "ma-e2e-slave-b"
+	slaveAID        = "a4811483-6f8e-4494-a132-2da139469221"
+	slaveBID        = "ab268a1b-6482-4d71-9de8-04ee6e1e3610"
 )
 
 type rpcClient struct {
@@ -84,12 +88,17 @@ func (c *rpcClient) callTool(name string, args any) (json.RawMessage, error) {
 
 func main() {
 	timeoutSec := flag.Int("timeout-sec", 1200, "overall helper timeout")
+	skipPrepare := flag.Bool("skip-prepare", false, "skip rebuilding binaries and restarting slave containers")
 	flag.Parse()
+
+	if !*skipPrepare {
+		prepareWorkspace()
+	}
 
 	cmd := exec.Command("docker", "run", "--rm", "-i", "--network", "host",
 		"-v", runtimeRoot+":/e2e",
 		"-v", "/root/.zshrc:/root/.zshrc:ro",
-		"multi-agent-e2e-runtime:latest",
+		runtimeImage,
 		"zsh", "-lc", "cd /e2e/driver && /e2e/bin/driver-agent serve-mcp --config config.yaml")
 	stdin, _ := cmd.StdinPipe()
 	stdout, _ := cmd.StdoutPipe()
@@ -234,4 +243,80 @@ func main() {
 func die(msg string) {
 	fmt.Fprintln(os.Stderr, "online driver-first e2e FAIL:", msg)
 	os.Exit(1)
+}
+
+// prepareWorkspace makes a single test run idempotent across branches by:
+//  1. Rebuilding driver-agent and slave-agent from the current worktree into
+//     runtimeRoot/bin/ (the fixed agentserver workspace's binary cache).
+//  2. Restarting the long-lived slave containers so they reload the binary.
+//
+// The driver runs as a one-shot stdio container below, so it always picks up
+// fresh binaries; only the slaves need explicit cycling.
+func prepareWorkspace() {
+	moduleRoot := findModuleRoot()
+	fmt.Println("PREPARE_BUILT_FROM=" + moduleRoot)
+	binDir := filepath.Join(runtimeRoot, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		die("mkdir bin: " + err.Error())
+	}
+	for _, t := range []struct{ name, pkg string }{
+		{"driver-agent", "./cmd/driver-agent"},
+		{"slave-agent", "./cmd/slave-agent"},
+	} {
+		out := filepath.Join(binDir, t.name)
+		cmd := exec.Command("go", "build", "-o", out, t.pkg)
+		cmd.Dir = moduleRoot
+		cmd.Stderr = os.Stderr
+		cmd.Stdout = os.Stdout
+		if err := cmd.Run(); err != nil {
+			die("build " + t.name + ": " + err.Error())
+		}
+	}
+	restartSlaveContainer(slaveContainerA, "slave-a")
+	restartSlaveContainer(slaveContainerB, "slave-b")
+	fmt.Println("PREPARE_OK=slaves_restarted")
+}
+
+// findModuleRoot returns the directory containing the current go.mod. Uses
+// `go env GOMOD` so it reflects the invoker's CWD, not a path baked into a
+// stale binary built from another worktree.
+func findModuleRoot() string {
+	out, err := exec.Command("go", "env", "GOMOD").Output()
+	if err != nil {
+		die("go env GOMOD: " + err.Error())
+	}
+	goMod := strings.TrimSpace(string(out))
+	if goMod == "" || goMod == "/dev/null" {
+		die("not inside a Go module; run from a worktree containing multi-agent/go.mod")
+	}
+	return filepath.Dir(goMod)
+}
+
+// restartSlaveContainer ensures a slave container with the given name is
+// running fresh against the new binary. Stops/removes any existing instance
+// (running or exited) first, then starts a new one detached. Idempotent.
+func restartSlaveContainer(containerName, workdirName string) {
+	// Stop+rm any existing container with this name. `docker rm -f` is a no-op
+	// if the container doesn't exist (exits non-zero, swallow).
+	rm := exec.Command("docker", "rm", "-f", containerName)
+	rm.Stdout = io.Discard
+	rm.Stderr = io.Discard
+	_ = rm.Run()
+
+	args := []string{
+		"run", "-d", "--name", containerName,
+		"--network", "host",
+		"-v", runtimeRoot + ":/e2e",
+		"-v", "/root/.zshrc:/root/.zshrc:ro",
+		runtimeImage,
+		"zsh", "-lc",
+		fmt.Sprintf("cd /e2e/%s && /e2e/bin/slave-agent config.yaml", workdirName),
+	}
+	run := exec.Command("docker", args...)
+	run.Stderr = os.Stderr
+	if err := run.Run(); err != nil {
+		die("start " + containerName + ": " + err.Error())
+	}
+	// Brief grace so the slave can register/announce before the driver lists agents.
+	time.Sleep(2 * time.Second)
 }
