@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/user"
@@ -137,14 +138,18 @@ func runServe(args []string) {
 		fmt.Fprintln(os.Stderr, "driver: publish card warning:", err)
 	}
 
-	obs := observerclient.New(observerclient.Config{
-		Enabled:     cfg.Observer.Enabled,
-		URL:         cfg.Observer.URL,
-		WorkspaceID: cfg.Observer.WorkspaceID,
-		AgentID:     cfg.Observer.AgentID,
-		AgentRole:   observer.RoleDriver,
-		Token:       cfg.Observer.Token,
+	obs, errObs := observerclient.New(observerclient.Config{
+		Enabled:        cfg.Observer.Enabled,
+		URL:            cfg.Observer.URL,
+		WorkspaceID:    cfg.Observer.WorkspaceID,
+		AgentID:        cfg.Observer.AgentID,
+		AgentRole:      observer.RoleDriver,
+		APIKey:         cfg.Observer.APIKey,
+		TokenStatePath: cfg.Observer.TokenStatePath,
 	})
+	if errObs != nil {
+		log.Fatalf("observerclient: %v", errObs)
+	}
 	defer obs.Close()
 
 	sdkClient := driver.NewAgentSDKClient(cli, cfg.Server.URL, cfg.Credentials.ProxyToken)
@@ -159,7 +164,7 @@ func runServe(args []string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if cfg.DriverDefaults.ArtifactTransport == driver.ArtifactTransportObserverLazy {
-		go driver.NewObserverRelay(cfg).ServePendingLoop(ctx, reg, audit, 2*time.Second)
+		go driver.NewObserverRelay(cfg, obs).ServePendingLoop(ctx, reg, audit, 2*time.Second)
 	}
 
 	connDone := make(chan error, 1)
