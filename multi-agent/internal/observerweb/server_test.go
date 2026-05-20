@@ -622,3 +622,104 @@ func TestRegisterDefaultsDisplayNameToAgentID(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	require.Equal(t, "slave-a", resp.DisplayName)
 }
+
+func TestRegisterRejectsBadAPIKey(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_real"))
+
+	h := New(st)
+	body := bytes.NewBufferString(`{"agent_id":"slave-a","role":"slave"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/register", body)
+	req.Header.Set("Authorization", "Bearer ak_FAKE")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code)
+}
+
+func TestRegisterRejectsMissingBearer(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_real"))
+
+	h := New(st)
+	body := bytes.NewBufferString(`{"agent_id":"slave-a","role":"slave"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/register", body)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusUnauthorized, rr.Code)
+}
+
+func TestRegisterRejectsBadRole(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_real"))
+
+	h := New(st)
+	body := bytes.NewBufferString(`{"agent_id":"slave-a","role":"hacker"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/register", body)
+	req.Header.Set("Authorization", "Bearer ak_real")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), "role")
+}
+
+func TestRegisterRejectsBadAgentID(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_real"))
+
+	h := New(st)
+	cases := []string{
+		`{"agent_id":"","role":"slave"}`,                  // empty
+		`{"agent_id":"has space","role":"slave"}`,         // space
+		`{"agent_id":"weird/slash","role":"slave"}`,       // slash
+		`{"agent_id":"` + strings.Repeat("a", 65) + `","role":"slave"}`, // too long
+	}
+	for _, body := range cases {
+		req := httptest.NewRequest(http.MethodPost, "/api/agents/register", bytes.NewBufferString(body))
+		req.Header.Set("Authorization", "Bearer ak_real")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		require.Equal(t, http.StatusBadRequest, rr.Code, "body=%s", body)
+	}
+}
+
+func TestRegisterRejectsBadJSON(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_real"))
+
+	h := New(st)
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/register", bytes.NewBufferString(`{not json`))
+	req.Header.Set("Authorization", "Bearer ak_real")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestRegisterRejectsWrongMethod(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_real"))
+
+	h := New(st)
+	req := httptest.NewRequest(http.MethodGet, "/api/agents/register", nil)
+	req.Header.Set("Authorization", "Bearer ak_real")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
+}
