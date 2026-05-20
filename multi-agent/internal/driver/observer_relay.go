@@ -16,19 +16,25 @@ import (
 	"time"
 )
 
+// TokenSource exposes a live observer Bearer token. *observerclient.Client
+// satisfies this; the driver test suite supplies a stub implementation.
+type TokenSource interface {
+	Token() string
+}
+
 type ObserverRelay struct {
 	baseURL string
-	token   string
+	src     TokenSource
 	http    *http.Client
 }
 
-func NewObserverRelay(cfg *Config) *ObserverRelay {
-	if cfg == nil || !cfg.Observer.Enabled || cfg.Observer.URL == "" || cfg.Observer.Token == "" {
+func NewObserverRelay(cfg *Config, src TokenSource) *ObserverRelay {
+	if cfg == nil || !cfg.Observer.Enabled || cfg.Observer.URL == "" || src == nil {
 		return nil
 	}
 	return &ObserverRelay{
 		baseURL: strings.TrimRight(cfg.Observer.URL, "/"),
-		token:   cfg.Observer.Token,
+		src:     src,
 		http:    http.DefaultClient,
 	}
 }
@@ -72,7 +78,7 @@ func (r *ObserverRelay) SaveTaskContract(ctx context.Context, taskID, conversati
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+r.token)
+	req.Header.Set("Authorization", "Bearer "+r.src.Token())
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := r.http.Do(req)
 	if err != nil {
@@ -97,7 +103,7 @@ func (r *ObserverRelay) SaveResourceSnapshot(ctx context.Context, body json.RawM
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+r.token)
+	req.Header.Set("Authorization", "Bearer "+r.src.Token())
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := r.http.Do(req)
 	if err != nil {
@@ -119,7 +125,7 @@ func (r *ObserverRelay) RegisterArtifact(ctx context.Context, entry observerArti
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+r.token)
+	req.Header.Set("Authorization", "Bearer "+r.src.Token())
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := r.http.Do(req)
 	if err != nil {
@@ -156,7 +162,7 @@ func (r *ObserverRelay) CreateWrite(ctx context.Context, entry observerWriteCrea
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+r.token)
+	req.Header.Set("Authorization", "Bearer "+r.src.Token())
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := r.http.Do(req)
 	if err != nil {
@@ -184,7 +190,7 @@ func (r *ObserverRelay) UpdateWriteTask(ctx context.Context, writeID, taskID str
 		if err != nil {
 			return err
 		}
-		req.Header.Set("Authorization", "Bearer "+r.token)
+		req.Header.Set("Authorization", "Bearer "+r.src.Token())
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := r.http.Do(req)
 		if err != nil {
@@ -233,7 +239,7 @@ func (r *ObserverRelay) ServePendingOnce(ctx context.Context, reg *FileRegistry,
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+r.token)
+	req.Header.Set("Authorization", "Bearer "+r.src.Token())
 	resp, err := r.http.Do(req)
 	if err != nil {
 		return err
@@ -274,7 +280,7 @@ func (r *ObserverRelay) uploadFile(ctx context.Context, artifactID, path string,
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+r.token)
+	req.Header.Set("Authorization", "Bearer "+r.src.Token())
 	if mt := mimeForPath(path); mt != "" {
 		req.Header.Set("Content-Type", mt)
 	}
@@ -332,7 +338,7 @@ func (r *ObserverRelay) SyncWrites(ctx context.Context, taskID string, disableUI
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+r.token)
+	req.Header.Set("Authorization", "Bearer "+r.src.Token())
 	resp, err := r.http.Do(req)
 	if err != nil {
 		return nil, err

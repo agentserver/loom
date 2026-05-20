@@ -46,7 +46,7 @@ type Tools struct {
 
 // NewTools constructs a Tools bundle.
 func NewTools(reg *FileRegistry, audit *AuditLog, sdk SDKClient, cfg *Config, obs ObserverSink) *Tools {
-	return &Tools{reg: reg, audit: audit, sdk: sdk, cfg: cfg, observer: obs, relay: NewObserverRelay(cfg)}
+	return &Tools{reg: reg, audit: audit, sdk: sdk, cfg: cfg, observer: obs, relay: NewObserverRelay(cfg, toTokenSource(obs))}
 }
 
 func (t *Tools) SetContractRunner(r ContractRunner) {
@@ -92,7 +92,7 @@ func (t *Tools) useObserverRelay() bool {
 
 func (t *Tools) observerRelay() *ObserverRelay {
 	if t.relay == nil {
-		t.relay = NewObserverRelay(t.cfg)
+		t.relay = NewObserverRelay(t.cfg, toTokenSource(t.observer))
 	}
 	return t.relay
 }
@@ -770,4 +770,18 @@ func (c *cancelTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		"status": info.Status,
 		"note":   "cancel_task is not implemented in v1; query get_task and wait for natural completion or timeout",
 	})
+}
+
+// toTokenSource adapts an ObserverSink (the 1-method Emit interface) into
+// the broader TokenSource the relay needs. The concrete *observerclient.Client
+// satisfies both; consumers like tests may pass a sink that does not — in
+// which case the relay degrades to nil (no relay calls).
+func toTokenSource(s ObserverSink) TokenSource {
+	if s == nil {
+		return nil
+	}
+	if ts, ok := s.(TokenSource); ok {
+		return ts
+	}
+	return nil
 }
