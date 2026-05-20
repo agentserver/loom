@@ -668,7 +668,8 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 
 	workspaceID, keyID, ok, err := h.s.LookupAPIKey(apiKey)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("observer: LookupAPIKey error: %v", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
 		return
 	}
 	if !ok {
@@ -705,7 +706,8 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 
 	token, err := mintAgentToken()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("observer: mintAgentToken error: %v", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
 		return
 	}
 
@@ -716,7 +718,8 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 		DisplayName: displayName,
 	}
 	if err := h.s.UpsertAgent(agent, token); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("observer: UpsertAgent error ws=%s id=%s: %v", workspaceID, req.AgentID, err)
+		http.Error(w, "internal", http.StatusInternalServerError)
 		return
 	}
 
@@ -731,7 +734,8 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 		DisplayName: agent.DisplayName,
 		Token:       token,
 	}); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("observer: encode register response error: %v", err)
+		// Headers already flushed; nothing useful to send to the client.
 		return
 	}
 }
