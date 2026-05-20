@@ -162,3 +162,14 @@ CREATE TABLE IF NOT EXISTS resource_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_resource_snapshots_latest
 ON resource_snapshots(workspace_id, created_at);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+    workspace_id TEXT NOT NULL,
+    id           TEXT NOT NULL,
+    key_hash     TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, id),
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
