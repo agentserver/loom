@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"log"
@@ -10,7 +11,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/observerstore"
 	"github.com/yourorg/multi-agent/internal/observerweb"
 )
@@ -22,16 +22,14 @@ type Config struct {
 }
 
 type WorkspaceConfig struct {
-	ID     string        `yaml:"id"`
-	Name   string        `yaml:"name"`
-	Agents []AgentConfig `yaml:"agents"`
+	ID      string         `yaml:"id"`
+	Name    string         `yaml:"name"`
+	APIKeys []APIKeyConfig `yaml:"api_keys"`
 }
 
-type AgentConfig struct {
-	ID          string `yaml:"id"`
-	Role        string `yaml:"role"`
-	DisplayName string `yaml:"display_name"`
-	Token       string `yaml:"token"`
+type APIKeyConfig struct {
+	ID  string `yaml:"id"`
+	Key string `yaml:"key"`
 }
 
 func main() {
@@ -53,16 +51,12 @@ func main() {
 		if err := st.UpsertWorkspace(observerstore.Workspace{ID: workspace.ID, Name: workspace.Name}); err != nil {
 			log.Fatal(err)
 		}
-		for _, agent := range workspace.Agents {
-			err := st.UpsertAgent(observerstore.Agent{
-				WorkspaceID: workspace.ID,
-				ID:          agent.ID,
-				Role:        agent.Role,
-				DisplayName: agent.DisplayName,
-			}, agent.Token)
-			if err != nil {
-				log.Fatal(err)
-			}
+		specs := make([]observerstore.APIKeySpec, 0, len(workspace.APIKeys))
+		for _, k := range workspace.APIKeys {
+			specs = append(specs, observerstore.APIKeySpec{ID: k.ID, Key: k.Key})
+		}
+		if err := st.ReplaceAPIKeysForWorkspace(workspace.ID, specs); err != nil {
+			log.Fatal(err)
 		}
 	}
 
@@ -76,8 +70,11 @@ func loadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	if err := dec.Decode(&cfg); err != nil {
 		return nil, err
 	}
 	if cfg.ListenAddr == "" {
@@ -98,7 +95,6 @@ func validateConfig(cfg *Config) error {
 	}
 
 	workspaces := make(map[string]struct{})
-	tokens := make(map[string]struct{})
 	for wi, workspace := range cfg.Workspaces {
 		workspaceID := workspace.ID
 		if workspaceID == "" {
@@ -117,63 +113,32 @@ func validateConfig(cfg *Config) error {
 			return fmt.Errorf("duplicate workspace id %s", workspaceID)
 		}
 		workspaces[workspaceID] = struct{}{}
-		if len(workspace.Agents) == 0 {
-			return fmt.Errorf("workspace[%s] must define at least one agent", workspaceID)
+
+		if len(workspace.APIKeys) == 0 {
+			return fmt.Errorf("workspace[%s] must define at least one api_keys entry", workspaceID)
 		}
 
-		agents := make(map[string]struct{})
-		for ai, agent := range workspace.Agents {
-			agentID := agent.ID
-			role := agent.Role
-			displayName := agent.DisplayName
-			token := agent.Token
-			if agentID == "" {
-				return fmt.Errorf("workspace[%s].agents[%d].id is required", workspaceID, ai)
+		keyIDs := make(map[string]struct{})
+		for ki, k := range workspace.APIKeys {
+			if k.ID == "" {
+				return fmt.Errorf("workspace[%s].api_keys[%d].id is required", workspaceID, ki)
 			}
-			if hasOuterWhitespace(agentID) {
-				return fmt.Errorf("workspace[%s].agents[%d].id must not contain leading or trailing whitespace", workspaceID, ai)
+			if hasOuterWhitespace(k.ID) {
+				return fmt.Errorf("workspace[%s].api_keys[%d].id must not contain leading or trailing whitespace", workspaceID, ki)
 			}
-			if _, ok := agents[agentID]; ok {
-				return fmt.Errorf("duplicate agent id %s in workspace %s", agentID, workspaceID)
+			if _, ok := keyIDs[k.ID]; ok {
+				return fmt.Errorf("duplicate api_keys.id %s in workspace %s", k.ID, workspaceID)
 			}
-			agents[agentID] = struct{}{}
-			if role == "" {
-				return fmt.Errorf("workspace[%s].agents[%s].role is required", workspaceID, agentID)
+			keyIDs[k.ID] = struct{}{}
+			if k.Key == "" {
+				return fmt.Errorf("workspace[%s].api_keys[%s].key is required", workspaceID, k.ID)
 			}
-			if hasOuterWhitespace(role) {
-				return fmt.Errorf("workspace[%s].agents[%s].role must not contain leading or trailing whitespace", workspaceID, agentID)
+			if hasOuterWhitespace(k.Key) {
+				return fmt.Errorf("workspace[%s].api_keys[%s].key must not contain leading or trailing whitespace", workspaceID, k.ID)
 			}
-			if !validRole(role) {
-				return fmt.Errorf("workspace[%s].agents[%s].role must be one of driver, master, slave", workspaceID, agentID)
-			}
-			if displayName == "" {
-				return fmt.Errorf("workspace[%s].agents[%s].display_name is required", workspaceID, agentID)
-			}
-			if hasOuterWhitespace(displayName) {
-				return fmt.Errorf("workspace[%s].agents[%s].display_name must not contain leading or trailing whitespace", workspaceID, agentID)
-			}
-			if token == "" {
-				return fmt.Errorf("workspace[%s].agents[%s].token is required", workspaceID, agentID)
-			}
-			if hasOuterWhitespace(token) {
-				return fmt.Errorf("workspace[%s].agents[%s].token must not contain leading or trailing whitespace", workspaceID, agentID)
-			}
-			if _, ok := tokens[token]; ok {
-				return fmt.Errorf("duplicate token %s", token)
-			}
-			tokens[token] = struct{}{}
 		}
 	}
 	return nil
-}
-
-func validRole(role string) bool {
-	switch role {
-	case observer.RoleDriver, observer.RoleMaster, observer.RoleSlave:
-		return true
-	default:
-		return false
-	}
 }
 
 func hasOuterWhitespace(s string) bool {

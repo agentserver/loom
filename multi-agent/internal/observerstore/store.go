@@ -332,6 +332,83 @@ func (s *Store) UpsertAgent(a Agent, token string) error {
 	return err
 }
 
+// APIKeySpec is a per-workspace bootstrap credential. Agents present the
+// plaintext Key as a Bearer token against /api/agents/register to mint
+// their own per-agent token.
+type APIKeySpec struct {
+	ID  string
+	Key string
+}
+
+// UpsertAPIKey inserts or replaces the api key identified by
+// (workspaceID, id). The plaintext key is hashed before storage. An empty
+// key is rejected; the workspace must already exist (enforced by FK).
+func (s *Store) UpsertAPIKey(workspaceID, id, key string) error {
+	if key == "" {
+		return errors.New("observerstore: api key must not be empty")
+	}
+	_, err := s.db.Exec(`INSERT INTO api_keys(workspace_id, id, key_hash, created_at)
+		VALUES(?, ?, ?, ?)
+		ON CONFLICT(workspace_id, id) DO UPDATE SET key_hash=excluded.key_hash, created_at=excluded.created_at`,
+		workspaceID, id, tokenHash(key), nowUTC())
+	return err
+}
+
+// LookupAPIKey returns the workspace_id and key id whose key_hash matches
+// the plaintext key. ok=false means no row matched; err is reserved for
+// real DB errors. An empty input returns ok=false without consulting the DB.
+func (s *Store) LookupAPIKey(key string) (workspaceID, keyID string, ok bool, err error) {
+	if key == "" {
+		return "", "", false, nil
+	}
+	err = s.db.QueryRow(
+		`SELECT workspace_id, id FROM api_keys WHERE key_hash=?`,
+		tokenHash(key),
+	).Scan(&workspaceID, &keyID)
+	if err == sql.ErrNoRows {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	return workspaceID, keyID, true, nil
+}
+
+// ReplaceAPIKeysForWorkspace deletes every api_keys row for workspaceID,
+// then inserts the supplied spec set in a single transaction. Used at
+// observer boot to reconcile yaml ↔ db so that keys removed from yaml
+// stop working after restart.
+func (s *Store) ReplaceAPIKeysForWorkspace(workspaceID string, keys []APIKeySpec) error {
+	for i, k := range keys {
+		if k.ID == "" {
+			return fmt.Errorf("observerstore: api key[%d] id must not be empty", i)
+		}
+		if k.Key == "" {
+			return fmt.Errorf("observerstore: api key[%s] value must not be empty", k.ID)
+		}
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM api_keys WHERE workspace_id=?`, workspaceID); err != nil {
+		return err
+	}
+	now := nowUTC()
+	for _, k := range keys {
+		if _, err := tx.Exec(
+			`INSERT INTO api_keys(workspace_id, id, key_hash, created_at) VALUES(?, ?, ?, ?)`,
+			workspaceID, k.ID, tokenHash(k.Key), now,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) ValidateToken(token string) (Agent, bool, error) {
 	if token == "" {
 		return Agent{}, false, nil

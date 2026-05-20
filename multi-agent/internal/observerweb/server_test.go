@@ -556,3 +556,239 @@ func TestSlavesPageShowsDirectSlaveTask(t *testing.T) {
 	require.Contains(t, rr.Body.String(), "completed")
 	require.Contains(t, rr.Body.String(), "done")
 }
+
+func TestRegisterSuccessAndIssuedTokenIngests(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_secret"))
+
+	h := New(st)
+
+	body := bytes.NewBufferString(`{"agent_id":"slave-a","role":"slave","display_name":"Slave A"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/register", body)
+	req.Header.Set("Authorization", "Bearer ak_secret")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	var resp struct {
+		WorkspaceID string `json:"workspace_id"`
+		AgentID     string `json:"agent_id"`
+		Role        string `json:"role"`
+		DisplayName string `json:"display_name"`
+		Token       string `json:"token"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, "ws1", resp.WorkspaceID)
+	require.Equal(t, "slave-a", resp.AgentID)
+	require.Equal(t, observer.RoleSlave, resp.Role)
+	require.Equal(t, "Slave A", resp.DisplayName)
+	require.Len(t, resp.Token, 64, "token must be 32 random bytes hex-encoded")
+
+	// Issued token must work for ingest end-to-end.
+	evBody, _ := json.Marshal(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave-a", AgentRole: observer.RoleSlave,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "t1", Summary: "first", Status: "assigned",
+	})
+	ev := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(evBody))
+	ev.Header.Set("Authorization", "Bearer "+resp.Token)
+	ev2 := httptest.NewRecorder()
+	h.ServeHTTP(ev2, ev)
+	require.Equal(t, http.StatusAccepted, ev2.Code, ev2.Body.String())
+}
+
+func TestRegisterDefaultsDisplayNameToAgentID(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_secret"))
+
+	h := New(st)
+	body := bytes.NewBufferString(`{"agent_id":"slave-a","role":"slave"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/register", body)
+	req.Header.Set("Authorization", "Bearer ak_secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var resp struct {
+		DisplayName string `json:"display_name"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, "slave-a", resp.DisplayName)
+}
+
+func TestRegisterRejectsBadAPIKey(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_real"))
+
+	h := New(st)
+	body := bytes.NewBufferString(`{"agent_id":"slave-a","role":"slave"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/register", body)
+	req.Header.Set("Authorization", "Bearer ak_FAKE")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code)
+}
+
+func TestRegisterRejectsMissingBearer(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_real"))
+
+	h := New(st)
+	body := bytes.NewBufferString(`{"agent_id":"slave-a","role":"slave"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/register", body)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusUnauthorized, rr.Code)
+}
+
+func TestRegisterRejectsBadRole(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_real"))
+
+	h := New(st)
+	body := bytes.NewBufferString(`{"agent_id":"slave-a","role":"hacker"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/register", body)
+	req.Header.Set("Authorization", "Bearer ak_real")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), "role")
+}
+
+func TestRegisterRejectsBadAgentID(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_real"))
+
+	h := New(st)
+	cases := []string{
+		`{"agent_id":"","role":"slave"}`,                  // empty
+		`{"agent_id":"has space","role":"slave"}`,         // space
+		`{"agent_id":"weird/slash","role":"slave"}`,       // slash
+		`{"agent_id":"` + strings.Repeat("a", 65) + `","role":"slave"}`, // too long
+	}
+	for _, body := range cases {
+		req := httptest.NewRequest(http.MethodPost, "/api/agents/register", bytes.NewBufferString(body))
+		req.Header.Set("Authorization", "Bearer ak_real")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		require.Equal(t, http.StatusBadRequest, rr.Code, "body=%s", body)
+	}
+}
+
+func TestRegisterRejectsBadJSON(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_real"))
+
+	h := New(st)
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/register", bytes.NewBufferString(`{not json`))
+	req.Header.Set("Authorization", "Bearer ak_real")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestRegisterRejectsWrongMethod(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_real"))
+
+	h := New(st)
+	req := httptest.NewRequest(http.MethodGet, "/api/agents/register", nil)
+	req.Header.Set("Authorization", "Bearer ak_real")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
+}
+
+func TestRegisterReissueInvalidatesOldToken(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_real"))
+
+	h := New(st)
+	register := func() string {
+		body := bytes.NewBufferString(`{"agent_id":"slave-a","role":"slave","display_name":"Slave A"}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/agents/register", body)
+		req.Header.Set("Authorization", "Bearer ak_real")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		var resp struct {
+			Token string `json:"token"`
+		}
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+		require.NotEmpty(t, resp.Token)
+		return resp.Token
+	}
+
+	first := register()
+	second := register()
+	require.NotEqual(t, first, second, "reissue must return a new token")
+
+	// Old token: ingest now fails 401.
+	evBody, _ := json.Marshal(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave-a", AgentRole: observer.RoleSlave,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "t1", Summary: "x", Status: "assigned",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(evBody))
+	req.Header.Set("Authorization", "Bearer "+first)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusUnauthorized, rr.Code, "old token must be invalidated")
+
+	// New token still works.
+	req = httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(evBody))
+	req.Header.Set("Authorization", "Bearer "+second)
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusAccepted, rr.Code, rr.Body.String())
+}
+
+func TestRegisterRejectsPerAgentTokenAsAPIKey(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_real"))
+	// Statically seed an agent token (mimics a per-agent token issued by an
+	// earlier register call).
+	require.NoError(t, st.UpsertAgent(
+		observerstore.Agent{WorkspaceID: "ws1", ID: "slave-a", Role: observer.RoleSlave, DisplayName: "Slave A"},
+		"leaked_agent_token",
+	))
+
+	h := New(st)
+	body := bytes.NewBufferString(`{"agent_id":"slave-b","role":"slave"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/register", body)
+	req.Header.Set("Authorization", "Bearer leaked_agent_token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code,
+		"per-agent token must not be accepted as an api-key")
+}

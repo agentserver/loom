@@ -69,13 +69,9 @@ func TestDistributedComposeExampleConfigsLoad(t *testing.T) {
 		"db_path:",
 		"workspaces:",
 		"id: dev",
-		"role: driver",
-		"role: master",
-		"role: slave",
-		"token: driver-token",
-		"token: master-token",
-		"token: slave-a-token",
-		"token: slave-b-token",
+		"api_keys:",
+		"id: ak-dev",
+		"key: ak_dev_shared_secret",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("observer example missing %q", want)

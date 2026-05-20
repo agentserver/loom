@@ -1,12 +1,16 @@
 package observerweb
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"html/template"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/yourorg/multi-agent/internal/observer"
@@ -33,12 +37,17 @@ type Store interface {
 	GetTaskContract(workspaceID, taskID string) (observerstore.TaskContractRecord, error)
 	SaveResourceSnapshot(observerstore.ResourceSnapshotRecord) error
 	GetLatestResourceSnapshot(workspaceID string) (observerstore.ResourceSnapshotRecord, error)
+
+	// API-key registration support.
+	LookupAPIKey(key string) (workspaceID, keyID string, ok bool, err error)
+	UpsertAgent(a observerstore.Agent, token string) error
 }
 
 func New(s Store) http.Handler {
 	h := &handler{s: s}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/events", h.postEvent)
+	mux.HandleFunc("/api/agents/register", h.register)
 	mux.HandleFunc("/api/tasks", h.apiTasks)
 	mux.HandleFunc("/api/artifacts", h.artifacts)
 	mux.HandleFunc("/api/artifacts/", h.artifactRouter)
@@ -627,6 +636,125 @@ func hasSlaveActivity(task observerstore.TaskView) bool {
 		}
 	}
 	return false
+}
+
+type registerRequest struct {
+	AgentID     string `json:"agent_id"`
+	Role        string `json:"role"`
+	DisplayName string `json:"display_name"`
+}
+
+type registerResponse struct {
+	WorkspaceID string `json:"workspace_id"`
+	AgentID     string `json:"agent_id"`
+	Role        string `json:"role"`
+	DisplayName string `json:"display_name"`
+	Token       string `json:"token"`
+}
+
+var agentIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+func (h *handler) register(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	apiKey, ok := bearerToken(r.Header.Get("Authorization"))
+	if !ok {
+		http.Error(w, "missing or invalid bearer token", http.StatusUnauthorized)
+		return
+	}
+
+	workspaceID, keyID, ok, err := h.s.LookupAPIKey(apiKey)
+	if err != nil {
+		log.Printf("observer: LookupAPIKey error: %v", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.Error(w, "invalid api key", http.StatusForbidden)
+		return
+	}
+
+	var req registerRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<14) // 16 KiB is plenty
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	var trailing struct{}
+	if err := dec.Decode(&trailing); err != io.EOF {
+		http.Error(w, "bad json: trailing content", http.StatusBadRequest)
+		return
+	}
+
+	if !agentIDPattern.MatchString(req.AgentID) {
+		http.Error(w, "agent_id must match [A-Za-z0-9_-]{1,64}", http.StatusBadRequest)
+		return
+	}
+	if !validRegisterRole(req.Role) {
+		http.Error(w, "role must be one of driver, master, slave", http.StatusBadRequest)
+		return
+	}
+	displayName := req.DisplayName
+	if displayName == "" {
+		displayName = req.AgentID
+	}
+
+	token, err := mintAgentToken()
+	if err != nil {
+		log.Printf("observer: mintAgentToken error: %v", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+
+	agent := observerstore.Agent{
+		WorkspaceID: workspaceID,
+		ID:          req.AgentID,
+		Role:        req.Role,
+		DisplayName: displayName,
+	}
+	if err := h.s.UpsertAgent(agent, token); err != nil {
+		log.Printf("observer: UpsertAgent error ws=%s id=%s: %v", workspaceID, req.AgentID, err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("observer: registered agent ws=%s id=%s role=%s via api_key_id=%s",
+		workspaceID, req.AgentID, req.Role, keyID)
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(registerResponse{
+		WorkspaceID: workspaceID,
+		AgentID:     agent.ID,
+		Role:        agent.Role,
+		DisplayName: agent.DisplayName,
+		Token:       token,
+	}); err != nil {
+		log.Printf("observer: encode register response error: %v", err)
+		// Headers already flushed; nothing useful to send to the client.
+		return
+	}
+}
+
+func validRegisterRole(role string) bool {
+	switch role {
+	case observer.RoleDriver, observer.RoleMaster, observer.RoleSlave:
+		return true
+	default:
+		return false
+	}
+}
+
+func mintAgentToken() (string, error) {
+	var buf [32]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf[:]), nil
 }
 
 var pageTemplate = template.Must(template.New("observer").Parse(`<!doctype html>
