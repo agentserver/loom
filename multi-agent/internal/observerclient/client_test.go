@@ -82,6 +82,34 @@ func TestNewColdStartRegistersAndEmits(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("did not receive event before timeout")
 	}
+
+	// Spec requires the issued token to be persisted with mode 0600.
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	persisted, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "tk_issued", string(persisted))
+}
+
+func TestNewWorkspaceMismatchReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"workspace_id":"OTHER-WS","token":"tk_x"}`))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "observer.token")
+	_, err := New(Config{
+		Enabled: true, URL: srv.URL, WorkspaceID: "ws-1",
+		AgentID: "agent-1", AgentRole: observer.RoleSlave,
+		APIKey: "ak", TokenStatePath: path,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "OTHER-WS")
+	require.Contains(t, err.Error(), "ws-1")
+	_, statErr := os.Stat(path)
+	require.True(t, os.IsNotExist(statErr), "mismatch must not persist a token")
 }
 
 func TestNewWarmStartSkipsRegister(t *testing.T) {

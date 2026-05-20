@@ -198,3 +198,50 @@ observer:
 		t.Fatalf("error should mention token: %v", err)
 	}
 }
+
+func TestLoadConfig_ObserverEnabledRequiresAPIKeyAndTokenStatePath(t *testing.T) {
+	cases := []struct {
+		name    string
+		extra   string
+		wantSub string
+	}{
+		{
+			name: "missing api_key",
+			extra: func() string {
+				return "  token_state_path: " + filepath.Join(t.TempDir(), "observer.token") + "\n"
+			}(),
+			wantSub: "observer.api_key",
+		},
+		{
+			name:    "missing token_state_path",
+			extra:   "  api_key: ak\n",
+			wantSub: "observer.token_state_path",
+		},
+		{
+			name:    "relative token_state_path",
+			extra:   "  api_key: ak\n  token_state_path: relative/path\n",
+			wantSub: "must be an absolute path",
+		},
+		{
+			name:    "missing parent dir",
+			extra:   "  api_key: ak\n  token_state_path: /nonexistent_dir_xyz/observer.token\n",
+			wantSub: "parent directory",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "c.yaml")
+			body := "server:\n  url: https://example.com\n  name: m\ndiscovery:\n  display_name: driver-display\nobserver:\n  enabled: true\n  url: https://observer.example\n  workspace_id: ws\n  agent_id: a\n" + tc.extra
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := LoadConfig(path)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantSub)
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("expected error to contain %q, got %v", tc.wantSub, err)
+			}
+		})
+	}
+}

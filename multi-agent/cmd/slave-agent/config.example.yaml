@@ -38,8 +38,8 @@ discovery:
 
 observer:
   enabled: false
-  url: http://39.104.86.73:8090
-  workspace_id: ws-prod
+  url: https://observer.example.com
+  workspace_id: ws-replace-me
   agent_id: slave-local
   api_key: ak_REPLACE_ME
   token_state_path: /var/lib/loom/slave-local/observer.token
