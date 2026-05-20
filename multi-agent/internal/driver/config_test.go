@@ -171,3 +171,30 @@ func TestSaveConfig_RoundTrip(t *testing.T) {
 		t.Errorf("round-trip lost ProxyToken: %q", got.Credentials.ProxyToken)
 	}
 }
+
+func TestLoadConfig_ObserverRejectsObsoleteTokenField(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	if err := os.WriteFile(path, []byte(`
+server:
+  url: https://example.com
+  name: m
+discovery:
+  display_name: driver-display
+observer:
+  enabled: true
+  url: https://observer.example
+  workspace_id: ws
+  agent_id: a
+  token: leftover-token
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error for obsolete token field")
+	}
+	if !strings.Contains(err.Error(), "token") {
+		t.Fatalf("error should mention token: %v", err)
+	}
+}
