@@ -173,8 +173,3 @@ func (c *Client) post(ev observer.Event) {
 		fmt.Fprintf(os.Stderr, "observerclient: post event status: %s\n", resp.Status)
 	}
 }
-
-// Temporary stub — replaced by the real handle401 in Task 4.
-func (c *Client) handle401(_ context.Context) {
-	fmt.Fprintln(os.Stderr, "observerclient: ingest 401 — re-register handler not yet wired")
-}

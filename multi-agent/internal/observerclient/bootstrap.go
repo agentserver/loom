@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 // writeTokenFile writes the plaintext token to path with mode 0600, replacing
@@ -129,4 +130,41 @@ func (c *Client) loadOrRegister(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("observerclient: persist token: %w", err)
 	}
 	return tok, nil
+}
+
+// handle401 reacts to a 401 from /api/events by re-registering, swapping
+// the in-memory token, and overwriting the token file. A 60-second cooldown
+// per process prevents an unbounded re-register storm if the api-key itself
+// has been revoked server-side.
+func (c *Client) handle401(ctx context.Context) {
+	c.tokenMu.Lock()
+	now := time.Now()
+	if now.Sub(c.lastReRegister) < reRegisterCoolDur {
+		c.tokenMu.Unlock()
+		fmt.Fprintln(os.Stderr, "observerclient: ingest 401 within cooldown; not re-registering")
+		return
+	}
+	c.lastReRegister = now
+	c.tokenMu.Unlock()
+
+	regCtx, cancel := context.WithTimeout(ctx, registerTimeout)
+	defer cancel()
+
+	httpc := &http.Client{Timeout: registerTimeout}
+	tok, _, err := register(regCtx, httpc, c.cfg.URL, c.cfg.APIKey,
+		c.cfg.AgentID, c.cfg.AgentRole, c.cfg.AgentID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "observerclient: ingest 401 → re-register failed: %v\n", err)
+		return
+	}
+
+	c.tokenMu.Lock()
+	c.token = tok
+	c.tokenMu.Unlock()
+
+	if writeErr := writeTokenFile(c.cfg.TokenStatePath, tok); writeErr != nil {
+		fmt.Fprintf(os.Stderr,
+			"observerclient: token rotated in-memory but file write failed: %v\n", writeErr)
+	}
+	fmt.Fprintln(os.Stderr, "observerclient: ingest 401 → re-registered successfully")
 }

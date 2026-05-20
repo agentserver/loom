@@ -160,3 +160,113 @@ func TestCloseReturnsWhenPostStalls(t *testing.T) {
 	}
 	close(block)
 }
+
+func TestPost401TriggersReRegisterAndUpdatesToken(t *testing.T) {
+	var eventCalls atomic.Int32
+	var regCalls atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/agents/register":
+			regCalls.Add(1)
+			_, _ = w.Write([]byte(`{"workspace_id":"ws-1","token":"tk_v2"}`))
+		case "/api/events":
+			n := eventCalls.Add(1)
+			if n == 1 {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			if r.Header.Get("Authorization") != "Bearer tk_v2" {
+				t.Errorf("second event Authorization want Bearer tk_v2, got %s", r.Header.Get("Authorization"))
+			}
+			w.WriteHeader(http.StatusAccepted)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "observer.token")
+	require.NoError(t, writeTokenFile(path, "tk_v1"))
+
+	c, err := New(Config{
+		Enabled: true, URL: srv.URL, WorkspaceID: "ws-1",
+		AgentID: "agent-1", AgentRole: observer.RoleSlave,
+		APIKey: "ak", TokenStatePath: path,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "tk_v1", c.Token())
+
+	c.Emit(observer.Event{TaskID: "t1"})
+	c.Emit(observer.Event{TaskID: "t2"})
+	c.Close()
+
+	require.Equal(t, int32(1), regCalls.Load(), "expected exactly one re-register")
+	require.Equal(t, "tk_v2", c.Token())
+
+	got, _ := os.ReadFile(path)
+	require.Equal(t, "tk_v2", string(got))
+}
+
+func TestPost401WithinCooldownSkipsReRegister(t *testing.T) {
+	var regCalls atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/agents/register":
+			regCalls.Add(1)
+			_, _ = w.Write([]byte(`{"workspace_id":"ws-1","token":"tk_v2"}`))
+		case "/api/events":
+			w.WriteHeader(http.StatusUnauthorized)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "observer.token")
+	require.NoError(t, writeTokenFile(path, "tk_v1"))
+
+	c, err := New(Config{
+		Enabled: true, URL: srv.URL, WorkspaceID: "ws-1",
+		AgentID: "agent-1", AgentRole: observer.RoleSlave,
+		APIKey: "ak", TokenStatePath: path,
+	})
+	require.NoError(t, err)
+
+	for i := 0; i < 5; i++ {
+		c.Emit(observer.Event{TaskID: "t"})
+	}
+	c.Close()
+
+	require.Equal(t, int32(1), regCalls.Load(),
+		"expected exactly one register call under cooldown; got %d", regCalls.Load())
+}
+
+func TestPost403DoesNotTriggerReRegister(t *testing.T) {
+	var regCalls atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/agents/register":
+			regCalls.Add(1)
+			_, _ = w.Write([]byte(`{"workspace_id":"ws-1","token":"tk_v2"}`))
+		case "/api/events":
+			w.WriteHeader(http.StatusForbidden)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "observer.token")
+	require.NoError(t, writeTokenFile(path, "tk_v1"))
+
+	c, err := New(Config{
+		Enabled: true, URL: srv.URL, WorkspaceID: "ws-1",
+		AgentID: "agent-1", AgentRole: observer.RoleSlave,
+		APIKey: "ak", TokenStatePath: path,
+	})
+	require.NoError(t, err)
+	c.Emit(observer.Event{TaskID: "t"})
+	c.Close()
+
+	require.Equal(t, int32(0), regCalls.Load(), "403 must not trigger re-register")
+}
