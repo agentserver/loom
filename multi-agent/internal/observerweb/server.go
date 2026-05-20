@@ -33,6 +33,10 @@ type Store interface {
 	GetTaskContract(workspaceID, taskID string) (observerstore.TaskContractRecord, error)
 	SaveResourceSnapshot(observerstore.ResourceSnapshotRecord) error
 	GetLatestResourceSnapshot(workspaceID string) (observerstore.ResourceSnapshotRecord, error)
+
+	// API-key registration support.
+	LookupAPIKey(key string) (workspaceID, keyID string, ok bool, err error)
+	UpsertAgent(a observerstore.Agent, token string) error
 }
 
 func New(s Store) http.Handler {
