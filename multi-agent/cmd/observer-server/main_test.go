@@ -14,16 +14,16 @@ func TestLoadConfigDefaultsAndValidates(t *testing.T) {
 workspaces:
   - id: ws1
     name: Workspace
-    agents:
-      - id: driver
-        role: driver
-        display_name: Driver
-        token: driver-token
+    api_keys:
+      - id: ak-default
+        key: ak_secret
 `)
 
 	require.Equal(t, ":8090", cfg.ListenAddr)
 	require.Equal(t, "observer.db", cfg.DBPath)
 	require.Len(t, cfg.Workspaces, 1)
+	require.Len(t, cfg.Workspaces[0].APIKeys, 1)
+	require.Equal(t, "ak-default", cfg.Workspaces[0].APIKeys[0].ID)
 }
 
 func TestLoadDistributedObserverExampleConfig(t *testing.T) {
@@ -34,7 +34,27 @@ func TestLoadDistributedObserverExampleConfig(t *testing.T) {
 	require.Equal(t, "observer.db", cfg.DBPath)
 	require.Len(t, cfg.Workspaces, 1)
 	require.Equal(t, "dev", cfg.Workspaces[0].ID)
-	require.Len(t, cfg.Workspaces[0].Agents, 4)
+	require.Len(t, cfg.Workspaces[0].APIKeys, 1)
+	require.Equal(t, "ak-dev", cfg.Workspaces[0].APIKeys[0].ID)
+}
+
+func TestLoadConfigRejectsObsoleteAgentsField(t *testing.T) {
+	path := writeConfig(t, `
+workspaces:
+  - id: ws1
+    name: Workspace
+    api_keys:
+      - id: ak-default
+        key: ak_secret
+    agents:
+      - id: driver
+        role: driver
+        display_name: Driver
+        token: driver-token
+`)
+	_, err := loadConfig(path)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "agents", "yaml strict mode should reject the obsolete field")
 }
 
 func TestLoadConfigRejectsInvalidValues(t *testing.T) {
@@ -48,11 +68,9 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 			yaml: `
 workspaces:
   - name: Workspace
-    agents:
-      - id: driver
-        role: driver
-        display_name: Driver
-        token: driver-token
+    api_keys:
+      - id: ak-default
+        key: ak_secret
 `,
 			wantErr: "workspace[0].id is required",
 		},
@@ -61,204 +79,85 @@ workspaces:
 			yaml: `
 workspaces:
   - id: ws1
-    agents:
-      - id: driver
-        role: driver
-        display_name: Driver
-        token: driver-token
+    api_keys:
+      - id: ak-default
+        key: ak_secret
 `,
 			wantErr: "workspace[0].name is required",
 		},
 		{
-			name: "workspace with no agents",
+			name: "workspace with no api_keys",
 			yaml: `
 workspaces:
   - id: ws1
     name: Workspace
 `,
-			wantErr: "workspace[ws1] must define at least one agent",
+			wantErr: "workspace[ws1] must define at least one api_keys entry",
 		},
 		{
-			name: "empty agent id",
+			name: "workspace with empty api_keys list",
 			yaml: `
 workspaces:
   - id: ws1
     name: Workspace
-    agents:
-      - role: driver
-        display_name: Driver
-        token: driver-token
+    api_keys: []
 `,
-			wantErr: "workspace[ws1].agents[0].id is required",
+			wantErr: "workspace[ws1] must define at least one api_keys entry",
 		},
 		{
-			name: "empty agent role",
+			name: "duplicate api_keys id in workspace",
 			yaml: `
 workspaces:
   - id: ws1
     name: Workspace
-    agents:
-      - id: driver
-        display_name: Driver
-        token: driver-token
+    api_keys:
+      - id: ak-dup
+        key: key-1
+      - id: ak-dup
+        key: key-2
 `,
-			wantErr: "workspace[ws1].agents[driver].role is required",
+			wantErr: "duplicate api_keys.id ak-dup in workspace ws1",
 		},
 		{
-			name: "empty agent display name",
+			name: "empty api_key id",
 			yaml: `
 workspaces:
   - id: ws1
     name: Workspace
-    agents:
-      - id: driver
-        role: driver
-        token: driver-token
+    api_keys:
+      - id: ""
+        key: key-1
 `,
-			wantErr: "workspace[ws1].agents[driver].display_name is required",
+			wantErr: "workspace[ws1].api_keys[0].id is required",
 		},
 		{
-			name: "empty agent token",
+			name: "empty api_key value",
 			yaml: `
 workspaces:
   - id: ws1
     name: Workspace
-    agents:
-      - id: driver
-        role: driver
-        display_name: Driver
+    api_keys:
+      - id: ak-empty
+        key: ""
 `,
-			wantErr: "workspace[ws1].agents[driver].token is required",
-		},
-		{
-			name: "invalid role",
-			yaml: `
-workspaces:
-  - id: ws1
-    name: Workspace
-    agents:
-      - id: driver
-        role: worker
-        display_name: Driver
-        token: driver-token
-`,
-			wantErr: "workspace[ws1].agents[driver].role must be one of driver, master, slave",
-		},
-		{
-			name: "whitespace padded workspace id",
-			yaml: `
-workspaces:
-  - id: " ws1"
-    name: Workspace
-    agents:
-      - id: driver
-        role: driver
-        display_name: Driver
-        token: driver-token
-`,
-			wantErr: "workspace[0].id must not contain leading or trailing whitespace",
-		},
-		{
-			name: "whitespace padded agent id",
-			yaml: `
-workspaces:
-  - id: ws1
-    name: Workspace
-    agents:
-      - id: "driver "
-        role: driver
-        display_name: Driver
-        token: driver-token
-`,
-			wantErr: "workspace[ws1].agents[0].id must not contain leading or trailing whitespace",
-		},
-		{
-			name: "whitespace padded role",
-			yaml: `
-workspaces:
-  - id: ws1
-    name: Workspace
-    agents:
-      - id: driver
-        role: " driver"
-        display_name: Driver
-        token: driver-token
-`,
-			wantErr: "workspace[ws1].agents[driver].role must not contain leading or trailing whitespace",
-		},
-		{
-			name: "whitespace padded token",
-			yaml: `
-workspaces:
-  - id: ws1
-    name: Workspace
-    agents:
-      - id: driver
-        role: driver
-        display_name: Driver
-        token: "driver-token "
-`,
-			wantErr: "workspace[ws1].agents[driver].token must not contain leading or trailing whitespace",
+			wantErr: "workspace[ws1].api_keys[ak-empty].key is required",
 		},
 		{
 			name: "duplicate workspace id",
 			yaml: `
 workspaces:
   - id: ws1
-    name: Workspace 1
-    agents:
-      - id: driver
-        role: driver
-        display_name: Driver
-        token: driver-token
+    name: Workspace A
+    api_keys:
+      - id: ak-a
+        key: key-a
   - id: ws1
-    name: Workspace 2
-    agents:
-      - id: master
-        role: master
-        display_name: Master
-        token: master-token
+    name: Workspace B
+    api_keys:
+      - id: ak-b
+        key: key-b
 `,
 			wantErr: "duplicate workspace id ws1",
-		},
-		{
-			name: "duplicate agent id",
-			yaml: `
-workspaces:
-  - id: ws1
-    name: Workspace
-    agents:
-      - id: driver
-        role: driver
-        display_name: Driver
-        token: driver-token
-      - id: driver
-        role: master
-        display_name: Master
-        token: master-token
-`,
-			wantErr: "duplicate agent id driver in workspace ws1",
-		},
-		{
-			name: "duplicate token",
-			yaml: `
-workspaces:
-  - id: ws1
-    name: Workspace
-    agents:
-      - id: driver
-        role: driver
-        display_name: Driver
-        token: shared-token
-  - id: ws2
-    name: Workspace 2
-    agents:
-      - id: master
-        role: master
-        display_name: Master
-        token: shared-token
-`,
-			wantErr: "duplicate token shared-token",
 		},
 	}
 
