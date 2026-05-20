@@ -769,3 +769,26 @@ func TestRegisterReissueInvalidatesOldToken(t *testing.T) {
 	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusAccepted, rr.Code, rr.Body.String())
 }
+
+func TestRegisterRejectsPerAgentTokenAsAPIKey(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_real"))
+	// Statically seed an agent token (mimics a per-agent token issued by an
+	// earlier register call).
+	require.NoError(t, st.UpsertAgent(
+		observerstore.Agent{WorkspaceID: "ws1", ID: "slave-a", Role: observer.RoleSlave, DisplayName: "Slave A"},
+		"leaked_agent_token",
+	))
+
+	h := New(st)
+	body := bytes.NewBufferString(`{"agent_id":"slave-b","role":"slave"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/register", body)
+	req.Header.Set("Authorization", "Bearer leaked_agent_token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code,
+		"per-agent token must not be accepted as an api-key")
+}
