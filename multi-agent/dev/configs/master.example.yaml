@@ -29,4 +29,5 @@ observer:
   url: http://observer:8080
   workspace_id: dev
   agent_id: master-dev
-  token: master-token
+  api_key: ak_dev_shared_secret
+  token_state_path: /tmp/observer-master-dev.token
