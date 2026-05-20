@@ -374,6 +374,41 @@ func (s *Store) LookupAPIKey(key string) (workspaceID, keyID string, ok bool, er
 	return workspaceID, keyID, true, nil
 }
 
+// ReplaceAPIKeysForWorkspace deletes every api_keys row for workspaceID,
+// then inserts the supplied spec set in a single transaction. Used at
+// observer boot to reconcile yaml ↔ db so that keys removed from yaml
+// stop working after restart.
+func (s *Store) ReplaceAPIKeysForWorkspace(workspaceID string, keys []APIKeySpec) error {
+	for i, k := range keys {
+		if k.ID == "" {
+			return fmt.Errorf("observerstore: api key[%d] id must not be empty", i)
+		}
+		if k.Key == "" {
+			return fmt.Errorf("observerstore: api key[%s] value must not be empty", k.ID)
+		}
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM api_keys WHERE workspace_id=?`, workspaceID); err != nil {
+		return err
+	}
+	now := nowUTC()
+	for _, k := range keys {
+		if _, err := tx.Exec(
+			`INSERT INTO api_keys(workspace_id, id, key_hash, created_at) VALUES(?, ?, ?, ?)`,
+			workspaceID, k.ID, tokenHash(k.Key), now,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) ValidateToken(token string) (Agent, bool, error) {
 	if token == "" {
 		return Agent{}, false, nil

@@ -878,3 +878,58 @@ func TestLookupAPIKeyMiss(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, ok)
 }
+
+func TestReplaceAPIKeysForWorkspaceDeletesMissing(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer s.Close()
+	require.NoError(t, s.UpsertWorkspace(Workspace{ID: "ws1", Name: "Workspace"}))
+
+	require.NoError(t, s.ReplaceAPIKeysForWorkspace("ws1", []APIKeySpec{
+		{ID: "ak-a", Key: "key-a"},
+		{ID: "ak-b", Key: "key-b"},
+	}))
+
+	_, _, ok, err := s.LookupAPIKey("key-a")
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	// Reconcile with a shorter list — "ak-a" disappears.
+	require.NoError(t, s.ReplaceAPIKeysForWorkspace("ws1", []APIKeySpec{
+		{ID: "ak-b", Key: "key-b"},
+	}))
+
+	_, _, ok, err = s.LookupAPIKey("key-a")
+	require.NoError(t, err)
+	require.False(t, ok, "ak-a should be deleted by reconcile")
+
+	_, _, ok, err = s.LookupAPIKey("key-b")
+	require.NoError(t, err)
+	require.True(t, ok)
+}
+
+func TestReplaceAPIKeysForWorkspaceScopedByWorkspace(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer s.Close()
+	require.NoError(t, s.UpsertWorkspace(Workspace{ID: "ws1", Name: "Workspace 1"}))
+	require.NoError(t, s.UpsertWorkspace(Workspace{ID: "ws2", Name: "Workspace 2"}))
+
+	require.NoError(t, s.ReplaceAPIKeysForWorkspace("ws1", []APIKeySpec{
+		{ID: "ak-a", Key: "key-1a"},
+	}))
+	require.NoError(t, s.ReplaceAPIKeysForWorkspace("ws2", []APIKeySpec{
+		{ID: "ak-a", Key: "key-2a"},
+	}))
+
+	// Reconcile ws1 with an empty list — ws2's row must survive.
+	require.NoError(t, s.ReplaceAPIKeysForWorkspace("ws1", nil))
+
+	_, _, ok, err := s.LookupAPIKey("key-1a")
+	require.NoError(t, err)
+	require.False(t, ok)
+
+	_, _, ok, err = s.LookupAPIKey("key-2a")
+	require.NoError(t, err)
+	require.True(t, ok, "reconciling ws1 should not touch ws2 rows")
+}
