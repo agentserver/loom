@@ -2,6 +2,7 @@ package observerclient
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,49 +15,78 @@ import (
 )
 
 const (
-	queueSize    = 128
-	closeTimeout = 3 * time.Second
+	queueSize         = 128
+	closeTimeout      = 3 * time.Second
+	registerTimeout   = 5 * time.Second
+	reRegisterCoolDur = 60 * time.Second
 )
 
 type Config struct {
-	Enabled     bool
-	URL         string
-	WorkspaceID string
-	AgentID     string
-	AgentRole   string
-	Token       string
+	Enabled        bool
+	URL            string
+	WorkspaceID    string
+	AgentID        string
+	AgentRole      string
+	APIKey         string
+	TokenStatePath string
 }
 
 type Client struct {
 	cfg     Config
-	url     string
+	url     string // /api/events
 	enabled bool
 	queue   chan observer.Event
 	http    *http.Client
+
+	tokenMu        sync.Mutex
+	token          string
+	lastReRegister time.Time
 
 	mu     sync.Mutex
 	closed bool
 	wg     sync.WaitGroup
 }
 
-func New(cfg Config) *Client {
+// New constructs an observer client. When cfg.Enabled is true, New blocks
+// synchronously while it either loads a cached token from cfg.TokenStatePath
+// or calls register() against cfg.URL. A failure here is fatal — main()
+// should log.Fatal and let systemd Restart=on-failure retry.
+func New(cfg Config) (*Client, error) {
 	c := &Client{
 		cfg:     cfg,
 		url:     strings.TrimRight(cfg.URL, "/") + "/api/events",
-		enabled: cfg.Enabled && cfg.URL != "" && cfg.Token != "",
+		enabled: cfg.Enabled && cfg.URL != "",
 		http:    &http.Client{Timeout: 2 * time.Second},
 	}
 	if !c.enabled {
-		return c
+		return c, nil
 	}
+
+	tok, err := c.loadOrRegister(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	c.token = tok
+
 	c.queue = make(chan observer.Event, queueSize)
 	c.wg.Add(1)
 	go c.run()
-	return c
+	return c, nil
 }
 
 func (c *Client) Enabled() bool {
 	return c != nil && c.enabled
+}
+
+// Token returns the live per-agent token. Other consumers (e.g. driver's
+// ObserverRelay) read this on every request so re-registration propagates.
+func (c *Client) Token() string {
+	if c == nil || !c.enabled {
+		return ""
+	}
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	return c.token
 }
 
 func (c *Client) Emit(ev observer.Event) {
@@ -123,7 +153,7 @@ func (c *Client) post(ev observer.Event) {
 		fmt.Fprintf(os.Stderr, "observerclient: build request: %v\n", err)
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+c.cfg.Token)
+	req.Header.Set("Authorization", "Bearer "+c.Token())
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -131,7 +161,15 @@ func (c *Client) post(ev observer.Event) {
 		return
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		// success
+	case resp.StatusCode == http.StatusUnauthorized:
+		c.handle401(context.Background())
+	case resp.StatusCode == http.StatusForbidden:
+		fmt.Fprintln(os.Stderr,
+			"observerclient: ingest 403 — check observer.workspace_id matches the api-key's workspace")
+	default:
 		fmt.Fprintf(os.Stderr, "observerclient: post event status: %s\n", resp.Status)
 	}
 }

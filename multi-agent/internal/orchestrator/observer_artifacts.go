@@ -23,19 +23,26 @@ var (
 	observerWriteRe   = regexp.MustCompile(`(?is)\b(https?://\S*/api/writes/\S+)`)
 )
 
+// TokenSource exposes a live observer Bearer token. *observerclient.Client
+// satisfies this. Local declaration avoids a hard import cycle on observerclient
+// and matches the pattern used by internal/driver/observer_relay.go.
+type TokenSource interface {
+	Token() string
+}
+
 type ObserverArtifactResolver struct {
 	baseURL string
-	token   string
+	src     TokenSource
 	http    *http.Client
 }
 
-func NewObserverArtifactResolver(cfg config.Observer) *ObserverArtifactResolver {
-	if !cfg.Enabled || cfg.URL == "" || cfg.Token == "" {
+func NewObserverArtifactResolver(cfg config.Observer, src TokenSource) *ObserverArtifactResolver {
+	if !cfg.Enabled || cfg.URL == "" || src == nil {
 		return nil
 	}
 	return &ObserverArtifactResolver{
 		baseURL: strings.TrimRight(cfg.URL, "/"),
-		token:   cfg.Token,
+		src:     src,
 		http:    &http.Client{Timeout: 10 * time.Second},
 	}
 }
@@ -54,7 +61,7 @@ func (r *ObserverArtifactResolver) GetArtifact(ctx context.Context, rawURL strin
 		if err != nil {
 			return nil, "", err
 		}
-		req.Header.Set("Authorization", "Bearer "+r.token)
+		req.Header.Set("Authorization", "Bearer "+r.src.Token())
 		resp, err := r.http.Do(req)
 		if err != nil {
 			return nil, "", err
@@ -103,7 +110,7 @@ func (r *ObserverArtifactResolver) PutWrite(ctx context.Context, rawURL string, 
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+r.token)
+	req.Header.Set("Authorization", "Bearer "+r.src.Token())
 	if mime != "" {
 		req.Header.Set("Content-Type", mime)
 	}
@@ -120,7 +127,7 @@ func (r *ObserverArtifactResolver) PutWrite(ctx context.Context, rawURL string, 
 }
 
 func (r *ObserverArtifactResolver) AuthorizeArtifactURL(rawURL string) (string, bool) {
-	if r == nil || r.token == "" {
+	if r == nil || r.src.Token() == "" {
 		return rawURL, false
 	}
 	if err := r.validateObserverURL(rawURL, "/api/artifacts/"); err != nil {
@@ -131,7 +138,7 @@ func (r *ObserverArtifactResolver) AuthorizeArtifactURL(rawURL string) (string, 
 		return rawURL, false
 	}
 	q := u.Query()
-	q.Set("token", r.token)
+	q.Set("token", r.src.Token())
 	u.RawQuery = q.Encode()
 	return u.String(), true
 }

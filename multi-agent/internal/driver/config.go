@@ -2,8 +2,10 @@
 package driver
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	agentconfig "github.com/yourorg/multi-agent/internal/config"
 	"gopkg.in/yaml.v3"
@@ -58,11 +60,12 @@ const (
 )
 
 type Observer struct {
-	Enabled     bool   `yaml:"enabled"`
-	URL         string `yaml:"url"`
-	WorkspaceID string `yaml:"workspace_id"`
-	AgentID     string `yaml:"agent_id"`
-	Token       string `yaml:"token"`
+	Enabled        bool   `yaml:"enabled"`
+	URL            string `yaml:"url"`
+	WorkspaceID    string `yaml:"workspace_id"`
+	AgentID        string `yaml:"agent_id"`
+	APIKey         string `yaml:"api_key"`
+	TokenStatePath string `yaml:"token_state_path"`
 }
 
 // LoadConfig reads + validates the yaml at path and applies DriverDefaults defaults.
@@ -71,8 +74,10 @@ func LoadConfig(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
 	var c Config
-	if err := yaml.Unmarshal(b, &c); err != nil {
+	if err := dec.Decode(&c); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	if c.Server.URL == "" {
@@ -120,9 +125,27 @@ func LoadConfig(path string) (*Config, error) {
 		if c.Observer.AgentID == "" {
 			return nil, fmt.Errorf("observer.agent_id is required when observer.enabled is true")
 		}
-		if c.Observer.Token == "" {
-			return nil, fmt.Errorf("observer.token is required when observer.enabled is true")
+		if c.Observer.APIKey == "" {
+			return nil, fmt.Errorf("observer.api_key is required when observer.enabled is true")
 		}
+		if c.Observer.TokenStatePath == "" {
+			return nil, fmt.Errorf("observer.token_state_path is required when observer.enabled is true")
+		}
+		if !filepath.IsAbs(c.Observer.TokenStatePath) {
+			return nil, fmt.Errorf("observer.token_state_path must be an absolute path (got %q)", c.Observer.TokenStatePath)
+		}
+		parent := filepath.Dir(c.Observer.TokenStatePath)
+		info, err := os.Stat(parent)
+		if err != nil || !info.IsDir() {
+			return nil, fmt.Errorf("observer.token_state_path parent directory %q must exist", parent)
+		}
+		probe := filepath.Join(parent, ".observer-write-probe")
+		f, err := os.OpenFile(probe, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		if err != nil {
+			return nil, fmt.Errorf("observer.token_state_path parent directory %q must be writable: %w", parent, err)
+		}
+		_ = f.Close()
+		_ = os.Remove(probe)
 	}
 	if c.DriverDefaults.ArtifactTransport == ArtifactTransportObserverLazy && !c.Observer.Enabled {
 		return nil, fmt.Errorf("observer must be enabled when driver_defaults.artifact_transport is observer_lazy")

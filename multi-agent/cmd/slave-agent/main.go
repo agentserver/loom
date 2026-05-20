@@ -88,14 +88,18 @@ func run(cfgPath string) error {
 	defer cancel()
 
 	tn := tunnel.New(cfg, cfgPath, ui)
-	obs := observerclient.New(observerclient.Config{
-		Enabled:     cfg.Observer.Enabled,
-		URL:         cfg.Observer.URL,
-		WorkspaceID: cfg.Observer.WorkspaceID,
-		AgentID:     cfg.Observer.AgentID,
-		AgentRole:   observer.RoleSlave,
-		Token:       cfg.Observer.Token,
+	obs, errObs := observerclient.New(observerclient.Config{
+		Enabled:        cfg.Observer.Enabled,
+		URL:            cfg.Observer.URL,
+		WorkspaceID:    cfg.Observer.WorkspaceID,
+		AgentID:        cfg.Observer.AgentID,
+		AgentRole:      observer.RoleSlave,
+		APIKey:         cfg.Observer.APIKey,
+		TokenStatePath: cfg.Observer.TokenStatePath,
 	})
+	if errObs != nil {
+		log.Fatalf("observerclient: %v", errObs)
+	}
 	defer obs.Close()
 
 	routes := map[string]executor.Executor{

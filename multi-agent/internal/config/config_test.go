@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -234,4 +235,83 @@ func TestLoad_ResourcesAbsentIsNil(t *testing.T) {
 	if c.Resources != nil {
 		t.Fatalf("expected nil Resources when not declared, got %+v", c.Resources)
 	}
+}
+
+func TestLoad_ObserverEnabledRequiresAPIKeyAndTokenStatePath(t *testing.T) {
+	cases := []struct {
+		name    string
+		extra   string
+		wantSub string
+	}{
+		{
+			name: "missing api_key",
+			extra: func() string {
+				parent := t.TempDir()
+				return "  token_state_path: " + filepath.Join(parent, "observer.token") + "\n"
+			}(),
+			wantSub: "observer.api_key",
+		},
+		{
+			name:    "missing token_state_path",
+			extra:   "  api_key: ak\n",
+			wantSub: "observer.token_state_path",
+		},
+		{
+			name:    "relative token_state_path",
+			extra:   "  api_key: ak\n  token_state_path: relative/path\n",
+			wantSub: "must be an absolute path",
+		},
+		{
+			name:    "missing parent dir",
+			extra:   "  api_key: ak\n  token_state_path: /nonexistent_dir_xyz/observer.token\n",
+			wantSub: "parent directory",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "c.yaml")
+			body := "server:\n  url: https://example.com\n  name: m\ndiscovery:\n  display_name: a\nobserver:\n  enabled: true\n  url: https://observer.example\n  workspace_id: ws\n  agent_id: a\n" + tc.extra
+			require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+			_, err := Load(path)
+			require.Error(t, err)
+			require.True(t, strings.Contains(err.Error(), tc.wantSub),
+				"want error containing %q, got %v", tc.wantSub, err)
+		})
+	}
+}
+
+func TestLoad_ObserverRejectsObsoleteTokenField(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+server:
+  url: https://example.com
+  name: m
+discovery:
+  display_name: a
+observer:
+  enabled: true
+  url: https://observer.example
+  workspace_id: ws
+  agent_id: a
+  token: leftover-token
+`), 0o600))
+	_, err := Load(path)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "token",
+		"strict yaml decoder should reject the obsolete token field")
+}
+
+func TestLoad_ObserverSuccessWithAPIKeyAndPath(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	require.NoError(t, os.Mkdir(stateDir, 0o755))
+	tokenPath := filepath.Join(stateDir, "observer.token")
+
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	body := "server:\n  url: https://example.com\n  name: m\ndiscovery:\n  display_name: a\nobserver:\n  enabled: true\n  url: https://observer.example\n  workspace_id: ws\n  agent_id: a\n  api_key: ak_x\n  token_state_path: " + tokenPath + "\n"
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+	c, err := Load(path)
+	require.NoError(t, err)
+	require.Equal(t, "ak_x", c.Observer.APIKey)
+	require.Equal(t, tokenPath, c.Observer.TokenStatePath)
 }

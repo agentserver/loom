@@ -39,9 +39,10 @@ discovery:
 observer:
   enabled: false
   url: https://observer.example.com
-  workspace_id: ws-local
+  workspace_id: ws-replace-me
   agent_id: slave-local
-  token: slave-token
+  api_key: ak_REPLACE_ME
+  token_state_path: /var/lib/loom/slave-local/observer.token
 
 # Optional: hardware / runtime resources advertised on the agent card.
 # All fields optional. The planner uses these literally to pick a slave for

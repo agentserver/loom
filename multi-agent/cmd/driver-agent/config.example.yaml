@@ -29,9 +29,10 @@ fanout:
 observer:
   enabled: false
   url: https://observer.example.com
-  workspace_id: ws-local
+  workspace_id: ws-replace-me
   agent_id: driver-local
-  token: driver-token
+  api_key: ak_REPLACE_ME
+  token_state_path: /var/lib/loom/driver-local/observer.token
 
 driver_defaults:
   target_display_name: ""        # blank = auto-pick the unique fanout-skilled agent

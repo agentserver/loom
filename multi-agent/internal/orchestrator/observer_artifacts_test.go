@@ -9,6 +9,10 @@ import (
 	"github.com/yourorg/multi-agent/internal/config"
 )
 
+type stubTokenSource string
+
+func (s stubTokenSource) Token() string { return string(s) }
+
 func TestObserverArtifactResolver_RetriesSQLiteBusy(t *testing.T) {
 	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -22,10 +26,11 @@ func TestObserverArtifactResolver_RetriesSQLiteBusy(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	resolver := NewObserverArtifactResolver(config.Observer{
-		Enabled: true,
-		URL:     srv.URL,
-		Token:   "token",
-	})
+		Enabled:        true,
+		URL:            srv.URL,
+		APIKey:         "ak-test",
+		TokenStatePath: "/tmp/test-observer-token",
+	}, stubTokenSource("token"))
 
 	body, _, err := resolver.GetArtifact(context.Background(), srv.URL+"/api/artifacts/art_1")
 	if err != nil {

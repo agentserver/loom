@@ -60,6 +60,10 @@ func (f *fakeContractRunner) Run(ctx context.Context, prompt string) (orchestrat
 	return f.result, f.err
 }
 
+type stubTokenSource string
+
+func (s stubTokenSource) Token() string { return string(s) }
+
 func newTestTools(t *testing.T, sdk SDKClient) *Tools {
 	return newTestToolsWithObserver(t, sdk, nil)
 }
@@ -519,8 +523,9 @@ func TestSubmitContractTaskReturnsWarningWhenTaskContractSaveFailsAfterDelegate(
 	tools := newTestTools(t, sdk)
 	tools.cfg.Observer.Enabled = true
 	tools.cfg.Observer.URL = observerServer.URL
-	tools.cfg.Observer.Token = "observer-token"
-	tools.relay = NewObserverRelay(tools.cfg)
+	tools.cfg.Observer.APIKey = "ak-test"
+	tools.cfg.Observer.TokenStatePath = "/tmp/test-observer-token"
+	tools.relay = NewObserverRelay(tools.cfg, stubTokenSource("test-token"))
 	raw, err := json.Marshal(map[string]interface{}{"contract": testTaskContract()})
 	require.NoError(t, err)
 
@@ -560,8 +565,9 @@ func TestSubmitContractTaskReturnsWarningWhenResourceSnapshotSaveFailsAfterDeleg
 	tools := newTestTools(t, sdk)
 	tools.cfg.Observer.Enabled = true
 	tools.cfg.Observer.URL = observerServer.URL
-	tools.cfg.Observer.Token = "observer-token"
-	tools.relay = NewObserverRelay(tools.cfg)
+	tools.cfg.Observer.APIKey = "ak-test"
+	tools.cfg.Observer.TokenStatePath = "/tmp/test-observer-token"
+	tools.relay = NewObserverRelay(tools.cfg, stubTokenSource("test-token"))
 	raw, err := json.Marshal(map[string]interface{}{"contract": testTaskContract()})
 	require.NoError(t, err)
 
@@ -630,7 +636,9 @@ func TestTool_InspectCapabilitiesReturnsSnapshotAndSavesIt(t *testing.T) {
 	tools.cfg.Observer.URL = observerServer.URL
 	tools.cfg.Observer.WorkspaceID = "dev"
 	tools.cfg.Observer.AgentID = "driver"
-	tools.cfg.Observer.Token = "driver-token"
+	tools.cfg.Observer.APIKey = "ak-test"
+	tools.cfg.Observer.TokenStatePath = "/tmp/test-observer-token"
+	tools.relay = NewObserverRelay(tools.cfg, stubTokenSource("test-token"))
 
 	out, err := toolByName(t, tools, "inspect_capabilities").Call(context.Background(), json.RawMessage(`{}`))
 	require.NoError(t, err)
@@ -1055,8 +1063,10 @@ func TestTool_SubmitTask_ObserverLazyManifest(t *testing.T) {
 	tools := newTestTools(t, sdk)
 	tools.cfg.Observer.Enabled = true
 	tools.cfg.Observer.URL = observerServer.URL
-	tools.cfg.Observer.Token = "observer-token"
+	tools.cfg.Observer.APIKey = "ak-test"
+	tools.cfg.Observer.TokenStatePath = "/tmp/test-observer-token"
 	tools.cfg.DriverDefaults.ArtifactTransport = ArtifactTransportObserverLazy
+	tools.relay = NewObserverRelay(tools.cfg, stubTokenSource("observer-token"))
 
 	for _, tt := range tools.All() {
 		if tt.Name() == "submit_task" {
@@ -1098,7 +1108,8 @@ func TestTool_SubmitTask_ObserverLazyRejectsDirectory(t *testing.T) {
 	tools := newTestTools(t, sdk)
 	tools.cfg.Observer.Enabled = true
 	tools.cfg.Observer.URL = "http://observer.example"
-	tools.cfg.Observer.Token = "observer-token"
+	tools.cfg.Observer.APIKey = "ak-test"
+	tools.cfg.Observer.TokenStatePath = "/tmp/test-observer-token"
 	tools.cfg.DriverDefaults.ArtifactTransport = ArtifactTransportObserverLazy
 
 	for _, tt := range tools.All() {
@@ -1140,7 +1151,7 @@ func TestObserverRelayServesPendingFileRequest(t *testing.T) {
 	}))
 	defer observerServer.Close()
 
-	relay := &ObserverRelay{baseURL: observerServer.URL, token: "observer-token", http: observerServer.Client()}
+	relay := &ObserverRelay{baseURL: observerServer.URL, src: stubTokenSource("observer-token"), http: observerServer.Client()}
 	err := relay.ServePendingOnce(context.Background(), reg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1163,7 +1174,7 @@ func TestObserverRelaySyncWrites(t *testing.T) {
 	}))
 	defer observerServer.Close()
 
-	relay := &ObserverRelay{baseURL: observerServer.URL, token: "observer-token", http: observerServer.Client()}
+	relay := &ObserverRelay{baseURL: observerServer.URL, src: stubTokenSource("observer-token"), http: observerServer.Client()}
 	written, err := relay.SyncWrites(context.Background(), "t-1", false, reg)
 	if err != nil {
 		t.Fatal(err)
@@ -1195,7 +1206,7 @@ func TestObserverRelayUpdateWriteTaskRetriesSQLiteBusy(t *testing.T) {
 	}))
 	defer observerServer.Close()
 
-	relay := &ObserverRelay{baseURL: observerServer.URL, token: "observer-token", http: observerServer.Client()}
+	relay := &ObserverRelay{baseURL: observerServer.URL, src: stubTokenSource("observer-token"), http: observerServer.Client()}
 	err := relay.UpdateWriteTask(context.Background(), "wr_1", "task_1")
 	if err != nil {
 		t.Fatal(err)
