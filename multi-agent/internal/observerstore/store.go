@@ -332,6 +332,48 @@ func (s *Store) UpsertAgent(a Agent, token string) error {
 	return err
 }
 
+// APIKeySpec is a per-workspace bootstrap credential. Agents present the
+// plaintext Key as a Bearer token against /api/agents/register to mint
+// their own per-agent token.
+type APIKeySpec struct {
+	ID  string
+	Key string
+}
+
+// UpsertAPIKey inserts or replaces the api key identified by
+// (workspaceID, id). The plaintext key is hashed before storage. An empty
+// key is rejected; the workspace must already exist (enforced by FK).
+func (s *Store) UpsertAPIKey(workspaceID, id, key string) error {
+	if key == "" {
+		return errors.New("observerstore: api key must not be empty")
+	}
+	_, err := s.db.Exec(`INSERT INTO api_keys(workspace_id, id, key_hash, created_at)
+		VALUES(?, ?, ?, ?)
+		ON CONFLICT(workspace_id, id) DO UPDATE SET key_hash=excluded.key_hash, created_at=excluded.created_at`,
+		workspaceID, id, tokenHash(key), nowUTC())
+	return err
+}
+
+// LookupAPIKey returns the workspace_id and key id whose key_hash matches
+// the plaintext key. ok=false means no row matched; err is reserved for
+// real DB errors. An empty input returns ok=false without consulting the DB.
+func (s *Store) LookupAPIKey(key string) (workspaceID, keyID string, ok bool, err error) {
+	if key == "" {
+		return "", "", false, nil
+	}
+	err = s.db.QueryRow(
+		`SELECT workspace_id, id FROM api_keys WHERE key_hash=?`,
+		tokenHash(key),
+	).Scan(&workspaceID, &keyID)
+	if err == sql.ErrNoRows {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	return workspaceID, keyID, true, nil
+}
+
 func (s *Store) ValidateToken(token string) (Agent, bool, error) {
 	if token == "" {
 		return Agent{}, false, nil

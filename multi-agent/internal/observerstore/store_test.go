@@ -821,3 +821,60 @@ func TestResourceSnapshotPersistence(t *testing.T) {
 	require.Equal(t, "snap-2", got.SnapshotID)
 	require.JSONEq(t, string(secondBody), string(got.Body))
 }
+
+func TestUpsertAPIKeyRoundTrip(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer s.Close()
+	require.NoError(t, s.UpsertWorkspace(Workspace{ID: "ws1", Name: "Workspace"}))
+
+	require.NoError(t, s.UpsertAPIKey("ws1", "ak-default", "ak_secret_abc"))
+
+	wsID, keyID, ok, err := s.LookupAPIKey("ak_secret_abc")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "ws1", wsID)
+	require.Equal(t, "ak-default", keyID)
+}
+
+func TestUpsertAPIKeyReplacesKey(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer s.Close()
+	require.NoError(t, s.UpsertWorkspace(Workspace{ID: "ws1", Name: "Workspace"}))
+
+	require.NoError(t, s.UpsertAPIKey("ws1", "ak-default", "first-key"))
+	require.NoError(t, s.UpsertAPIKey("ws1", "ak-default", "second-key"))
+
+	_, _, ok, err := s.LookupAPIKey("first-key")
+	require.NoError(t, err)
+	require.False(t, ok, "old key value should no longer resolve")
+
+	wsID, _, ok, err := s.LookupAPIKey("second-key")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "ws1", wsID)
+}
+
+func TestUpsertAPIKeyRejectsEmptyKey(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer s.Close()
+	require.NoError(t, s.UpsertWorkspace(Workspace{ID: "ws1", Name: "Workspace"}))
+
+	require.Error(t, s.UpsertAPIKey("ws1", "ak-default", ""))
+}
+
+func TestLookupAPIKeyMiss(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer s.Close()
+
+	_, _, ok, err := s.LookupAPIKey("unknown")
+	require.NoError(t, err)
+	require.False(t, ok)
+
+	_, _, ok, err = s.LookupAPIKey("")
+	require.NoError(t, err)
+	require.False(t, ok)
+}
