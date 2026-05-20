@@ -2,9 +2,15 @@ package observerclient
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"io/fs"
+	"net/http"
 	"os"
+	"strings"
 )
 
 // writeTokenFile writes the plaintext token to path with mode 0600, replacing
@@ -38,4 +44,58 @@ func readTokenFile(path string) (token string, ok bool, err error) {
 		return "", false, nil
 	}
 	return trimmed, true, nil
+}
+
+type registerRequest struct {
+	AgentID     string `json:"agent_id"`
+	Role        string `json:"role"`
+	DisplayName string `json:"display_name"`
+}
+
+type registerResponse struct {
+	WorkspaceID string `json:"workspace_id"`
+	AgentID     string `json:"agent_id"`
+	Role        string `json:"role"`
+	DisplayName string `json:"display_name"`
+	Token       string `json:"token"`
+}
+
+// register POSTs to <baseURL>/api/agents/register with Authorization: Bearer <apiKey>.
+// Returns the issued per-agent token and the workspace_id reported by the server.
+// The caller is responsible for cross-checking workspace_id against the operator-declared value.
+func register(
+	ctx context.Context,
+	httpc *http.Client,
+	baseURL, apiKey, agentID, role, displayName string,
+) (token, workspaceID string, err error) {
+	body, _ := json.Marshal(registerRequest{
+		AgentID:     agentID,
+		Role:        role,
+		DisplayName: displayName,
+	})
+	url := strings.TrimRight(baseURL, "/") + "/api/agents/register"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpc.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("observerclient register: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return "", "", fmt.Errorf("observerclient register: HTTP %d: %s",
+			resp.StatusCode, strings.TrimSpace(string(snippet)))
+	}
+	var rr registerResponse
+	if err := json.NewDecoder(resp.Body).Decode(&rr); err != nil {
+		return "", "", fmt.Errorf("observerclient register: decode response: %w", err)
+	}
+	if rr.Token == "" {
+		return "", "", errors.New("observerclient register: server returned empty token")
+	}
+	return rr.Token, rr.WorkspaceID, nil
 }
