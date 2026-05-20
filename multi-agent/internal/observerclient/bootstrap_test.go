@@ -148,3 +148,92 @@ func TestRegisterDefaultsDisplayNameWhenEmpty(t *testing.T) {
 }
 
 var _ = strings.NewReader
+
+func newTestClient(t *testing.T, cfg Config) *Client {
+	t.Helper()
+	return &Client{cfg: cfg}
+}
+
+func TestLoadOrRegister_WarmStartReusesCachedToken(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "observer.token")
+	require.NoError(t, os.WriteFile(path, []byte("cached_token\n"), 0o600))
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("register endpoint should not be called when token file exists; got %s", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, Config{
+		URL: srv.URL, WorkspaceID: "ws-1", AgentID: "agent-1",
+		AgentRole: "slave", APIKey: "ak", TokenStatePath: path,
+	})
+	tok, err := c.loadOrRegister(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "cached_token", tok)
+}
+
+func TestLoadOrRegister_ColdStartCallsRegisterAndPersists(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "observer.token")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"workspace_id":"ws-1","agent_id":"agent-1","role":"slave","token":"tk_fresh"}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, Config{
+		URL: srv.URL, WorkspaceID: "ws-1", AgentID: "agent-1",
+		AgentRole: "slave", APIKey: "ak", TokenStatePath: path,
+	})
+	tok, err := c.loadOrRegister(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "tk_fresh", tok)
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	got, _ := os.ReadFile(path)
+	require.Equal(t, "tk_fresh", string(got))
+}
+
+func TestLoadOrRegister_WorkspaceMismatchReturnsErrorAndDoesNotPersist(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "observer.token")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"workspace_id":"OTHER","token":"tk"}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, Config{
+		URL: srv.URL, WorkspaceID: "ws-1", AgentID: "agent-1",
+		AgentRole: "slave", APIKey: "ak", TokenStatePath: path,
+	})
+	_, err := c.loadOrRegister(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "OTHER")
+	require.Contains(t, err.Error(), "ws-1")
+	_, statErr := os.Stat(path)
+	require.True(t, os.IsNotExist(statErr), "token file must not be written when workspace mismatches")
+}
+
+func TestLoadOrRegister_RegisterErrorPropagatesAndDoesNotPersist(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "observer.token")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "invalid api key", http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, Config{
+		URL: srv.URL, WorkspaceID: "ws-1", AgentID: "agent-1",
+		AgentRole: "slave", APIKey: "ak_bad", TokenStatePath: path,
+	})
+	_, err := c.loadOrRegister(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "403")
+	_, statErr := os.Stat(path)
+	require.True(t, os.IsNotExist(statErr))
+}

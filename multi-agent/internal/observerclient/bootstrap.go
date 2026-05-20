@@ -99,3 +99,34 @@ func register(
 	}
 	return rr.Token, rr.WorkspaceID, nil
 }
+
+// loadOrRegister returns the token to seed Client.token. It prefers an
+// existing on-disk token (cfg.TokenStatePath) and falls back to a synchronous
+// register call. On a register success the response is cross-checked against
+// cfg.WorkspaceID and persisted to disk before returning.
+func (c *Client) loadOrRegister(ctx context.Context) (string, error) {
+	if tok, ok, err := readTokenFile(c.cfg.TokenStatePath); err != nil {
+		return "", fmt.Errorf("observerclient: read token state: %w", err)
+	} else if ok {
+		return tok, nil
+	}
+
+	regCtx, cancel := context.WithTimeout(ctx, registerTimeout)
+	defer cancel()
+
+	httpc := &http.Client{Timeout: registerTimeout}
+	tok, ws, err := register(regCtx, httpc, c.cfg.URL, c.cfg.APIKey,
+		c.cfg.AgentID, c.cfg.AgentRole, c.cfg.AgentID)
+	if err != nil {
+		return "", err
+	}
+	if ws != c.cfg.WorkspaceID {
+		return "", fmt.Errorf(
+			"observerclient: api_key belongs to workspace %q but yaml declares observer.workspace_id=%q",
+			ws, c.cfg.WorkspaceID)
+	}
+	if err := writeTokenFile(c.cfg.TokenStatePath, tok); err != nil {
+		return "", fmt.Errorf("observerclient: persist token: %w", err)
+	}
+	return tok, nil
+}
