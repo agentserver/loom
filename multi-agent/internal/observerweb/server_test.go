@@ -556,3 +556,69 @@ func TestSlavesPageShowsDirectSlaveTask(t *testing.T) {
 	require.Contains(t, rr.Body.String(), "completed")
 	require.Contains(t, rr.Body.String(), "done")
 }
+
+func TestRegisterSuccessAndIssuedTokenIngests(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_secret"))
+
+	h := New(st)
+
+	body := bytes.NewBufferString(`{"agent_id":"slave-a","role":"slave","display_name":"Slave A"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/register", body)
+	req.Header.Set("Authorization", "Bearer ak_secret")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	var resp struct {
+		WorkspaceID string `json:"workspace_id"`
+		AgentID     string `json:"agent_id"`
+		Role        string `json:"role"`
+		DisplayName string `json:"display_name"`
+		Token       string `json:"token"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, "ws1", resp.WorkspaceID)
+	require.Equal(t, "slave-a", resp.AgentID)
+	require.Equal(t, observer.RoleSlave, resp.Role)
+	require.Equal(t, "Slave A", resp.DisplayName)
+	require.Len(t, resp.Token, 64, "token must be 32 random bytes hex-encoded")
+
+	// Issued token must work for ingest end-to-end.
+	evBody, _ := json.Marshal(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave-a", AgentRole: observer.RoleSlave,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "t1", Summary: "first", Status: "assigned",
+	})
+	ev := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(evBody))
+	ev.Header.Set("Authorization", "Bearer "+resp.Token)
+	ev2 := httptest.NewRecorder()
+	h.ServeHTTP(ev2, ev)
+	require.Equal(t, http.StatusAccepted, ev2.Code, ev2.Body.String())
+}
+
+func TestRegisterDefaultsDisplayNameToAgentID(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_secret"))
+
+	h := New(st)
+	body := bytes.NewBufferString(`{"agent_id":"slave-a","role":"slave"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/register", body)
+	req.Header.Set("Authorization", "Bearer ak_secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var resp struct {
+		DisplayName string `json:"display_name"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, "slave-a", resp.DisplayName)
+}
