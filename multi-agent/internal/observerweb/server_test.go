@@ -723,3 +723,49 @@ func TestRegisterRejectsWrongMethod(t *testing.T) {
 	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
 }
+
+func TestRegisterReissueInvalidatesOldToken(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
+	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_real"))
+
+	h := New(st)
+	register := func() string {
+		body := bytes.NewBufferString(`{"agent_id":"slave-a","role":"slave","display_name":"Slave A"}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/agents/register", body)
+		req.Header.Set("Authorization", "Bearer ak_real")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		var resp struct {
+			Token string `json:"token"`
+		}
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+		require.NotEmpty(t, resp.Token)
+		return resp.Token
+	}
+
+	first := register()
+	second := register()
+	require.NotEqual(t, first, second, "reissue must return a new token")
+
+	// Old token: ingest now fails 401.
+	evBody, _ := json.Marshal(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave-a", AgentRole: observer.RoleSlave,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "t1", Summary: "x", Status: "assigned",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(evBody))
+	req.Header.Set("Authorization", "Bearer "+first)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusUnauthorized, rr.Code, "old token must be invalidated")
+
+	// New token still works.
+	req = httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(evBody))
+	req.Header.Set("Authorization", "Bearer "+second)
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusAccepted, rr.Code, rr.Body.String())
+}
