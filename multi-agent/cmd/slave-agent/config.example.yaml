@@ -34,6 +34,7 @@ discovery:
     - mcp
     # - register_mcp  # opt-in: register pre-built MCP server files; pair with bash skill for generation
     # - bash  # opt-in deterministic shell execution for trusted workspaces
+    # - file  # opt-in stateless file read/write/stat through a native slave-agent executor
     # - claude_permissions  # opt-in task-channel Claude Code permission management
 
 observer:
