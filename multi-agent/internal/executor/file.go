@@ -131,7 +131,7 @@ func (e *FileExecutor) doRead(req fileRequest, abs string, sink Sink) (Result, e
 		f.Close()
 		// ReadAt may return io.EOF when fewer than len(buf) bytes are available;
 		// a short read is fine, but a zero-byte read with a real error is not.
-		if err != nil && !errors.Is(err, fs.ErrClosed) && n == 0 {
+		if err != nil && n == 0 {
 			return Result{}, err
 		}
 		buf = buf[:n]
