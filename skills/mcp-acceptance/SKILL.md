@@ -123,6 +123,30 @@ Flags:
 - `--keep` — skip cleanup so you can inspect the workdir if a case failed.
 - `--runner PATH` — override the embedded runner (default: the canonical copy alongside `remote_run.py`).
 
+### Alternative: file-tools path (no base64 embedding)
+
+When the slave advertises `file`, you can skip the bundled payload entirely:
+
+```text
+write_slave_file(target=slave-a, path="/tmp/mcpa/server.py",  source_path="generated_mcp/foo/v1.py")
+write_slave_file(target=slave-a, path="/tmp/mcpa/cases.jsonl", source_path="generated_mcp/foo/cases.jsonl")
+write_slave_file(target=slave-a, path="/tmp/mcpa/runner.py",  source_path="skills/mcp-acceptance/scripts/mcp_acceptance.py")
+run_slave_bash(target=slave-a, script="python3 /tmp/mcpa/runner.py --server 'python3 /tmp/mcpa/server.py' --cases /tmp/mcpa/cases.jsonl")
+# exit code propagates: 0 = pass, 1 = case failed, 2 = server unreachable.
+```
+
+Tradeoffs vs `remote_run.py`:
+
+| | `remote_run.py` (Option A) | file-tools (Option B) |
+|---|---|---|
+| Cleanup | automatic `trap` on exit | manual; survives for `read_slave_file`-based debug |
+| Payload shape | one base64 shell blob | three plain file writes + one bash call |
+| Re-running with edits | rebuild & re-ship payload | re-`write_slave_file` only the changed file |
+| Inspect server source after run | `--keep` then `read_slave_file` | always available, no flag |
+| Shell-pipeline gating | exit code from one command | exit code from final `run_slave_bash` |
+
+Pick A for CI-like one-shot validation. Pick B when iterating on cases or expecting a failure you'll want to dig into.
+
 ## Writing Good Cases
 
 | Cover | Why |

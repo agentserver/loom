@@ -117,9 +117,12 @@ def _handle_summarize_rows(args: dict) -> str:
 
 1. Write `spec.json`.
 2. `scaffold_mcp.py --spec spec.json --out generated_mcp/<name>/v1.py`.
-3. Edit handler bodies between business markers.
-4. Validate with `mcp-acceptance` (see that skill) — **do not skip; register_mcp does not check semantics**.
-5. `register_slave_mcp` with the same `spec.json` and `source_path`.
+3. Edit handler bodies between business markers (driver-local).
+4. Ship the source to the slave so acceptance + register can see it:
+   - **Preferred** — `write_slave_file(target=..., path="generated_mcp/<name>/v1.py", source_path="<driver abs path>")`. Source lives in the slave fs, easy to re-read with `read_slave_file` for debugging.
+   - **Alternative** — bundle source + cases + runner with `remote_run.py` (see `mcp-acceptance`) when you want a one-shot self-cleaning shell payload.
+5. Validate with `mcp-acceptance` (see that skill) — **do not skip; register_mcp does not check semantics**.
+6. `register_slave_mcp` with the same `spec.json` and `source_path` (must match what step 4 wrote).
 
 ## Common Mistakes
 

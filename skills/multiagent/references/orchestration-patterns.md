@@ -35,12 +35,36 @@ Rules:
 
 ## File Transfer
 
-Driver files are local to the driver machine. Remote agents receive artifact URLs, not local paths.
+Driver files are local to the driver machine. Remote agents receive artifact URLs, not local paths. Two transports are available; pick by payload size and lifecycle.
 
-- `submit_task.read_paths` registers driver-local files.
-- `submit_task.write_paths` creates PUT targets for remote output.
-- With `artifact_transport: observer_lazy`, observer stores lazy artifact/write records and syncs writes after task completion.
+### Option A: PUT-manifest via observer (large / archival)
+
+- `submit_task.read_paths` registers driver-local files; the slave fetches via observer URL.
+- `submit_task.write_paths` creates PUT targets; outputs sync back after the task completes.
+- With `artifact_transport: observer_lazy`, observer stores lazy artifact/write records.
+- Best for: large artifacts, anything that should survive in the observer artifact store, asynchronous output collection.
 - Do not use `127.0.0.1` as a cross-machine URL.
+
+### Option B: In-band file tools (small / synchronous / driver-mediated)
+
+`read_slave_file` / `write_slave_file` / `stat_slave_file` (see `driver-tools.md`) move bytes synchronously through the driver's `FileRegistry`. Bytes never enter LLM context — `read_slave_file` returns a `blob_handle` and a driver-local `cache_path`; `write_slave_file` accepts `content`, `source_blob`, or `source_path`.
+
+- Best for: shipping a generated MCP server source up to a slave, pulling a small log back for review, cross-slave copy (`read` from A → `write source_blob=...` to B), `stat`-then-write probing.
+- Slave-cap is 8 MiB per read call; chunk larger files via `offset`/`length` or fall back to Option A.
+- Requires the target slave to advertise `file`.
+
+### Decision rule
+
+| Situation | Use |
+|---|---|
+| Need observer artifact lineage / PR review | PUT-manifest |
+| Shipping a scaffolded MCP source to a slave | `write_slave_file` |
+| Pulling back a server file or log for inspection | `read_slave_file` |
+| Copying file between two slaves | `read_slave_file` → `write_slave_file source_blob=...` |
+| File > a few MiB and one-shot | PUT-manifest |
+| Need to check "does this already exist?" cheaply | `stat_slave_file` |
+
+Anti-pattern: `run_slave_bash` with a `cat <<EOF` or base64-decode heredoc to ship a file. Use `write_slave_file` instead.
 
 ## Permissions
 

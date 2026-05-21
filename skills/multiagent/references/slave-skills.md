@@ -142,6 +142,8 @@ Returns `{path, exists, size?, mode?, is_dir?, mtime?}`. Missing paths return `e
 
 The driver exposes `read_slave_file`, `write_slave_file`, and `stat_slave_file`. They keep bytes out of the LLM context: `read_slave_file` caches in the driver's `FileRegistry` and returns a `sha256` / `blob_handle` / `cache_path`; `write_slave_file` accepts `source_blob` (a prior handle) or `source_path` (a driver-local path) so the LLM never carries large payloads as tool arguments.
 
+Full schemas, the cross-slave copy pattern, and when to prefer these over the PUT-manifest path live in `driver-tools.md` ("Slave File Tools") and `orchestration-patterns.md` ("File Transfer").
+
 ## `claude_permissions`
 
 Implemented by slave-agent native Go code, not by slave Claude Code.

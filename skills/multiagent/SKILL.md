@@ -86,3 +86,4 @@ Do not call `register_slave_mcp` directly from a one-shot Claude generation: `re
 - Calling `skill:"mcp"` with natural language instead of JSON `{server, tool, args}`.
 - Asking slave Claude Code to edit its own permissions; permission changes go through native `skill:"claude_permissions"` for now.
 - Using `127.0.0.1` or local file paths as if they were reachable from other machines.
+- Hand-rolling `cat <<EOF` or base64-decode payloads over `run_slave_bash` to ship a file when the slave advertises `file` — use `write_slave_file`. Same for `cat`-via-bash to pull a log back; use `read_slave_file` (returns a `blob_handle` + driver-local `cache_path`, bytes stay out of LLM context).
