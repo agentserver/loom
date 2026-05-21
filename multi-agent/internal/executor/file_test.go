@@ -141,3 +141,151 @@ func TestFileExecutor_ReadAbsolutePath(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 }
+
+func TestFileExecutor_WriteOverwriteCreatesAndReplaces(t *testing.T) {
+	workdir := t.TempDir()
+	exec := NewFileExecutor(FileConfig{WorkDir: workdir})
+	// create
+	res, err := exec.Run(context.Background(), Task{
+		Prompt: `{"op":"write","path":"out.txt","content":"first"}`,
+	}, noopSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got FileWriteResult
+	if err := json.Unmarshal([]byte(res.Summary), &got); err != nil {
+		t.Fatalf("summary not FileWriteResult JSON: %v\n%s", err, res.Summary)
+	}
+	if got.BytesWritten != 5 || got.Mode != "overwrite" || got.Offset != nil {
+		t.Fatalf("create result: %+v", got)
+	}
+	// replace
+	_, err = exec.Run(context.Background(), Task{
+		Prompt: `{"op":"write","path":"out.txt","content":"second"}`,
+	}, noopSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := os.ReadFile(filepath.Join(workdir, "out.txt"))
+	if string(body) != "second" {
+		t.Fatalf("file = %q, want %q", body, "second")
+	}
+}
+
+func TestFileExecutor_WriteAppend(t *testing.T) {
+	workdir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workdir, "log"), []byte("line1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	exec := NewFileExecutor(FileConfig{WorkDir: workdir})
+	_, err := exec.Run(context.Background(), Task{
+		Prompt: `{"op":"write","path":"log","content":"line2\n","mode":"append"}`,
+	}, noopSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := os.ReadFile(filepath.Join(workdir, "log"))
+	if string(body) != "line1\nline2\n" {
+		t.Fatalf("file = %q", body)
+	}
+}
+
+func TestFileExecutor_WriteCreateNew_ErrorsIfExists(t *testing.T) {
+	workdir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workdir, "exist"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	exec := NewFileExecutor(FileConfig{WorkDir: workdir})
+	_, err := exec.Run(context.Background(), Task{
+		Prompt: `{"op":"write","path":"exist","content":"y","mode":"create_new"}`,
+	}, noopSink{})
+	if err == nil {
+		t.Fatal("expected create_new to error on existing file")
+	}
+}
+
+func TestFileExecutor_WritePatchInRange(t *testing.T) {
+	workdir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workdir, "f"), []byte("AAAAAAAAAA"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	exec := NewFileExecutor(FileConfig{WorkDir: workdir})
+	_, err := exec.Run(context.Background(), Task{
+		Prompt: `{"op":"write","path":"f","content":"BB","mode":"patch","offset":3}`,
+	}, noopSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := os.ReadFile(filepath.Join(workdir, "f"))
+	if string(body) != "AAABBAAAAA" {
+		t.Fatalf("file = %q", body)
+	}
+}
+
+func TestFileExecutor_WritePatchPastEOFZeroFills(t *testing.T) {
+	workdir := t.TempDir()
+	exec := NewFileExecutor(FileConfig{WorkDir: workdir})
+	_, err := exec.Run(context.Background(), Task{
+		Prompt: `{"op":"write","path":"f","content":"XY","mode":"patch","offset":4,"mkdir":true}`,
+	}, noopSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := os.ReadFile(filepath.Join(workdir, "f"))
+	if !bytes.Equal(body, []byte{0, 0, 0, 0, 'X', 'Y'}) {
+		t.Fatalf("file = %v", body)
+	}
+}
+
+func TestFileExecutor_WriteRejectsOffsetWithoutPatch(t *testing.T) {
+	exec := NewFileExecutor(FileConfig{WorkDir: t.TempDir()})
+	_, err := exec.Run(context.Background(), Task{
+		Prompt: `{"op":"write","path":"x","content":"y","mode":"overwrite","offset":5}`,
+	}, noopSink{})
+	if err == nil || !strings.Contains(err.Error(), "offset") {
+		t.Fatalf("expected offset rejection, got %v", err)
+	}
+}
+
+func TestFileExecutor_WritePatchWithZeroOffsetOK(t *testing.T) {
+	// patch with offset:0 is allowed; the rejection is "offset on non-patch modes".
+	exec := NewFileExecutor(FileConfig{WorkDir: t.TempDir()})
+	_, err := exec.Run(context.Background(), Task{
+		Prompt: `{"op":"write","path":"f","content":"hi","mode":"patch"}`,
+	}, noopSink{})
+	if err != nil {
+		t.Fatalf("patch with offset 0 should succeed: %v", err)
+	}
+}
+
+func TestFileExecutor_WriteMkdirCreatesParents(t *testing.T) {
+	workdir := t.TempDir()
+	exec := NewFileExecutor(FileConfig{WorkDir: workdir})
+	_, err := exec.Run(context.Background(), Task{
+		Prompt: `{"op":"write","path":"a/b/c/file","content":"hi","mkdir":true}`,
+	}, noopSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := os.ReadFile(filepath.Join(workdir, "a", "b", "c", "file"))
+	if string(body) != "hi" {
+		t.Fatalf("file = %q", body)
+	}
+}
+
+func TestFileExecutor_WriteBase64Roundtrip(t *testing.T) {
+	workdir := t.TempDir()
+	raw := []byte{0x00, 0xff, 0x42}
+	enc := base64.StdEncoding.EncodeToString(raw)
+	exec := NewFileExecutor(FileConfig{WorkDir: workdir})
+	_, err := exec.Run(context.Background(), Task{
+		Prompt: fmt.Sprintf(`{"op":"write","path":"bin","content":%q,"encoding":"base64"}`, enc),
+	}, noopSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := os.ReadFile(filepath.Join(workdir, "bin"))
+	if !bytes.Equal(body, raw) {
+		t.Fatalf("bytes differ")
+	}
+}

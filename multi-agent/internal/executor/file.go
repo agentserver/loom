@@ -71,6 +71,8 @@ func (e *FileExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, erro
 	switch req.Op {
 	case "read":
 		return e.doRead(req, abs, sink)
+	case "write":
+		return e.doWrite(req, abs, sink)
 	default:
 		return Result{}, fmt.Errorf("unknown file op %q", req.Op)
 	}
@@ -148,6 +150,90 @@ func (e *FileExecutor) doRead(req fileRequest, abs string, sink Sink) (Result, e
 		Encoding: enc,
 		Content:  content,
 		EOF:      req.Offset+int64(len(buf)) >= size,
+	}
+	body, _ := json.Marshal(result)
+	sink.Write("chunk", string(body))
+	return Result{Summary: string(body)}, nil
+}
+
+func (e *FileExecutor) doWrite(req fileRequest, abs string, sink Sink) (Result, error) {
+	enc := req.Encoding
+	if enc == "" {
+		enc = "utf-8"
+	}
+	if enc != "utf-8" && enc != "base64" {
+		return Result{}, fmt.Errorf("encoding must be utf-8 or base64, got %q", enc)
+	}
+	mode := req.Mode
+	if mode == "" {
+		mode = "overwrite"
+	}
+	switch mode {
+	case "overwrite", "append", "create_new", "patch":
+	default:
+		return Result{}, fmt.Errorf("mode must be overwrite|append|create_new|patch, got %q", mode)
+	}
+	if mode != "patch" && req.Offset != 0 {
+		return Result{}, fmt.Errorf("offset is only valid with mode=patch")
+	}
+	if req.Offset < 0 {
+		return Result{}, fmt.Errorf("offset must be >= 0")
+	}
+
+	var bytesPayload []byte
+	switch enc {
+	case "utf-8":
+		bytesPayload = []byte(req.Content)
+	case "base64":
+		decoded, err := base64.StdEncoding.DecodeString(req.Content)
+		if err != nil {
+			return Result{}, fmt.Errorf("base64 decode: %w", err)
+		}
+		bytesPayload = decoded
+	}
+
+	if req.Mkdir {
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			return Result{}, err
+		}
+	}
+
+	var (
+		f   *os.File
+		err error
+	)
+	switch mode {
+	case "overwrite":
+		f, err = os.OpenFile(abs, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	case "append":
+		f, err = os.OpenFile(abs, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+	case "create_new":
+		f, err = os.OpenFile(abs, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	case "patch":
+		f, err = os.OpenFile(abs, os.O_WRONLY|os.O_CREATE, 0o644)
+	}
+	if err != nil {
+		return Result{}, err
+	}
+	defer f.Close()
+
+	var n int
+	if mode == "patch" {
+		n, err = f.WriteAt(bytesPayload, req.Offset)
+	} else {
+		n, err = f.Write(bytesPayload)
+	}
+	if err != nil {
+		return Result{}, err
+	}
+	result := FileWriteResult{
+		Path:         abs,
+		BytesWritten: int64(n),
+		Mode:         mode,
+	}
+	if mode == "patch" {
+		off := req.Offset
+		result.Offset = &off
 	}
 	body, _ := json.Marshal(result)
 	sink.Write("chunk", string(body))
