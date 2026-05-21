@@ -242,3 +242,103 @@ Input:
 ```
 
 Requires target skill `claude_permissions`. Uses the task channel today; future design should move this to a dedicated agentserver control channel.
+
+## Slave File Tools
+
+In-band file I/O against a slave that advertises `file`. Bytes flow through the driver's `FileRegistry` (sha256-keyed cache under `logs/file-cache/`), so payloads never need to live in the LLM context as tool arguments or results. Slave-side semantics are documented in `slave-skills.md` under `file`.
+
+Prefer these over `run_slave_bash "cat ..."` / base64-in-bash payloads whenever you actually want bytes (uploading an MCP server source, pulling back a log, copying between slaves). Prefer the PUT-manifest path (`submit_task.read_paths`/`write_paths`) for large artifacts that should live in observer storage.
+
+### `read_slave_file`
+
+Input:
+
+```json
+{
+  "target_agent_id": "optional",
+  "target_display_name": "slave-a",
+  "path": "data/in.csv",
+  "offset": 0,
+  "length": 65536,
+  "encoding": "utf-8",
+  "inline_max_bytes": 65536
+}
+```
+
+- `path` resolves against the slave's `claude.workdir` if relative; absolute paths are used as-is.
+- `encoding`: `"utf-8"` (default) or `"base64"` for binary-safe transfer.
+- `offset` / `length` chunk large files (slave caps a single read at 8 MiB).
+- `inline_max_bytes` controls whether `content` is returned inline; bytes are always cached.
+
+Result:
+
+```json
+{
+  "slave_path": "data/in.csv",
+  "size": 41,
+  "sha256": "f38d...",
+  "blob_handle": "sha256:f38d...",
+  "cache_path": "logs/file-cache/f38d...",
+  "encoding": "utf-8",
+  "content": "...optional inline...",
+  "eof": true
+}
+```
+
+`blob_handle` is the stable reference. Pass it back into `write_slave_file` as `source_blob` to push the same bytes to another slave without re-fetching. `cache_path` is a driver-local file you can hand to the `Read` tool when you actually need to inspect the bytes.
+
+### `write_slave_file`
+
+Input — exactly one of `content` / `source_blob` / `source_path` is required:
+
+```json
+{
+  "target_display_name": "slave-a",
+  "path": "generated_mcp/foo/v1.py",
+  "mode": "overwrite",
+  "mkdir": true,
+  "encoding": "utf-8",
+  "content": "...inline string..."
+}
+```
+
+```json
+{
+  "target_display_name": "slave-b",
+  "path": "data/copy.bin",
+  "source_blob": "sha256:f38d..."
+}
+```
+
+```json
+{
+  "target_display_name": "slave-a",
+  "path": "generated_mcp/foo/v1.py",
+  "source_path": "/abs/driver/path/v1.py"
+}
+```
+
+- `mode`: `overwrite` | `append` | `create_new` | `patch`. `offset` is only valid with `patch`.
+- `source_path` (driver-local absolute path) gets registered in `FileRegistry` on the way through, so the resulting handle is available for subsequent fanout.
+- `source_blob` must reference a handle the driver already knows (returned by a prior `read_slave_file` or `write_slave_file source_path`).
+
+Result: `{slave_path, bytes_written, mode, source}`.
+
+### `stat_slave_file`
+
+Input:
+
+```json
+{"target_display_name": "slave-a", "path": "generated_mcp/foo/v1.py"}
+```
+
+Result: `{slave_path, exists, size?, mode?, is_dir?, mtime?}`. Missing paths return `exists:false` — not an error — so it's cheap to probe before writing.
+
+### Cross-slave copy pattern
+
+```text
+read_slave_file(target=A, path=src)        -> {blob_handle: H, ...}
+write_slave_file(target=B, path=dst, source_blob=H)
+```
+
+The bytes round-trip through the driver's `FileRegistry`, never through chat or `run_slave_bash`. Use this instead of routing through observer artifacts when both endpoints are slaves currently advertising `file` and the payload fits comfortably in driver-local cache.
