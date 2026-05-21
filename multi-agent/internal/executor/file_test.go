@@ -39,7 +39,9 @@ func TestFileExecutor_ReadWholeFile_UTF8(t *testing.T) {
 
 func TestFileExecutor_ReadWithOffsetAndLength(t *testing.T) {
 	workdir := t.TempDir()
-	os.WriteFile(filepath.Join(workdir, "in.txt"), []byte("abcdefghij"), 0o644)
+	if err := os.WriteFile(filepath.Join(workdir, "in.txt"), []byte("abcdefghij"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	exec := NewFileExecutor(FileConfig{WorkDir: workdir})
 	res, err := exec.Run(context.Background(), Task{
 		Prompt: `{"op":"read","path":"in.txt","offset":2,"length":4}`,
@@ -48,7 +50,9 @@ func TestFileExecutor_ReadWithOffsetAndLength(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got FileReadResult
-	json.Unmarshal([]byte(res.Summary), &got)
+	if err := json.Unmarshal([]byte(res.Summary), &got); err != nil {
+		t.Fatalf("summary not FileReadResult JSON: %v\n%s", err, res.Summary)
+	}
 	if got.Content != "cdef" || got.Bytes != 4 || got.EOF {
 		t.Fatalf("got %+v", got)
 	}
@@ -57,7 +61,9 @@ func TestFileExecutor_ReadWithOffsetAndLength(t *testing.T) {
 func TestFileExecutor_ReadBase64BinarySafe(t *testing.T) {
 	workdir := t.TempDir()
 	raw := []byte{0x00, 0xff, 0x10, 0x80}
-	os.WriteFile(filepath.Join(workdir, "bin"), raw, 0o644)
+	if err := os.WriteFile(filepath.Join(workdir, "bin"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	exec := NewFileExecutor(FileConfig{WorkDir: workdir})
 	res, err := exec.Run(context.Background(), Task{
 		Prompt: `{"op":"read","path":"bin","encoding":"base64"}`,
@@ -66,7 +72,9 @@ func TestFileExecutor_ReadBase64BinarySafe(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got FileReadResult
-	json.Unmarshal([]byte(res.Summary), &got)
+	if err := json.Unmarshal([]byte(res.Summary), &got); err != nil {
+		t.Fatalf("summary not FileReadResult JSON: %v\n%s", err, res.Summary)
+	}
 	decoded, _ := base64.StdEncoding.DecodeString(got.Content)
 	if !bytes.Equal(decoded, raw) {
 		t.Fatalf("base64 roundtrip failed: %v vs %v", decoded, raw)
@@ -75,7 +83,9 @@ func TestFileExecutor_ReadBase64BinarySafe(t *testing.T) {
 
 func TestFileExecutor_ReadInvalidUTF8Rejected(t *testing.T) {
 	workdir := t.TempDir()
-	os.WriteFile(filepath.Join(workdir, "bad"), []byte{0xff, 0xfe}, 0o644)
+	if err := os.WriteFile(filepath.Join(workdir, "bad"), []byte{0xff, 0xfe}, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	exec := NewFileExecutor(FileConfig{WorkDir: workdir})
 	_, err := exec.Run(context.Background(), Task{
 		Prompt: `{"op":"read","path":"bad"}`,
@@ -88,7 +98,9 @@ func TestFileExecutor_ReadInvalidUTF8Rejected(t *testing.T) {
 func TestFileExecutor_ReadCapEnforced(t *testing.T) {
 	workdir := t.TempDir()
 	big := make([]byte, fileMaxReadBytes+1)
-	os.WriteFile(filepath.Join(workdir, "big"), big, 0o644)
+	if err := os.WriteFile(filepath.Join(workdir, "big"), big, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	exec := NewFileExecutor(FileConfig{WorkDir: workdir})
 	_, err := exec.Run(context.Background(), Task{
 		Prompt: `{"op":"read","path":"big","encoding":"base64"}`,
@@ -111,7 +123,9 @@ func TestFileExecutor_ReadFileNotFound(t *testing.T) {
 func TestFileExecutor_ReadAbsolutePath(t *testing.T) {
 	dir := t.TempDir()
 	abs := filepath.Join(dir, "abs.txt")
-	os.WriteFile(abs, []byte("xyz"), 0o644)
+	if err := os.WriteFile(abs, []byte("xyz"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	exec := NewFileExecutor(FileConfig{WorkDir: "/tmp/elsewhere"})
 	res, err := exec.Run(context.Background(), Task{
 		Prompt: fmt.Sprintf(`{"op":"read","path":%q}`, abs),
@@ -120,7 +134,9 @@ func TestFileExecutor_ReadAbsolutePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got FileReadResult
-	json.Unmarshal([]byte(res.Summary), &got)
+	if err := json.Unmarshal([]byte(res.Summary), &got); err != nil {
+		t.Fatalf("summary not FileReadResult JSON: %v\n%s", err, res.Summary)
+	}
 	if got.Path != abs || got.Content != "xyz" {
 		t.Fatalf("got %+v", got)
 	}
