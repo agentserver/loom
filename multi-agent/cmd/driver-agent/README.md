@@ -37,6 +37,9 @@ Slave control helpers:
 - `run_slave_bash`: sends explicit Bash code to a slave that advertises `bash`.
 - `get_slave_claude_permissions`: reads a slave's Claude Code project permissions.
 - `update_slave_claude_permissions`: patches a slave's Claude Code project permissions.
+- `read_slave_file`: reads a path on a slave that advertises `file`. Bytes are cached in the driver's blob store and returned as a `sha256` handle plus `cache_path`; inline `content` is included only when ≤ 4 KiB and utf-8.
+- `write_slave_file`: writes to a path on a slave that advertises `file`. Pass exactly one of `content` (inline, ≤ 4 KiB), `source_blob` (a sha256 returned from a prior tool), or `source_path` (a driver-local absolute path).
+- `stat_slave_file`: stats a path on a slave that advertises `file`. Returns `exists:false` for missing paths rather than erroring.
 
 Permission tools currently submit ordinary tasks with `skill="claude_permissions"` because the current agentserver does not expose the needed custom-agent peer/control proxy. The task is handled by native Go code in `slave-agent`; it is not a request for the slave's Claude Code process to edit its own permissions. Future work should migrate this control operation to a dedicated agentserver control channel.
 
@@ -57,6 +60,17 @@ Example Bash execution:
   "script": "python3 - <<'PY'\nprint('ok')\nPY",
   "timeout_sec": 60
 }
+```
+
+Example chained slave-A → slave-B file transfer (LLM never carries bytes):
+
+```json
+{"target_display_name":"slave-a","path":"data/big.bin","encoding":"base64"}
+```
+→ returns `{"sha256":"abc...","blob_handle":"sha256:abc...","cache_path":"..."}`
+
+```json
+{"target_display_name":"slave-b","path":"incoming/big.bin","source_blob":"sha256:abc...","mkdir":true}
 ```
 
 ## Audit log

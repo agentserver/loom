@@ -29,9 +29,10 @@ discovery:
     - register_mcp
     - bash
     - claude_permissions
+    - file
 ```
 
-`register_mcp` registers a pre-built MCP server file written by a prior bash task. `bash` enables deterministic shell execution through a native `slave-agent` executor. `claude_permissions` enables driver-side permission inspection and patching through the existing task channel. Permission patching is also native `slave-agent` Go code; it must not be implemented by asking the slave's Claude Code process to modify its own `.claude/settings.local.json`, because Claude Code may not yet have the required `Write`, `Edit`, or `Bash` permission.
+`register_mcp` registers a pre-built MCP server file written by a prior bash task. `bash` enables deterministic shell execution through a native `slave-agent` executor. `claude_permissions` enables driver-side permission inspection and patching through the existing task channel. Permission patching is also native `slave-agent` Go code; it must not be implemented by asking the slave's Claude Code process to modify its own `.claude/settings.local.json`, because Claude Code may not yet have the required `Write`, `Edit`, or `Bash` permission. `file` enables stateless deterministic file read/write/stat through a native `slave-agent` executor; same trust model as `bash`.
 
 This task-channel permission path is a compatibility bridge. When agentserver exposes a dedicated control channel for custom agents, permission management should move there.
 
