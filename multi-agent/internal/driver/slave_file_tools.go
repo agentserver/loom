@@ -360,3 +360,66 @@ func (w *writeSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (jso
 	}
 	return json.Marshal(out)
 }
+
+type statSlaveFileTool struct{ t *Tools }
+
+func (s *statSlaveFileTool) Name() string { return "stat_slave_file" }
+func (s *statSlaveFileTool) Description() string {
+	return "Stat a path on a selected slave through the file skill. Returns exists=false for missing paths instead of erroring."
+}
+func (s *statSlaveFileTool) InputSchema() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{
+        "target_agent_id":{"type":"string"},
+        "target_display_name":{"type":"string"},
+        "path":{"type":"string"}
+    },"required":["path"],"additionalProperties":false}`)
+}
+func (s *statSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	var args struct {
+		TargetAgentID     string `json:"target_agent_id"`
+		TargetDisplayName string `json:"target_display_name"`
+		Path              string `json:"path"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, &MCPToolError{Message: "invalid args: " + err.Error()}
+	}
+	if args.Path == "" {
+		return nil, &MCPToolError{Message: "path is required"}
+	}
+	card, err := s.t.resolveAvailableAgent(ctx, args.TargetAgentID, args.TargetDisplayName)
+	if err != nil {
+		return nil, err
+	}
+	if !hasSkill(card, "file") {
+		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise file"}
+	}
+	prompt, _ := json.Marshal(map[string]string{"op": "stat", "path": args.Path})
+	resp, err := s.t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
+		TargetID: card.AgentID, Skill: "file", Prompt: string(prompt),
+	})
+	if err != nil {
+		return nil, &MCPToolError{Message: "delegate file stat: " + err.Error()}
+	}
+	waitOut, err := s.t.waitDelegatedTask(ctx, resp.TaskID, 0)
+	if err != nil {
+		return nil, err
+	}
+	var wrap struct {
+		Output string `json:"output"`
+	}
+	json.Unmarshal(waitOut, &wrap)
+	var slaveRes map[string]interface{}
+	json.Unmarshal([]byte(wrap.Output), &slaveRes)
+	out := map[string]interface{}{
+		"task_id":             resp.TaskID,
+		"target_display_name": card.DisplayName,
+	}
+	for k, v := range slaveRes {
+		if k == "path" {
+			out["slave_path"] = v
+			continue
+		}
+		out[k] = v
+	}
+	return json.Marshal(out)
+}

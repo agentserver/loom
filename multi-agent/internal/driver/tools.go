@@ -71,6 +71,7 @@ func (t *Tools) All() []Tool {
 		&updateSlaveClaudePermissionsTool{t},
 		&readSlaveFileTool{t},
 		&writeSlaveFileTool{t},
+		&statSlaveFileTool{t},
 		&draftTaskContractTool{t},
 		&dryRunContractTool{t},
 		&submitTaskTool{t},

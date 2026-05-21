@@ -354,3 +354,37 @@ func TestWriteSlaveFile_RejectsMissingFileSkill(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "does not advertise file")
 }
+
+func TestStatSlaveFile_PassesThroughResult(t *testing.T) {
+	var captured agentsdk.DelegateTaskRequest
+	sdk := newAvailableFileSlaveSDK(t,
+		`{"path":"/abs/f","exists":true,"size":42,"mode":"0644","is_dir":false,"mtime":"2026-05-21T10:00:00Z"}`,
+		&captured)
+	tool := toolByName(t, newTestTools(t, sdk), "stat_slave_file")
+	raw, err := tool.Call(context.Background(),
+		json.RawMessage(`{"target_display_name":"slave-b","path":"f"}`))
+	require.NoError(t, err)
+	require.JSONEq(t, `{"op":"stat","path":"f"}`, captured.Prompt)
+	var out map[string]interface{}
+	json.Unmarshal(raw, &out)
+	require.Equal(t, true, out["exists"])
+	require.EqualValues(t, 42, out["size"])
+	require.Equal(t, "/abs/f", out["slave_path"])
+	require.Equal(t, "task-w1", out["task_id"])
+}
+
+func TestStatSlaveFile_RejectsMissingFileSkill(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{{
+				AgentID: "slave-b", DisplayName: "slave-b", Status: "available",
+				Card: json.RawMessage(`{"skills":["chat"]}`),
+			}}, nil
+		},
+	}
+	tool := toolByName(t, newTestTools(t, sdk), "stat_slave_file")
+	_, err := tool.Call(context.Background(),
+		json.RawMessage(`{"target_display_name":"slave-b","path":"f"}`))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "does not advertise file")
+}
