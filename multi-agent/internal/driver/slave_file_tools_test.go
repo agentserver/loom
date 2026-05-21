@@ -2,9 +2,13 @@ package driver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
@@ -159,4 +163,194 @@ func TestReadSlaveFile_AuditsRegisterReadWithSlaveShortID(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(body), `"event":"register_read"`)
 	require.Contains(t, string(body), `"peer_short_id":"sa"`)
+}
+
+func newAvailableFileSlaveSDK(t *testing.T, slaveResult string, captured *agentsdk.DelegateTaskRequest) *fakeSDK {
+	return &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{{
+				AgentID: "slave-b", DisplayName: "slave-b", Status: "available",
+				Card: json.RawMessage(`{"skills":["file"],"short_id":"sb"}`),
+			}}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			*captured = req
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-w1"}, nil
+		},
+		getTaskFunc: func(id string, includeOutput bool) (*agentsdk.TaskInfo, error) {
+			return &agentsdk.TaskInfo{
+				TaskID: "task-w1", Status: "completed",
+				Result: json.RawMessage(`"` + jsonEscape(slaveResult) + `"`),
+			}, nil
+		},
+	}
+}
+
+func jsonEscape(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b[1 : len(b)-1])
+}
+
+func TestWriteSlaveFile_InlineContent(t *testing.T) {
+	var captured agentsdk.DelegateTaskRequest
+	sdk := newAvailableFileSlaveSDK(t,
+		`{"path":"/abs/out.txt","bytes_written":5,"mode":"overwrite"}`, &captured)
+	tool := toolByName(t, newTestTools(t, sdk), "write_slave_file")
+	raw, err := tool.Call(context.Background(),
+		json.RawMessage(`{"target_display_name":"slave-b","path":"out.txt","content":"hello"}`))
+	require.NoError(t, err)
+	require.Equal(t, "file", captured.Skill)
+	require.JSONEq(t,
+		`{"op":"write","path":"out.txt","content":"hello","encoding":"utf-8","mode":"overwrite"}`,
+		captured.Prompt)
+	var out map[string]interface{}
+	json.Unmarshal(raw, &out)
+	require.Equal(t, "content", out["source"])
+	require.EqualValues(t, 5, out["bytes_written"])
+}
+
+func TestWriteSlaveFile_RejectsZeroOrMultipleSources(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{{
+				AgentID: "slave-b", DisplayName: "slave-b", Status: "available",
+				Card: json.RawMessage(`{"skills":["file"]}`),
+			}}, nil
+		},
+	}
+	tool := toolByName(t, newTestTools(t, sdk), "write_slave_file")
+	// zero
+	_, err := tool.Call(context.Background(),
+		json.RawMessage(`{"target_display_name":"slave-b","path":"x"}`))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exactly one")
+	// multiple
+	_, err = tool.Call(context.Background(),
+		json.RawMessage(`{"target_display_name":"slave-b","path":"x","content":"a","source_path":"/p"}`))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exactly one")
+}
+
+func TestWriteSlaveFile_RejectsOffsetWithoutPatch(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{{
+				AgentID: "slave-b", DisplayName: "slave-b", Status: "available",
+				Card: json.RawMessage(`{"skills":["file"]}`),
+			}}, nil
+		},
+	}
+	tool := toolByName(t, newTestTools(t, sdk), "write_slave_file")
+	_, err := tool.Call(context.Background(), json.RawMessage(
+		`{"target_display_name":"slave-b","path":"x","content":"a","mode":"overwrite","offset":5}`))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "offset")
+}
+
+func TestWriteSlaveFile_RejectsLargeInlineContent(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{{
+				AgentID: "slave-b", DisplayName: "slave-b", Status: "available",
+				Card: json.RawMessage(`{"skills":["file"]}`),
+			}}, nil
+		},
+	}
+	tool := toolByName(t, newTestTools(t, sdk), "write_slave_file")
+	big := strings.Repeat("a", 5000) // > 4 KiB default
+	args, _ := json.Marshal(map[string]string{
+		"target_display_name": "slave-b", "path": "x", "content": big,
+	})
+	_, err := tool.Call(context.Background(), args)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "inline_max_bytes")
+}
+
+func TestWriteSlaveFile_SourceBlobLooksUpAndSendsBase64(t *testing.T) {
+	var captured agentsdk.DelegateTaskRequest
+	sdk := newAvailableFileSlaveSDK(t,
+		`{"path":"/abs/out.bin","bytes_written":3,"mode":"overwrite"}`, &captured)
+	tools := newTestTools(t, sdk)
+	// Seed a blob in the registry by writing a temp file and registering it.
+	tmp := filepath.Join(t.TempDir(), "src")
+	require.NoError(t, os.WriteFile(tmp, []byte{0x00, 0xff, 0x42}, 0o644))
+	sha, _, _, err := tools.reg.RegisterFile(tmp)
+	require.NoError(t, err)
+
+	tool := toolByName(t, tools, "write_slave_file")
+	raw, err := tool.Call(context.Background(), json.RawMessage(
+		`{"target_display_name":"slave-b","path":"out.bin","source_blob":"sha256:`+sha+`"}`))
+	require.NoError(t, err)
+
+	// The forwarded prompt must use encoding=base64 regardless of what caller passed.
+	var slavePrompt map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(captured.Prompt), &slavePrompt))
+	require.Equal(t, "base64", slavePrompt["encoding"])
+	decoded, _ := base64.StdEncoding.DecodeString(slavePrompt["content"].(string))
+	require.Equal(t, []byte{0x00, 0xff, 0x42}, decoded)
+
+	var out map[string]interface{}
+	json.Unmarshal(raw, &out)
+	require.Equal(t, "source_blob:sha256:"+sha, out["source"])
+}
+
+func TestWriteSlaveFile_SourceBlobUnknownSha(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{{
+				AgentID: "slave-b", DisplayName: "slave-b", Status: "available",
+				Card: json.RawMessage(`{"skills":["file"]}`),
+			}}, nil
+		},
+	}
+	tool := toolByName(t, newTestTools(t, sdk), "write_slave_file")
+	_, err := tool.Call(context.Background(), json.RawMessage(
+		`{"target_display_name":"slave-b","path":"x","source_blob":"sha256:deadbeef"}`))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "source_blob")
+}
+
+func TestWriteSlaveFile_SourcePathRegistersAndUploads(t *testing.T) {
+	var captured agentsdk.DelegateTaskRequest
+	sdk := newAvailableFileSlaveSDK(t,
+		`{"path":"/abs/out","bytes_written":4,"mode":"overwrite"}`, &captured)
+	tools := newTestTools(t, sdk)
+	src := filepath.Join(t.TempDir(), "src")
+	require.NoError(t, os.WriteFile(src, []byte("ABCD"), 0o644))
+	tool := toolByName(t, tools, "write_slave_file")
+	args, _ := json.Marshal(map[string]string{
+		"target_display_name": "slave-b", "path": "out", "source_path": src,
+	})
+	raw, err := tool.Call(context.Background(), args)
+	require.NoError(t, err)
+	var slavePrompt map[string]interface{}
+	json.Unmarshal([]byte(captured.Prompt), &slavePrompt)
+	require.Equal(t, "base64", slavePrompt["encoding"])
+	decoded, _ := base64.StdEncoding.DecodeString(slavePrompt["content"].(string))
+	require.Equal(t, []byte("ABCD"), decoded)
+
+	var out map[string]interface{}
+	json.Unmarshal(raw, &out)
+	require.Equal(t, "source_path:"+src, out["source"])
+
+	// Confirm the file was registered.
+	sum := sha256.Sum256([]byte("ABCD"))
+	_, ok := tools.reg.LookupBlob(hex.EncodeToString(sum[:]))
+	require.True(t, ok)
+}
+
+func TestWriteSlaveFile_RejectsMissingFileSkill(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{{
+				AgentID: "slave-b", DisplayName: "slave-b", Status: "available",
+				Card: json.RawMessage(`{"skills":["chat"]}`),
+			}}, nil
+		},
+	}
+	tool := toolByName(t, newTestTools(t, sdk), "write_slave_file")
+	_, err := tool.Call(context.Background(), json.RawMessage(
+		`{"target_display_name":"slave-b","path":"x","content":"hi"}`))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "does not advertise file")
 }

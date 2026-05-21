@@ -70,6 +70,7 @@ func (t *Tools) All() []Tool {
 		&getSlaveClaudePermissionsTool{t},
 		&updateSlaveClaudePermissionsTool{t},
 		&readSlaveFileTool{t},
+		&writeSlaveFileTool{t},
 		&draftTaskContractTool{t},
 		&dryRunContractTool{t},
 		&submitTaskTool{t},
