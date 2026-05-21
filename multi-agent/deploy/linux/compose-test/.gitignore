@@ -1,0 +1,2 @@
+# Volumes / runtime state if you ever bind-mount instead of using named volumes
+state/

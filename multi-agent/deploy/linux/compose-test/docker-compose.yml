@@ -1,0 +1,69 @@
+name: loom-deploy-test
+
+# Verifies the three deploy templates (observer / driver / slave) work
+# end-to-end against a local observer. Each service runs the actual
+# deploy/linux/<role>/install.sh inside a debian container, then execs
+# the binary in foreground.
+#
+# The driver and slave hit https://agent.cs.ac.cn for tunnel registration on
+# first start. Each will print a "device-code" verification URL — visit it
+# in a browser and approve to advance the deploy.
+#
+# Bind-mounts: this file lives at deploy/linux/compose-test/, so `../` is
+# deploy/linux/ and `../bin` is where the binaries are expected.
+#
+# Usage:
+#   1. Drop pre-built or downloaded binaries into deploy/linux/bin/
+#        (observer-server.linux-amd64, driver-agent.linux-amd64, slave-agent.linux-amd64)
+#   2. cd deploy/linux/compose-test
+#   3. docker compose up --build
+#   4. Watch the logs — each role prints the URL you need to visit.
+
+services:
+  observer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Use the host network during build so apt-get can reach deb.debian.org
+      # in sandboxes where the docker daemon's default build network has no DNS.
+      network: host
+    image: loom-deploy-test:latest
+    container_name: loom-observer
+    ports:
+      - "127.0.0.1:18090:8090"
+    volumes:
+      - ../:/opt/loom/deploy:ro
+    command: ["bash", "/opt/loom/deploy/compose-test/entrypoint-observer.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/8090' 2>/dev/null || exit 1"]
+      interval: 2s
+      timeout: 1s
+      retries: 30
+      start_period: 5s
+    init: true
+
+  driver:
+    image: loom-deploy-test:latest
+    container_name: loom-driver
+    depends_on:
+      observer:
+        condition: service_healthy
+    volumes:
+      - ../:/opt/loom/deploy:ro
+    command: ["bash", "/opt/loom/deploy/compose-test/entrypoint-driver.sh"]
+    init: true
+    stdin_open: true
+    tty: true
+
+  slave:
+    image: loom-deploy-test:latest
+    container_name: loom-slave
+    depends_on:
+      observer:
+        condition: service_healthy
+    volumes:
+      - ../:/opt/loom/deploy:ro
+    command: ["bash", "/opt/loom/deploy/compose-test/entrypoint-slave.sh"]
+    init: true
+    stdin_open: true
+    tty: true

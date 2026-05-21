@@ -1,0 +1,24 @@
+[Unit]
+Description=Loom observer-server (__INSTANCE_NAME__)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+WorkingDirectory=__LOOM_HOME__
+ExecStart=__LOOM_HOME__/observer-server --config __LOOM_HOME__/observer.yaml
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:__LOOM_HOME__/observer.log
+StandardError=append:__LOOM_HOME__/observer.log
+
+# Hardening (loosen if you need to write outside LOOM_HOME)
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=__LOOM_HOME__
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

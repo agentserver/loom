@@ -1,0 +1,22 @@
+[Unit]
+Description=loom slave-agent (__AGENT_NAME__)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+Group=__SERVICE_USER__
+WorkingDirectory=__LOOM_HOME__
+ExecStart=__LOOM_HOME__/slave-agent __LOOM_HOME__/config.yaml
+Restart=on-failure
+RestartSec=5s
+StandardOutput=append:__LOOM_HOME__/slave.log
+StandardError=append:__LOOM_HOME__/slave.log
+Environment="HOME=__SERVICE_USER_HOME__"
+# Optional override for the Anthropic API endpoint:
+# Environment="ANTHROPIC_BASE_URL=https://code.ai.cs.ac.cn"
+EnvironmentFile=-__LOOM_HOME__/slave.env
+
+[Install]
+WantedBy=multi-user.target

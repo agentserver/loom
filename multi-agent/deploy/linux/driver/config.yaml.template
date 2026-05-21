@@ -1,0 +1,49 @@
+server:
+  url: https://agent.cs.ac.cn
+  name: __AGENT_NAME__
+
+# Auto-filled by `driver-agent register`: device-code OAuth flow against
+# server.url writes the issued sandbox / tunnel / proxy creds back into
+# THIS file. Run `register` once before launching the MCP server.
+credentials:
+  sandbox_id: ""
+  tunnel_token: ""
+  proxy_token: ""
+  workspace_id: ""
+  short_id: ""
+
+discovery:
+  display_name: __AGENT_NAME__
+  description: __DESCRIPTION__
+  skills: []
+
+listen_addr: 127.0.0.1:0
+
+planner:
+  bin: claude
+  timeout_sec: 300
+  extra_args: []
+
+fanout:
+  max_concurrency: 2
+  default_policy: ""
+  policy_by_skill: {}
+  subtask_defaults:
+    timeout_sec: 600
+    max_budget_usd: 0
+
+driver_defaults:
+  target_display_name: ""
+  task_timeout_sec: 600
+  audit_log_dir: ./logs
+  disable_uid_check: true
+  max_dir_cache_entries: 50000
+  artifact_transport: observer_lazy
+
+observer:
+  enabled: true
+  url: __OBSERVER_URL__
+  workspace_id: __WORKSPACE_ID__
+  agent_id: __AGENT_NAME__
+  api_key: ""                       # paste the workspace bootstrap api-key here, then chmod 0600 this file
+  token_state_path: __LOOM_HOME__/observer.token
