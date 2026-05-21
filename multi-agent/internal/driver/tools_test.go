@@ -81,6 +81,7 @@ func newTestToolsWithObserver(t *testing.T, sdk SDKClient, obs ObserverSink) *To
 	cfg.Credentials.ShortID = "drv-001"
 	cfg.Credentials.SandboxID = "sbx-driver"
 	cfg.DriverDefaults.TaskTimeoutSec = 600
+	cfg.DriverDefaults.AuditLogDir = dir // expose so cache root and audit log path are predictable
 	return NewTools(NewFileRegistry(50000), a, sdk, cfg, obs)
 }
 

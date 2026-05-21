@@ -13,3 +13,12 @@ func TestHasSkill(t *testing.T) {
 		t.Fatal("did not expect bash skill")
 	}
 }
+
+func TestHasSkill_File(t *testing.T) {
+	if !hasSkill([]string{"chat", "file"}, "file") {
+		t.Fatal("expected file skill")
+	}
+	if hasSkill([]string{"chat"}, "file") {
+		t.Fatal("did not expect file skill")
+	}
+}

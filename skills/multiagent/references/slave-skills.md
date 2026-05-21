@@ -6,6 +6,7 @@ Slaves advertise skills through their discovery card. The driver and planner sho
 - `mcp`: direct call to a configured or generated MCP server.
 - `register_mcp`: register a pre-built MCP server file (paired with bash to generate and validate).
 - `bash`: run explicit Bash through native slave-agent code.
+- `file`: stateless file read/write/stat through a native slave-agent executor.
 - `claude_permissions`: read or patch Claude Code permissions through native slave-agent code.
 
 ## `chat`
@@ -86,6 +87,59 @@ Prompt is JSON:
 ```
 
 Use only for explicit commands the driver has decided are appropriate. If Claude Code permissions block a command, use permission tools first.
+
+## `file`
+
+Stateless file I/O through a native `slave-agent` Go executor. Advertised by adding `file` to `discovery.skills`. The prompt is JSON with an `op` discriminator. Same trust model as `bash`: a slave that advertises `file` is granting access to any path its OS user can reach.
+
+### `op: "read"`
+
+```json
+{
+  "op": "read",
+  "path": "data/in.csv",
+  "offset": 0,
+  "length": 65536,
+  "encoding": "utf-8"
+}
+```
+
+- `path` resolves against `claude.workdir` if relative; absolute paths used as-is.
+- `encoding`: `"utf-8"` (default; rejects invalid UTF-8) or `"base64"` (binary-safe).
+- `offset` / `length` optional; reads to EOF if `length` unset.
+- Hard cap: one read returns ≤ 8 MiB. Chunk by raising `offset`.
+
+Result: `{path, bytes, encoding, content, eof}`.
+
+### `op: "write"`
+
+```json
+{
+  "op": "write",
+  "path": "data/out.txt",
+  "content": "hello\n",
+  "encoding": "utf-8",
+  "mode": "overwrite",
+  "mkdir": true,
+  "offset": 0
+}
+```
+
+Modes: `overwrite` (truncate+write), `append` (`O_APPEND`), `create_new` (`O_EXCL`, errors if file exists), `patch` (writes at `offset` without truncating; zero-fills if `offset > size`). `offset` is rejected on non-patch modes.
+
+Result: `{path, bytes_written, mode, offset?}`.
+
+### `op: "stat"`
+
+```json
+{"op":"stat","path":"data/out.txt"}
+```
+
+Returns `{path, exists, size?, mode?, is_dir?, mtime?}`. Missing paths return `exists:false` (not an error) so callers can probe "should I write here?" cheaply.
+
+### Driver-side tools
+
+The driver exposes `read_slave_file`, `write_slave_file`, and `stat_slave_file`. They keep bytes out of the LLM context: `read_slave_file` caches in the driver's `FileRegistry` and returns a `sha256` / `blob_handle` / `cache_path`; `write_slave_file` accepts `source_blob` (a prior handle) or `source_path` (a driver-local path) so the LLM never carries large payloads as tool arguments.
 
 ## `claude_permissions`
 

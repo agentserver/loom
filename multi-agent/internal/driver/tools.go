@@ -69,6 +69,9 @@ func (t *Tools) All() []Tool {
 		// Permission tools use task delegation until agentserver exposes a dedicated control channel.
 		&getSlaveClaudePermissionsTool{t},
 		&updateSlaveClaudePermissionsTool{t},
+		&readSlaveFileTool{t},
+		&writeSlaveFileTool{t},
+		&statSlaveFileTool{t},
 		&draftTaskContractTool{t},
 		&dryRunContractTool{t},
 		&submitTaskTool{t},
@@ -158,7 +161,7 @@ func agentAvailable(c agentsdk.AgentCard) bool {
 // skills submit_task forwards the caller's prompt verbatim.
 func jsonPromptSkill(skill string) bool {
 	switch skill {
-	case "mcp", "bash", "register_mcp", "claude_permissions":
+	case "mcp", "bash", "register_mcp", "claude_permissions", "file":
 		return true
 	}
 	return false

@@ -109,6 +109,9 @@ func run(cfgPath string) error {
 	if hasSkill(cfg.Discovery.Skills, "bash") {
 		routes["bash"] = executor.NewBashExecutor(executor.BashConfig{WorkDir: cfg.Claude.WorkDir})
 	}
+	if hasSkill(cfg.Discovery.Skills, "file") {
+		routes["file"] = executor.NewFileExecutor(executor.FileConfig{WorkDir: cfg.Claude.WorkDir})
+	}
 	enumerateMCPTools := func(ctx context.Context) []capability.MCPToolDescriptor {
 		allDesc := []capability.MCPToolDescriptor{}
 		for _, name := range mcpExec.Servers() {
