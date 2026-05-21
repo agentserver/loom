@@ -33,3 +33,4 @@ cmd/master-agent/master-agent
 cmd/observer-server/observer-server
 cmd/slave-agent/slave-agent
 testdata/fake-mcp-stdio/fake-mcp-stdio
+/tests/prod_test/
