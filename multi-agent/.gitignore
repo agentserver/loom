@@ -34,3 +34,4 @@ cmd/observer-server/observer-server
 cmd/slave-agent/slave-agent
 testdata/fake-mcp-stdio/fake-mcp-stdio
 /tests/prod_test/
+tests/claude_driver/.mcp.json
