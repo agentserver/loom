@@ -1,0 +1,6 @@
+# row_stats — happy path
+{"name": "four-row sum", "tool": "summarize_rows", "args": {"rows": [1,2,3,4]}, "expect_contains": ["count=4", "sum=10", "mean=2.500"]}
+# row_stats — empty rows should not crash (returns mean=0)
+{"name": "empty rows", "tool": "summarize_rows", "args": {"rows": []}, "expect_contains": ["count=0", "mean=0.000"], "expect_isError": false}
+# row_stats — schema enforces rows; missing rows should surface as error
+{"name": "missing rows raises", "tool": "summarize_rows", "args": {}, "expect_isError": true, "expect_contains": ["error"]}

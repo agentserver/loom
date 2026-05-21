@@ -66,13 +66,14 @@ Validation:
 
 ## Bash → register_mcp workflow
 
-The driver Claude should construct MCP servers by combining `bash` and `register_mcp`:
+The driver Claude should construct MCP servers using the two dedicated skills, plumbed via `run_slave_bash`:
 
-1. Use `bash` (or `run_slave_bash`) to write `generated_mcp/<name>/v1.py` on the slave, optionally importing or shelling out to existing services already on the slave.
-2. Inside the same bash task, run real acceptance cases against the file (e.g. `python3 generated_mcp/<name>/v1.py < tests.jsonl`) and iterate on the source until outputs match expectations.
-3. Submit `register_mcp` (or `register_slave_mcp` from the driver) with the spec and `source_path`. Registration only does structural checks + `tools/list` smoke; acceptance is the previous step's job.
+1. **`scaffold-mcp-server`** — generate `generated_mcp/<name>/v1.py` from `spec.json`. The scaffolder owns the JSON-RPC protocol region; you only fill in handler bodies. `args_schema` from the spec is translated to `inputSchema` in the generated TOOLS list, so the two fields stay in sync by construction.
+2. Hand-edit handlers between `# @@scaffold:business:start <tool>` / `# @@scaffold:business:end` markers. Re-running scaffold (e.g. after `spec.json` changes) preserves these bodies.
+3. **`mcp-acceptance`** — drive `initialize → tools/list → tools/call` against `cases.jsonl`. Exit 0 = safe; gate registration: `mcp_acceptance.py ... && register_slave_mcp ...`. Exit 1 = case failure; exit 2 = server unreachable.
+4. Submit `register_mcp` / `register_slave_mcp` with the same `spec.json` and `source_path`. Registration only does structural checks + `tools/list` smoke; semantic correctness is the acceptance step's job.
 
-The structured spec exists so capability publishing has clean metadata; it is not a generation contract.
+The structured spec exists so capability publishing has clean metadata AND as input to the scaffolder; it is not a generation contract for one-shot LLM emission.
 
 ## `bash`
 
