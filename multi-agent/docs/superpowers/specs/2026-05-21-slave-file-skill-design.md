@@ -25,11 +25,31 @@ One skill named `file`, advertised in `discovery.skills`. The prompt is JSON wit
 
 Driver side exposes three MCP tools that each delegate a `skill="file"` task with the right `op` baked in: `read_slave_file`, `write_slave_file`, `stat_slave_file`. The reason for three driver tools but one slave skill: LLM tool selection is sharper when each tool has a specific name and schema, but `discovery.skills` should not multiply (it shapes capability advertising, planner dispatch, and permission gating).
 
+### Avoiding LLM Token Waste: Out-of-Band by Default
+
+A naive design routes file bytes through the driver's Claude Code context — every `read_slave_file` result becomes an MCP tool result the LLM sees, and every `write_slave_file` requires `content` as a tool-call argument. For small text this is fine; for large or binary files it burns the LLM context window unnecessarily.
+
+Crucially, **task-channel bytes do not enter the LLM by themselves**. The task result returns to driver-side Go code first; only what the MCP tool's `Call` chooses to put in its JSON return reaches the LLM. So byte-bypass can be done entirely in the driver tool layer without changing the slave wire protocol.
+
+The driver already operates a sha256-keyed blob channel for user files: `internal/driver/files_handler.go` exposes `/files/blob/{sha}` over the agentserver peer-proxy, with `FileRegistry` managing registrations and an audit log. The file skill **reuses this existing channel**: after `read_slave_file` pulls bytes via the task channel, the driver writes them to a local cache file and registers it in `FileRegistry`. Other slaves can then fetch the same content directly via `/files/blob/{sha}` without going through the driver Claude. The LLM only ever sees `{size, sha256, cache_path, blob_handle}` — ~200 bytes regardless of file size.
+
+A small inline window remains for genuinely small files (`inline_max_bytes`, default 4 KiB): the tool result also includes a `content` field when the file is small and the encoding is UTF-8, so the LLM can read tiny configs without a second `Read` round-trip.
+
+For `write_slave_file`, the three source modes mirror this:
+
+- `content` — small inline string the LLM provides (default cap 4 KiB).
+- `source_blob` — a sha256 handle returned by a prior `read_slave_file` or by user-file registration. The driver looks up the local path in `FileRegistry`, reads bytes itself, and ships them through the task channel. **The LLM never sees the bytes.**
+- `source_path` — driver-local absolute path. The driver registers it in `FileRegistry` (so it gets a sha) and proceeds as in `source_blob`.
+
+This composes with the existing dataflow: a slave-A → slave-B file transfer becomes "driver issues `read_slave_file(A)`, driver issues `write_slave_file(B, source_blob=sha)`" — both tool returns are small handles, and slave-B can fetch the blob through the peer-proxy without ever putting bytes in the LLM's context.
+
 ### Alternatives Considered
 
 - **Three separate skills (`file_read`, `file_write`, `file_stat`).** Lets a slave grant read but not write. Rejected because (a) the cluster has no current need for that granularity, (b) it triples the size of `discovery.skills` for what is one capability, and (c) it diverges from the `bash` precedent (one skill, op-shaped JSON for `script`/`env`/`timeout`).
 - **Keep using `bash` with `cat`/`tee`.** Rejected: not binary-safe, requires Claude Code Bash permissions, no structured offset/length, return shape mixes file bytes with shell framing.
 - **Slave-local MCP file server.** Rejected for the same reason `claude_permissions` is native Go: bootstrapping an MCP call may itself depend on Claude Code permissions the operator has not yet granted.
+- **All bytes inline through the LLM.** Rejected: burns tokens linearly with file size for no LLM benefit, and breaks binary content unless every consumer is forced to deal with base64 in context.
+- **Slave-side `/files/*` blob server for direct slave↔slave transfers.** Possible future work; deferred. The driver-cached approach already enables slave-A → driver-blob → slave-B fetches via the existing peer-proxy; a direct slave↔slave path only matters once the driver becomes a bandwidth bottleneck. YAGNI for now.
 
 ## Skill Protocol
 
@@ -149,13 +169,117 @@ A slave that advertises `file` is granting the same trust surface as `bash`: any
 
 ## Driver MCP Tools
 
-In `internal/driver/slave_file_tools.go`, add three tools modeled exactly on `runSlaveBashTool`:
+In `internal/driver/slave_file_tools.go`, add three tools modeled on `runSlaveBashTool` for target resolution and task delegation, but with extra logic in `Call` to keep bytes out of the LLM context.
 
-- `read_slave_file(target_agent_id?, target_display_name?, path, offset?, length?, encoding?)` — delegates `skill="file"`, prompt `{"op":"read", ...}`, wait=true by default. Schema mirrors the slave-side read fields.
-- `write_slave_file(target_agent_id?, target_display_name?, path, content, encoding?, mode?, mkdir?, offset?)` — delegates `{"op":"write", ...}`. Schema validates that `offset` is set iff `mode == "patch"`.
-- `stat_slave_file(target_agent_id?, target_display_name?, path)` — delegates `{"op":"stat", ...}`.
+All three reuse `resolveAvailableAgent` and gate on `hasSkill(card, "file")`, matching `run_slave_bash`. They use the existing `t.sdk.DelegateTask` + `t.waitDelegatedTask` plumbing for transport. They share access to the driver's `FileRegistry` and `AuditLog` (passed through `Tools` like the existing `/files/*` handler does).
 
-All three reuse `resolveAvailableAgent` and gate on `hasSkill(card, "file")`, matching `run_slave_bash`'s patterns. Wait semantics, timeout defaults, and result wrapping (`marshalDelegatedTaskOutput`) come from the existing helpers — no new control flow.
+### `read_slave_file`
+
+Input:
+
+```json
+{
+  "target_agent_id": "...",
+  "target_display_name": "...",
+  "path": "data/in.csv",
+  "offset": 0,
+  "length": 65536,
+  "encoding": "utf-8",
+  "inline_max_bytes": 4096
+}
+```
+
+`inline_max_bytes` is optional, default **4096**. Set to `0` to suppress inline content entirely.
+
+Behavior:
+
+1. Delegate `{"op":"read", path, offset, length, encoding}` to the target slave.
+2. Receive the slave's structured result (path, bytes, encoding, content, eof) in driver Go code — not yet in the LLM context.
+3. Decode `content` to raw bytes (UTF-8 passthrough or base64 decode).
+4. Write the bytes to a driver-local cache file at `<cache_root>/file-cache/<sha256>` and register it in `FileRegistry` (`reg.RegisterFile`). The cache root follows the existing driver convention: `driver_defaults.audit_log_dir` if set, otherwise `~/.cache/multi-agent/<short_id>/`. Audit-log the registration as `register_read` with `peer_short_id` = the slave's short id, mirroring the user-file flow.
+5. Return to the LLM:
+
+   ```json
+   {
+     "task_id": "t-9",
+     "target_display_name": "slave-a-...",
+     "slave_path": "/abs/on/slave/data/in.csv",
+     "size": 12345678,
+     "encoding": "utf-8",
+     "sha256": "abc...",
+     "blob_handle": "sha256:abc...",
+     "cache_path": "/home/me/.cache/multi-agent/d3f/file-cache/abc...",
+     "eof": true,
+     "content": "..."
+   }
+   ```
+
+   `content` is included only when the returned byte count is `<= inline_max_bytes` AND the encoding is `utf-8`. Otherwise the field is omitted (binary, or too large). The LLM can read the bytes by calling Claude Code's native `Read` tool on `cache_path`, or hand `blob_handle` to a subsequent `write_slave_file` on another slave.
+
+The 8 MiB cap on the slave side still applies — the driver tool reflects the slave's error verbatim if the caller asks for more than that in one go.
+
+### `write_slave_file`
+
+Input — exactly one of `content`, `source_blob`, `source_path` must be set:
+
+```json
+{
+  "target_agent_id": "...",
+  "target_display_name": "...",
+  "path": "data/out.txt",
+  "content": "hello\n",
+  "source_blob": "sha256:abc...",
+  "source_path": "/home/me/local.bin",
+  "encoding": "utf-8",
+  "mode": "overwrite",
+  "mkdir": true,
+  "offset": 0
+}
+```
+
+Schema validation:
+
+- Exactly one of `content` / `source_blob` / `source_path` is set; tool rejects the call otherwise.
+- `content` inline is capped at the driver's `inline_max_bytes` (default 4 KiB) to prevent the LLM from being asked to carry large payloads as tool arguments. Larger writes must go through `source_blob` or `source_path`.
+- `offset` is set iff `mode == "patch"`.
+
+Behavior by source:
+
+- **`content`**: tool forwards the slave-side prompt `{"op":"write", path, content, encoding, mode, mkdir, offset?}` directly.
+- **`source_path`**: tool reads the local file (registers it in `FileRegistry` so it gets a sha256), then proceeds as `source_blob`.
+- **`source_blob`**: tool looks up the absolute path in `FileRegistry.LookupBlob(sha)`, reads bytes, base64-encodes them (regardless of caller-specified `encoding` — binary is always safe), and sends the slave-side prompt with `encoding="base64"` and the base64 content. The slave-side executor decodes as usual.
+
+The slave-side wire protocol is unchanged.
+
+Return to the LLM:
+
+```json
+{
+  "task_id": "t-10",
+  "target_display_name": "slave-b-...",
+  "slave_path": "/abs/on/slave/data/out.txt",
+  "bytes_written": 4096,
+  "mode": "patch",
+  "offset": 65536,
+  "source": "source_blob:sha256:abc..."
+}
+```
+
+`source` echoes which input mode was used (`"content"`, `"source_blob:<sha>"`, or `"source_path:<abs>"`) so the LLM can chain operations without re-asking.
+
+### `stat_slave_file`
+
+Input:
+
+```json
+{
+  "target_agent_id": "...",
+  "target_display_name": "...",
+  "path": "data/out.txt"
+}
+```
+
+Delegates `{"op":"stat", path}`. Return is the slave's stat result as-is, with `task_id` and `target_display_name` added. Stat results are small; no caching layer.
 
 ## Stateless Guarantees
 
@@ -173,8 +297,17 @@ The result: the executor can be invoked from any dispatch thread, in any order, 
 
 - `multi-agent/internal/executor/file.go` — `FileExecutor` and its `Run` implementation. Pure I/O code, no goroutines, no caches.
 - `multi-agent/internal/executor/file_test.go` — unit tests (see below).
-- `multi-agent/internal/driver/slave_file_tools.go` — three MCP tool types (`readSlaveFileTool`, `writeSlaveFileTool`, `statSlaveFileTool`), each ~25 LOC, all delegating through `t.sdk.DelegateTask` like `runSlaveBashTool`.
+- `multi-agent/internal/driver/slave_file_tools.go` — three MCP tool types (`readSlaveFileTool`, `writeSlaveFileTool`, `statSlaveFileTool`). `readSlaveFileTool` also writes to driver cache and registers in `FileRegistry`; `writeSlaveFileTool` dispatches by source mode (`content` / `source_blob` / `source_path`).
 - `multi-agent/internal/driver/slave_file_tools_test.go` — driver tool tests.
+
+### Driver Cache Path
+
+Resolved once at driver startup (or lazily on first use):
+
+- If `driver_defaults.audit_log_dir` is set, cache root is `<audit_log_dir>/file-cache/`.
+- Otherwise, cache root is `~/.cache/multi-agent/<short_id>/file-cache/`.
+
+Files inside the cache root are named by their sha256 (no extension). Re-fetching the same `(slave, path, content)` is idempotent because `FileRegistry.RegisterFile` is sha-keyed and the writer skips re-registration when the target file already exists.
 
 ### Files Modified
 
@@ -200,7 +333,14 @@ The result: the executor can be invoked from any dispatch thread, in any order, 
 - Each tool errors when target lacks `file` skill.
 - Each tool errors on missing required fields.
 - `write_slave_file` rejects `offset` with non-patch mode (schema-level).
-- `wait=true` path returns the slave's structured result; `wait=false` path returns task id and status.
+- `write_slave_file` rejects when zero or more than one of `content`/`source_blob`/`source_path` is set.
+- `write_slave_file` rejects `content` larger than `inline_max_bytes` cap.
+- `read_slave_file` writes the bytes to the cache root, registers in `FileRegistry`, and includes `cache_path` + `blob_handle` in the LLM-facing return.
+- `read_slave_file` includes inline `content` when size ≤ `inline_max_bytes` and `encoding=utf-8`; omits it when size > cap; omits it for base64 even if small.
+- `read_slave_file` logs a `register_read` audit event with the slave's short id.
+- `write_slave_file` with `source_blob` looks up the blob in `FileRegistry`, base64-encodes the bytes, and sends `encoding=base64` to the slave regardless of caller `encoding`.
+- `write_slave_file` with `source_path` registers the local file and proceeds as `source_blob`.
+- `write_slave_file` with `source_blob` errors clearly when the sha is not in `FileRegistry`.
 
 `cmd/slave-agent/main_test.go`:
 
@@ -212,3 +352,5 @@ The result: the executor can be invoked from any dispatch thread, in any order, 
 - **Streaming / chunked transport.** The 8 MiB cap plus `offset`/`length` on read and `patch`+`offset` on write give callers explicit chunking — adequate for the current need. A future streaming op can be added if profile shows excessive task-channel overhead.
 - **Per-path ACLs on the slave.** Trust model is "advertise the skill or don't"; same as `bash`.
 - **Optimistic concurrency** (e.g. `if_etag`/`if_mtime` on write). The stateless executor leaves coordination to the orchestrator; can be revisited if conflict scenarios appear in practice.
+- **Slave-side `/files/*` blob server.** Direct slave↔slave blob transport (bypassing the driver cache) is deferred. The driver-cached path already produces a `blob_handle` that other slaves can fetch via the existing peer-proxy `/files/blob/{sha}` — driver bandwidth is the only thing in the loop, which is acceptable until profiling says otherwise.
+- **Cache eviction policy.** The driver cache grows monotonically for the lifetime of the driver process; sha-keyed naming means dedup is automatic but stale entries are not pruned. Operators can clear the cache root manually. A real LRU/TTL policy can be added when cache size becomes a problem.
