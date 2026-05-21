@@ -1,0 +1,4 @@
+# Binaries land here at deploy time. Pull pre-built ones from
+# https://github.com/agentserver/loom/releases or build into this dir.
+*
+!.gitignore

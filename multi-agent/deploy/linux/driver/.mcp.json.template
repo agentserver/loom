@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "driver": {
+      "command": "__PROJECT_DIR__/driver-agent",
+      "args": [
+        "serve-mcp",
+        "--config",
+        "__PROJECT_DIR__/config.yaml"
+      ]
+    }
+  }
+}

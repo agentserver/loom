@@ -1,0 +1,56 @@
+server:
+  url: https://agent.cs.ac.cn
+  name: __AGENT_NAME__
+
+# Auto-filled by tunnel.EnsureRegistered on first start: if sandbox_id and
+# tunnel_token are empty, the slave runs the device-code OAuth flow against
+# server.url, prints the verification URL on stderr (visible in slave.log),
+# then writes the issued credentials back into THIS file.
+credentials:
+  sandbox_id: ""
+  tunnel_token: ""
+  proxy_token: ""
+  short_id: ""
+
+claude:
+  bin: claude                       # absolute path if claude is not in PATH of the service user
+  workdir: __LOOM_HOME__
+  extra_args: []
+
+mcp_servers: {}
+
+discovery:
+  display_name: __AGENT_NAME__
+  description: __DESCRIPTION__
+  skills:
+    - chat
+    - bash
+    - register_mcp
+    - claude_permissions
+    - file
+
+planner:
+  bin: claude
+  timeout_sec: 300
+  extra_args: []
+
+fanout:
+  max_concurrency: 1
+  default_policy: best_effort
+  policy_by_skill: {}
+
+resources:
+  cpu:
+    cores: __CPU_CORES__
+    arch: __CPU_ARCH__              # amd64 | aarch64
+  memory_gb: __MEMORY_GB__
+  tags:
+    - __TAG__                       # add more tags as needed
+
+observer:
+  enabled: true
+  url: __OBSERVER_URL__
+  workspace_id: __WORKSPACE_ID__
+  agent_id: __AGENT_NAME__
+  api_key: ""                       # paste the workspace bootstrap api-key here, then chmod 0600 this file
+  token_state_path: __LOOM_HOME__/observer.token
