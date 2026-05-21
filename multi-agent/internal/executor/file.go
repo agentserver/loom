@@ -125,13 +125,10 @@ func (e *FileExecutor) doRead(req fileRequest, abs string, sink Sink) (Result, e
 		}
 		n, err := f.ReadAt(buf, req.Offset)
 		f.Close()
-		if err != nil && !errors.Is(err, fs.ErrClosed) && n < int(want) {
-			// EOF at exactly want bytes is fine; only a short read is a problem.
-			if !(err.Error() == "EOF" && n == int(want)) {
-				if n == 0 {
-					return Result{}, err
-				}
-			}
+		// ReadAt may return io.EOF when fewer than len(buf) bytes are available;
+		// a short read is fine, but a zero-byte read with a real error is not.
+		if err != nil && !errors.Is(err, fs.ErrClosed) && n == 0 {
+			return Result{}, err
 		}
 		buf = buf[:n]
 	}
