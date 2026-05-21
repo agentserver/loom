@@ -73,6 +73,8 @@ func (e *FileExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, erro
 		return e.doRead(req, abs, sink)
 	case "write":
 		return e.doWrite(req, abs, sink)
+	case "stat":
+		return e.doStat(req, abs, sink)
 	default:
 		return Result{}, fmt.Errorf("unknown file op %q", req.Op)
 	}
@@ -240,5 +242,26 @@ func (e *FileExecutor) doWrite(req fileRequest, abs string, sink Sink) (Result, 
 	return Result{Summary: string(body)}, nil
 }
 
-// time.Now is referenced later (stat); import retained.
-var _ = time.Now
+func (e *FileExecutor) doStat(req fileRequest, abs string, sink Sink) (Result, error) {
+	info, err := os.Stat(abs)
+	if errors.Is(err, fs.ErrNotExist) {
+		result := FileStatResult{Path: abs, Exists: false}
+		body, _ := json.Marshal(result)
+		sink.Write("chunk", string(body))
+		return Result{Summary: string(body)}, nil
+	}
+	if err != nil {
+		return Result{}, err
+	}
+	result := FileStatResult{
+		Path:   abs,
+		Exists: true,
+		Size:   info.Size(),
+		Mode:   fmt.Sprintf("%#o", info.Mode().Perm()),
+		IsDir:  info.IsDir(),
+		MTime:  info.ModTime().UTC().Format(time.RFC3339Nano),
+	}
+	body, _ := json.Marshal(result)
+	sink.Write("chunk", string(body))
+	return Result{Summary: string(body)}, nil
+}

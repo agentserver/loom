@@ -289,3 +289,65 @@ func TestFileExecutor_WriteBase64Roundtrip(t *testing.T) {
 		t.Fatalf("bytes differ")
 	}
 }
+
+func TestFileExecutor_StatExisting(t *testing.T) {
+	workdir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workdir, "f"), []byte("abcde"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	exec := NewFileExecutor(FileConfig{WorkDir: workdir})
+	res, err := exec.Run(context.Background(), Task{
+		Prompt: `{"op":"stat","path":"f"}`,
+	}, noopSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got FileStatResult
+	if err := json.Unmarshal([]byte(res.Summary), &got); err != nil {
+		t.Fatalf("summary not FileStatResult JSON: %v\n%s", err, res.Summary)
+	}
+	if !got.Exists || got.Size != 5 || got.IsDir {
+		t.Fatalf("got %+v", got)
+	}
+	if got.MTime == "" || got.Mode == "" {
+		t.Fatalf("expected mtime and mode populated: %+v", got)
+	}
+}
+
+func TestFileExecutor_StatMissingReturnsExistsFalse(t *testing.T) {
+	exec := NewFileExecutor(FileConfig{WorkDir: t.TempDir()})
+	res, err := exec.Run(context.Background(), Task{
+		Prompt: `{"op":"stat","path":"nope"}`,
+	}, noopSink{})
+	if err != nil {
+		t.Fatalf("stat on missing path should not error: %v", err)
+	}
+	var got FileStatResult
+	if err := json.Unmarshal([]byte(res.Summary), &got); err != nil {
+		t.Fatalf("summary not FileStatResult JSON: %v\n%s", err, res.Summary)
+	}
+	if got.Exists {
+		t.Fatalf("expected exists=false, got %+v", got)
+	}
+}
+
+func TestFileExecutor_StatDirectory(t *testing.T) {
+	workdir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(workdir, "d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exec := NewFileExecutor(FileConfig{WorkDir: workdir})
+	res, err := exec.Run(context.Background(), Task{
+		Prompt: `{"op":"stat","path":"d"}`,
+	}, noopSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got FileStatResult
+	if err := json.Unmarshal([]byte(res.Summary), &got); err != nil {
+		t.Fatalf("summary not FileStatResult JSON: %v\n%s", err, res.Summary)
+	}
+	if !got.Exists || !got.IsDir {
+		t.Fatalf("got %+v", got)
+	}
+}
