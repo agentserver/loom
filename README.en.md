@@ -10,6 +10,42 @@ The most distinctive bit: **the fleet's capabilities are not fixed.** When none 
 
 > Naming note: the project was originally called `multi-agent` and is now **Loom**. The Go module path and the on-disk `multi-agent/` directory are kept as-is for now; the rename will be applied in a single later pass.
 
+## One-line deploy
+
+All three roles bring up with a single `bash <(curl -fsSL ...)` against a
+release-hosted bootstrap script — **no repo clone required**, on any Linux
+host (amd64 / arm64) or Termux/Android (aarch64). Replace
+`OBSERVER_HOST` / `WS_ID` / `YOUR_API_KEY` / agent names with your own
+values. Append `--systemd` on slave/observer for a managed unit (needs
+sudo; drop on Termux).
+
+```bash
+# observer (control plane) — random api-key is generated and printed if LOOM_API_KEY is unset
+export LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
+bash <(curl -fsSL \
+  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-observer.sh) \
+  --name obs-prod --systemd
+
+# driver (Claude Code MCP entrypoint) — run inside the dir you want as the project root
+export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
+bash <(curl -fsSL \
+  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-driver.sh) \
+  --name driver-myhost
+
+# slave (executor) — drop --systemd on Termux/Android and run in the foreground
+export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
+bash <(curl -fsSL \
+  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-slave.sh) \
+  --name slave-myhost --systemd
+```
+
+After bootstrap, run the one-time `./driver-agent register --config ./config.yaml`
+device-code OAuth on the driver host; on the slave the first start prints a
+device-code URL on stderr — approve it in a browser and the slave writes
+the issued sandbox / tunnel credentials back into `config.yaml`, then
+registers with observer. Full flag reference and the non-bootstrap install
+path live at [`multi-agent/deploy/README.md`](multi-agent/deploy/README.md).
+
 ## Topology
 
 ```
