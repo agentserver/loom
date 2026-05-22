@@ -6,11 +6,38 @@ script and config templates you point at a real host.
 
 ## Quick start — one-liners
 
-Replace the placeholders (`OBSERVER_HOST`, `WS_ID`, `YOUR_API_KEY`, agent
-names) with your own values. Both commands are run **inside the directory
-you want to use as the agent's project / install dir**.
+All three roles bring up with a single `bash <(curl -fsSL ...)` call
+against a release-hosted bootstrap script — **no repo clone required**, on
+any Linux host (amd64 / arm64) or Termux/Android (aarch64). Replace the
+placeholders (`OBSERVER_HOST`, `WS_ID`, `YOUR_API_KEY`, agent names) with
+your own values. Append `--systemd` to slave/observer for a managed unit
+(needs sudo; not available on Termux).
 
-### Driver (Termux on Android, aarch64)
+### Observer
+
+EN — install observer-server into `~/.loom/<NAME>/`, seed one workspace
+with a bootstrap api-key (random if `LOOM_API_KEY` is unset; printed once
+on stdout — copy it, slaves/drivers need it):
+
+```bash
+export LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'   # both optional
+bash <(curl -fsSL \
+  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-observer.sh) \
+  --name obs-prod --systemd
+```
+
+中文 — 把 observer-server 装到 `~/.loom/<NAME>/`，初始化一个工作区和
+bootstrap api-key（不传 `LOOM_API_KEY` 就随机生成并打印一次，slave / driver
+注册时要用）。`--systemd` 可选，默认前台：
+
+```bash
+export LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'   # 两个都可省
+bash <(curl -fsSL \
+  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-observer.sh) \
+  --name obs-prod --systemd
+```
+
+### Driver
 
 EN — drop a Claude Code driver project into the current directory (binary,
 `config.yaml`, `.mcp.json`, skills bundle); next `claude` run auto-loads
@@ -18,9 +45,9 @@ the driver MCP and skills:
 
 ```bash
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
-pkg install -y bash curl && bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-driver-android.sh) \
-  --name driver-myandroid
+bash <(curl -fsSL \
+  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-driver.sh) \
+  --name driver-myhost
 ```
 
 中文 — 在当前目录铺一个 Claude Code driver 工程（二进制 + `config.yaml` +
@@ -28,64 +55,45 @@ pkg install -y bash curl && bash <(curl -fsSL \
 
 ```bash
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
-pkg install -y bash curl && bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-driver-android.sh) \
-  --name driver-myandroid
+bash <(curl -fsSL \
+  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-driver.sh) \
+  --name driver-myhost
 ```
 
 启动前别忘了：`./driver-agent register --config ./config.yaml` 走一次
 device-code，再 `claude login`（或 `export ANTHROPIC_API_KEY=...`）。
+Driver 不是常驻进程（Claude Code 按 `.mcp.json` 拉起来），所以没有 `--systemd`。
 
-### Slave (Termux on Android, aarch64)
+### Slave
 
 EN — install slave-agent into `~/.loom/<NAME>/` (binary + `config.yaml`,
-auto-detected resources). No clone needed; same env-var pattern as driver:
+auto-detected CPU/memory/arch). Add `--systemd` to register a systemd
+unit (Linux only, sudo); omit it for foreground / Termux:
 
 ```bash
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
-pkg install -y bash curl && bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-slave-android.sh) \
-  --name slave-myandroid
+bash <(curl -fsSL \
+  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-slave.sh) \
+  --name slave-myhost --systemd          # drop --systemd on Termux/Android
 ```
 
-中文 — 在 Android Termux 里把 slave-agent 装到 `~/.loom/<NAME>/`（二进制 +
-`config.yaml`，CPU/内存自动探测）。不用 clone 仓库，env 变量约定跟
-driver 一样：
+中文 — 把 slave-agent 装到 `~/.loom/<NAME>/`（二进制 + `config.yaml`，
+CPU / 内存 / 架构自动探测）。加 `--systemd` 走 systemd 托管（仅 Linux，需 sudo），
+不加就前台 / Termux 跑：
 
 ```bash
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
-pkg install -y bash curl && bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-slave-android.sh) \
-  --name slave-myandroid
+bash <(curl -fsSL \
+  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-slave.sh) \
+  --name slave-myhost --systemd          # Termux/Android 上去掉 --systemd
 ```
 
-启动方式（Android 没 systemd，只能前台或 `nohup`）：
+前台模式：`~/.loom/<NAME>/slave-agent ~/.loom/<NAME>/config.yaml`。
+首启动 stderr 会打印 device-code 验证 URL —— 浏览器批准一次，凭证自动
+回写 `config.yaml` 并注册到 observer。
 
-```bash
-# claude login 过的话直接：
-~/.loom/slave-myandroid/slave-agent ~/.loom/slave-myandroid/config.yaml
-# 否则先 export ANTHROPIC_API_KEY=...
-```
-
-首启动会在 stderr 打印 device-code 验证 URL —— 浏览器批准一次即可，
-凭证会自动回写 `config.yaml`。
-
-### Slave (generic Linux with systemd, amd64 / arm64)
-
-非 Android 的 Linux 主机用这条（需要 clone 本仓库到目标机），支持 systemd
-托管；`--anthropic-key` 可选，已 `claude login` 时不需要：
-
-```bash
-cd deploy/linux/slave   # on a checkout of this repo on the target host
-./install.sh \
-  --name slave-myhost \
-  --observer-url http://OBSERVER_HOST:8090 \
-  --workspace WS_ID \
-  --api-key 'YOUR_API_KEY' \
-  --systemd                           # omit for foreground smoke mode
-```
-
-详细参数与 observer 的部署参见下表中的子目录 README。
+详细参数请见下表中各子目录的 README；如果手头已经 clone 了仓库，也可以
+跳过 bootstrap，直接用各目录的 `install.sh`（功能等价、可读 `--bin PATH`）。
 
 | Path | Target |
 |---|---|

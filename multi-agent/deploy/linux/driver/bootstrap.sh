@@ -1,27 +1,28 @@
 #!/usr/bin/env bash
-# One-shot driver-agent bootstrap for Termux on Android (aarch64).
+# One-shot driver-agent bootstrap. Works on any Linux (amd64/arm64) and on
+# Termux/Android (aarch64). No repo clone required.
 #
 # Run inside the directory you want to use as the Claude Code project:
 #
+#   export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 \
+#          LOOM_WORKSPACE_ID=WS_ID \
+#          LOOM_API_KEY='YOUR_API_KEY'
 #   bash <(curl -fsSL \
-#     https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-driver-android.sh) \
-#     --name driver-myandroid \
-#     --observer-url http://OBSERVER_HOST:8090 \
-#     --workspace ws-prod \
-#     --api-key 'YOUR_WORKSPACE_API_KEY'
+#     https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-driver.sh) \
+#     --name driver-myhost
 #
 # All three of --observer-url / --workspace / --api-key can also come from
 # env vars LOOM_OBSERVER_URL / LOOM_WORKSPACE_ID / LOOM_API_KEY.
 #
 # What it lays down in $PWD:
-#   driver-agent             # arm64 binary (downloaded from release)
+#   driver-agent             # amd64/arm64 binary (downloaded from release)
 #   config.yaml              # rendered, 0600
 #   .mcp.json                # Claude Code MCP server registration
 #   .claude/skills/...       # multiagent / mcp-acceptance / scaffold-mcp-server
 #   logs/
 #
 # Required release assets at $RELEASE_BASE:
-#   driver-agent.linux-arm64
+#   driver-agent.linux-{amd64,arm64}
 #   driver-skills.tar.gz     # tar of .claude/skills/{multiagent,mcp-acceptance,scaffold-mcp-server}
 #   bootstrap-driver-android.sh   (this file)
 
@@ -65,12 +66,25 @@ PROJECT="$(pwd)"
 TOKEN_DIR="$HOME/.loom/$NAME"
 
 echo "==> ensuring deps (curl, tar, nodejs)"
-if command -v pkg >/dev/null 2>&1; then
+if command -v pkg >/dev/null 2>&1; then          # Termux
   pkg install -y curl tar nodejs >/dev/null
+elif command -v apt-get >/dev/null 2>&1; then    # Debian / Ubuntu
+  sudo -n apt-get update -qq 2>/dev/null && sudo -n apt-get install -y -qq curl tar nodejs npm >/dev/null 2>&1 \
+    || echo "    (skipped apt install — needs passwordless sudo; ensure curl/tar/nodejs are present manually)"
+elif command -v dnf >/dev/null 2>&1; then        # Fedora / RHEL
+  sudo -n dnf install -y -q curl tar nodejs npm >/dev/null 2>&1 \
+    || echo "    (skipped dnf install — needs passwordless sudo)"
 fi
+for cmd in curl tar; do
+  command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR: '$cmd' not found and auto-install failed; install it then retry" >&2; exit 2; }
+done
 if ! command -v claude >/dev/null 2>&1; then
-  echo "==> installing claude code CLI (npm i -g @anthropic-ai/claude-code)"
-  npm install -g @anthropic-ai/claude-code
+  if command -v npm >/dev/null 2>&1; then
+    echo "==> installing claude code CLI (npm i -g @anthropic-ai/claude-code)"
+    npm install -g @anthropic-ai/claude-code
+  else
+    echo "WARN: 'claude' not in PATH and 'npm' unavailable — install Node + 'npm i -g @anthropic-ai/claude-code' before launching"
+  fi
 fi
 
 echo "==> downloading $BIN_ASSET"
