@@ -33,6 +33,7 @@ fi
   --api-key "$API_KEY" \
   --token-dir "$PROJECT" \
   --skill-bundle "" \
+  --agent "${LOOM_AGENT_KIND:-claude}" \
   --bin "$BIN"
 
 cat <<EOF
