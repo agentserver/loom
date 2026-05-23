@@ -21,6 +21,7 @@ import (
 	"github.com/yourorg/multi-agent/internal/webui"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 	_ "github.com/yourorg/multi-agent/pkg/agentbackend/claude"
+	_ "github.com/yourorg/multi-agent/pkg/agentbackend/codex"
 )
 
 func main() {

@@ -15,7 +15,6 @@ func RegisterBuilder(kind Kind, builder Builder) {
 
 // New creates a Backend based on the Config Kind.
 // It defaults to Claude if no Kind is specified.
-// Codex is not yet implemented and will return an error.
 func New(cfg Config, env []string) (Backend, error) {
 	kind := cfg.Kind
 	if kind == "" {
@@ -23,9 +22,6 @@ func New(cfg Config, env []string) (Backend, error) {
 	}
 	builder, ok := builders[kind]
 	if !ok {
-		if kind == KindCodex {
-			return nil, fmt.Errorf("agentbackend: codex backend not yet implemented (Phase 2)")
-		}
 		return nil, fmt.Errorf("agentbackend: unknown kind %q", kind)
 	}
 	return builder(cfg, env)

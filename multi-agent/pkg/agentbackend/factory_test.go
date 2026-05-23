@@ -5,6 +5,7 @@ import (
 
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 	_ "github.com/yourorg/multi-agent/pkg/agentbackend/claude"
+	_ "github.com/yourorg/multi-agent/pkg/agentbackend/codex"
 )
 
 func TestNewDefaultsToClaude(t *testing.T) {
@@ -17,10 +18,16 @@ func TestNewDefaultsToClaude(t *testing.T) {
 	}
 }
 
-func TestNewCodexNotYetImplemented(t *testing.T) {
-	_, err := agentbackend.New(agentbackend.Config{Kind: agentbackend.KindCodex}, nil)
-	if err == nil {
-		t.Fatal("expected codex-not-implemented error")
+func TestNewCodexBuilds(t *testing.T) {
+	b, err := agentbackend.New(agentbackend.Config{
+		Kind:  agentbackend.KindCodex,
+		Codex: agentbackend.CodexConfig{Bin: "codex"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Kind() != agentbackend.KindCodex {
+		t.Fatalf("kind=%v", b.Kind())
 	}
 }
 
