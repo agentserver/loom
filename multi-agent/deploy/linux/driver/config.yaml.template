@@ -19,10 +19,7 @@ discovery:
 
 listen_addr: 127.0.0.1:0
 
-planner:
-  bin: claude
-  timeout_sec: 300
-  extra_args: []
+__AGENT_BLOCK__
 
 fanout:
   max_concurrency: 2
