@@ -19,6 +19,8 @@ import (
 	"github.com/yourorg/multi-agent/internal/store"
 	"github.com/yourorg/multi-agent/internal/tunnel"
 	"github.com/yourorg/multi-agent/internal/webui"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
+	_ "github.com/yourorg/multi-agent/pkg/agentbackend/claude"
 )
 
 func main() {
@@ -63,7 +65,15 @@ func run(cfgPath string) error {
 	if sdk == nil {
 		return fmt.Errorf("tunnel.SDKClient returned nil after EnsureRegistered")
 	}
-	p := planner.New(cfg.Planner)
+	backend, err := agentbackend.New(agentbackend.Config{
+		Kind:   agentbackend.Kind(cfg.Agent.Kind),
+		Claude: agentbackend.ClaudeConfig{Bin: cfg.Claude.Bin, WorkDir: cfg.Claude.WorkDir, ExtraArgs: cfg.Claude.Args},
+		Codex:  agentbackend.CodexConfig{Bin: cfg.Codex.Bin, WorkDir: cfg.Codex.WorkDir, ExtraArgs: cfg.Codex.Args},
+	}, nil)
+	if err != nil {
+		return fmt.Errorf("agentbackend: %w", err)
+	}
+	p := planner.New(cfg.Planner, backend.LLM())
 	obs, errObs := observerclient.New(observerclient.Config{
 		Enabled:        cfg.Observer.Enabled,
 		URL:            cfg.Observer.URL,

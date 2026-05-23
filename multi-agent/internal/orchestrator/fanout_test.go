@@ -20,6 +20,8 @@ import (
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/planner"
 	"github.com/yourorg/multi-agent/internal/store"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
+	claudebe "github.com/yourorg/multi-agent/pkg/agentbackend/claude"
 )
 
 // fakeSDKQueue lets each child task return a queued (status, output) pair keyed by request order.
@@ -247,7 +249,7 @@ echo $((round+1)) > "$ROUND_FILE"
 		agents: []agentsdk.AgentCard{agentWithRenderTool(t)},
 	}
 	obs := &fakeObserver{}
-	p := planner.New(config.Planner{Bin: bin, TimeoutSec: 5})
+	p := planner.New(config.Planner{TimeoutSec: 5}, claudebe.New(agentbackend.ClaudeConfig{Bin: bin}, nil).LLM())
 	s, err := store.Open(filepath.Join(t.TempDir(), "x.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { s.Close() })
@@ -407,7 +409,7 @@ fi
 		queue:  []agentsdk.TaskInfo{{Status: "completed", Output: "work output"}},
 	}
 	resolver := &fakeArtifactResolver{}
-	p := planner.New(config.Planner{Bin: bin, TimeoutSec: 5})
+	p := planner.New(config.Planner{TimeoutSec: 5}, claudebe.New(agentbackend.ClaudeConfig{Bin: bin}, nil).LLM())
 	s, err := store.Open(filepath.Join(t.TempDir(), "x.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { s.Close() })
@@ -447,7 +449,7 @@ fi
 		agents: []agentsdk.AgentCard{{AgentID: "agent-a", Status: "available"}},
 	}
 	resolver := &fakeArtifactResolver{}
-	p := planner.New(config.Planner{Bin: bin, TimeoutSec: 5})
+	p := planner.New(config.Planner{TimeoutSec: 5}, claudebe.New(agentbackend.ClaudeConfig{Bin: bin}, nil).LLM())
 	s, err := store.Open(filepath.Join(t.TempDir(), "x.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { s.Close() })
@@ -487,7 +489,7 @@ fi
 		queue:  []agentsdk.TaskInfo{{Status: "completed", Output: `{"row_count":5,"risk":"high"}`}},
 	}
 	resolver := &fakeArtifactResolver{}
-	p := planner.New(config.Planner{Bin: bin, TimeoutSec: 5})
+	p := planner.New(config.Planner{TimeoutSec: 5}, claudebe.New(agentbackend.ClaudeConfig{Bin: bin}, nil).LLM())
 	s, err := store.Open(filepath.Join(t.TempDir(), "x.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { s.Close() })
@@ -632,7 +634,7 @@ echo $((round+1)) > "$ROUND_FILE"
 		agents: []agentsdk.AgentCard{agentWithRenderTool(t)},
 		queue:  []agentsdk.TaskInfo{{Status: "completed", Output: "bypass"}},
 	}
-	p := planner.New(config.Planner{Bin: bin, TimeoutSec: 5})
+	p := planner.New(config.Planner{TimeoutSec: 5}, claudebe.New(agentbackend.ClaudeConfig{Bin: bin}, nil).LLM())
 	s, err := store.Open(filepath.Join(t.TempDir(), "x.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { s.Close() })

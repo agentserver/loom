@@ -4,13 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/yourorg/multi-agent/internal/config"
-	"github.com/yourorg/multi-agent/internal/progress"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
 type ProgressFunc func(ctx context.Context, phase, message string, elapsed time.Duration)
@@ -19,10 +18,13 @@ const plannerIdleTimeout = 90 * time.Second
 
 type Planner struct {
 	cfg      config.Planner
+	llm      agentbackend.LLMRunner
 	progress ProgressFunc
 }
 
-func New(cfg config.Planner) *Planner { return &Planner{cfg: cfg} }
+func New(cfg config.Planner, llm agentbackend.LLMRunner) *Planner {
+	return &Planner{cfg: cfg, llm: llm}
+}
 
 func (p *Planner) WithProgress(fn ProgressFunc) *Planner {
 	cp := *p
@@ -47,7 +49,7 @@ type SubResult struct {
 }
 
 func (p *Planner) Route(ctx context.Context, prompt string, agents []agentsdk.AgentCard) (string, error) {
-	out, err := p.runClaude(ctx, routePrompt(prompt, agents))
+	out, err := p.runLLM(ctx, routePrompt(prompt, agents))
 	if err != nil {
 		return "", err
 	}
@@ -62,7 +64,7 @@ func (p *Planner) Route(ctx context.Context, prompt string, agents []agentsdk.Ag
 }
 
 func (p *Planner) Plan(ctx context.Context, prompt string, agents []agentsdk.AgentCard) ([]Node, error) {
-	out, err := p.runClaude(ctx, planPrompt(prompt, agents))
+	out, err := p.runLLM(ctx, planPrompt(prompt, agents))
 	if err != nil {
 		return nil, err
 	}
@@ -93,50 +95,22 @@ func stripJSONFence(out string) string {
 }
 
 func (p *Planner) Reduce(ctx context.Context, originalPrompt string, results []SubResult) (string, error) {
-	return p.runClaude(ctx, reducePrompt(originalPrompt, results))
+	return p.runLLM(ctx, reducePrompt(originalPrompt, results))
 }
 
-func (p *Planner) runClaude(ctx context.Context, stdinPrompt string) (string, error) {
+func (p *Planner) runLLM(ctx context.Context, stdinPrompt string) (string, error) {
 	timeout := time.Duration(p.cfg.TimeoutSec) * time.Second
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
-
-	var stderrBuf strings.Builder
-	var out []byte
-	commandDone := make(chan struct{})
-	err := progress.RunWithHeartbeat(ctx, progress.Config{
-		Interval:    15 * time.Second,
-		IdleTimeout: plannerIdleTimeout,
-		HardTimeout: timeout,
-		Message:     "planner still running",
-		Emit: func(ctx context.Context, elapsed time.Duration) {
-			if p.progress != nil {
-				p.progress(ctx, "planning", "planner still running", elapsed)
-			}
-		},
-	}, func(runCtx context.Context) error {
-		defer close(commandDone)
-		args := append([]string{"--print"}, p.cfg.ExtraArgs...)
-		cmd := exec.CommandContext(runCtx, p.cfg.Bin, args...)
-		cmd.Stdin = strings.NewReader(stdinPrompt)
-		cmd.Stderr = &stderrBuf
-		var err error
-		out, err = cmd.Output()
-		return err
-	})
-	<-commandDone
-	if err != nil {
-		if strings.Contains(err.Error(), "hard timeout") {
-			return "", fmt.Errorf("planner timeout after %s", timeout)
-		}
-		tail := stderrBuf.String()
-		if len(tail) > 4096 {
-			tail = tail[len(tail)-4096:]
-		}
-		return "", fmt.Errorf("planner exit: %v: %s", err, tail)
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	out, err := p.llm.Run(runCtx, stdinPrompt)
+	if err != nil && runCtx.Err() != nil {
+		// Context expired due to our timeout — normalize to a recognizable message.
+		return "", fmt.Errorf("planner timeout after %s", timeout)
 	}
-	return strings.TrimSpace(string(out)), nil
+	return out, err
 }
 
 func truncate(s string, n int) string {

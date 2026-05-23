@@ -1,6 +1,27 @@
 package executor
 
-import "github.com/yourorg/multi-agent/internal/observer"
+import (
+	"sync"
+
+	"github.com/yourorg/multi-agent/internal/observer"
+)
+
+type captureSink struct {
+	mu     sync.Mutex
+	events []struct{ Type, Data string }
+	closed bool
+}
+
+func (c *captureSink) Write(t, d string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.events = append(c.events, struct{ Type, Data string }{t, d})
+}
+func (c *captureSink) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
+}
 
 type fakeObserver struct {
 	events []observer.Event

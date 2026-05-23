@@ -15,8 +15,8 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/yourorg/multi-agent/internal/capability"
-	"github.com/yourorg/multi-agent/internal/claudeperm"
 	"github.com/yourorg/multi-agent/internal/config"
+	claudepkg "github.com/yourorg/multi-agent/pkg/agentbackend/claude"
 )
 
 const Filename = "CAPABILITIES.md"
@@ -60,7 +60,7 @@ type snapshot struct {
 	WorkDir           string
 	Runtime           runtimeInfo
 	Skills            []string
-	ClaudePermissions claudeperm.State
+	ClaudePermissions claudepkg.State
 	Resources         *config.Resources
 	Servers           []serverDoc
 	CurrentState      string
@@ -114,7 +114,7 @@ func scan(dir string, in Input) snapshot {
 		s.Servers = append(s.Servers, staticServers(cfg.MCPServers)...)
 	}
 	if in.WorkDir != "" {
-		if state, err := claudeperm.NewStore(in.WorkDir).Read(); err == nil {
+		if state, err := claudepkg.NewStore(in.WorkDir).Read(); err == nil {
 			s.ClaudePermissions = state
 		}
 	}
@@ -381,9 +381,20 @@ func upsertTool(tools []capability.MCPToolDescriptor, tool capability.MCPToolDes
 }
 
 func scanCommands(cfg *config.Config) []commandPresence {
-	names := []string{"claude", "python3", "node", "npm", "go", "docker"}
-	if cfg != nil && cfg.Claude.Bin != "" {
-		names = append(names, cfg.Claude.Bin)
+	names := []string{"python3", "node", "npm", "go", "docker"}
+	if cfg != nil {
+		switch cfg.Agent.Kind {
+		case "codex":
+			names = append(names, "codex")
+			if cfg.Codex.Bin != "" && cfg.Codex.Bin != "codex" {
+				names = append(names, cfg.Codex.Bin)
+			}
+		default:
+			names = append(names, "claude")
+			if cfg.Claude.Bin != "" && cfg.Claude.Bin != "claude" {
+				names = append(names, cfg.Claude.Bin)
+			}
+		}
 	}
 	seen := map[string]bool{}
 	out := []commandPresence{}
