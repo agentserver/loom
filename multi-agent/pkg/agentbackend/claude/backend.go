@@ -45,3 +45,9 @@ func (b *Backend) Detect(ctx context.Context) error { return detect(ctx, b.cfg.B
 
 // Kind is a local alias so package-internal code can reference it without the full path.
 type Kind = agentbackend.Kind
+
+func init() {
+	agentbackend.RegisterBuilder(agentbackend.KindClaude, func(cfg agentbackend.Config, env []string) (agentbackend.Backend, error) {
+		return New(cfg.Claude, env), nil
+	})
+}
