@@ -142,6 +142,7 @@ func run(cfgPath string) error {
 			DynamicMCPPath: dynamicMCPPath,
 			MCPTools:       allDesc,
 			Reason:         reason,
+			Permissions:    backend.Permissions(),
 		}); err != nil {
 			log.Printf("capability doc refresh: %v", err)
 		}

@@ -16,6 +16,7 @@ import (
 
 	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/config"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 	claudepkg "github.com/yourorg/multi-agent/pkg/agentbackend/claude"
 )
 
@@ -27,6 +28,11 @@ type Input struct {
 	DynamicMCPPath string
 	MCPTools       []capability.MCPToolDescriptor
 	Reason         string
+	// Permissions is the backend's PermissionsStore. When non-nil it is the
+	// authoritative source for the rendered "Permissions" section; otherwise
+	// the scanner falls back to reading <WorkDir>/.claude/settings.local.json
+	// (BC for the legacy claude-only path).
+	Permissions agentbackend.PermissionsStore
 }
 
 type Store struct {
@@ -60,7 +66,7 @@ type snapshot struct {
 	WorkDir           string
 	Runtime           runtimeInfo
 	Skills            []string
-	ClaudePermissions claudepkg.State
+	Permissions       agentbackend.State
 	Resources         *config.Resources
 	Servers           []serverDoc
 	CurrentState      string
@@ -113,9 +119,20 @@ func scan(dir string, in Input) snapshot {
 		s.Resources = cfg.Resources
 		s.Servers = append(s.Servers, staticServers(cfg.MCPServers)...)
 	}
-	if in.WorkDir != "" {
+	switch {
+	case in.Permissions != nil:
+		if state, err := in.Permissions.Get(context.Background()); err == nil {
+			s.Permissions = state
+		}
+	case in.WorkDir != "":
+		// BC path: assume claude backend and read .claude/settings.local.json.
 		if state, err := claudepkg.NewStore(in.WorkDir).Read(); err == nil {
-			s.ClaudePermissions = state
+			s.Permissions = agentbackend.State{
+				Backend: agentbackend.KindClaude,
+				Path:    state.Path,
+				Allow:   state.Allow,
+				Deny:    state.Deny,
+			}
 		}
 	}
 	s.Servers = mergeServers(s.Servers, dynamicServers(in.DynamicMCPPath))
@@ -155,12 +172,25 @@ func render(s snapshot) string {
 			fmt.Fprintf(&b, "- %s\n", skill)
 		}
 	}
-	fmt.Fprintf(&b, "\n## Claude Code Permissions\n\n")
-	if len(s.ClaudePermissions.Allow) == 0 && len(s.ClaudePermissions.Deny) == 0 {
-		fmt.Fprintf(&b, "- none configured\n")
-	} else {
-		writeList(&b, "allow", s.ClaudePermissions.Allow)
-		writeList(&b, "deny", s.ClaudePermissions.Deny)
+	switch s.Permissions.Backend {
+	case agentbackend.KindCodex:
+		fmt.Fprintf(&b, "\n## Permissions (codex)\n\n")
+		if s.Permissions.Mode == "" {
+			fmt.Fprintf(&b, "- mode: ask (no config)\n")
+		} else {
+			writeKV(&b, "mode", s.Permissions.Mode)
+			if s.Permissions.Path != "" {
+				writeKV(&b, "path", s.Permissions.Path)
+			}
+		}
+	default:
+		fmt.Fprintf(&b, "\n## Permissions (claude)\n\n")
+		if len(s.Permissions.Allow) == 0 && len(s.Permissions.Deny) == 0 {
+			fmt.Fprintf(&b, "- none configured\n")
+		} else {
+			writeList(&b, "allow", s.Permissions.Allow)
+			writeList(&b, "deny", s.Permissions.Deny)
+		}
 	}
 	fmt.Fprintf(&b, "\n## MCP Servers\n\n")
 	if len(s.Servers) == 0 {
