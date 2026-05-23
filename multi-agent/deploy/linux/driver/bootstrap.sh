@@ -137,17 +137,17 @@ if [[ "$AGENT" == "claude" ]]; then
   AGENT_BLOCK="agent:
   kind: claude
 
-planner:
+claude:
   bin: claude
-  timeout_sec: 300
+  workdir: $PROJECT
   extra_args: []"
 else
   AGENT_BLOCK="agent:
   kind: codex
 
-planner:
-  bin: \"\"
-  timeout_sec: 300
+codex:
+  bin: codex
+  workdir: $PROJECT
   extra_args: []"
 fi
 
@@ -164,6 +164,11 @@ credentials:
   short_id: ""
 
 $AGENT_BLOCK
+
+planner:
+  bin: ""
+  timeout_sec: 300
+  extra_args: []
 
 discovery:
   display_name: $NAME

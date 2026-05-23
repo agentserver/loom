@@ -21,6 +21,11 @@ listen_addr: 127.0.0.1:0
 
 __AGENT_BLOCK__
 
+planner:
+  bin: ""
+  timeout_sec: 300
+  extra_args: []
+
 fanout:
   max_concurrency: 2
   default_policy: ""

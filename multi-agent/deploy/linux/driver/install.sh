@@ -116,9 +116,9 @@ fi
 
 # Build the agent block for config.yaml template substitution
 if [[ "$AGENT" == "claude" ]]; then
-  AGENT_BLOCK="planner:\n  bin: claude\n  timeout_sec: 300\n  extra_args: []"
+  AGENT_BLOCK="agent:\n  kind: claude\n\nclaude:\n  bin: claude\n  workdir: $PROJECT_ABS\n  extra_args: []"
 else
-  AGENT_BLOCK="planner:\n  bin: \"\"\n  timeout_sec: 300\n  extra_args: []"
+  AGENT_BLOCK="agent:\n  kind: codex\n\ncodex:\n  bin: codex\n  workdir: $PROJECT_ABS\n  extra_args: []"
 fi
 
 echo "==> staging into $PROJECT_ABS"
