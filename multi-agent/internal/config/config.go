@@ -12,13 +12,25 @@ import (
 type Config struct {
 	Server      Server               `yaml:"server"`
 	Credentials Credentials          `yaml:"credentials"`
+	Agent       Agent                `yaml:"agent"`
 	Claude      Claude               `yaml:"claude"`
+	Codex       Codex                `yaml:"codex"`
 	MCPServers  map[string]MCPServer `yaml:"mcp_servers"`
 	Discovery   Discovery            `yaml:"discovery"`
 	Planner     Planner              `yaml:"planner"`
 	Fanout      Fanout               `yaml:"fanout"`
 	Resources   *Resources           `yaml:"resources,omitempty"`
 	Observer    Observer             `yaml:"observer,omitempty"`
+}
+
+type Agent struct {
+	Kind string `yaml:"kind"` // "claude" | "codex"; default claude
+}
+
+type Codex struct {
+	Bin     string   `yaml:"bin"`
+	WorkDir string   `yaml:"workdir"`
+	Args    []string `yaml:"extra_args"`
 }
 
 type Server struct {
@@ -99,8 +111,22 @@ func Load(path string) (*Config, error) {
 	if c.Claude.Bin == "" {
 		c.Claude.Bin = "claude"
 	}
+	if c.Agent.Kind == "" {
+		c.Agent.Kind = "claude"
+	}
+	if c.Codex.Bin == "" {
+		c.Codex.Bin = "codex"
+	}
+	if c.Codex.WorkDir == "" {
+		c.Codex.WorkDir = c.Claude.WorkDir
+	}
 	if c.Planner.Bin == "" {
-		c.Planner.Bin = c.Claude.Bin
+		switch c.Agent.Kind {
+		case "codex":
+			c.Planner.Bin = c.Codex.Bin
+		default:
+			c.Planner.Bin = c.Claude.Bin
+		}
 	}
 	if c.Planner.TimeoutSec == 0 {
 		c.Planner.TimeoutSec = 60

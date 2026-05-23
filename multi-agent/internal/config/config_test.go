@@ -302,6 +302,50 @@ observer:
 		"strict yaml decoder should reject the obsolete token field")
 }
 
+func TestLoadDefaultsAgentKindToClaude(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	os.WriteFile(path, []byte(`
+server: { url: x, name: y }
+credentials: {}
+claude: { bin: claude }
+discovery: { display_name: a }
+`), 0o600)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Agent.Kind != "claude" {
+		t.Fatalf("Agent.Kind=%q want claude", c.Agent.Kind)
+	}
+	if c.Codex.Bin != "codex" {
+		t.Fatalf("Codex.Bin default=%q want codex", c.Codex.Bin)
+	}
+}
+
+func TestLoadAgentKindCodexFillsCodexDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	os.WriteFile(path, []byte(`
+server: { url: x, name: y }
+credentials: {}
+agent: { kind: codex }
+codex: { workdir: /tmp/cx }
+discovery: { display_name: a }
+`), 0o600)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Agent.Kind != "codex" {
+		t.Fatalf("kind=%q", c.Agent.Kind)
+	}
+	if c.Codex.Bin != "codex" {
+		t.Fatalf("bin=%q", c.Codex.Bin)
+	}
+	if c.Planner.Bin != "codex" {
+		t.Fatalf("planner.bin=%q (should follow codex)", c.Planner.Bin)
+	}
+}
+
 func TestLoad_ObserverSuccessWithAPIKeyAndPath(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "state")
 	require.NoError(t, os.Mkdir(stateDir, 0o755))

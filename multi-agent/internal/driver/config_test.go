@@ -199,6 +199,48 @@ observer:
 	}
 }
 
+func TestDriverLoadDefaultsAgentKindToClaude(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	os.WriteFile(path, []byte(`
+server: { url: x, name: y }
+credentials: {}
+discovery: { display_name: a }
+`), 0o600)
+	c, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Agent.Kind != "claude" {
+		t.Fatalf("Agent.Kind=%q want claude", c.Agent.Kind)
+	}
+	if c.Codex.Bin != "codex" {
+		t.Fatalf("Codex.Bin default=%q want codex", c.Codex.Bin)
+	}
+	if c.Planner.Bin != "claude" {
+		t.Fatalf("Planner.Bin default=%q want claude", c.Planner.Bin)
+	}
+}
+
+func TestDriverLoadAgentKindCodexFillsCodexDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	os.WriteFile(path, []byte(`
+server: { url: x, name: y }
+credentials: {}
+agent: { kind: codex }
+discovery: { display_name: a }
+`), 0o600)
+	c, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Agent.Kind != "codex" {
+		t.Fatalf("kind=%q", c.Agent.Kind)
+	}
+	if c.Planner.Bin != "codex" {
+		t.Fatalf("planner.bin=%q (should follow codex)", c.Planner.Bin)
+	}
+}
+
 func TestLoadConfig_ObserverEnabledRequiresAPIKeyAndTokenStatePath(t *testing.T) {
 	cases := []struct {
 		name    string

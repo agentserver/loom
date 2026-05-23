@@ -17,12 +17,31 @@ import (
 type Config struct {
 	Server         ServerConfig        `yaml:"server"`
 	Credentials    Credentials         `yaml:"credentials"`
+	Agent          AgentConfig         `yaml:"agent"`
+	Claude         ClaudeConfig        `yaml:"claude"`
+	Codex          CodexConfig         `yaml:"codex"`
 	Discovery      Discovery           `yaml:"discovery"`
 	ListenAddr     string              `yaml:"listen_addr"`
 	Planner        agentconfig.Planner `yaml:"planner"`
 	Fanout         agentconfig.Fanout  `yaml:"fanout"`
 	DriverDefaults DriverDefaults      `yaml:"driver_defaults"`
 	Observer       Observer            `yaml:"observer,omitempty"`
+}
+
+type AgentConfig struct {
+	Kind string `yaml:"kind"` // "claude" | "codex"; default claude
+}
+
+type ClaudeConfig struct {
+	Bin     string   `yaml:"bin"`
+	WorkDir string   `yaml:"workdir"`
+	Args    []string `yaml:"extra_args"`
+}
+
+type CodexConfig struct {
+	Bin     string   `yaml:"bin"`
+	WorkDir string   `yaml:"workdir"`
+	Args    []string `yaml:"extra_args"`
 }
 
 type ServerConfig struct {
@@ -98,8 +117,25 @@ func LoadConfig(path string) (*Config, error) {
 	if c.DriverDefaults.ArtifactTransport == "" {
 		c.DriverDefaults.ArtifactTransport = ArtifactTransportPeerProxy
 	}
+	if c.Agent.Kind == "" {
+		c.Agent.Kind = "claude"
+	}
+	if c.Claude.Bin == "" {
+		c.Claude.Bin = "claude"
+	}
+	if c.Codex.Bin == "" {
+		c.Codex.Bin = "codex"
+	}
+	if c.Codex.WorkDir == "" {
+		c.Codex.WorkDir = c.Claude.WorkDir
+	}
 	if c.Planner.Bin == "" {
-		c.Planner.Bin = "claude"
+		switch c.Agent.Kind {
+		case "codex":
+			c.Planner.Bin = c.Codex.Bin
+		default:
+			c.Planner.Bin = c.Claude.Bin
+		}
 	}
 	if c.Planner.TimeoutSec == 0 {
 		c.Planner.TimeoutSec = 60
