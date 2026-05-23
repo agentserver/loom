@@ -67,6 +67,7 @@ claude
 | `--skill-bundle PATH` | `../../../tests/prod_test/driver/.claude/skills/multiagent` if present | Skill dir to copy under `<project>/.claude/skills/`. |
 | `--token-dir PATH` | `~/.loom/<NAME>` | Parent dir for `observer.token`. Must be absolute. |
 | `--bin PATH` | `../bin/driver-agent.linux-<arch>` | Override the binary path (e.g., point at a downloaded release asset). |
+| `--agent CLI` | `claude` | `claude` or `codex`. Codex mode writes `.codex/config.toml` instead of `.mcp.json`, drops `AGENTS.md` + optional `.codex/prompts/`, and renders `agent.kind: codex` in `config.yaml`. |
 
 ## Project layout after install
 
@@ -83,6 +84,18 @@ claude
 ~/.loom/<NAME>/
 └── observer.token          # 0600 — written on first start by observerclient
 ```
+
+## Codex notes
+
+- Codex loads project-scoped `.codex/config.toml` **only in trusted
+  directories**. The first `codex` invocation in the project dir prompts
+  to trust it — approve once.
+- Codex CLI auth: `codex login` (with a ChatGPT subscription) or
+  `export OPENAI_API_KEY=...`. The driver-agent itself still does its
+  own observer device-code OAuth via `./driver-agent register`.
+- Codex's permissions model is coarser than Claude's. The `permissions`
+  skill exposes presets (`file_write`, `full_access`, ...) and the
+  three sandbox modes (`ask`, `workspace-write`, `full-access`).
 
 ## Why no systemd unit?
 

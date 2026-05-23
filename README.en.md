@@ -4,7 +4,7 @@
 
 **Language**: [简体中文](README.md) · [English](README.en.md)
 
-Loom is a set of custom agents on top of the [agentserver](https://github.com/agentserver/agentserver) platform, sharing one Go module and a common set of internal packages. The core idea: **a user runs a single local driver inside Claude Code and uses it to command a fleet of self-hosted slaves that live on different machines with different capabilities.** The driver clarifies intent, inspects capabilities, and orchestrates tasks; each slave executes locally on its own node; all telemetry flows to a standalone observer for replay and debugging.
+Loom is a set of custom agents on top of the [agentserver](https://github.com/agentserver/agentserver) platform, sharing one Go module and a common set of internal packages. The core idea: **a user runs a single local driver inside Claude Code or Codex CLI and uses it to command a fleet of self-hosted slaves that live on different machines with different capabilities.** The driver clarifies intent, inspects capabilities, and orchestrates tasks; each slave executes locally on its own node; all telemetry flows to a standalone observer for replay and debugging. **Mixed-fleet deployment is fully supported** — each driver and slave independently picks its backend via `--agent claude|codex`; agents from both backends share one observer / workspace.
 
 The most distinctive bit: **the fleet's capabilities are not fixed.** When none of the current slaves can satisfy a task, the driver has a slave author, run, and validate a Python MCP server on the fly, then registers it via `register_mcp`. By the next orchestration round, that new capability is already callable. The cluster therefore starts from a minimal skeleton and grows the tools it actually needs from real user tasks, instead of shipping a giant pre-baked integration catalog. The whole thing reads like weaving: warp and weft are existing capabilities from different slaves, the driver decides how they interlace into the finished task — and when a critical thread does not exist yet, it is spun on the spot on a slave and woven in.
 
@@ -26,25 +26,39 @@ bash <(curl -fsSL \
   https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-observer.sh) \
   --name obs-prod --systemd
 
-# driver (Claude Code MCP entrypoint) — run inside the dir you want as the project root
+# driver — Claude Code variant (default)
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
 bash <(curl -fsSL \
   https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-driver.sh) \
   --name driver-myhost
 
-# slave (executor) — drop --systemd on Termux/Android and run in the foreground
+# driver — Codex variant (writes .codex/config.toml + AGENTS.md instead of .mcp.json)
+export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
+bash <(curl -fsSL \
+  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-driver.sh) \
+  --name driver-myhost --agent codex
+
+# slave — Claude Code variant (executor; drop --systemd on Termux/Android)
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
 bash <(curl -fsSL \
   https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-slave.sh) \
   --name slave-myhost --systemd
+
+# slave — Codex variant (chat skill drives codex exec --json; mix freely with Claude Code slaves)
+export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
+bash <(curl -fsSL \
+  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-slave.sh) \
+  --name slave-myhost --agent codex --systemd
 ```
 
 After bootstrap, run the one-time `./driver-agent register --config ./config.yaml`
-device-code OAuth on the driver host; on the slave the first start prints a
-device-code URL on stderr — approve it in a browser and the slave writes
-the issued sandbox / tunnel credentials back into `config.yaml`, then
-registers with observer. Full flag reference and the non-bootstrap install
-path live at [`multi-agent/deploy/README.md`](multi-agent/deploy/README.md).
+device-code OAuth on the driver host. For a Codex driver, also run `codex login`
+(or `export OPENAI_API_KEY=...`) and invoke `codex` once in the project dir to
+add it to the trust list. On the slave, the first start prints a device-code URL
+on stderr — approve it in a browser and the slave writes the issued sandbox /
+tunnel credentials back into `config.yaml`, then registers with observer. Full
+flag reference and the non-bootstrap install path live at
+[`multi-agent/deploy/README.md`](multi-agent/deploy/README.md).
 
 ## Topology
 
