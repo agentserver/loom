@@ -14,8 +14,6 @@ import (
 
 type ProgressFunc func(ctx context.Context, phase, message string, elapsed time.Duration)
 
-const plannerIdleTimeout = 90 * time.Second
-
 type Planner struct {
 	cfg      config.Planner
 	llm      agentbackend.LLMRunner

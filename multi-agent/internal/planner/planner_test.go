@@ -168,10 +168,6 @@ wait
 	require.GreaterOrEqual(t, time.Since(start), 200*time.Millisecond)
 }
 
-func TestPlannerIdleTimeoutIsNinetySeconds(t *testing.T) {
-	require.Equal(t, 90*time.Second, plannerIdleTimeout)
-}
-
 func TestPlan_DecodeNodeKindAndSkill(t *testing.T) {
 	jsonSrc := `[
 	  {"id":"n0","target_id":"a","kind":"register_mcp","skill":"register_mcp","prompt":"spec"},
