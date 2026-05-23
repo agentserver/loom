@@ -88,3 +88,45 @@ func TestPermissionsPatchIdempotent(t *testing.T) {
 		t.Fatalf("not idempotent: %v vs %v", a, b)
 	}
 }
+
+// TestPermissionsPatchPreservesUnknownKeys verifies that a user-written
+// config.toml with mcp_servers tables and other top-level scalars survives a
+// Patch — Patch must only mutate approval_policy and sandbox_mode.
+func TestPermissionsPatchPreservesUnknownKeys(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	seed := `model = "o3"
+
+[mcp_servers.driver]
+command = "/usr/local/bin/driver-agent"
+args = ["serve-mcp", "--config", "/etc/loom/config.yaml"]
+enabled = true
+`
+	if err := os.WriteFile(filepath.Join(dir, ".codex", "config.toml"), []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewStore(dir)
+	if _, err := s.Patch(context.Background(), agentbackend.Patch{Presets: []string{"full_access"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, ".codex", "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(data)
+	for _, want := range []string{
+		`model = "o3"`,
+		`[mcp_servers.driver]`,
+		`command = "/usr/local/bin/driver-agent"`,
+		`approval_policy = "never"`,
+		`sandbox_mode = "danger-full-access"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("config.toml missing %q after Patch:\n%s", want, body)
+		}
+	}
+}

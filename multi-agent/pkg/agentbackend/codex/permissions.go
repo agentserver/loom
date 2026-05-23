@@ -20,46 +20,34 @@ func NewStore(workdir string) *Store { return &Store{workdir: workdir} }
 
 func (s *Store) path() string { return filepath.Join(s.workdir, ".codex", "config.toml") }
 
-// rawConfig is a minimal representation of .codex/config.toml.
-// Only the two keys we own are decoded; all other keys in a real-world file
-// are intentionally discarded on write (known limitation — see task spec).
-type rawConfig struct {
-	ApprovalPolicy string `toml:"approval_policy,omitempty"`
-	SandboxMode    string `toml:"sandbox_mode,omitempty"`
-}
-
-func (s *Store) read() (rawConfig, error) {
-	var c rawConfig
+// readMap decodes config.toml into a top-level key map. Missing file ⇒ empty map.
+// Returning a map (rather than a struct) lets Patch preserve unknown keys —
+// e.g. mcp_servers tables or model overrides written by the user — across writes.
+func (s *Store) readMap() (map[string]any, error) {
 	data, err := os.ReadFile(s.path())
 	if errors.Is(err, os.ErrNotExist) {
-		return c, nil
+		return map[string]any{}, nil
 	}
 	if err != nil {
-		return c, err
+		return nil, err
 	}
-	if err := toml.Unmarshal(data, &c); err != nil {
-		return c, err
+	m := map[string]any{}
+	if len(data) == 0 {
+		return m, nil
 	}
-	return c, nil
+	if err := toml.Unmarshal(data, &m); err != nil {
+		return nil, err
+	}
+	if m == nil {
+		m = map[string]any{}
+	}
+	return m, nil
 }
 
-// Get returns the current permissions state without modifying the file.
-// If config.toml does not exist the mode defaults to "ask".
-func (s *Store) Get(_ context.Context) (agentbackend.State, error) {
-	c, err := s.read()
-	if err != nil {
-		return agentbackend.State{}, err
-	}
-	return agentbackend.State{
-		Backend: agentbackend.KindCodex,
-		Path:    s.path(),
-		Mode:    codexMode(c),
-	}, nil
-}
-
-// codexMode maps rawConfig fields to the canonical mode string.
-func codexMode(c rawConfig) string {
-	switch c.SandboxMode {
+// modeOf extracts the canonical mode string from the on-disk sandbox_mode value.
+func modeOf(m map[string]any) string {
+	v, _ := m["sandbox_mode"].(string)
+	switch v {
 	case "danger-full-access":
 		return "full-access"
 	case "workspace-write":
@@ -69,7 +57,22 @@ func codexMode(c rawConfig) string {
 	}
 }
 
-// Patch applies p and persists the result to config.toml.
+// Get returns the current permissions state without modifying the file.
+// If config.toml does not exist the mode defaults to "ask".
+func (s *Store) Get(_ context.Context) (agentbackend.State, error) {
+	m, err := s.readMap()
+	if err != nil {
+		return agentbackend.State{}, err
+	}
+	return agentbackend.State{
+		Backend: agentbackend.KindCodex,
+		Path:    s.path(),
+		Mode:    modeOf(m),
+	}, nil
+}
+
+// Patch applies p and persists the result to config.toml. Unknown top-level keys
+// in the existing file are preserved verbatim across the write.
 // AllowAdd/AllowRemove/DenyAdd/DenyRemove are rejected — those are Claude-only.
 func (s *Store) Patch(ctx context.Context, p agentbackend.Patch) (agentbackend.State, error) {
 	if len(p.AllowAdd) > 0 || len(p.AllowRemove) > 0 ||
@@ -79,33 +82,33 @@ func (s *Store) Patch(ctx context.Context, p agentbackend.Patch) (agentbackend.S
 		)
 	}
 
-	c, err := s.read()
+	m, err := s.readMap()
 	if err != nil {
 		return agentbackend.State{}, err
 	}
 
-	cur := codexMode(c)
+	cur := modeOf(m)
 	var newMode string
 	switch {
 	case p.Mode != "":
 		newMode = p.Mode
 	case len(p.Presets) > 0:
-		m, _ := presetToMode(p.Presets, cur)
-		newMode = m
+		mode, _ := presetToMode(p.Presets, cur)
+		newMode = mode
 	default:
 		newMode = cur
 	}
 
 	switch newMode {
 	case "ask":
-		c.SandboxMode = ""
-		c.ApprovalPolicy = ""
+		delete(m, "sandbox_mode")
+		delete(m, "approval_policy")
 	case "workspace-write":
-		c.SandboxMode = "workspace-write"
-		c.ApprovalPolicy = "on-request"
+		m["sandbox_mode"] = "workspace-write"
+		m["approval_policy"] = "on-request"
 	case "full-access":
-		c.SandboxMode = "danger-full-access"
-		c.ApprovalPolicy = "never"
+		m["sandbox_mode"] = "danger-full-access"
+		m["approval_policy"] = "never"
 	default:
 		return agentbackend.State{}, fmt.Errorf("unknown codex mode %q", newMode)
 	}
@@ -118,7 +121,7 @@ func (s *Store) Patch(ctx context.Context, p agentbackend.Patch) (agentbackend.S
 		return agentbackend.State{}, err
 	}
 	defer f.Close()
-	if err := toml.NewEncoder(f).Encode(c); err != nil {
+	if err := toml.NewEncoder(f).Encode(m); err != nil {
 		return agentbackend.State{}, err
 	}
 
