@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -40,7 +42,101 @@ func main() {
 	}
 }
 
+// acquireInstanceLock takes an exclusive flock on $CWD/slave-agent.lock so two
+// slave-agents in the same install dir can't fight for the broker tunnel
+// (single-occupancy → 1s EOF flap, the "mode B" outage).
+//
+// When the lock is already held, behavior depends on whether we were started
+// by systemd (INVOCATION_ID env, set by systemd ≥232): systemd-managed starts
+// SIGTERM the holder and retake the lock (last-start-wins is the right
+// semantics for `systemctl restart` and on-failure respawns); manual starts
+// refuse with a clear error so an operator probing with ssh doesn't
+// accidentally knock over the production unit.
+//
+// The holder's pid is written to the lock file so operators can identify it.
+// The returned *os.File must stay open for the process lifetime.
+func acquireInstanceLock() (*os.File, error) {
+	lockPath, err := filepath.Abs("slave-agent.lock")
+	if err != nil {
+		return nil, fmt.Errorf("resolve lock path: %w", err)
+	}
+	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open lock file %s: %w", lockPath, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		holderPid := readHolderPid(lockPath)
+		if os.Getenv("INVOCATION_ID") == "" {
+			f.Close()
+			return nil, fmt.Errorf("another slave-agent is already running in this install dir "+
+				"(lock=%s holder_pid=%d); refusing to start. "+
+				"If this is a stale lock, run: pkill -f 'slave-agent .*%s' && rm %s",
+				lockPath, holderPid, filepath.Base(filepath.Dir(lockPath)), lockPath)
+		}
+		log.Printf("acquireInstanceLock: lock held by pid=%d, taking over (systemd-managed start)", holderPid)
+		if err := takeOverLock(f, lockPath, holderPid); err != nil {
+			f.Close()
+			return nil, err
+		}
+	}
+	if err := f.Truncate(0); err == nil {
+		f.Seek(0, 0)
+		fmt.Fprintf(f, "%d\n", os.Getpid())
+	}
+	return f, nil
+}
+
+// readHolderPid parses the pid written by the current lock holder. Returns 0
+// on any read/parse failure — callers treat 0 as "unknown holder".
+func readHolderPid(lockPath string) int {
+	b, err := os.ReadFile(lockPath)
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return 0
+	}
+	return pid
+}
+
+// takeOverLock terminates the current holder (if alive) and retakes the flock.
+// SIGTERM first with a 5s grace window for clean tunnel shutdown, then SIGKILL.
+// Returns an error if we can't acquire the lock within ~10s total.
+func takeOverLock(f *os.File, lockPath string, holderPid int) error {
+	if holderPid > 0 && holderPid != os.Getpid() {
+		if err := syscall.Kill(holderPid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
+			log.Printf("acquireInstanceLock: SIGTERM pid=%d: %v (continuing)", holderPid, err)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if syscall.Kill(holderPid, 0) == syscall.ESRCH {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if syscall.Kill(holderPid, 0) != syscall.ESRCH {
+			log.Printf("acquireInstanceLock: pid=%d still alive after SIGTERM, sending SIGKILL", holderPid)
+			_ = syscall.Kill(holderPid, syscall.SIGKILL)
+		}
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("could not acquire %s after terminating pid=%d", lockPath, holderPid)
+}
+
 func run(cfgPath string) error {
+	lockFile, err := acquireInstanceLock()
+	if err != nil {
+		return err
+	}
+	defer lockFile.Close()
+
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return err
