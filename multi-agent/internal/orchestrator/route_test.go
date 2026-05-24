@@ -17,6 +17,8 @@ import (
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/planner"
 	"github.com/yourorg/multi-agent/internal/store"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
+	claudebe "github.com/yourorg/multi-agent/pkg/agentbackend/claude"
 )
 
 type fakeSDK struct {
@@ -58,7 +60,7 @@ func newOrch(t *testing.T, sdk SDKDelegator, mode string) *Orchestrator {
 func newOrchWithObserver(t *testing.T, sdk SDKDelegator, mode string, obs ObserverSink) *Orchestrator {
 	t.Helper()
 	t.Setenv("FAKE_PLANNER_MODE", mode)
-	p := planner.New(config.Planner{Bin: fakePlannerForOrch(t), TimeoutSec: 5})
+	p := planner.New(config.Planner{TimeoutSec: 5}, claudebe.New(agentbackend.ClaudeConfig{Bin: fakePlannerForOrch(t)}, nil).LLM())
 	s, err := store.Open(filepath.Join(t.TempDir(), "x.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { s.Close() })

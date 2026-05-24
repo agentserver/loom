@@ -1,10 +1,14 @@
-package claudeperm
+package claude
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
 func TestStoreReadMissingReturnsEmpty(t *testing.T) {
@@ -25,11 +29,11 @@ func TestStorePatchExpandsPresetsSortsAndIsIdempotent(t *testing.T) {
 		AllowAdd:     []string{"Bash(python3 *)"},
 		DenyAdd:      []string{"Bash(rm *)"},
 	}
-	first, err := store.Patch(patch)
+	first, err := store.PatchNative(patch)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := store.Patch(patch)
+	second, err := store.PatchNative(patch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +70,7 @@ func TestStorePreservesUnknownSettingsFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := NewStore(workdir)
-	if _, err := store.Patch(Patch{AllowAdd: []string{"Write"}}); err != nil {
+	if _, err := store.PatchNative(Patch{AllowAdd: []string{"Write"}}); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)
@@ -79,6 +83,28 @@ func TestStorePreservesUnknownSettingsFields(t *testing.T) {
 	}
 	if string(got["theme"]) != `"dark"` {
 		t.Fatalf("theme not preserved: %s", data)
+	}
+}
+
+func TestStorePatchAdapterRejectsModeField(t *testing.T) {
+	store := NewStore(t.TempDir())
+	_, err := store.Patch(context.Background(), agentbackend.Patch{Mode: "full-access"})
+	if err == nil || !strings.Contains(err.Error(), "Mode") {
+		t.Fatalf("expected Mode-rejection error, got %v", err)
+	}
+}
+
+func TestStorePatchAdapterPassesPresets(t *testing.T) {
+	store := NewStore(t.TempDir())
+	st, err := store.Patch(context.Background(), agentbackend.Patch{Presets: []string{"file_write"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !equal(st.Allow, []string{"Edit", "Read", "Write"}) {
+		t.Fatalf("allow=%v", st.Allow)
+	}
+	if st.Backend != agentbackend.KindClaude {
+		t.Fatalf("backend=%v", st.Backend)
 	}
 }
 

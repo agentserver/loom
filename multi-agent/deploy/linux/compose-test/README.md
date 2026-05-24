@@ -89,6 +89,17 @@ Visit each URL in a browser, approve. After approval:
     http://127.0.0.1:18090/api/agents | python3 -m json.tool
   ```
 
+## Codex driver (optional)
+
+The `driver-codex` service is gated behind the `codex` profile. To run it:
+
+    export OPENAI_API_KEY=sk-...      # or set up codex login in a mounted volume
+    docker compose --profile codex up driver-codex
+
+Without auth, codex exec returns an error; the service will crash-loop. That's
+expected — the goal of this profile is to verify the deploy templates lay the
+right files, not to make a paid API call in CI.
+
 ## Tear down
 
 ```bash

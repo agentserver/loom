@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/config"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
+	codexbe "github.com/yourorg/multi-agent/pkg/agentbackend/codex"
 )
 
 func TestStoreRefreshWritesPersistentHierarchicalCapabilityDoc(t *testing.T) {
@@ -78,22 +80,43 @@ servers:
 	require.Contains(t, text, "cached state")
 }
 
-func TestStoreRefreshIncludesClaudeCodePermissions(t *testing.T) {
-	t.Run("Claude Code Permissions", func(t *testing.T) {
-		dir := t.TempDir()
-		workdir := t.TempDir()
-		settingsPath := filepath.Join(workdir, ".claude", "settings.local.json")
-		require.NoError(t, os.MkdirAll(filepath.Dir(settingsPath), 0o755))
-		require.NoError(t, os.WriteFile(settingsPath, []byte(`{"permissions":{"allow":["Bash(curl *)","Read"],"deny":["Bash(rm *)"]}}`), 0o600))
+func TestStoreRefreshIncludesClaudePermissionsFromWorkdir(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	settingsPath := filepath.Join(workdir, ".claude", "settings.local.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(settingsPath), 0o755))
+	require.NoError(t, os.WriteFile(settingsPath, []byte(`{"permissions":{"allow":["Bash(curl *)","Read"],"deny":["Bash(rm *)"]}}`), 0o600))
 
-		store := NewStore(dir)
-		require.NoError(t, store.Refresh(context.Background(), Input{WorkDir: workdir}))
+	store := NewStore(dir)
+	require.NoError(t, store.Refresh(context.Background(), Input{WorkDir: workdir}))
 
-		body, err := os.ReadFile(filepath.Join(dir, "CAPABILITIES.md"))
-		require.NoError(t, err)
-		text := string(body)
-		require.Contains(t, text, "## Claude Code Permissions")
-		require.Contains(t, text, "- allow: Bash(curl *), Read")
-		require.Contains(t, text, "- deny: Bash(rm *)")
-	})
+	body, err := os.ReadFile(filepath.Join(dir, "CAPABILITIES.md"))
+	require.NoError(t, err)
+	text := string(body)
+	require.Contains(t, text, "## Permissions (claude)")
+	require.Contains(t, text, "- allow: Bash(curl *), Read")
+	require.Contains(t, text, "- deny: Bash(rm *)")
+	require.NotContains(t, text, "## Permissions (codex)")
+}
+
+func TestStoreRefreshIncludesCodexPermissionsFromStore(t *testing.T) {
+	dir := t.TempDir()
+	workdir := t.TempDir()
+	codexStore := codexbe.NewStore(workdir)
+	if _, err := codexStore.Patch(context.Background(), agentbackend.Patch{Presets: []string{"full_access"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewStore(dir)
+	require.NoError(t, store.Refresh(context.Background(), Input{
+		WorkDir:     workdir,
+		Permissions: codexStore,
+	}))
+
+	body, err := os.ReadFile(filepath.Join(dir, "CAPABILITIES.md"))
+	require.NoError(t, err)
+	text := string(body)
+	require.Contains(t, text, "## Permissions (codex)")
+	require.Contains(t, text, "- mode: full-access")
+	require.NotContains(t, text, "## Permissions (claude)")
 }

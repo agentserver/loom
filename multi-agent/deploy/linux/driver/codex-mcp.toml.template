@@ -1,0 +1,10 @@
+# Codex CLI MCP registration for the driver-agent.
+# Codex loads project-scoped .codex/config.toml only in trusted directories;
+# the first `codex` invocation in this dir will prompt to trust it.
+
+[mcp_servers.driver]
+command = "__PROJECT_DIR__/driver-agent"
+args    = ["serve-mcp", "--config", "__PROJECT_DIR__/config.yaml"]
+startup_timeout_sec = 30
+tool_timeout_sec    = 120
+enabled             = true

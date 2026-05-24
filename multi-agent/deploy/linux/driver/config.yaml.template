@@ -19,8 +19,10 @@ discovery:
 
 listen_addr: 127.0.0.1:0
 
+__AGENT_BLOCK__
+
 planner:
-  bin: claude
+  bin: ""
   timeout_sec: 300
   extra_args: []
 

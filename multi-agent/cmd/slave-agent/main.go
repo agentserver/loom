@@ -25,6 +25,9 @@ import (
 	"github.com/yourorg/multi-agent/internal/store"
 	"github.com/yourorg/multi-agent/internal/tunnel"
 	"github.com/yourorg/multi-agent/internal/webui"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
+	_ "github.com/yourorg/multi-agent/pkg/agentbackend/claude"
+	_ "github.com/yourorg/multi-agent/pkg/agentbackend/codex"
 )
 
 func main() {
@@ -77,9 +80,14 @@ func run(cfgPath string) error {
 	}
 	mcpExec := executor.NewMCPExecutor(mcpCfg)
 	defer mcpExec.Close()
-	claudeExec := executor.NewClaudeExecutor(executor.ClaudeConfig{
-		Bin: cfg.Claude.Bin, WorkDir: cfg.Claude.WorkDir, Args: cfg.Claude.Args,
-	})
+	backend, err := agentbackend.New(agentbackend.Config{
+		Kind:   agentbackend.Kind(cfg.Agent.Kind),
+		Claude: agentbackend.ClaudeConfig{Bin: cfg.Claude.Bin, WorkDir: cfg.Claude.WorkDir, ExtraArgs: cfg.Claude.Args},
+		Codex:  agentbackend.CodexConfig{Bin: cfg.Codex.Bin, WorkDir: cfg.Codex.WorkDir, ExtraArgs: cfg.Codex.Args},
+	}, nil)
+	if err != nil {
+		log.Fatalf("agentbackend: %v", err)
+	}
 
 	ui := webui.NewHandler(s, journalDir, cfg)
 	webui.SetMCPBridge(ui, mcpExec)
@@ -104,7 +112,7 @@ func run(cfgPath string) error {
 
 	routes := map[string]executor.Executor{
 		"mcp": mcpExec,
-		"":    claudeExec,
+		"":    backendExecutor{backend},
 	}
 	if hasSkill(cfg.Discovery.Skills, "bash") {
 		routes["bash"] = executor.NewBashExecutor(executor.BashConfig{WorkDir: cfg.Claude.WorkDir})
@@ -134,19 +142,22 @@ func run(cfgPath string) error {
 			DynamicMCPPath: dynamicMCPPath,
 			MCPTools:       allDesc,
 			Reason:         reason,
+			Permissions:    backend.Permissions(),
 		}); err != nil {
 			log.Printf("capability doc refresh: %v", err)
 		}
 		return allDesc
 	}
-	if hasSkill(cfg.Discovery.Skills, "claude_permissions") {
-		routes["claude_permissions"] = executor.NewClaudePermissionsExecutor(executor.ClaudePermissionsConfig{
-			WorkDir: cfg.Claude.WorkDir,
-			Refresh: func(ctx context.Context, reason string) error {
-				refreshCapabilities(ctx, reason)
-				return tn.PublishCard(ctx)
-			},
+	if hasSkill(cfg.Discovery.Skills, "permissions") || hasSkill(cfg.Discovery.Skills, "claude_permissions") {
+		if hasSkill(cfg.Discovery.Skills, "claude_permissions") {
+			log.Printf("WARN: 'claude_permissions' skill name is deprecated; rename to 'permissions' in discovery.skills")
+		}
+		permExec := newPermissionsExecutor(backend.Permissions(), func(ctx context.Context, reason string) error {
+			refreshCapabilities(ctx, reason)
+			return tn.PublishCard(ctx)
 		})
+		routes["permissions"] = permExec
+		routes["claude_permissions"] = permExec // BC alias
 	}
 	if hasSkill(cfg.Discovery.Skills, "register_mcp") {
 		routes["register_mcp"] = executor.NewRegisterMCPExecutor(executor.RegisterMCPConfig{
@@ -190,6 +201,15 @@ func run(cfgPath string) error {
 		return fmt.Errorf("run: %w", err)
 	}
 	return nil
+}
+
+// backendExecutor adapts agentbackend.Backend to executor.Executor.
+type backendExecutor struct {
+	b agentbackend.Backend
+}
+
+func (be backendExecutor) Run(ctx context.Context, t executor.Task, sink executor.Sink) (executor.Result, error) {
+	return be.b.Run(ctx, t, sink)
 }
 
 func hasSkill(skills []string, want string) bool {

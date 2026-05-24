@@ -1,4 +1,4 @@
-package executor
+package claude
 
 import (
 	"bufio"
@@ -8,40 +8,44 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
-type ClaudeConfig struct {
-	Bin     string
-	WorkDir string
-	Args    []string
-	Env     []string // extra env (KEY=VAL)
+type executor struct {
+	cfg agentbackend.ClaudeConfig
+	env []string
 }
 
-type ClaudeExecutor struct{ cfg ClaudeConfig }
+func newExecutor(cfg agentbackend.ClaudeConfig, env []string) *executor {
+	return &executor{cfg: cfg, env: env}
+}
 
-func NewClaudeExecutor(cfg ClaudeConfig) *ClaudeExecutor { return &ClaudeExecutor{cfg: cfg} }
+func (e *executor) Run(ctx context.Context, t agentbackend.Task, sink agentbackend.Sink) (agentbackend.Result, error) {
+	args := append([]string{
+		"--print",
+		"--output-format=stream-json",
+		"--verbose",
+		"--append-system-prompt", agentbackend.CapabilityEpilogue,
+	}, e.cfg.ExtraArgs...)
 
-const capEpilogue = "\n\nWhen you finish, append a line `=== CAPABILITY ===` then 1-3 lines describing any persistent capability change to yourself. If none, write `NO_CAPABILITY_CHANGE`."
-
-func (e *ClaudeExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, error) {
-	args := append([]string{"--print", "--output-format=stream-json", "--verbose", "--append-system-prompt", capEpilogue}, e.cfg.Args...)
 	cmd := exec.CommandContext(ctx, e.cfg.Bin, args...)
 	cmd.Dir = e.cfg.WorkDir
-	cmd.Env = append(cmd.Environ(), e.cfg.Env...)
+	cmd.Env = append(cmd.Environ(), e.env...)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return Result{}, err
+		return agentbackend.Result{}, err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return Result{}, err
+		return agentbackend.Result{}, err
 	}
 	var stderrBuf strings.Builder
 	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
-		return Result{}, err
+		return agentbackend.Result{}, err
 	}
 
 	go func() {
@@ -67,7 +71,7 @@ func (e *ClaudeExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, er
 			} `json:"message"`
 		}
 		if err := json.Unmarshal(line, &msg); err != nil {
-			continue // garbage line: skip per spec §5.5
+			continue
 		}
 		if msg.Type != "assistant" {
 			continue
@@ -84,34 +88,20 @@ func (e *ClaudeExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, er
 	if err := cmd.Wait(); err != nil {
 		defer sink.Close()
 		if ctx.Err() == context.DeadlineExceeded {
-			return Result{}, fmt.Errorf("timeout")
+			return agentbackend.Result{}, fmt.Errorf("timeout")
 		}
 		tail := stderrBuf.String()
 		if len(tail) > 4096 {
 			tail = tail[len(tail)-4096:]
 		}
-		return Result{}, fmt.Errorf("claude exit: %v: %s", err, tail)
+		return agentbackend.Result{}, fmt.Errorf("claude exit: %v: %s", err, tail)
 	}
 
 	full := lastText.String()
-	summary, change := splitCapability(full)
+	summary, change := agentbackend.SplitCapability(full)
 	if change != "" {
 		sink.Write("capability", change)
 	}
 	sink.Close()
-	return Result{Summary: summary, CapabilityChange: change}, nil
-}
-
-func splitCapability(s string) (summary, change string) {
-	const sep = "=== CAPABILITY ==="
-	i := strings.LastIndex(s, sep)
-	if i < 0 {
-		return strings.TrimSpace(s), ""
-	}
-	summary = strings.TrimSpace(s[:i])
-	change = strings.TrimSpace(s[i+len(sep):])
-	if change == "NO_CAPABILITY_CHANGE" {
-		change = ""
-	}
-	return
+	return agentbackend.Result{Summary: summary, CapabilityChange: change}, nil
 }

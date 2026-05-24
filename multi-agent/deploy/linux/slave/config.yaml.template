@@ -12,10 +12,7 @@ credentials:
   proxy_token: ""
   short_id: ""
 
-claude:
-  bin: claude                       # absolute path if claude is not in PATH of the service user
-  workdir: __LOOM_HOME__
-  extra_args: []
+__AGENT_BLOCK__
 
 mcp_servers: {}
 
@@ -25,12 +22,12 @@ discovery:
   skills:
     - chat
     - bash
+    - permissions
     - register_mcp
-    - claude_permissions
     - file
 
 planner:
-  bin: claude
+  bin: ""
   timeout_sec: 300
   extra_args: []
 

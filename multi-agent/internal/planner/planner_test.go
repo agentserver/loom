@@ -13,6 +13,8 @@ import (
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/stretchr/testify/require"
 	"github.com/yourorg/multi-agent/internal/config"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
+	claudebe "github.com/yourorg/multi-agent/pkg/agentbackend/claude"
 )
 
 func fakePlanner(t *testing.T) string {
@@ -24,11 +26,10 @@ func fakePlanner(t *testing.T) string {
 }
 
 func newPlanner(t *testing.T, mode string) *Planner {
-	return New(config.Planner{
-		Bin:        fakePlanner(t),
-		TimeoutSec: 5,
-		ExtraArgs:  []string{},
-	})
+	fakeBin := fakePlanner(t)
+	cfg := agentbackend.ClaudeConfig{Bin: fakeBin}
+	backend := claudebe.New(cfg, nil)
+	return New(config.Planner{TimeoutSec: 5}, backend.LLM())
 }
 
 func withMode(t *testing.T, mode string, fn func()) {
@@ -82,7 +83,8 @@ func TestPlan_InvalidJSONErrors(t *testing.T) {
 
 func TestPlanParsesBuildSpecField(t *testing.T) {
 	t.Setenv("FAKE_PLANNER_MODE", "plan_build_spec_field")
-	p := New(config.Planner{Bin: fakePlanner(t), TimeoutSec: 5})
+	backend := claudebe.New(agentbackend.ClaudeConfig{Bin: fakePlanner(t)}, nil)
+	p := New(config.Planner{TimeoutSec: 5}, backend.LLM())
 
 	nodes, err := p.Plan(context.Background(), "build reusable tool", demoAgents)
 
@@ -122,7 +124,8 @@ func TestRunClaude_Exit1(t *testing.T) {
 func TestRunClaude_Timeout(t *testing.T) {
 	withMode(t, "sleep", func() {
 		t.Setenv("FAKE_PLANNER_SLEEP", "10")
-		p := New(config.Planner{Bin: fakePlanner(t), TimeoutSec: 1})
+		backend := claudebe.New(agentbackend.ClaudeConfig{Bin: fakePlanner(t)}, nil)
+		p := New(config.Planner{TimeoutSec: 1}, backend.LLM())
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_, err := p.Route(ctx, "x", demoAgents)
@@ -142,7 +145,8 @@ wait
 	require.NoError(t, err)
 
 	t.Setenv("RUN_CLAUDE_STARTED", started)
-	p := New(config.Planner{Bin: bin, TimeoutSec: 5})
+	backend := claudebe.New(agentbackend.ClaudeConfig{Bin: bin}, nil)
+	p := New(config.Planner{TimeoutSec: 5}, backend.LLM())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -162,10 +166,6 @@ wait
 	err = <-errCh
 	require.Error(t, err)
 	require.GreaterOrEqual(t, time.Since(start), 200*time.Millisecond)
-}
-
-func TestPlannerIdleTimeoutIsNinetySeconds(t *testing.T) {
-	require.Equal(t, 90*time.Second, plannerIdleTimeout)
 }
 
 func TestPlan_DecodeNodeKindAndSkill(t *testing.T) {

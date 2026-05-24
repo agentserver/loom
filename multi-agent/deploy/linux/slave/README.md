@@ -90,6 +90,7 @@ mcp__driver__list_agents
 | `--api-key KEY` | (none) | Writes `observer.api_key`. Without this, edit the rendered config manually. |
 | `--anthropic-key KEY` | (none) | Writes `ANTHROPIC_API_KEY=...` to `slave.env` (mode 0600). |
 | `--bin PATH` | `../bin/slave-agent.linux-<arch>` | Override the binary path (e.g., point at a downloaded release asset). |
+| `--agent CLI` | `claude` | `claude` or `codex`. One slave process = one backend. Under `--agent codex` the `chat` skill spawns `codex exec --json` instead of `claude --print --output-format=stream-json`. Mixed fleets (some slaves claude, others codex) share the same observer / workspace. For codex slaves, export `OPENAI_API_KEY` (and optionally drop a `~/.codex/config.toml` with `[model_providers.<name>]` to point at a self-hosted OpenAI-compatible endpoint — see [`../../agent-backends.md`](../../agent-backends.md)). |
 
 Host CPU cores (`nproc`), arch (`uname -m`), and total memory (`/proc/meminfo`)
 are auto-detected and written into the config's `resources` block.

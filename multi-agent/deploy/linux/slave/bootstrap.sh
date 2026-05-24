@@ -40,6 +40,7 @@ OBSERVER_URL="${LOOM_OBSERVER_URL:-}"
 WORKSPACE_ID="${LOOM_WORKSPACE_ID:-ws-default}"
 API_KEY="${LOOM_API_KEY:-}"
 ANTHROPIC_KEY="${LOOM_ANTHROPIC_KEY:-}"
+AGENT="${LOOM_AGENT_KIND:-claude}"
 DESC=""
 TAGS=()
 USE_SYSTEMD=0
@@ -51,6 +52,7 @@ while (( $# )); do
     --workspace)     WORKSPACE_ID="$2"; shift 2 ;;
     --api-key)       API_KEY="$2"; shift 2 ;;
     --anthropic-key) ANTHROPIC_KEY="$2"; shift 2 ;;
+    --agent)         AGENT="$2"; shift 2 ;;
     --tag)           TAGS+=("$2"); shift 2 ;;
     --desc)          DESC="$2"; shift 2 ;;
     --systemd)       USE_SYSTEMD=1; shift ;;
@@ -63,6 +65,7 @@ done
 [[ -n "$NAME" ]]         || { echo "ERROR: --name is required" >&2; exit 2; }
 [[ -n "$OBSERVER_URL" ]] || { echo "ERROR: --observer-url is required (or LOOM_OBSERVER_URL)" >&2; exit 2; }
 [[ -n "$API_KEY" ]]      || { echo "ERROR: --api-key is required (or LOOM_API_KEY)" >&2; exit 2; }
+case "$AGENT" in claude|codex) ;; *) echo "ERROR: --agent must be claude or codex" >&2; exit 2 ;; esac
 DESC="${DESC:-loom slave-agent ($NAME)}"
 
 arch="$(uname -m)"
@@ -89,12 +92,23 @@ fi
 for cmd in curl tar; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR: '$cmd' not found and auto-install failed; install it then retry" >&2; exit 2; }
 done
-if ! command -v claude >/dev/null 2>&1; then
-  if command -v npm >/dev/null 2>&1; then
-    echo "==> installing claude code CLI (npm i -g @anthropic-ai/claude-code)"
-    npm install -g @anthropic-ai/claude-code
-  else
-    echo "WARN: 'claude' not in PATH and 'npm' unavailable — install Node + 'npm i -g @anthropic-ai/claude-code' for the chat skill"
+if [[ "$AGENT" == "claude" ]]; then
+  if ! command -v claude >/dev/null 2>&1; then
+    if command -v npm >/dev/null 2>&1; then
+      echo "==> installing claude code CLI (npm i -g @anthropic-ai/claude-code)"
+      npm install -g @anthropic-ai/claude-code
+    else
+      echo "WARN: 'claude' not in PATH and 'npm' unavailable — install Node + 'npm i -g @anthropic-ai/claude-code'"
+    fi
+  fi
+else
+  if ! command -v codex >/dev/null 2>&1; then
+    if command -v npm >/dev/null 2>&1; then
+      echo "==> installing openai codex CLI (npm i -g @openai/codex)"
+      npm install -g @openai/codex || echo "WARN: codex install failed (requires Node >= 22); install manually"
+    else
+      echo "WARN: 'codex' not in PATH and 'npm' unavailable — install Node >= 22 + 'npm i -g @openai/codex'"
+    fi
   fi
 fi
 
@@ -110,6 +124,30 @@ tag_lines=""
 for t in "${TAGS[@]}"; do tag_lines+="    - $t"$'\n'; done
 
 echo "==> writing config.yaml"
+if [[ "$AGENT" == "claude" ]]; then
+  AGENT_BLOCK=$(cat <<YAML
+agent:
+  kind: claude
+
+claude:
+  bin: claude
+  workdir: $LOOM_HOME
+  extra_args: []
+YAML
+)
+else
+  AGENT_BLOCK=$(cat <<YAML
+agent:
+  kind: codex
+
+codex:
+  bin: codex
+  workdir: $LOOM_HOME
+  extra_args: []
+YAML
+)
+fi
+
 cat > "$LOOM_HOME/config.yaml" <<EOF
 server:
   url: https://agent.cs.ac.cn
@@ -121,10 +159,7 @@ credentials:
   proxy_token: ""
   short_id: ""
 
-claude:
-  bin: claude
-  workdir: $LOOM_HOME
-  extra_args: []
+$AGENT_BLOCK
 
 mcp_servers: {}
 
@@ -134,12 +169,12 @@ discovery:
   skills:
     - chat
     - bash
+    - permissions
     - register_mcp
-    - claude_permissions
     - file
 
 planner:
-  bin: claude
+  bin: ""
   timeout_sec: 300
   extra_args: []
 
@@ -226,12 +261,19 @@ cat <<EOF
       set -a; source $LOOM_HOME/slave.env; set +a
       $LOOM_HOME/slave-agent $LOOM_HOME/config.yaml
 EOF
-else
+elif [[ "$AGENT" == "claude" ]]; then
 cat <<EOF
       # if 'claude' is already logged in (claude login):
       $LOOM_HOME/slave-agent $LOOM_HOME/config.yaml
       # otherwise export the API key first:
       #   export ANTHROPIC_API_KEY='sk-ant-...'
+EOF
+else
+cat <<EOF
+      # if 'codex' is already logged in (codex login):
+      $LOOM_HOME/slave-agent $LOOM_HOME/config.yaml
+      # otherwise export the API key first:
+      #   export OPENAI_API_KEY='sk-...'
 EOF
 fi
 

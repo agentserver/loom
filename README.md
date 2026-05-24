@@ -4,7 +4,7 @@
 
 **语言**: [简体中文](README.md) · [English](README.en.md)
 
-Loom 是基于 [agentserver](https://github.com/agentserver/agentserver) 平台的一组自定义 agent，共享同一个 Go module 与一套内部包。整套系统的目标是：**用户在 Claude Code 里跑一台本地 driver，用它统一指挥一组分布在不同机器、不同能力的 self-host slave**；driver 负责澄清意图、检视能力、编排任务；slave 在各自节点本地执行；所有遥测汇集到独立部署的 observer 便于回放与调试。
+Loom 是基于 [agentserver](https://github.com/agentserver/agentserver) 平台的一组自定义 agent，共享同一个 Go module 与一套内部包。整套系统的目标是：**用户在 Claude Code 或 Codex CLI 里跑一台本地 driver，用它统一指挥一组分布在不同机器、不同能力的 self-host slave**；driver 负责澄清意图、检视能力、编排任务；slave 在各自节点本地执行；所有遥测汇集到独立部署的 observer 便于回放与调试。支持**混合机队**部署：每个 driver 和 slave 独立选择后端（`--agent claude|codex`），来自不同后端的 agent 共享同一个 observer / workspace。
 
 最与众不同的一点：**集群能力不是固定的**。当现有 slave 都满足不了某个任务时，driver 会让一台 slave 在线写、跑、验证一段 Python MCP server，然后通过 `register_mcp` 把它注册进去；下一轮编排时这套新能力就已可调用。集群因此可以从一个最小骨架开始，按用户实际任务慢慢长出真正用得到的工具，而不是先做一大套预制集成。整件事就像织布：经线、纬线来自不同 slave 的现成能力，driver 决定怎么交织成最终任务；如果某根关键的线还不存在，就当场在 slave 上纺出来再织进去。
 
@@ -24,23 +24,46 @@ bash <(curl -fsSL \
   https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-observer.sh) \
   --name obs-prod --systemd
 
-# driver（Claude Code MCP 入口）—— 在你想用作工程根的目录里跑
+# driver — Claude Code 版（默认）
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
 bash <(curl -fsSL \
   https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-driver.sh) \
   --name driver-myhost
 
-# slave（执行器）—— Termux 上去掉 --systemd 改前台
+# driver — Codex 版（写 .codex/config.toml + AGENTS.md）
+export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
+bash <(curl -fsSL \
+  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-driver.sh) \
+  --name driver-myhost --agent codex
+
+# slave — Claude Code 版（执行器，Termux 上去掉 --systemd 改前台）
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
 bash <(curl -fsSL \
   https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-slave.sh) \
   --name slave-myhost --systemd
+
+# slave — Codex 版（chat skill 改用 codex exec --json 驱动，可与 Claude Code slave 混用）
+export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
+bash <(curl -fsSL \
+  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-slave.sh) \
+  --name slave-myhost --agent codex --systemd
 ```
 
 driver 跑完后一次性 `./driver-agent register --config ./config.yaml` 完成
-agentserver device-code OAuth；slave 首启动 stderr 会打印 device-code URL，
-浏览器批准后凭证自动回写 `config.yaml` 并向 observer 注册。详细参数与
-非 bootstrap 部署路径见 [`multi-agent/deploy/README.md`](multi-agent/deploy/README.md)。
+agentserver device-code OAuth；Codex driver 还需提前 `codex login` 或
+`export OPENAI_API_KEY=...`，并在项目目录首次运行 `codex` 以建立 trust。
+slave 首启动 stderr 会打印 device-code URL，浏览器批准后凭证自动回写
+`config.yaml` 并向 observer 注册。
+
+Codex CLI 不强制走 api.openai.com —— 通过 `~/.codex/config.toml` 的
+`[model_providers.<name>]` 可指向任何 OpenAI 兼容端点（与 Claude Code 端
+`ANTHROPIC_BASE_URL=...` 对称），常用于自建网关。示例配置、容器部署的两个
+坑（项目级 `.codex/config.toml` 需要交互式 trust，容器里改挂全局；driver 容器里
+codex 是 `docker exec` 按需调起，不是 PID 1）以及 `permissions` skill 在两种
+后端下的 JSON 例子，统一见
+[`multi-agent/deploy/agent-backends.md`](multi-agent/deploy/agent-backends.md)。
+详细参数与非 bootstrap 部署路径见
+[`multi-agent/deploy/README.md`](multi-agent/deploy/README.md)。
 
 ## 拓扑
 

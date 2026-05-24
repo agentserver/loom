@@ -21,6 +21,9 @@ import (
 	"github.com/yourorg/multi-agent/internal/orchestration"
 	"github.com/yourorg/multi-agent/internal/planner"
 	"github.com/yourorg/multi-agent/internal/webui"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
+	_ "github.com/yourorg/multi-agent/pkg/agentbackend/claude"
+	_ "github.com/yourorg/multi-agent/pkg/agentbackend/codex"
 )
 
 const usage = `driver-agent — bridges Claude Code to the multi-agent workspace.
@@ -154,7 +157,16 @@ func runServe(args []string) {
 
 	sdkClient := driver.NewAgentSDKClient(cli, cfg.Server.URL, cfg.Credentials.ProxyToken)
 	tools := driver.NewTools(reg, audit, sdkClient, cfg, obs)
-	tools.SetContractRunner(orchestration.NewDriverRunner(planner.New(cfg.Planner), sdkClient, orchestration.RunnerConfig{
+	backend, err := agentbackend.New(agentbackend.Config{
+		Kind:   agentbackend.Kind(cfg.Agent.Kind),
+		Claude: agentbackend.ClaudeConfig{Bin: cfg.Claude.Bin, WorkDir: cfg.Claude.WorkDir, ExtraArgs: cfg.Claude.Args},
+		Codex:  agentbackend.CodexConfig{Bin: cfg.Codex.Bin, WorkDir: cfg.Codex.WorkDir, ExtraArgs: cfg.Codex.Args},
+	}, nil)
+	if err != nil {
+		log.Fatalf("agentbackend: %v", err)
+	}
+	p := planner.New(cfg.Planner, backend.LLM())
+	tools.SetContractRunner(orchestration.NewDriverRunner(p, sdkClient, orchestration.RunnerConfig{
 		MaxConcurrency:  cfg.Fanout.MaxConcurrency,
 		ChildTimeoutSec: cfg.Fanout.SubTaskDefaults.TimeoutSec,
 		SelfID:          cfg.Credentials.SandboxID,

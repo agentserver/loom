@@ -55,6 +55,23 @@ services:
     stdin_open: true
     tty: true
 
+  driver-codex:
+    image: loom-deploy-test:latest
+    container_name: loom-driver-codex
+    profiles: [codex]
+    depends_on:
+      observer:
+        condition: service_healthy
+    volumes:
+      - ../:/opt/loom/deploy:ro
+    environment:
+      LOOM_AGENT_KIND: codex
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-skip}
+    command: ["bash", "/opt/loom/deploy/compose-test/entrypoint-driver.sh"]
+    init: true
+    stdin_open: true
+    tty: true
+
   slave:
     image: loom-deploy-test:latest
     container_name: loom-slave

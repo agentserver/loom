@@ -1,23 +1,30 @@
-package claudeperm
+package claude
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
+// Store manages the Claude permissions file (.claude/settings.local.json)
+// inside a given workdir.
 type Store struct {
 	workdir string
 }
 
+// State is the native claudeperm state (path + allow/deny lists).
 type State struct {
 	Path  string   `json:"path"`
 	Allow []string `json:"allow"`
 	Deny  []string `json:"deny"`
 }
 
+// Patch is the native claudeperm patch shape.
 type Patch struct {
 	AllowPresets []string `json:"allow_presets"`
 	AllowAdd     []string `json:"allow_add"`
@@ -31,14 +38,17 @@ type permissionsSettings struct {
 	Deny  []string `json:"deny"`
 }
 
+// NewStore creates a Store rooted at workdir.
 func NewStore(workdir string) *Store {
 	return &Store{workdir: workdir}
 }
 
+// Path returns the absolute path of the permissions file.
 func (s *Store) Path() string {
 	return filepath.Join(s.workdir, ".claude", "settings.local.json")
 }
 
+// Read reads the current permissions state.
 func (s *Store) Read() (State, error) {
 	doc, err := s.readDoc()
 	if err != nil {
@@ -51,7 +61,10 @@ func (s *Store) Read() (State, error) {
 	return State{Path: s.Path(), Allow: sortedUnique(perm.Allow), Deny: sortedUnique(perm.Deny)}, nil
 }
 
-func (s *Store) Patch(p Patch) (State, error) {
+// PatchNative applies a native Patch and returns the updated State.
+// (Renamed from the original Patch method to avoid signature clash with the
+// agentbackend.PermissionsStore adapter method below.)
+func (s *Store) PatchNative(p Patch) (State, error) {
 	doc, err := s.readDoc()
 	if err != nil {
 		return State{}, err
@@ -85,26 +98,47 @@ func (s *Store) Patch(p Patch) (State, error) {
 	return State{Path: s.Path(), Allow: perm.Allow, Deny: perm.Deny}, nil
 }
 
-func ExpandPresets(presets []string) ([]string, error) {
-	var out []string
-	for _, preset := range presets {
-		switch preset {
-		case "python":
-			out = append(out, "Bash(python *)", "Bash(python3 *)")
-		case "pip":
-			out = append(out, "Bash(pip *)", "Bash(pip3 *)", "Bash(python -m pip *)", "Bash(python3 -m pip *)")
-		case "curl":
-			out = append(out, "Bash(curl *)")
-		case "file_read":
-			out = append(out, "Read")
-		case "file_write":
-			out = append(out, "Write", "Edit", "Read")
-		default:
-			return nil, fmt.Errorf("unknown permission preset %q", preset)
-		}
+// --- agentbackend.PermissionsStore adapter ---
+
+// Get implements agentbackend.PermissionsStore.
+func (s *Store) Get(_ context.Context) (agentbackend.State, error) {
+	st, err := s.Read()
+	if err != nil {
+		return agentbackend.State{}, err
 	}
-	return sortedUnique(out), nil
+	return agentbackend.State{
+		Backend: agentbackend.KindClaude,
+		Path:    st.Path,
+		Allow:   st.Allow,
+		Deny:    st.Deny,
+	}, nil
 }
+
+// Patch implements agentbackend.PermissionsStore.
+func (s *Store) Patch(_ context.Context, p agentbackend.Patch) (agentbackend.State, error) {
+	if p.Mode != "" {
+		return agentbackend.State{}, fmt.Errorf("claude backend does not accept Patch.Mode (codex-only)")
+	}
+	native := Patch{
+		AllowPresets: p.Presets,
+		AllowAdd:     p.AllowAdd,
+		AllowRemove:  p.AllowRemove,
+		DenyAdd:      p.DenyAdd,
+		DenyRemove:   p.DenyRemove,
+	}
+	st, err := s.PatchNative(native)
+	if err != nil {
+		return agentbackend.State{}, err
+	}
+	return agentbackend.State{
+		Backend: agentbackend.KindClaude,
+		Path:    st.Path,
+		Allow:   st.Allow,
+		Deny:    st.Deny,
+	}, nil
+}
+
+// --- internal helpers ---
 
 func (s *Store) readDoc() (map[string]json.RawMessage, error) {
 	data, err := os.ReadFile(s.Path())

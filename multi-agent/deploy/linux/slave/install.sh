@@ -55,6 +55,7 @@ DESC=""
 TAGS=()
 API_KEY=""
 ANTHROPIC_KEY=""
+AGENT="${LOOM_AGENT_KIND:-claude}"
 OBSERVER_URL=""
 WORKSPACE_ID="ws-default"
 
@@ -68,6 +69,7 @@ while (( $# )); do
     --tag)            TAGS+=("$2"); shift 2 ;;
     --api-key)        API_KEY="$2"; shift 2 ;;
     --anthropic-key)  ANTHROPIC_KEY="$2"; shift 2 ;;
+    --agent)          AGENT="$2"; shift 2 ;;
     --bin)            BIN_OVERRIDE="$2"; shift 2 ;;
     --observer-url)   OBSERVER_URL="$2"; shift 2 ;;
     --workspace)      WORKSPACE_ID="$2"; shift 2 ;;
@@ -78,6 +80,7 @@ done
 
 [[ -n "$NAME"         ]] || { echo "ERROR: --name is required" >&2; exit 2; }
 [[ -n "$OBSERVER_URL" ]] || { echo "ERROR: --observer-url is required (e.g. http://observer.example.com:8090)" >&2; exit 2; }
+case "$AGENT" in claude|codex) ;; *) echo "ERROR: --agent must be claude or codex" >&2; exit 2 ;; esac
 
 # Resolve service user home
 SERVICE_USER_HOME="$(getent passwd "$SERVICE_USER" | cut -d: -f6)"
@@ -103,6 +106,27 @@ BIN="${BIN_OVERRIDE:-$BIN_DIR/$BIN_NAME}"
   exit 2
 }
 
+# Install agent CLI if missing
+if [[ "$AGENT" == "claude" ]]; then
+  if ! command -v claude >/dev/null 2>&1; then
+    if command -v npm >/dev/null 2>&1; then
+      echo "==> installing claude code CLI (npm i -g @anthropic-ai/claude-code)"
+      npm install -g @anthropic-ai/claude-code
+    else
+      echo "WARN: 'claude' not in PATH and 'npm' unavailable — install Node + 'npm i -g @anthropic-ai/claude-code'"
+    fi
+  fi
+else
+  if ! command -v codex >/dev/null 2>&1; then
+    if command -v npm >/dev/null 2>&1; then
+      echo "==> installing openai codex CLI (npm i -g @openai/codex)"
+      npm install -g @openai/codex || echo "WARN: codex install failed (requires Node >= 22); install manually"
+    else
+      echo "WARN: 'codex' not in PATH and 'npm' unavailable — install Node >= 22 + 'npm i -g @openai/codex'"
+    fi
+  fi
+fi
+
 # Host resources for the discovery card
 CPU_CORES="$(nproc 2>/dev/null || echo 1)"
 MEMORY_GB="$(awk '/MemTotal/ {printf "%d", $2/1024/1024+0.5}' /proc/meminfo 2>/dev/null || echo 1)"
@@ -110,10 +134,18 @@ TAG_LINES=""
 for t in "${TAGS[@]:-linux}"; do TAG_LINES+="    - $t"$'\n'; done
 [[ -z "$TAG_LINES" ]] && TAG_LINES="    - linux"$'\n'
 
+# Build agent block for template substitution
+if [[ "$AGENT" == "claude" ]]; then
+  AGENT_BLOCK="agent:\n  kind: claude\n\nclaude:\n  bin: claude\n  workdir: $LOOM_HOME\n  extra_args: []"
+else
+  AGENT_BLOCK="agent:\n  kind: codex\n\ncodex:\n  bin: codex\n  workdir: $LOOM_HOME\n  extra_args: []"
+fi
+
 # Render config
 CONFIG_OUT="$(mktemp)"
 sed \
   -e "s|__AGENT_NAME__|$NAME|g" \
+  -e "s|__AGENT_KIND__|$AGENT|g" \
   -e "s|__LOOM_HOME__|$LOOM_HOME|g" \
   -e "s|__DESCRIPTION__|$DESC|g" \
   -e "s|__CPU_CORES__|$CPU_CORES|g" \
@@ -123,12 +155,15 @@ sed \
   -e "s|__WORKSPACE_ID__|$WORKSPACE_ID|g" \
   "$HERE/config.yaml.template" > "$CONFIG_OUT"
 
-# Replace the placeholder tag block with the user-supplied tags
-python3 - "$CONFIG_OUT" "$TAG_LINES" <<'PY'
+# Replace multiline placeholders and tag block via python3
+python3 - "$CONFIG_OUT" "$TAG_LINES" "$AGENT_BLOCK" <<'PY'
 import sys, pathlib
 p = pathlib.Path(sys.argv[1])
 text = p.read_text()
 text = text.replace("    - __TAG__                       # add more tags as needed\n", sys.argv[2])
+# Expand the __AGENT_BLOCK__ placeholder (escape sequences from bash \n)
+agent_block = sys.argv[3].replace("\\n", "\n")
+text = text.replace("__AGENT_BLOCK__", agent_block)
 p.write_text(text)
 PY
 
