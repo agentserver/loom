@@ -12,7 +12,7 @@
 #   bash <(curl -fsSL .../bootstrap-observer.sh) \
 #     --name obs-prod --systemd  # systemd-managed (needs sudo)
 #
-# Layout after install:
+# Layout after install (default — see --loom-home below to override):
 #   ~/.loom/<NAME>/
 #     ├── observer-server      # amd64/arm64 binary, 0755
 #     ├── observer.yaml        # 0600, rendered
@@ -21,6 +21,11 @@
 #
 # With --systemd: also writes /etc/systemd/system/observer-<NAME>.service
 # and enables + starts it.
+#
+# --loom-home PATH overrides the install dir (default: $HOME/.loom/<NAME>).
+# Use `--loom-home .` to install in the current directory, or any absolute /
+# relative path. Resolved to an absolute path before being baked into the
+# systemd unit so it survives WorkingDirectory / ExecStart.
 #
 # Required release asset at $RELEASE_BASE:
 #   observer-server.linux-{amd64,arm64}
@@ -35,6 +40,7 @@ LISTEN_ADDR="${LOOM_LISTEN_ADDR:-:8090}"
 WORKSPACE_ID="${LOOM_WORKSPACE_ID:-ws-default}"
 WORKSPACE_NAME=""
 API_KEY="${LOOM_API_KEY:-}"
+LOOM_HOME_OVERRIDE=""
 USE_SYSTEMD=0
 
 while (( $# )); do
@@ -44,6 +50,7 @@ while (( $# )); do
     --workspace)       WORKSPACE_ID="$2"; shift 2 ;;
     --workspace-name)  WORKSPACE_NAME="$2"; shift 2 ;;
     --api-key)         API_KEY="$2"; shift 2 ;;
+    --loom-home)       LOOM_HOME_OVERRIDE="$2"; shift 2 ;;
     --systemd)         USE_SYSTEMD=1; shift ;;
     --release)         RELEASE_TAG="$2"; RELEASE_BASE="https://github.com/agentserver/loom/releases/download/${RELEASE_TAG}"; shift 2 ;;
     -h|--help)         sed -n '2,28p' "$0"; exit 0 ;;
@@ -61,7 +68,9 @@ case "$arch" in
   *) echo "ERROR: unsupported arch $arch" >&2; exit 2 ;;
 esac
 
-LOOM_HOME="$HOME/.loom/$NAME"
+LOOM_HOME="${LOOM_HOME_OVERRIDE:-$HOME/.loom/$NAME}"
+mkdir -p "$LOOM_HOME"
+LOOM_HOME="$(cd "$LOOM_HOME" && pwd -P)"
 
 echo "==> ensuring deps (curl)"
 if command -v apt-get >/dev/null 2>&1; then

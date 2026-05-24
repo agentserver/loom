@@ -13,7 +13,7 @@
 #   bash <(curl -fsSL .../bootstrap-slave.sh) \
 #     --name slave-myhost --systemd  # systemd-managed (Linux only; needs sudo)
 #
-# Layout after install:
+# Layout after install (default — see --loom-home below to override):
 #   ~/.loom/<NAME>/
 #     ├── slave-agent          # amd64/arm64 binary, 0755
 #     ├── config.yaml          # 0600, rendered
@@ -23,6 +23,11 @@
 #
 # With --systemd: also writes /etc/systemd/system/slave-agent-<NAME>.service
 # and enables + starts it.
+#
+# --loom-home PATH overrides the install dir (default: $HOME/.loom/<NAME>).
+# Use `--loom-home .` to install in the current directory, or any absolute /
+# relative path. Resolved to an absolute path before being baked into the
+# systemd unit so it survives WorkingDirectory / ExecStart.
 #
 # Required release asset at $RELEASE_BASE:
 #   slave-agent.linux-{arm64,amd64}
@@ -41,6 +46,7 @@ WORKSPACE_ID="${LOOM_WORKSPACE_ID:-ws-default}"
 API_KEY="${LOOM_API_KEY:-}"
 ANTHROPIC_KEY="${LOOM_ANTHROPIC_KEY:-}"
 AGENT="${LOOM_AGENT_KIND:-claude}"
+LOOM_HOME_OVERRIDE=""
 DESC=""
 TAGS=()
 USE_SYSTEMD=0
@@ -53,6 +59,7 @@ while (( $# )); do
     --api-key)       API_KEY="$2"; shift 2 ;;
     --anthropic-key) ANTHROPIC_KEY="$2"; shift 2 ;;
     --agent)         AGENT="$2"; shift 2 ;;
+    --loom-home)     LOOM_HOME_OVERRIDE="$2"; shift 2 ;;
     --tag)           TAGS+=("$2"); shift 2 ;;
     --desc)          DESC="$2"; shift 2 ;;
     --systemd)       USE_SYSTEMD=1; shift ;;
@@ -75,7 +82,9 @@ case "$arch" in
   *) echo "ERROR: unsupported arch $arch" >&2; exit 2 ;;
 esac
 
-LOOM_HOME="$HOME/.loom/$NAME"
+LOOM_HOME="${LOOM_HOME_OVERRIDE:-$HOME/.loom/$NAME}"
+mkdir -p "$LOOM_HOME"
+LOOM_HOME="$(cd "$LOOM_HOME" && pwd -P)"
 CPU_CORES="$(nproc 2>/dev/null || echo 1)"
 MEMORY_GB="$(awk '/MemTotal/ {printf "%d", $2/1024/1024+0.5}' /proc/meminfo 2>/dev/null || echo 1)"
 
