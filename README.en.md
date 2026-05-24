@@ -56,8 +56,16 @@ device-code OAuth on the driver host. For a Codex driver, also run `codex login`
 (or `export OPENAI_API_KEY=...`) and invoke `codex` once in the project dir to
 add it to the trust list. On the slave, the first start prints a device-code URL
 on stderr — approve it in a browser and the slave writes the issued sandbox /
-tunnel credentials back into `config.yaml`, then registers with observer. Full
-flag reference and the non-bootstrap install path live at
+tunnel credentials back into `config.yaml`, then registers with observer.
+
+Codex CLI accepts any OpenAI-compatible endpoint via `[model_providers.<name>]`
+in `~/.codex/config.toml` (symmetric to pointing Claude Code at
+`ANTHROPIC_BASE_URL=...`) — useful for self-hosted gateways. See
+[`multi-agent/deploy/agent-backends.md`](multi-agent/deploy/agent-backends.md)
+for the example block, container-deployment caveats (project-scoped
+`.codex/config.toml` needs a trust prompt that can't fire in containers; mount
+the global config instead), and `permissions`-skill JSON examples for both
+backends. Full flag reference and the non-bootstrap install path live at
 [`multi-agent/deploy/README.md`](multi-agent/deploy/README.md).
 
 ## Topology

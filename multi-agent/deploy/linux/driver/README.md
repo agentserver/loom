@@ -96,6 +96,16 @@ claude
 - Codex's permissions model is coarser than Claude's. The `permissions`
   skill exposes presets (`file_write`, `full_access`, ...) and the
   three sandbox modes (`ask`, `workspace-write`, `full-access`).
+- **Self-hosted endpoint**: codex CLI accepts any OpenAI-compatible URL
+  via `[model_providers.<name>]` in `~/.codex/config.toml`. Same pattern as
+  pointing Claude at `ANTHROPIC_BASE_URL=...`. Example block + env in
+  [`../../agent-backends.md`](../../agent-backends.md).
+- **In containers**: the trusted-dir prompt can't fire non-interactively, so
+  mount a fully-populated **global** `/root/.codex/config.toml` (both
+  `[model_providers.<name>]` and `[mcp_servers.driver]`) instead of relying
+  on the project-scoped `.codex/config.toml`. The container itself runs
+  with `sleep infinity` as PID 1 and you `docker exec ... codex exec ...`
+  per task — codex isn't a daemon.
 
 ## Why no systemd unit?
 
