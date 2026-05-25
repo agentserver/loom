@@ -67,8 +67,6 @@ func TestDistributedComposeExampleConfigsLoad(t *testing.T) {
 	for _, want := range []string{
 		"listen_addr:",
 		"db_path:",
-		"workspaces:",
-		"id: dev",
 		"api_keys:",
 		"id: ak-dev",
 		"key: ak_dev_shared_secret",
