@@ -266,6 +266,17 @@ func run(cfgPath string) error {
 			Observer: obs,
 		})
 	}
+	if hasSkill(cfg.Discovery.Skills, "unregister_mcp") {
+		routes["unregister_mcp"] = executor.NewUnregisterMCPExecutor(executor.UnregisterMCPConfig{
+			WorkDir: workdir,
+			MCPExec: mcpExec,
+			Republish: func(ctx context.Context) error {
+				refreshCapabilities(ctx, "unregister_mcp removed MCP server")
+				return tn.PublishCard(ctx)
+			},
+			Observer: obs,
+		})
+	}
 	d := dispatch.New(routes, refreshingJournal{
 		base: j,
 		refresh: func(ctx context.Context, reason string) error {
