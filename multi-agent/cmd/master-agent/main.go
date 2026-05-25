@@ -79,6 +79,7 @@ func run(cfgPath string) error {
 		Enabled:        cfg.Observer.Enabled,
 		URL:            cfg.Observer.URL,
 		WorkspaceID:    cfg.Observer.WorkspaceID,
+		WorkspaceName:  cfg.Observer.WorkspaceName,
 		AgentID:        cfg.Observer.AgentID,
 		AgentRole:      observer.RoleMaster,
 		APIKey:         cfg.Observer.APIKey,

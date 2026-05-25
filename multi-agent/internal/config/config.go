@@ -84,6 +84,7 @@ type Observer struct {
 	Enabled        bool   `yaml:"enabled"`
 	URL            string `yaml:"url"`
 	WorkspaceID    string `yaml:"workspace_id"`
+	WorkspaceName  string `yaml:"workspace_name,omitempty"`
 	AgentID        string `yaml:"agent_id"`
 	APIKey         string `yaml:"api_key"`
 	TokenStatePath string `yaml:"token_state_path"`

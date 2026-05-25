@@ -145,6 +145,7 @@ func runServe(args []string) {
 		Enabled:        cfg.Observer.Enabled,
 		URL:            cfg.Observer.URL,
 		WorkspaceID:    cfg.Observer.WorkspaceID,
+		WorkspaceName:  cfg.Observer.WorkspaceName,
 		AgentID:        cfg.Observer.AgentID,
 		AgentRole:      observer.RoleDriver,
 		APIKey:         cfg.Observer.APIKey,

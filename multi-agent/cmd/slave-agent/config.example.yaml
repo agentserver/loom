@@ -41,6 +41,7 @@ observer:
   enabled: false
   url: https://observer.example.com
   workspace_id: ws-replace-me
+  workspace_name: ""  # optional; recorded only when this workspace is first created
   agent_id: slave-local
   api_key: ak_REPLACE_ME
   token_state_path: /var/lib/loom/slave-local/observer.token

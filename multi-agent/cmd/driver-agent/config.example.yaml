@@ -30,6 +30,7 @@ observer:
   enabled: false
   url: https://observer.example.com
   workspace_id: ws-replace-me
+  workspace_name: ""  # optional; recorded only when this workspace is first created
   agent_id: driver-local
   api_key: ak_REPLACE_ME
   token_state_path: /var/lib/loom/driver-local/observer.token
