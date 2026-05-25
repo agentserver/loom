@@ -371,13 +371,13 @@ func (s *Store) UpsertAPIKey(spec APIKeySpec) error {
 	if spec.Key == "" {
 		return errors.New("observerstore: api key value must not be empty")
 	}
+	// created_at is insert-only.
 	_, err := s.db.Exec(
 		`INSERT INTO api_keys(id, key_hash, note, created_at)
          VALUES(?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
             key_hash = excluded.key_hash,
-            note = excluded.note,
-            created_at = excluded.created_at`,
+            note = excluded.note`,
 		spec.ID, tokenHash(spec.Key), spec.Note, nowUTC(),
 	)
 	return err
@@ -405,6 +405,9 @@ func (s *Store) LookupAPIKey(key string) (keyID string, ok bool, err error) {
 // ReplaceAPIKeys deletes all existing api_keys rows then inserts the supplied
 // set, in one transaction. Called once at observer boot to reconcile yaml<->db.
 func (s *Store) ReplaceAPIKeys(keys []APIKeySpec) error {
+	if len(keys) == 0 {
+		return errors.New("observerstore: ReplaceAPIKeys: refusing to replace with empty set (would lock out all agents)")
+	}
 	seenID := map[string]bool{}
 	seenHash := map[string]bool{}
 	for i, k := range keys {

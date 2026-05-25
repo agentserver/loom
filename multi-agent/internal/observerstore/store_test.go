@@ -926,6 +926,44 @@ func TestReplaceAPIKeysRejectsDuplicates(t *testing.T) {
 	require.ErrorContains(t, err, "duplicate api key value")
 }
 
+func TestUpsertAPIKeyRejectsEmptyID(t *testing.T) {
+	st := testStore(t)
+	err := st.UpsertAPIKey(APIKeySpec{ID: "", Key: "k"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "id must not be empty")
+}
+
+func TestUpsertWorkspaceLazyRejectsEmptyAPIKeyID(t *testing.T) {
+	st := testStore(t)
+	err := st.UpsertWorkspaceLazy("ws-x", "X", "")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "apiKeyID must not be empty")
+}
+
+func TestUpsertAgentRejectsEmptyAPIKeyID(t *testing.T) {
+	st := testStore(t)
+	err := st.UpsertAgent(Agent{WorkspaceID: "ws-x", ID: "a", Role: "slave", DisplayName: "A"}, "tok", "")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "apiKeyID must not be empty")
+}
+
+func TestReplaceAPIKeysRejectsEmpty(t *testing.T) {
+	st := testStore(t)
+	require.NoError(t, st.UpsertAPIKey(APIKeySpec{ID: "ak-keep", Key: "keepkey"}))
+
+	err := st.ReplaceAPIKeys(nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "refusing to replace with empty set")
+
+	err = st.ReplaceAPIKeys([]APIKeySpec{})
+	require.Error(t, err)
+
+	// existing key untouched
+	_, ok, err := st.LookupAPIKey("keepkey")
+	require.NoError(t, err)
+	require.True(t, ok)
+}
+
 func TestApplyAggregate_DeletesMCPServerOnRemoved(t *testing.T) {
 	s := testStore(t)
 	defer s.Close()
