@@ -3,6 +3,7 @@ package observerclient
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -85,7 +86,7 @@ func TestRegisterPostsAPIKeyAndAgentDetails(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	token, ws, err := register(ctx, &http.Client{Timeout: 2 * time.Second}, srv.URL, "ak_secret", "slave-a", "slave", "Slave A")
+	token, ws, err := register(ctx, &http.Client{Timeout: 2 * time.Second}, srv.URL, "ak_secret", "slave-a", "slave", "Slave A", "ws-1", "")
 	require.NoError(t, err)
 	require.Equal(t, "tk_issued", token)
 	require.Equal(t, "ws-1", ws)
@@ -106,7 +107,7 @@ func TestRegisterStrips_TrailingSlashOnURL(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	_, _, err := register(ctx, http.DefaultClient, srv.URL+"/", "ak", "agent", "slave", "")
+	_, _, err := register(ctx, http.DefaultClient, srv.URL+"/", "ak", "agent", "slave", "", "ws-test", "")
 	require.NoError(t, err)
 }
 
@@ -117,7 +118,7 @@ func TestRegisterSurfacesNon2xxAsError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, _, err := register(context.Background(), http.DefaultClient, srv.URL, "ak_bad", "agent", "slave", "")
+	_, _, err := register(context.Background(), http.DefaultClient, srv.URL, "ak_bad", "agent", "slave", "", "ws-test", "")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "403")
 	require.Contains(t, err.Error(), "invalid api key")
@@ -128,7 +129,7 @@ func TestRegisterNetworkFailureReturnsError(t *testing.T) {
 	url := srv.URL
 	srv.Close()
 
-	_, _, err := register(context.Background(), &http.Client{Timeout: 200 * time.Millisecond}, url, "ak", "agent", "slave", "")
+	_, _, err := register(context.Background(), &http.Client{Timeout: 200 * time.Millisecond}, url, "ak", "agent", "slave", "", "ws-test", "")
 	require.Error(t, err)
 }
 
@@ -140,11 +141,31 @@ func TestRegisterDefaultsDisplayNameWhenEmpty(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, _, err := register(context.Background(), http.DefaultClient, srv.URL, "ak", "agent-x", "slave", "")
+	_, _, err := register(context.Background(), http.DefaultClient, srv.URL, "ak", "agent-x", "slave", "", "ws-test", "")
 	require.NoError(t, err)
 	_, present := gotBody["display_name"]
 	require.True(t, present)
 	require.Equal(t, "", gotBody["display_name"])
+}
+
+func TestRegister_SendsWorkspaceFieldsInBody(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		require.NoError(t, err)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"token":"t1","workspace_id":"ws-x","agent_id":"a","role":"slave","display_name":"a"}`))
+	}))
+	defer srv.Close()
+
+	ctx := context.Background()
+	_, _, err := register(ctx, &http.Client{Timeout: 2 * time.Second},
+		srv.URL, "apikey", "a", "slave", "a", "ws-x", "Test Name")
+	require.NoError(t, err)
+	require.JSONEq(t,
+		`{"agent_id":"a","role":"slave","display_name":"a","workspace_id":"ws-x","workspace_name":"Test Name"}`,
+		string(gotBody))
 }
 
 var _ = strings.NewReader

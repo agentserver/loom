@@ -25,6 +25,7 @@ type Config struct {
 	Enabled        bool
 	URL            string
 	WorkspaceID    string
+	WorkspaceName  string // optional; first-writer-wins at observer
 	AgentID        string
 	AgentRole      string
 	APIKey         string

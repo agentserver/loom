@@ -48,9 +48,11 @@ func readTokenFile(path string) (token string, ok bool, err error) {
 }
 
 type registerRequest struct {
-	AgentID     string `json:"agent_id"`
-	Role        string `json:"role"`
-	DisplayName string `json:"display_name"`
+	AgentID       string `json:"agent_id"`
+	Role          string `json:"role"`
+	DisplayName   string `json:"display_name"`
+	WorkspaceID   string `json:"workspace_id"`
+	WorkspaceName string `json:"workspace_name,omitempty"`
 }
 
 type registerResponse struct {
@@ -67,12 +69,14 @@ type registerResponse struct {
 func register(
 	ctx context.Context,
 	httpc *http.Client,
-	baseURL, apiKey, agentID, role, displayName string,
-) (token, workspaceID string, err error) {
+	baseURL, apiKey, agentID, role, displayName, workspaceID, workspaceName string,
+) (token, workspaceIDReturned string, err error) {
 	body, _ := json.Marshal(registerRequest{
-		AgentID:     agentID,
-		Role:        role,
-		DisplayName: displayName,
+		AgentID:       agentID,
+		Role:          role,
+		DisplayName:   displayName,
+		WorkspaceID:   workspaceID,
+		WorkspaceName: workspaceName,
 	})
 	url := strings.TrimRight(baseURL, "/") + "/api/agents/register"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -117,7 +121,7 @@ func (c *Client) loadOrRegister(ctx context.Context) (string, error) {
 
 	httpc := &http.Client{Timeout: registerTimeout}
 	tok, ws, err := register(regCtx, httpc, c.cfg.URL, c.cfg.APIKey,
-		c.cfg.AgentID, c.cfg.AgentRole, c.cfg.AgentID)
+		c.cfg.AgentID, c.cfg.AgentRole, c.cfg.AgentID, c.cfg.WorkspaceID, c.cfg.WorkspaceName)
 	if err != nil {
 		return "", err
 	}
@@ -152,7 +156,7 @@ func (c *Client) handle401(ctx context.Context) {
 
 	httpc := &http.Client{Timeout: registerTimeout}
 	tok, _, err := register(regCtx, httpc, c.cfg.URL, c.cfg.APIKey,
-		c.cfg.AgentID, c.cfg.AgentRole, c.cfg.AgentID)
+		c.cfg.AgentID, c.cfg.AgentRole, c.cfg.AgentID, c.cfg.WorkspaceID, c.cfg.WorkspaceName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "observerclient: ingest 401 → re-register failed: %v\n", err)
 		return
