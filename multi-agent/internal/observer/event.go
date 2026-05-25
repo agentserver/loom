@@ -35,6 +35,7 @@ const (
 	EventSlaveTaskFailed          = "slave_task_failed"
 	EventSlaveRegisterMCPProgress = "slave_register_mcp_progress"
 	EventMCPServerCreated         = "mcp_server_created"
+	EventMCPServerRemoved         = "mcp_server_removed"
 	EventMCPServerBlocked         = "mcp_server_blocked"
 )
 
