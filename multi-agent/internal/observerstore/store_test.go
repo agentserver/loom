@@ -1105,3 +1105,41 @@ func TestListWorkspaceSummaries(t *testing.T) {
 	}
 	require.Equal(t, []string{"ws-b", "ws-a"}, ids, "ordered by last_seen_at DESC")
 }
+
+func TestListEventsForWorkspace_FiltersByWorkspace(t *testing.T) {
+	st := testStore(t)
+	require.NoError(t, st.UpsertAPIKey(APIKeySpec{ID: "ak-2", Key: "k2"}))
+	require.NoError(t, st.UpsertWorkspaceLazy("ws-other", "Other", "ak-2"))
+	require.NoError(t, st.UpsertAgent(Agent{WorkspaceID: "ws-other", ID: "other-driver", Role: observer.RoleDriver, DisplayName: "OD"}, "other-driver-tok", "ak-2"))
+
+	// Ingest 2 events in ws1, 1 event in ws-other.
+	require.NoError(t, st.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "t1",
+	}))
+	require.NoError(t, st.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave", AgentRole: observer.RoleSlave,
+		Type: observer.EventSlaveTaskStarted, TaskID: "t1",
+	}))
+	require.NoError(t, st.Ingest(observer.Event{
+		WorkspaceID: "ws-other", AgentID: "other-driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "t-other",
+	}))
+
+	ws1Events, err := st.ListEventsForWorkspace("ws1")
+	require.NoError(t, err)
+	require.Len(t, ws1Events, 2, "ws1 must have exactly 2 events")
+	for _, ev := range ws1Events {
+		require.Equal(t, "ws1", ev.WorkspaceID)
+	}
+
+	otherEvents, err := st.ListEventsForWorkspace("ws-other")
+	require.NoError(t, err)
+	require.Len(t, otherEvents, 1, "ws-other must have exactly 1 event")
+	require.Equal(t, "ws-other", otherEvents[0].WorkspaceID)
+	require.Equal(t, "t-other", otherEvents[0].TaskID)
+
+	emptyEvents, err := st.ListEventsForWorkspace("ws-nonexistent")
+	require.NoError(t, err)
+	require.Empty(t, emptyEvents, "unknown workspace must return empty slice, not error")
+}

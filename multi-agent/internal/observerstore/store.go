@@ -545,6 +545,47 @@ func (s *Store) ValidateToken(token string) (Agent, bool, error) {
 	return a, true, nil
 }
 
+// ListEventsForWorkspace returns all events for the given workspace ordered
+// by ts ASC. Used by tests to verify cross-workspace isolation.
+func (s *Store) ListEventsForWorkspace(workspaceID string) ([]observer.Event, error) {
+	rows, err := s.db.Query(`
+		SELECT event_id, ts, workspace_id, agent_id, agent_role, type, task_id,
+		       COALESCE(parent_task_id, ''), COALESCE(subtask_id, ''), COALESCE(child_task_id, ''),
+		       COALESCE(summary, ''), COALESCE(subtask_summary, ''), COALESCE(status, ''),
+		       COALESCE(target_agent_id, ''), COALESCE(target_role, ''), COALESCE(mcp_server_name, ''),
+		       COALESCE(mcp_tools, '[]'), COALESCE(payload, '')
+		  FROM events
+		 WHERE workspace_id = ?
+		 ORDER BY ts ASC, event_id ASC
+	`, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []observer.Event
+	for rows.Next() {
+		var ev observer.Event
+		var tools, payload string
+		if err := rows.Scan(
+			&ev.EventID, &ev.TS, &ev.WorkspaceID, &ev.AgentID, &ev.AgentRole, &ev.Type, &ev.TaskID,
+			&ev.ParentTaskID, &ev.SubtaskID, &ev.ChildTaskID,
+			&ev.Summary, &ev.SubtaskSummary, &ev.Status,
+			&ev.TargetAgentID, &ev.TargetRole, &ev.MCPServerName,
+			&tools, &payload,
+		); err != nil {
+			return nil, err
+		}
+		if tools != "" && tools != "null" {
+			_ = json.Unmarshal([]byte(tools), &ev.MCPTools)
+		}
+		if payload != "" {
+			ev.Payload = json.RawMessage(payload)
+		}
+		out = append(out, ev)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) EventCount() (int, error) {
 	var count int
 	err := s.db.QueryRow(`SELECT count(*) FROM events`).Scan(&count)

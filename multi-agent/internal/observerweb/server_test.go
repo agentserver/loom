@@ -795,6 +795,65 @@ func TestListWorkspaces_HappyPath(t *testing.T) {
 	require.Equal(t, "ws-2", got[0].ID, "ordered by last_seen DESC")
 }
 
+// ---------------------------------------------------------------------------
+// E2E multi-workspace isolation (Task 9)
+// ---------------------------------------------------------------------------
+
+func ingestEvent(t *testing.T, h http.Handler, token, wsID, agentID, role, eventType, taskID string) {
+	t.Helper()
+	body, _ := json.Marshal(observer.Event{
+		WorkspaceID: wsID,
+		AgentID:     agentID,
+		AgentRole:   role,
+		Type:        eventType,
+		TaskID:      taskID,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusAccepted, rr.Code, "ingest body=%s", rr.Body.String())
+}
+
+func TestE2E_MultiWorkspaceIsolation(t *testing.T) {
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-1", "key1")
+
+	// Register 3 agents across 2 workspaces.
+	bodyA := postRegister(t, h, "key1",
+		`{"agent_id":"driver-A","role":"driver","workspace_id":"ws-personal","workspace_name":"Personal"}`,
+		http.StatusOK)
+	bodyB := postRegister(t, h, "key1",
+		`{"agent_id":"slave-A","role":"slave","workspace_id":"ws-personal"}`,
+		http.StatusOK)
+	bodyC := postRegister(t, h, "key1",
+		`{"agent_id":"slave-W","role":"slave","workspace_id":"ws-work","workspace_name":"Work"}`,
+		http.StatusOK)
+	tokA, tokB, tokC := extractToken(t, bodyA), extractToken(t, bodyB), extractToken(t, bodyC)
+
+	// Each emits an event in its own workspace.
+	ingestEvent(t, h, tokA, "ws-personal", "driver-A", "driver", observer.EventDriverTaskSubmitted, "personal-task-1")
+	ingestEvent(t, h, tokB, "ws-personal", "slave-A", "slave", observer.EventSlaveTaskStarted, "personal-task-1")
+	ingestEvent(t, h, tokC, "ws-work", "slave-W", "slave", observer.EventSlaveTaskStarted, "work-task-1")
+
+	// GET /api/workspaces returns both, ordered by last_seen DESC.
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/workspaces", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	var sums []observerstore.WorkspaceSummary
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &sums))
+	require.Len(t, sums, 2)
+
+	// Verify cross-workspace isolation via Store's public read.
+	personalEvents, err := st.ListEventsForWorkspace("ws-personal")
+	require.NoError(t, err)
+	workEvents, err := st.ListEventsForWorkspace("ws-work")
+	require.NoError(t, err)
+	require.Len(t, personalEvents, 2, "ws-personal must have exactly 2 events")
+	require.Len(t, workEvents, 1, "ws-work must have exactly 1 event")
+}
+
 func TestListWorkspaces_WebTokenGuard(t *testing.T) {
 	t.Setenv("OBSERVER_WEB_TOKEN", "secret")
 	h, _ := newTestHandler(t)
