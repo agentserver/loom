@@ -1007,3 +1007,31 @@ func TestApplyAggregate_RemovedOnMissingIsNoop(t *testing.T) {
 		MCPServerName: "nonexistent",
 	}))
 }
+
+func TestUpsertWorkspaceLazy_FirstWriterDefinesName(t *testing.T) {
+	st := testStore(t)
+	require.NoError(t, st.UpsertAPIKey(APIKeySpec{ID: "ak-1", Key: "k1"}))
+
+	require.NoError(t, st.UpsertWorkspaceLazy("ws-x", "First Name", "ak-1"))
+	require.NoError(t, st.UpsertWorkspaceLazy("ws-x", "Second Name", "ak-1"))
+
+	var name string
+	require.NoError(t, st.db.QueryRow(`SELECT name FROM workspaces WHERE id=?`, "ws-x").Scan(&name))
+	require.Equal(t, "First Name", name, "second call must not overwrite name")
+}
+
+func TestUpsertWorkspaceLazy_BumpsLastSeen(t *testing.T) {
+	st := testStore(t)
+	require.NoError(t, st.UpsertAPIKey(APIKeySpec{ID: "ak-1", Key: "k1"}))
+
+	require.NoError(t, st.UpsertWorkspaceLazy("ws-y", "Y", "ak-1"))
+	var firstSeen string
+	require.NoError(t, st.db.QueryRow(`SELECT last_seen_at FROM workspaces WHERE id=?`, "ws-y").Scan(&firstSeen))
+
+	time.Sleep(10 * time.Millisecond)
+	require.NoError(t, st.UpsertWorkspaceLazy("ws-y", "Y", "ak-1"))
+
+	var secondSeen string
+	require.NoError(t, st.db.QueryRow(`SELECT last_seen_at FROM workspaces WHERE id=?`, "ws-y").Scan(&secondSeen))
+	require.NotEqual(t, firstSeen, secondSeen, "last_seen_at must bump on every upsert")
+}
