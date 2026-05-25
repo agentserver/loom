@@ -909,6 +909,8 @@ func applyAggregate(tx *sql.Tx, ev observer.Event) error {
 		return upsertSlaveTask(tx, ev)
 	case observer.EventMCPServerCreated:
 		return upsertMCPServer(tx, ev)
+	case observer.EventMCPServerRemoved:
+		return deleteMCPServer(tx, ev)
 	case observer.EventMCPServerBlocked, observer.EventMasterMCPReplan:
 		return applyMCPStatus(tx, ev)
 	default:
@@ -1154,6 +1156,12 @@ func upsertMCPServer(tx *sql.Tx, ev observer.Event) error {
 		_, err = tx.Exec(`UPDATE subtasks SET mcp_status='created', updated_at=? WHERE workspace_id=? AND parent_task_id=? AND subtask_id=?`,
 			ev.TS, ev.WorkspaceID, parentTaskID, subtaskID)
 	}
+	return err
+}
+
+func deleteMCPServer(tx *sql.Tx, ev observer.Event) error {
+	_, err := tx.Exec(`DELETE FROM mcp_servers WHERE workspace_id=? AND name=?`,
+		ev.WorkspaceID, ev.MCPServerName)
 	return err
 }
 

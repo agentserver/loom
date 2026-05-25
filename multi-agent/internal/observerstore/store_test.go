@@ -933,3 +933,47 @@ func TestReplaceAPIKeysForWorkspaceScopedByWorkspace(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok, "reconciling ws1 should not touch ws2 rows")
 }
+
+func TestApplyAggregate_DeletesMCPServerOnRemoved(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	// Set up: create an mcp_servers row via EventMCPServerCreated.
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave", AgentRole: observer.RoleSlave,
+		Type: observer.EventMCPServerCreated, TaskID: "st1", ParentTaskID: "mt1",
+		MCPServerName: "calc", MCPTools: []string{"add", "sub"},
+	}))
+
+	// Verify the row exists.
+	var count int
+	require.NoError(t, s.db.QueryRow(
+		`SELECT COUNT(*) FROM mcp_servers WHERE workspace_id=? AND name=?`, "ws1", "calc",
+	).Scan(&count))
+	require.Equal(t, 1, count, "mcp_servers row must exist after EventMCPServerCreated")
+
+	// Apply EventMCPServerRemoved (task_id may differ — delete is by workspace_id + name).
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave", AgentRole: observer.RoleSlave,
+		Type: observer.EventMCPServerRemoved, TaskID: "st1",
+		MCPServerName: "calc",
+	}))
+
+	// Verify the row is gone.
+	require.NoError(t, s.db.QueryRow(
+		`SELECT COUNT(*) FROM mcp_servers WHERE workspace_id=? AND name=?`, "ws1", "calc",
+	).Scan(&count))
+	require.Equal(t, 0, count, "mcp_servers row must be deleted after EventMCPServerRemoved")
+}
+
+func TestApplyAggregate_RemovedOnMissingIsNoop(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	// Apply EventMCPServerRemoved against an empty mcp_servers table — must not error.
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave", AgentRole: observer.RoleSlave,
+		Type: observer.EventMCPServerRemoved, TaskID: "st1",
+		MCPServerName: "nonexistent",
+	}))
+}
