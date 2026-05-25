@@ -1071,3 +1071,37 @@ func TestRevokeAPIKey_CascadeDeletesAgents(t *testing.T) {
 	require.NoError(t, st.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE id=?`, "agent-2").Scan(&cnt2))
 	require.Equal(t, 1, cnt2, "agent created by ak-2 must remain")
 }
+
+func TestListWorkspaceSummaries(t *testing.T) {
+	st := testStore(t)
+	require.NoError(t, st.UpsertAPIKey(APIKeySpec{ID: "ak-1", Key: "k1"}))
+	require.NoError(t, st.UpsertWorkspaceLazy("ws-a", "A", "ak-1"))
+	time.Sleep(5 * time.Millisecond)
+	require.NoError(t, st.UpsertWorkspaceLazy("ws-b", "B", "ak-1"))
+	require.NoError(t, st.UpsertAgent(Agent{WorkspaceID: "ws-a", ID: "ag1", Role: "slave", DisplayName: "S"}, "t1", "ak-1"))
+	require.NoError(t, st.UpsertAgent(Agent{WorkspaceID: "ws-a", ID: "ag2", Role: "driver", DisplayName: "D"}, "t2", "ak-1"))
+
+	sums, err := st.ListWorkspaceSummaries()
+	require.NoError(t, err)
+	// testStore creates ws1; we also created ws-a and ws-b
+	// Find ws-b and ws-a by ID in the results
+	byID := map[string]WorkspaceSummary{}
+	for _, s := range sums {
+		byID[s.ID] = s
+	}
+	require.Contains(t, byID, "ws-a")
+	require.Contains(t, byID, "ws-b")
+	require.Equal(t, 2, byID["ws-a"].AgentCount)
+	require.Equal(t, 0, byID["ws-b"].AgentCount)
+	// ws-b was upserted last so should have a later or equal last_seen_at
+	require.GreaterOrEqual(t, byID["ws-b"].LastSeenAt, byID["ws-a"].LastSeenAt,
+		"ws-b upserted after ws-a must have later or equal last_seen_at")
+	// Ordering: ws-b should appear before ws-a (DESC by last_seen_at)
+	var ids []string
+	for _, s := range sums {
+		if s.ID == "ws-a" || s.ID == "ws-b" {
+			ids = append(ids, s.ID)
+		}
+	}
+	require.Equal(t, []string{"ws-b", "ws-a"}, ids, "ordered by last_seen_at DESC")
+}

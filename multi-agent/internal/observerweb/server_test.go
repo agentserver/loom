@@ -15,20 +15,84 @@ import (
 	"github.com/yourorg/multi-agent/internal/observerstore"
 )
 
-func TestPostEventAuthAndViews(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "tok"))
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
 
-	h := New(st)
+// newTestHandler creates a fresh store + HTTP handler pair backed by a
+// temporary on-disk SQLite database (avoids multi-connection ":memory:" issues).
+func newTestHandler(t *testing.T) (http.Handler, *observerstore.Store) {
+	t.Helper()
+	st, err := observerstore.New(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { st.Close() })
+	return New(st), st
+}
+
+// seedAPIKey adds one api_key row to st.
+func seedAPIKey(t *testing.T, st *observerstore.Store, id, key string) {
+	t.Helper()
+	require.NoError(t, st.UpsertAPIKey(observerstore.APIKeySpec{ID: id, Key: key}))
+}
+
+// postRegister POSTs to /api/agents/register and asserts the expected status.
+// Returns the raw body string so callers can inspect it.
+func postRegister(t *testing.T, h http.Handler, apiKey, jsonBody string, wantStatus int) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/register", strings.NewReader(jsonBody))
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, wantStatus, rr.Code, "body=%s", rr.Body.String())
+	return rr.Body.String()
+}
+
+// extractToken decodes a register response body and asserts the token is non-empty.
+func extractToken(t *testing.T, body string) string {
+	t.Helper()
+	var resp struct {
+		Token string `json:"token"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &resp))
+	require.NotEmpty(t, resp.Token)
+	return resp.Token
+}
+
+// seedWorkspaceAndAgents is a helper that sets up a workspace with some agents
+// for tests that don't exercise the register endpoint.
+func seedWorkspaceAndAgents(t *testing.T, st *observerstore.Store) {
+	t.Helper()
+	require.NoError(t, st.UpsertAPIKey(observerstore.APIKeySpec{ID: "ak-seed", Key: "seed-key"}))
+	require.NoError(t, st.UpsertWorkspaceLazy("ws1", "Workspace", "ak-seed"))
+	require.NoError(t, st.UpsertAgent(
+		observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"},
+		"driver-token", "ak-seed",
+	))
+	require.NoError(t, st.UpsertAgent(
+		observerstore.Agent{WorkspaceID: "ws1", ID: "master", Role: observer.RoleMaster, DisplayName: "Master"},
+		"master-token", "ak-seed",
+	))
+	require.NoError(t, st.UpsertAgent(
+		observerstore.Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"},
+		"slave-token", "ak-seed",
+	))
+}
+
+// ---------------------------------------------------------------------------
+// Event / view tests (non-register)
+// ---------------------------------------------------------------------------
+
+func TestPostEventAuthAndViews(t *testing.T) {
+	h, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
+
 	body, _ := json.Marshal(observer.Event{
 		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
 		Type: observer.EventDriverTaskSubmitted, TaskID: "t1", Summary: "build thing", Status: "assigned",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Authorization", "Bearer driver-token")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusAccepted, rr.Code)
@@ -40,54 +104,42 @@ func TestPostEventAuthAndViews(t *testing.T) {
 }
 
 func TestPostEventRejectsWrongAgent(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "tok"))
+	h, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
 
-	h := New(st)
 	body, _ := json.Marshal(observer.Event{
 		WorkspaceID: "ws1", AgentID: "other", AgentRole: observer.RoleDriver,
 		Type: observer.EventDriverTaskSubmitted, TaskID: "t1",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Authorization", "Bearer driver-token")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusForbidden, rr.Code)
 }
 
 func TestPostEventRejectsOversizedBody(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "tok"))
+	h, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
 
-	h := New(st)
 	body := io.LimitReader(bytes.NewReader(append([]byte(`{"summary":"`), bytes.Repeat([]byte("x"), maxEventBodyBytes)...)), maxEventBodyBytes+1)
 	req := httptest.NewRequest(http.MethodPost, "/api/events", body)
-	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Authorization", "Bearer driver-token")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusRequestEntityTooLarge, rr.Code)
 }
 
 func TestPostEventRejectsTrailingJSONValue(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "tok"))
+	h, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
 
-	h := New(st)
 	body, _ := json.Marshal(observer.Event{
 		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
 		Type: observer.EventDriverTaskSubmitted, TaskID: "t1", Summary: "build thing", Status: "assigned",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(append(body, []byte(` {}`)...)))
-	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Authorization", "Bearer driver-token")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusBadRequest, rr.Code)
@@ -98,14 +150,9 @@ func TestPostEventRejectsTrailingJSONValue(t *testing.T) {
 }
 
 func TestArtifactLazyHTTPFlow(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"}, "slave-token"))
+	h, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
 
-	h := New(st)
 	createBody := bytes.NewBufferString(`{"path":"/tmp/input.txt","kind":"file","mime":"text/plain","mode":"lazy"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/artifacts", createBody)
 	req.Header.Set("Authorization", "Bearer driver-token")
@@ -158,14 +205,9 @@ func TestArtifactLazyHTTPFlow(t *testing.T) {
 }
 
 func TestWriteHTTPFlow(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"}, "slave-token"))
+	h, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
 
-	h := New(st)
 	req := httptest.NewRequest(http.MethodPost, "/api/write-tokens", bytes.NewBufferString(`{"task_id":"task-1","path":"/tmp/out.txt","overwrite":true}`))
 	req.Header.Set("Authorization", "Bearer driver-token")
 	rr := httptest.NewRecorder()
@@ -196,13 +238,8 @@ func TestWriteHTTPFlow(t *testing.T) {
 }
 
 func TestAPITasksExposesMCPToolDescriptors(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "master", Role: observer.RoleMaster, DisplayName: "Master"}, "master-token"))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"}, "slave-token"))
+	h, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
 
 	require.NoError(t, st.Ingest(observer.Event{
 		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
@@ -223,7 +260,7 @@ func TestAPITasksExposesMCPToolDescriptors(t *testing.T) {
 	}))
 
 	rr := httptest.NewRecorder()
-	New(st).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/tasks", nil))
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/tasks", nil))
 	require.Equal(t, http.StatusOK, rr.Code)
 
 	var tasks []struct {
@@ -238,12 +275,8 @@ func TestAPITasksExposesMCPToolDescriptors(t *testing.T) {
 }
 
 func TestAPITasksIncludesLatestProgress(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "master", Role: observer.RoleMaster, DisplayName: "Master"}, "master-token"))
+	h, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
 
 	require.NoError(t, st.Ingest(observer.Event{
 		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
@@ -257,7 +290,7 @@ func TestAPITasksIncludesLatestProgress(t *testing.T) {
 	}))
 
 	rr := httptest.NewRecorder()
-	New(st).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/tasks", nil))
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/tasks", nil))
 	require.Equal(t, http.StatusOK, rr.Code)
 
 	var tasks []observerstore.TaskView
@@ -268,14 +301,8 @@ func TestAPITasksIncludesLatestProgress(t *testing.T) {
 }
 
 func TestTaskContractAPI(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "master", Role: observer.RoleMaster, DisplayName: "Master"}, "master-token"))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"}, "slave-token"))
-	h := New(st)
+	h, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
 
 	body := `{"task_id":"task-1","conversation_id":"conv-1","body":{"version":1,"intent":{"goal":"g","success_criteria":["s"]}}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/task-contracts", strings.NewReader(body))
@@ -307,14 +334,8 @@ func TestTaskContractAPI(t *testing.T) {
 }
 
 func TestResourceSnapshotAPIRestrictsRoles(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "master", Role: observer.RoleMaster, DisplayName: "Master"}, "master-token"))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"}, "slave-token"))
-	h := New(st)
+	h, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
 
 	body := `{"snapshot_id":"snap-1","body":{"generated_at":"2026-05-14T00:00:00Z","agents":[]}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/resource-snapshots", strings.NewReader(body))
@@ -343,12 +364,9 @@ func TestResourceSnapshotAPIRestrictsRoles(t *testing.T) {
 }
 
 func TestAPITasksAndEventsExposeValidationFailureEvidence(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "master", Role: observer.RoleMaster, DisplayName: "Master"}, "master-token"))
+	h, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
+
 	require.NoError(t, st.Ingest(observer.Event{
 		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
 		Type: observer.EventDriverTaskSubmitted, TaskID: "mt1", Summary: "build thing",
@@ -361,7 +379,6 @@ func TestAPITasksAndEventsExposeValidationFailureEvidence(t *testing.T) {
 		Payload: json.RawMessage(`{"validation_error":"unknown argument put_url_128","required":true}`),
 	}))
 
-	h := New(st)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/tasks", nil))
 	require.Equal(t, http.StatusOK, rr.Code)
@@ -384,11 +401,9 @@ func TestAPITasksAndEventsExposeValidationFailureEvidence(t *testing.T) {
 }
 
 func TestAPITasksEncodesEmptyCollectionsAsArrays(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
+	h, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
+
 	require.NoError(t, st.Ingest(observer.Event{
 		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
 		Type: observer.EventDriverTaskSubmitted, TaskID: "mt1", Summary: "standalone task",
@@ -396,7 +411,7 @@ func TestAPITasksEncodesEmptyCollectionsAsArrays(t *testing.T) {
 	}))
 
 	rr := httptest.NewRecorder()
-	New(st).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/tasks", nil))
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/tasks", nil))
 	require.Equal(t, http.StatusOK, rr.Code)
 
 	var tasks []struct {
@@ -410,13 +425,9 @@ func TestAPITasksEncodesEmptyCollectionsAsArrays(t *testing.T) {
 }
 
 func TestRolePagesRenderDistinctViewsAndMCPStatus(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "master", Role: observer.RoleMaster, DisplayName: "Master"}, "master-token"))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"}, "slave-token"))
+	h, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
+
 	require.NoError(t, st.Ingest(observer.Event{
 		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
 		Type: observer.EventDriverTaskSubmitted, TaskID: "mt1", Summary: "build thing",
@@ -434,7 +445,6 @@ func TestRolePagesRenderDistinctViewsAndMCPStatus(t *testing.T) {
 		Status: "blocked",
 	}))
 
-	h := New(st)
 	for _, tc := range []struct {
 		path string
 		want string
@@ -452,13 +462,9 @@ func TestRolePagesRenderDistinctViewsAndMCPStatus(t *testing.T) {
 }
 
 func TestRolePagesRenderLatestProgress(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "master", Role: observer.RoleMaster, DisplayName: "Master"}, "master-token"))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"}, "slave-token"))
+	h, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
+
 	require.NoError(t, st.Ingest(observer.Event{
 		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
 		Type: observer.EventDriverTaskSubmitted, TaskID: "mt1", Summary: "build thing",
@@ -481,7 +487,6 @@ func TestRolePagesRenderLatestProgress(t *testing.T) {
 		Payload: json.RawMessage(`{"phase":"build","message":"slave halfway done"}`),
 	}))
 
-	h := New(st)
 	for _, tc := range []struct {
 		path string
 		want string
@@ -499,13 +504,9 @@ func TestRolePagesRenderLatestProgress(t *testing.T) {
 }
 
 func TestSlavesPageFiltersOutDriverOnlyTasks(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "master", Role: observer.RoleMaster, DisplayName: "Master"}, "master-token"))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"}, "slave-token"))
+	h, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
+
 	require.NoError(t, st.Ingest(observer.Event{
 		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
 		Type: observer.EventDriverTaskSubmitted, TaskID: "driver-only", Summary: "driver only",
@@ -524,19 +525,16 @@ func TestSlavesPageFiltersOutDriverOnlyTasks(t *testing.T) {
 	}))
 
 	rr := httptest.NewRecorder()
-	New(st).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/slaves", nil))
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/slaves", nil))
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.NotContains(t, rr.Body.String(), "driver only")
 	require.Contains(t, rr.Body.String(), "with slave")
 }
 
 func TestSlavesPageShowsDirectSlaveTask(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
-	require.NoError(t, st.UpsertAgent(observerstore.Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"}, "slave-token"))
+	h, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
+
 	require.NoError(t, st.Ingest(observer.Event{
 		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
 		Type: observer.EventDriverTaskSubmitted, TaskID: "task-direct", Summary: "run benchmark",
@@ -549,7 +547,7 @@ func TestSlavesPageShowsDirectSlaveTask(t *testing.T) {
 	}))
 
 	rr := httptest.NewRecorder()
-	New(st).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/slaves", nil))
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/slaves", nil))
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.Contains(t, rr.Body.String(), "run benchmark")
 	require.Contains(t, rr.Body.String(), "slave")
@@ -557,23 +555,17 @@ func TestSlavesPageShowsDirectSlaveTask(t *testing.T) {
 	require.Contains(t, rr.Body.String(), "done")
 }
 
+// ---------------------------------------------------------------------------
+// Register endpoint tests
+// ---------------------------------------------------------------------------
+
 func TestRegisterSuccessAndIssuedTokenIngests(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_secret"))
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-default", "ak_secret")
 
-	h := New(st)
-
-	body := bytes.NewBufferString(`{"agent_id":"slave-a","role":"slave","display_name":"Slave A"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/agents/register", body)
-	req.Header.Set("Authorization", "Bearer ak_secret")
-	req.Header.Set("Content-Type", "application/json")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	body := postRegister(t, h, "ak_secret",
+		`{"agent_id":"slave-a","role":"slave","display_name":"Slave A","workspace_id":"ws1"}`,
+		http.StatusOK)
 
 	var resp struct {
 		WorkspaceID string `json:"workspace_id"`
@@ -582,7 +574,7 @@ func TestRegisterSuccessAndIssuedTokenIngests(t *testing.T) {
 		DisplayName string `json:"display_name"`
 		Token       string `json:"token"`
 	}
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.NoError(t, json.Unmarshal([]byte(body), &resp))
 	require.Equal(t, "ws1", resp.WorkspaceID)
 	require.Equal(t, "slave-a", resp.AgentID)
 	require.Equal(t, observer.RoleSlave, resp.Role)
@@ -602,121 +594,77 @@ func TestRegisterSuccessAndIssuedTokenIngests(t *testing.T) {
 }
 
 func TestRegisterDefaultsDisplayNameToAgentID(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_secret"))
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-default", "ak_secret")
 
-	h := New(st)
-	body := bytes.NewBufferString(`{"agent_id":"slave-a","role":"slave"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/agents/register", body)
-	req.Header.Set("Authorization", "Bearer ak_secret")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	body := postRegister(t, h, "ak_secret",
+		`{"agent_id":"slave-a","role":"slave","workspace_id":"ws1"}`,
+		http.StatusOK)
 
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	var resp struct {
 		DisplayName string `json:"display_name"`
 	}
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.NoError(t, json.Unmarshal([]byte(body), &resp))
 	require.Equal(t, "slave-a", resp.DisplayName)
 }
 
 func TestRegisterRejectsBadAPIKey(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_real"))
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-default", "ak_real")
 
-	h := New(st)
-	body := bytes.NewBufferString(`{"agent_id":"slave-a","role":"slave"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/agents/register", body)
-	req.Header.Set("Authorization", "Bearer ak_FAKE")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-	require.Equal(t, http.StatusForbidden, rr.Code)
+	// Bad API key must return 401 (token error), not 403.
+	postRegister(t, h, "ak_FAKE",
+		`{"agent_id":"slave-a","role":"slave","workspace_id":"ws1"}`,
+		http.StatusUnauthorized)
 }
 
 func TestRegisterRejectsMissingBearer(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_real"))
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-default", "ak_real")
 
-	h := New(st)
-	body := bytes.NewBufferString(`{"agent_id":"slave-a","role":"slave"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/agents/register", body)
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/register",
+		bytes.NewBufferString(`{"agent_id":"slave-a","role":"slave","workspace_id":"ws1"}`))
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusUnauthorized, rr.Code)
 }
 
 func TestRegisterRejectsBadRole(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_real"))
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-default", "ak_real")
 
-	h := New(st)
-	body := bytes.NewBufferString(`{"agent_id":"slave-a","role":"hacker"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/agents/register", body)
-	req.Header.Set("Authorization", "Bearer ak_real")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-	require.Equal(t, http.StatusBadRequest, rr.Code)
-	require.Contains(t, rr.Body.String(), "role")
+	body := postRegister(t, h, "ak_real",
+		`{"agent_id":"slave-a","role":"hacker","workspace_id":"ws1"}`,
+		http.StatusBadRequest)
+	require.Contains(t, body, "role")
 }
 
 func TestRegisterRejectsBadAgentID(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_real"))
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-default", "ak_real")
 
-	h := New(st)
 	cases := []string{
-		`{"agent_id":"","role":"slave"}`,                  // empty
-		`{"agent_id":"has space","role":"slave"}`,         // space
-		`{"agent_id":"weird/slash","role":"slave"}`,       // slash
-		`{"agent_id":"` + strings.Repeat("a", 65) + `","role":"slave"}`, // too long
+		`{"agent_id":"","role":"slave","workspace_id":"ws1"}`,                                     // empty
+		`{"agent_id":"has space","role":"slave","workspace_id":"ws1"}`,                            // space
+		`{"agent_id":"weird/slash","role":"slave","workspace_id":"ws1"}`,                          // slash
+		`{"agent_id":"` + strings.Repeat("a", 65) + `","role":"slave","workspace_id":"ws1"}`,     // too long
 	}
 	for _, body := range cases {
-		req := httptest.NewRequest(http.MethodPost, "/api/agents/register", bytes.NewBufferString(body))
-		req.Header.Set("Authorization", "Bearer ak_real")
-		rr := httptest.NewRecorder()
-		h.ServeHTTP(rr, req)
-		require.Equal(t, http.StatusBadRequest, rr.Code, "body=%s", body)
+		postRegister(t, h, "ak_real", body, http.StatusBadRequest)
 	}
 }
 
 func TestRegisterRejectsBadJSON(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_real"))
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-default", "ak_real")
 
-	h := New(st)
-	req := httptest.NewRequest(http.MethodPost, "/api/agents/register", bytes.NewBufferString(`{not json`))
-	req.Header.Set("Authorization", "Bearer ak_real")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-	require.Equal(t, http.StatusBadRequest, rr.Code)
+	postRegister(t, h, "ak_real", `{not json`, http.StatusBadRequest)
 }
 
 func TestRegisterRejectsWrongMethod(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_real"))
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-default", "ak_real")
 
-	h := New(st)
 	req := httptest.NewRequest(http.MethodGet, "/api/agents/register", nil)
 	req.Header.Set("Authorization", "Bearer ak_real")
 	rr := httptest.NewRecorder()
@@ -725,26 +673,14 @@ func TestRegisterRejectsWrongMethod(t *testing.T) {
 }
 
 func TestRegisterReissueInvalidatesOldToken(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_real"))
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-default", "ak_real")
 
-	h := New(st)
 	register := func() string {
-		body := bytes.NewBufferString(`{"agent_id":"slave-a","role":"slave","display_name":"Slave A"}`)
-		req := httptest.NewRequest(http.MethodPost, "/api/agents/register", body)
-		req.Header.Set("Authorization", "Bearer ak_real")
-		rr := httptest.NewRecorder()
-		h.ServeHTTP(rr, req)
-		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-		var resp struct {
-			Token string `json:"token"`
-		}
-		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-		require.NotEmpty(t, resp.Token)
-		return resp.Token
+		body := postRegister(t, h, "ak_real",
+			`{"agent_id":"slave-a","role":"slave","display_name":"Slave A","workspace_id":"ws1"}`,
+			http.StatusOK)
+		return extractToken(t, body)
 	}
 
 	first := register()
@@ -771,24 +707,70 @@ func TestRegisterReissueInvalidatesOldToken(t *testing.T) {
 }
 
 func TestRegisterRejectsPerAgentTokenAsAPIKey(t *testing.T) {
-	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
-	require.NoError(t, err)
-	defer st.Close()
-	require.NoError(t, st.UpsertWorkspace(observerstore.Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, st.UpsertAPIKey("ws1", "ak-default", "ak_real"))
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-default", "ak_real")
 	// Statically seed an agent token (mimics a per-agent token issued by an
 	// earlier register call).
 	require.NoError(t, st.UpsertAgent(
 		observerstore.Agent{WorkspaceID: "ws1", ID: "slave-a", Role: observer.RoleSlave, DisplayName: "Slave A"},
-		"leaked_agent_token",
+		"leaked_agent_token", "ak-default",
 	))
 
-	h := New(st)
-	body := bytes.NewBufferString(`{"agent_id":"slave-b","role":"slave"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/agents/register", body)
-	req.Header.Set("Authorization", "Bearer leaked_agent_token")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-	require.Equal(t, http.StatusForbidden, rr.Code,
-		"per-agent token must not be accepted as an api-key")
+	// Note: per-agent token is not an api_key, so LookupAPIKey returns !ok → 401.
+	postRegister(t, h, "leaked_agent_token",
+		`{"agent_id":"slave-b","role":"slave","workspace_id":"ws1"}`,
+		http.StatusUnauthorized)
+}
+
+// ---------------------------------------------------------------------------
+// New register tests (Task 5)
+// ---------------------------------------------------------------------------
+
+func TestRegister_RejectsMissingWorkspaceID(t *testing.T) {
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-1", "key1")
+	body := postRegister(t, h, "key1", `{"agent_id":"a","role":"slave"}`, http.StatusBadRequest)
+	require.Contains(t, body, "workspace_id must match")
+}
+
+func TestRegister_RejectsRebinding(t *testing.T) {
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-1", "key1")
+	postRegister(t, h, "key1", `{"agent_id":"a","role":"slave","workspace_id":"ws-A"}`, http.StatusOK)
+	body := postRegister(t, h, "key1", `{"agent_id":"a","role":"slave","workspace_id":"ws-B"}`, http.StatusConflict)
+	require.Contains(t, body, "already bound to workspace ws-A")
+}
+
+func TestRegister_NameStickyOnSecondRegister(t *testing.T) {
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-1", "key1")
+	postRegister(t, h, "key1", `{"agent_id":"a","role":"slave","workspace_id":"ws-X","workspace_name":"First"}`, http.StatusOK)
+	postRegister(t, h, "key1", `{"agent_id":"b","role":"slave","workspace_id":"ws-X","workspace_name":"Second"}`, http.StatusOK)
+	sums, err := st.ListWorkspaceSummaries()
+	require.NoError(t, err)
+	require.Len(t, sums, 1)
+	require.Equal(t, "First", sums[0].Name, "first writer must win the name")
+}
+
+func TestRegister_RebindRejectedDoesNotCreateOrphanWorkspace(t *testing.T) {
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-1", "key1")
+	postRegister(t, h, "key1", `{"agent_id":"a","role":"slave","workspace_id":"ws-A"}`, http.StatusOK)
+	postRegister(t, h, "key1", `{"agent_id":"a","role":"slave","workspace_id":"ws-LEAK"}`, http.StatusConflict)
+	sums, err := st.ListWorkspaceSummaries()
+	require.NoError(t, err)
+	for _, s := range sums {
+		require.NotEqual(t, "ws-LEAK", s.ID, "rejected rebind must not create the workspace")
+	}
+}
+
+func TestRegister_TokenRotation(t *testing.T) {
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-1", "key1")
+	body1 := postRegister(t, h, "key1", `{"agent_id":"a","role":"slave","workspace_id":"ws-A"}`, http.StatusOK)
+	body2 := postRegister(t, h, "key1", `{"agent_id":"a","role":"slave","workspace_id":"ws-A"}`, http.StatusOK)
+	require.NotEqual(t, extractToken(t, body1), extractToken(t, body2))
+	_, ok, err := st.ValidateToken(extractToken(t, body1))
+	require.NoError(t, err)
+	require.False(t, ok, "old token must be invalidated after rotation")
 }

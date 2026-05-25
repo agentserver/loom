@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html/template"
 	"io"
 	"log"
@@ -39,8 +40,10 @@ type Store interface {
 	GetLatestResourceSnapshot(workspaceID string) (observerstore.ResourceSnapshotRecord, error)
 
 	// API-key registration support.
-	LookupAPIKey(key string) (workspaceID, keyID string, ok bool, err error)
-	UpsertAgent(a observerstore.Agent, token string) error
+	LookupAPIKey(key string) (keyID string, ok bool, err error)
+	UpsertWorkspaceLazy(id, name, apiKeyID string) error
+	AgentBoundWorkspace(agentID string) (workspaceID string, found bool, err error)
+	UpsertAgent(a observerstore.Agent, token, apiKeyID string) error
 }
 
 func New(s Store) http.Handler {
@@ -639,9 +642,11 @@ func hasSlaveActivity(task observerstore.TaskView) bool {
 }
 
 type registerRequest struct {
-	AgentID     string `json:"agent_id"`
-	Role        string `json:"role"`
-	DisplayName string `json:"display_name"`
+	AgentID       string `json:"agent_id"`
+	Role          string `json:"role"`
+	DisplayName   string `json:"display_name"`
+	WorkspaceID   string `json:"workspace_id"`
+	WorkspaceName string `json:"workspace_name,omitempty"`
 }
 
 type registerResponse struct {
@@ -653,32 +658,31 @@ type registerResponse struct {
 }
 
 var agentIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+var workspaceIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
 	apiKey, ok := bearerToken(r.Header.Get("Authorization"))
 	if !ok {
 		http.Error(w, "missing or invalid bearer token", http.StatusUnauthorized)
 		return
 	}
-
-	workspaceID, keyID, ok, err := h.s.LookupAPIKey(apiKey)
+	keyID, ok, err := h.s.LookupAPIKey(apiKey)
 	if err != nil {
 		log.Printf("observer: LookupAPIKey error: %v", err)
 		http.Error(w, "internal", http.StatusInternalServerError)
 		return
 	}
 	if !ok {
-		http.Error(w, "invalid api key", http.StatusForbidden)
+		http.Error(w, "invalid api key", http.StatusUnauthorized)
 		return
 	}
 
 	var req registerRequest
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<14) // 16 KiB is plenty
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<14)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
@@ -695,6 +699,10 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "agent_id must match [A-Za-z0-9_-]{1,64}", http.StatusBadRequest)
 		return
 	}
+	if !workspaceIDPattern.MatchString(req.WorkspaceID) {
+		http.Error(w, "workspace_id must match [A-Za-z0-9_-]{1,64}", http.StatusBadRequest)
+		return
+	}
 	if !validRegisterRole(req.Role) {
 		http.Error(w, "role must be one of driver, master, slave", http.StatusBadRequest)
 		return
@@ -704,6 +712,18 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 		displayName = req.AgentID
 	}
 
+	// Early rebind check, BEFORE any DB write — protects against orphan workspaces.
+	if existing, found, err := h.s.AgentBoundWorkspace(req.AgentID); err != nil {
+		log.Printf("observer: AgentBoundWorkspace error: %v", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	} else if found && existing != req.WorkspaceID {
+		http.Error(w,
+			fmt.Sprintf("agent already bound to workspace %s", existing),
+			http.StatusConflict)
+		return
+	}
+
 	token, err := mintAgentToken()
 	if err != nil {
 		log.Printf("observer: mintAgentToken error: %v", err)
@@ -711,32 +731,40 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Lazy upsert workspace + upsert agent. Not wrapped in an explicit
+	// transaction: each call is single-statement-atomic, and the early
+	// rebind check above means we don't create an orphan workspace on
+	// the 409 path. Crash between the two would leave an empty workspace
+	// visible only to ListWorkspaceSummaries, which is acceptable.
+	if err := h.s.UpsertWorkspaceLazy(req.WorkspaceID, req.WorkspaceName, keyID); err != nil {
+		log.Printf("observer: UpsertWorkspaceLazy error ws=%s: %v", req.WorkspaceID, err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
 	agent := observerstore.Agent{
-		WorkspaceID: workspaceID,
+		WorkspaceID: req.WorkspaceID,
 		ID:          req.AgentID,
 		Role:        req.Role,
 		DisplayName: displayName,
 	}
-	if err := h.s.UpsertAgent(agent, token); err != nil {
-		log.Printf("observer: UpsertAgent error ws=%s id=%s: %v", workspaceID, req.AgentID, err)
+	if err := h.s.UpsertAgent(agent, token, keyID); err != nil {
+		log.Printf("observer: UpsertAgent error ws=%s id=%s: %v", req.WorkspaceID, req.AgentID, err)
 		http.Error(w, "internal", http.StatusInternalServerError)
 		return
 	}
 
 	log.Printf("observer: registered agent ws=%s id=%s role=%s via api_key_id=%s",
-		workspaceID, req.AgentID, req.Role, keyID)
+		req.WorkspaceID, req.AgentID, req.Role, keyID)
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(registerResponse{
-		WorkspaceID: workspaceID,
+		WorkspaceID: req.WorkspaceID,
 		AgentID:     agent.ID,
 		Role:        agent.Role,
 		DisplayName: agent.DisplayName,
 		Token:       token,
 	}); err != nil {
 		log.Printf("observer: encode register response error: %v", err)
-		// Headers already flushed; nothing useful to send to the client.
-		return
 	}
 }
 

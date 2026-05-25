@@ -183,6 +183,12 @@ type ResourceSnapshotRecord struct {
 	CreatedAt    string          `json:"created_at,omitempty"`
 }
 
+// New is an alias for Open provided for consistency with packages that prefer
+// the New(path) constructor convention.
+func New(path string) (*Store, error) {
+	return Open(path)
+}
+
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", sqliteDSNWithPragmas(path))
 	if err != nil {
@@ -361,6 +367,58 @@ func (s *Store) UpsertAgent(a Agent, token, apiKeyID string) error {
 		a.WorkspaceID, a.ID, a.Role, a.DisplayName, tokenHash(token), apiKeyID,
 	)
 	return err
+}
+
+// AgentBoundWorkspace returns the workspace_id this agent_id is currently
+// bound to. found=false means the agent_id has never registered.
+func (s *Store) AgentBoundWorkspace(agentID string) (string, bool, error) {
+	if agentID == "" {
+		return "", false, nil
+	}
+	var ws string
+	err := s.db.QueryRow(`SELECT workspace_id FROM agents WHERE id=? LIMIT 1`, agentID).Scan(&ws)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return ws, true, nil
+}
+
+// WorkspaceSummary is one row of the workspaces overview returned by
+// ListWorkspaceSummaries. Used by GET /api/workspaces (added in Task 6).
+type WorkspaceSummary struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	LastSeenAt    string `json:"last_seen_at"`
+	AgentCount    int    `json:"agent_count"`
+	RecentEventAt string `json:"recent_event_at,omitempty"`
+}
+
+// ListWorkspaceSummaries returns all workspaces ordered by last_seen_at DESC,
+// with derived agent_count and recent_event_at.
+func (s *Store) ListWorkspaceSummaries() ([]WorkspaceSummary, error) {
+	rows, err := s.db.Query(`
+        SELECT w.id, w.name, w.last_seen_at,
+               COALESCE((SELECT COUNT(*) FROM agents a WHERE a.workspace_id = w.id), 0),
+               COALESCE((SELECT MAX(ts) FROM events e WHERE e.workspace_id = w.id), '')
+          FROM workspaces w
+         ORDER BY w.last_seen_at DESC
+    `)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []WorkspaceSummary
+	for rows.Next() {
+		var ws WorkspaceSummary
+		if err := rows.Scan(&ws.ID, &ws.Name, &ws.LastSeenAt, &ws.AgentCount, &ws.RecentEventAt); err != nil {
+			return nil, err
+		}
+		out = append(out, ws)
+	}
+	return out, rows.Err()
 }
 
 // UpsertAPIKey inserts or refreshes one api_keys row.
