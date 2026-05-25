@@ -207,3 +207,49 @@ func TestRegisterMCP_ObserverEmitsCreated(t *testing.T) {
 	_, ok := observerEventOfType(obs.events, observer.EventMCPServerCreated)
 	require.True(t, ok, "expected EventMCPServerCreated")
 }
+
+func TestMCPExecutor_UnregisterStdio_Removes(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not on PATH")
+	}
+
+	// Write a real MCP server script so ListTools can succeed and actually
+	// spawn the subprocess — proving the kill() branch executes on unregister.
+	tmpFile := filepath.Join(t.TempDir(), "echo_mcp.py")
+	require.NoError(t, os.WriteFile(tmpFile, []byte(minimalMCPSource), 0o644))
+
+	mcpExec := NewMCPExecutor(map[string]MCPServerCfg{})
+	t.Cleanup(mcpExec.Close)
+	require.NoError(t, mcpExec.RegisterStdio("echo", MCPServerCfg{
+		Transport: "stdio", Command: "python3", Args: []string{tmpFile},
+	}))
+	require.Contains(t, mcpExec.Servers(), "echo")
+
+	// Force the subprocess to spawn by calling ListTools.
+	ctx := context.Background()
+	tools, err := mcpExec.ListTools(ctx, "echo")
+	require.NoError(t, err)
+	require.Len(t, tools, 1, "expected one tool from the minimal MCP server")
+
+	// The subprocess must now be live in the stdios map (pre-condition for
+	// the kill() branch we are about to exercise).
+	mcpExec.mu.Lock()
+	conn := mcpExec.stdios["echo"]
+	mcpExec.mu.Unlock()
+	require.NotNil(t, conn, "subprocess should be alive before unregister")
+	require.NotNil(t, conn.cmd.Process, "os.Process should be set")
+
+	// Unregister: this must call kill() on the running subprocess.
+	require.NoError(t, mcpExec.UnregisterStdio("echo"))
+	require.NotContains(t, mcpExec.Servers(), "echo")
+
+	// The process should now be dead (Wait already called inside kill()).
+	require.NotNil(t, conn.cmd.ProcessState, "process should have exited after kill")
+}
+
+func TestMCPExecutor_UnregisterStdio_NotRegistered(t *testing.T) {
+	mcpExec := NewMCPExecutor(map[string]MCPServerCfg{})
+	t.Cleanup(mcpExec.Close)
+	err := mcpExec.UnregisterStdio("nope")
+	require.ErrorIs(t, err, ErrMCPNotRegistered)
+}

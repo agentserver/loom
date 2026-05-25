@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -322,6 +323,26 @@ func (e *MCPExecutor) RegisterStdio(name string, cfg MCPServerCfg) error {
 		delete(e.stdios, name)
 	}
 	e.cfg[name] = cfg
+	return nil
+}
+
+// ErrMCPNotRegistered is returned when an unregister target is unknown.
+var ErrMCPNotRegistered = errors.New("mcp server not registered")
+
+// UnregisterStdio removes a stdio MCP server entry at runtime, killing any
+// running subprocess. Returns ErrMCPNotRegistered if no entry exists for
+// name. Symmetric to RegisterStdio.
+func (e *MCPExecutor) UnregisterStdio(name string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if _, ok := e.cfg[name]; !ok {
+		return ErrMCPNotRegistered
+	}
+	if h, ok := e.stdios[name]; ok {
+		h.kill()
+		delete(e.stdios, name)
+	}
+	delete(e.cfg, name)
 	return nil
 }
 
