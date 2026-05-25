@@ -124,3 +124,30 @@ func UpsertDynamicYAML(path string, entry DynamicEntry) error {
 	}
 	return os.Rename(tmp, path)
 }
+
+// RemoveDynamicYAML deletes the named server entry from dynamic_mcp.yaml at
+// path. Returns removed=true if the entry existed and was removed, false if
+// the entry was not present (including when the file does not exist).
+// Uses an atomic rename for the write.
+func RemoveDynamicYAML(path, name string) (bool, error) {
+	df, err := ReadDynamicYAML(path)
+	if err != nil {
+		return false, err
+	}
+	if _, ok := df.Servers[name]; !ok {
+		return false, nil
+	}
+	delete(df.Servers, name)
+	out, err := yaml.Marshal(df)
+	if err != nil {
+		return false, err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return false, err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return false, err
+	}
+	return true, nil
+}
