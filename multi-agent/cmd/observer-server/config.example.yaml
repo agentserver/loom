@@ -1,18 +1,11 @@
+# observer-server example config.
+# Workspaces are created lazily by /api/agents/register based on what the
+# agent declares. Only api_keys are operator-managed here.
+
 listen_addr: ":8090"
 db_path: observer.db
-workspaces:
-  - id: ws-local
-    name: Local Workspace
-    agents:
-      - id: driver-local
-        role: driver
-        display_name: Driver Local
-        token: driver-token
-      - id: master-local
-        role: master
-        display_name: Master Local
-        token: master-token
-      - id: slave-local
-        role: slave
-        display_name: Slave Local
-        token: slave-token
+
+api_keys:
+  - id: ak-personal
+    key: REPLACE_ME_OPENSSL_RAND_HEX_32
+    note: "main operator key"

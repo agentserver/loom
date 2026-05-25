@@ -7,7 +7,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -16,20 +15,15 @@ import (
 )
 
 type Config struct {
-	ListenAddr string            `yaml:"listen_addr"`
-	DBPath     string            `yaml:"db_path"`
-	Workspaces []WorkspaceConfig `yaml:"workspaces"`
-}
-
-type WorkspaceConfig struct {
-	ID      string         `yaml:"id"`
-	Name    string         `yaml:"name"`
-	APIKeys []APIKeyConfig `yaml:"api_keys"`
+	ListenAddr string         `yaml:"listen_addr"`
+	DBPath     string         `yaml:"db_path"`
+	APIKeys    []APIKeyConfig `yaml:"api_keys"`
 }
 
 type APIKeyConfig struct {
-	ID  string `yaml:"id"`
-	Key string `yaml:"key"`
+	ID   string `yaml:"id"`
+	Key  string `yaml:"key"`
+	Note string `yaml:"note,omitempty"`
 }
 
 func main() {
@@ -47,18 +41,14 @@ func main() {
 	}
 	defer st.Close()
 
-	for _, workspace := range cfg.Workspaces {
-		if err := st.UpsertWorkspace(observerstore.Workspace{ID: workspace.ID, Name: workspace.Name}); err != nil {
-			log.Fatal(err)
-		}
-		specs := make([]observerstore.APIKeySpec, 0, len(workspace.APIKeys))
-		for _, k := range workspace.APIKeys {
-			specs = append(specs, observerstore.APIKeySpec{ID: k.ID, Key: k.Key})
-		}
-		if err := st.ReplaceAPIKeysForWorkspace(workspace.ID, specs); err != nil {
-			log.Fatal(err)
-		}
+	specs := make([]observerstore.APIKeySpec, 0, len(cfg.APIKeys))
+	for _, k := range cfg.APIKeys {
+		specs = append(specs, observerstore.APIKeySpec{ID: k.ID, Key: k.Key, Note: k.Note})
 	}
+	if err := st.ReplaceAPIKeys(specs); err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("observer-server loaded %d api_keys", len(specs))
 
 	log.Printf("observer-server listening on %s", cfg.ListenAddr)
 	log.Fatal(http.ListenAndServe(cfg.ListenAddr, observerweb.New(st)))
@@ -90,57 +80,21 @@ func loadConfig(path string) (*Config, error) {
 }
 
 func validateConfig(cfg *Config) error {
-	if len(cfg.Workspaces) == 0 {
-		return fmt.Errorf("at least one workspace is required")
+	if len(cfg.APIKeys) == 0 {
+		return fmt.Errorf("config must define at least one api_keys entry")
 	}
-
-	workspaces := make(map[string]struct{})
-	for wi, workspace := range cfg.Workspaces {
-		workspaceID := workspace.ID
-		if workspaceID == "" {
-			return fmt.Errorf("workspace[%d].id is required", wi)
+	seenID := map[string]bool{}
+	for i, k := range cfg.APIKeys {
+		if k.ID == "" {
+			return fmt.Errorf("api_keys[%d].id is required", i)
 		}
-		if hasOuterWhitespace(workspaceID) {
-			return fmt.Errorf("workspace[%d].id must not contain leading or trailing whitespace", wi)
+		if k.Key == "" {
+			return fmt.Errorf("api_keys[%s].key is required", k.ID)
 		}
-		if workspace.Name == "" {
-			return fmt.Errorf("workspace[%d].name is required", wi)
+		if seenID[k.ID] {
+			return fmt.Errorf("duplicate api_keys.id %s", k.ID)
 		}
-		if hasOuterWhitespace(workspace.Name) {
-			return fmt.Errorf("workspace[%d].name must not contain leading or trailing whitespace", wi)
-		}
-		if _, ok := workspaces[workspaceID]; ok {
-			return fmt.Errorf("duplicate workspace id %s", workspaceID)
-		}
-		workspaces[workspaceID] = struct{}{}
-
-		if len(workspace.APIKeys) == 0 {
-			return fmt.Errorf("workspace[%s] must define at least one api_keys entry", workspaceID)
-		}
-
-		keyIDs := make(map[string]struct{})
-		for ki, k := range workspace.APIKeys {
-			if k.ID == "" {
-				return fmt.Errorf("workspace[%s].api_keys[%d].id is required", workspaceID, ki)
-			}
-			if hasOuterWhitespace(k.ID) {
-				return fmt.Errorf("workspace[%s].api_keys[%d].id must not contain leading or trailing whitespace", workspaceID, ki)
-			}
-			if _, ok := keyIDs[k.ID]; ok {
-				return fmt.Errorf("duplicate api_keys.id %s in workspace %s", k.ID, workspaceID)
-			}
-			keyIDs[k.ID] = struct{}{}
-			if k.Key == "" {
-				return fmt.Errorf("workspace[%s].api_keys[%s].key is required", workspaceID, k.ID)
-			}
-			if hasOuterWhitespace(k.Key) {
-				return fmt.Errorf("workspace[%s].api_keys[%s].key must not contain leading or trailing whitespace", workspaceID, k.ID)
-			}
-		}
+		seenID[k.ID] = true
 	}
 	return nil
-}
-
-func hasOuterWhitespace(s string) bool {
-	return s != strings.TrimSpace(s)
 }
