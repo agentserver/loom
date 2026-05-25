@@ -122,6 +122,7 @@ codex 是 `docker exec` 按需调起，不是 PID 1）以及 `permissions` skill
 - `chat` — 自然语言任务，由 slave 内嵌的 claude 执行
 - `mcp` — JSON 调用 `{server, tool, args}`，直接打到某个 MCP server
 - `register_mcp` — 注册一段已经在 slave 上写好并通过烟雾测试的 MCP server 源码
+- `unregister_mcp` — 解除注册某个 dynamic MCP server（从 `dynamic_mcp.yaml` 移除、杀掉子进程、刷新 CAPABILITIES）；不删源码文件
 - `bash` — 由 slave 原生 Go executor 执行的确定性 shell 任务
 - `claude_permissions` — 通过任务通道读取 / 修改 slave 上 Claude Code 的 project 权限（过渡方案）
 
@@ -132,7 +133,7 @@ codex 是 `docker exec` 按需调起，不是 PID 1）以及 `permissions` skill
 - `inspect_capabilities` / `list_agents`
 - `draft_task_contract` / `dry_run_contract` / `submit_contract_task`
 - `get_task` / `wait_task` / `tail_subtasks` / `cancel_task`
-- `run_slave_bash` / `register_slave_mcp`
+- `run_slave_bash` / `register_slave_mcp` / `unregister_slave_mcp`
 - `get_slave_claude_permissions` / `update_slave_claude_permissions`
 
 完整 schema 参见 `docs/superpowers/specs/2026-05-09-generic-driver-agent-design.md` 与 `skills/multiagent`。
