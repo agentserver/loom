@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 
@@ -39,6 +40,9 @@ type Store interface {
 	SaveResourceSnapshot(observerstore.ResourceSnapshotRecord) error
 	GetLatestResourceSnapshot(workspaceID string) (observerstore.ResourceSnapshotRecord, error)
 
+	// Workspace listing.
+	ListWorkspaceSummaries() ([]observerstore.WorkspaceSummary, error)
+
 	// API-key registration support.
 	LookupAPIKey(key string) (keyID string, ok bool, err error)
 	UpsertWorkspaceLazy(id, name, apiKeyID string) error
@@ -62,6 +66,7 @@ func New(s Store) http.Handler {
 	mux.HandleFunc("/api/task-contracts/", h.taskContractByID)
 	mux.HandleFunc("/api/resource-snapshots", h.resourceSnapshots)
 	mux.HandleFunc("/api/resource-snapshots/latest", h.latestResourceSnapshot)
+	mux.HandleFunc("/api/workspaces", h.guardWebToken(h.listWorkspaces))
 	mux.HandleFunc("/drivers", h.page("Drivers", "drivers"))
 	mux.HandleFunc("/masters", h.page("Masters", "masters"))
 	mux.HandleFunc("/slaves", h.page("Slaves", "slaves"))
@@ -765,6 +770,48 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 		Token:       token,
 	}); err != nil {
 		log.Printf("observer: encode register response error: %v", err)
+	}
+}
+
+// guardWebToken activates only when OBSERVER_WEB_TOKEN env var is non-empty.
+// When active, the request must carry the token via X-Observer-Web-Token
+// header or ?web_token= query param. When the env var is empty (default
+// local single-user case), requests pass through unchecked.
+func (h *handler) guardWebToken(next http.HandlerFunc) http.HandlerFunc {
+	want := os.Getenv("OBSERVER_WEB_TOKEN")
+	if want == "" {
+		return next
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		got := r.Header.Get("X-Observer-Web-Token")
+		if got == "" {
+			got = r.URL.Query().Get("web_token")
+		}
+		if got != want {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (h *handler) listWorkspaces(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	sums, err := h.s.ListWorkspaceSummaries()
+	if err != nil {
+		log.Printf("observer: ListWorkspaceSummaries error: %v", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	if sums == nil {
+		sums = []observerstore.WorkspaceSummary{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(sums); err != nil {
+		log.Printf("observer: encode listWorkspaces error: %v", err)
 	}
 }
 

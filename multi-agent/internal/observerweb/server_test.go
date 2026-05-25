@@ -774,3 +774,46 @@ func TestRegister_TokenRotation(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, ok, "old token must be invalidated after rotation")
 }
+
+// ---------------------------------------------------------------------------
+// GET /api/workspaces tests (Task 6)
+// ---------------------------------------------------------------------------
+
+func TestListWorkspaces_HappyPath(t *testing.T) {
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-1", "key1")
+	postRegister(t, h, "key1", `{"agent_id":"a","role":"slave","workspace_id":"ws-1","workspace_name":"One"}`, http.StatusOK)
+	postRegister(t, h, "key1", `{"agent_id":"b","role":"slave","workspace_id":"ws-2","workspace_name":"Two"}`, http.StatusOK)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/workspaces", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var got []observerstore.WorkspaceSummary
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
+	require.Len(t, got, 2)
+	require.Equal(t, "ws-2", got[0].ID, "ordered by last_seen DESC")
+}
+
+func TestListWorkspaces_WebTokenGuard(t *testing.T) {
+	t.Setenv("OBSERVER_WEB_TOKEN", "secret")
+	h, _ := newTestHandler(t)
+
+	// missing token → 401
+	rr1 := httptest.NewRecorder()
+	h.ServeHTTP(rr1, httptest.NewRequest(http.MethodGet, "/api/workspaces", nil))
+	require.Equal(t, http.StatusUnauthorized, rr1.Code)
+
+	// wrong header value → 401
+	req2 := httptest.NewRequest(http.MethodGet, "/api/workspaces", nil)
+	req2.Header.Set("X-Observer-Web-Token", "nope")
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, req2)
+	require.Equal(t, http.StatusUnauthorized, rr2.Code)
+
+	// correct query param → 200
+	req3 := httptest.NewRequest(http.MethodGet, "/api/workspaces?web_token=secret", nil)
+	rr3 := httptest.NewRecorder()
+	h.ServeHTTP(rr3, req3)
+	require.Equal(t, http.StatusOK, rr3.Code)
+}
