@@ -447,6 +447,30 @@ func (s *Store) ReplaceAPIKeys(keys []APIKeySpec) error {
 	return tx.Commit()
 }
 
+// RevokeAPIKey deletes the api_keys row for id. cascade=true also deletes,
+// in the same transaction, every agent row whose created_by_api_key_id matches.
+// cascade=false leaves agents intact — they keep valid tokens and can keep
+// ingesting until an admin cleans them up manually.
+func (s *Store) RevokeAPIKey(id string, cascade bool) error {
+	if id == "" {
+		return errors.New("observerstore: api key id must not be empty")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if cascade {
+		if _, err := tx.Exec(`DELETE FROM agents WHERE created_by_api_key_id=?`, id); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`DELETE FROM api_keys WHERE id=?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) ValidateToken(token string) (Agent, bool, error) {
 	if token == "" {
 		return Agent{}, false, nil

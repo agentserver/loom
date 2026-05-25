@@ -1035,3 +1035,39 @@ func TestUpsertWorkspaceLazy_BumpsLastSeen(t *testing.T) {
 	require.NoError(t, st.db.QueryRow(`SELECT last_seen_at FROM workspaces WHERE id=?`, "ws-y").Scan(&secondSeen))
 	require.NotEqual(t, firstSeen, secondSeen, "last_seen_at must bump on every upsert")
 }
+
+func TestRevokeAPIKey_NoCascadeKeepsAgents(t *testing.T) {
+	st := testStore(t)
+	require.NoError(t, st.UpsertAPIKey(APIKeySpec{ID: "ak-1", Key: "k1"}))
+	require.NoError(t, st.UpsertWorkspaceLazy("ws-a", "A", "ak-1"))
+	require.NoError(t, st.UpsertAgent(Agent{WorkspaceID: "ws-a", ID: "agent-1", Role: "slave", DisplayName: "S1"}, "tok1", "ak-1"))
+
+	require.NoError(t, st.RevokeAPIKey("ak-1", false))
+
+	// api_keys row gone
+	_, ok, err := st.LookupAPIKey("k1")
+	require.NoError(t, err)
+	require.False(t, ok)
+	// agent row still present
+	var cnt int
+	require.NoError(t, st.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE workspace_id=? AND id=?`, "ws-a", "agent-1").Scan(&cnt))
+	require.Equal(t, 1, cnt)
+}
+
+func TestRevokeAPIKey_CascadeDeletesAgents(t *testing.T) {
+	st := testStore(t)
+	require.NoError(t, st.UpsertAPIKey(APIKeySpec{ID: "ak-1", Key: "k1"}))
+	require.NoError(t, st.UpsertWorkspaceLazy("ws-a", "A", "ak-1"))
+	require.NoError(t, st.UpsertAgent(Agent{WorkspaceID: "ws-a", ID: "agent-1", Role: "slave", DisplayName: "S1"}, "tok1", "ak-1"))
+	// Another key registers a different agent — cascade must NOT touch it
+	require.NoError(t, st.UpsertAPIKey(APIKeySpec{ID: "ak-2", Key: "k2"}))
+	require.NoError(t, st.UpsertAgent(Agent{WorkspaceID: "ws-a", ID: "agent-2", Role: "slave", DisplayName: "S2"}, "tok2", "ak-2"))
+
+	require.NoError(t, st.RevokeAPIKey("ak-1", true))
+
+	var cnt1, cnt2 int
+	require.NoError(t, st.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE id=?`, "agent-1").Scan(&cnt1))
+	require.Equal(t, 0, cnt1, "agent created by ak-1 must be deleted")
+	require.NoError(t, st.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE id=?`, "agent-2").Scan(&cnt2))
+	require.Equal(t, 1, cnt2, "agent created by ak-2 must remain")
+}
