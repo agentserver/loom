@@ -876,3 +876,27 @@ func TestListWorkspaces_WebTokenGuard(t *testing.T) {
 	h.ServeHTTP(rr3, req3)
 	require.Equal(t, http.StatusOK, rr3.Code)
 }
+
+func TestRegister_RejectsBadWorkspaceID(t *testing.T) {
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-1", "key1")
+
+	bad := []struct {
+		name string
+		ws   string
+	}{
+		{"space", "ws space"},
+		{"semicolon", "ws;drop"},
+		{"slash", "ws/sub"},
+		{"too long", strings.Repeat("a", 65)},
+		{"unicode", "ws-中文"},
+	}
+	for _, tc := range bad {
+		t.Run(tc.name, func(t *testing.T) {
+			body := postRegister(t, h, "key1",
+				`{"agent_id":"a","role":"slave","workspace_id":"`+tc.ws+`"}`,
+				http.StatusBadRequest)
+			require.Contains(t, body, "workspace_id must match")
+		})
+	}
+}

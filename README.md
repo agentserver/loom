@@ -234,10 +234,12 @@ cp cmd/observer-server/config.example.yaml observer.yaml
 ```yaml
 observer:
   enabled: true
-  url: https://observer.example.com
-  workspace_id: ws-local
+  url: http://observer.local:8090
+  workspace_id: ws-personal          # required; observer lazy-creates
+  workspace_name: "Personal Lab"      # optional; recorded on first creation
   agent_id: driver-local
-  token: driver-token
+  api_key: REPLACE_ME
+  token_state_path: /var/lib/driver/observer-token.json
 ```
 
 视图：
