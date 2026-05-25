@@ -19,10 +19,11 @@ func testStore(t *testing.T) *Store {
 
 	s, err := Open(filepath.Join(t.TempDir(), "observer.db"))
 	require.NoError(t, err)
-	require.NoError(t, s.UpsertWorkspace(Workspace{ID: "ws1", Name: "Workspace"}))
-	require.NoError(t, s.UpsertAgent(Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token"))
-	require.NoError(t, s.UpsertAgent(Agent{WorkspaceID: "ws1", ID: "master", Role: observer.RoleMaster, DisplayName: "Master"}, "master-token"))
-	require.NoError(t, s.UpsertAgent(Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"}, "slave-token"))
+	require.NoError(t, s.UpsertAPIKey(APIKeySpec{ID: "ak-test", Key: "test-key"}))
+	require.NoError(t, s.UpsertWorkspaceLazy("ws1", "Workspace", "ak-test"))
+	require.NoError(t, s.UpsertAgent(Agent{WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "Driver"}, "driver-token", "ak-test"))
+	require.NoError(t, s.UpsertAgent(Agent{WorkspaceID: "ws1", ID: "master", Role: observer.RoleMaster, DisplayName: "Master"}, "master-token", "ak-test"))
+	require.NoError(t, s.UpsertAgent(Agent{WorkspaceID: "ws1", ID: "slave", Role: observer.RoleSlave, DisplayName: "Slave"}, "slave-token", "ak-test"))
 	return s
 }
 
@@ -82,13 +83,13 @@ func TestValidateToken(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, ok)
 
-	require.Error(t, s.UpsertAgent(Agent{WorkspaceID: "ws1", ID: "empty", Role: observer.RoleSlave, DisplayName: "Empty"}, ""))
+	require.Error(t, s.UpsertAgent(Agent{WorkspaceID: "ws1", ID: "empty", Role: observer.RoleSlave, DisplayName: "Empty"}, "", "ak-test"))
 
 	_, ok, err = s.ValidateToken("")
 	require.NoError(t, err)
 	require.False(t, ok)
 
-	err = s.UpsertAgent(Agent{WorkspaceID: "ws1", ID: "dupe", Role: observer.RoleSlave, DisplayName: "Duplicate"}, "master-token")
+	err = s.UpsertAgent(Agent{WorkspaceID: "ws1", ID: "dupe", Role: observer.RoleSlave, DisplayName: "Duplicate"}, "master-token", "ak-test")
 	require.Error(t, err)
 }
 
@@ -826,14 +827,12 @@ func TestUpsertAPIKeyRoundTrip(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "observer.db"))
 	require.NoError(t, err)
 	defer s.Close()
-	require.NoError(t, s.UpsertWorkspace(Workspace{ID: "ws1", Name: "Workspace"}))
 
-	require.NoError(t, s.UpsertAPIKey("ws1", "ak-default", "ak_secret_abc"))
+	require.NoError(t, s.UpsertAPIKey(APIKeySpec{ID: "ak-default", Key: "ak_secret_abc"}))
 
-	wsID, keyID, ok, err := s.LookupAPIKey("ak_secret_abc")
+	keyID, ok, err := s.LookupAPIKey("ak_secret_abc")
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.Equal(t, "ws1", wsID)
 	require.Equal(t, "ak-default", keyID)
 }
 
@@ -841,28 +840,26 @@ func TestUpsertAPIKeyReplacesKey(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "observer.db"))
 	require.NoError(t, err)
 	defer s.Close()
-	require.NoError(t, s.UpsertWorkspace(Workspace{ID: "ws1", Name: "Workspace"}))
 
-	require.NoError(t, s.UpsertAPIKey("ws1", "ak-default", "first-key"))
-	require.NoError(t, s.UpsertAPIKey("ws1", "ak-default", "second-key"))
+	require.NoError(t, s.UpsertAPIKey(APIKeySpec{ID: "ak-default", Key: "first-key"}))
+	require.NoError(t, s.UpsertAPIKey(APIKeySpec{ID: "ak-default", Key: "second-key"}))
 
-	_, _, ok, err := s.LookupAPIKey("first-key")
+	_, ok, err := s.LookupAPIKey("first-key")
 	require.NoError(t, err)
 	require.False(t, ok, "old key value should no longer resolve")
 
-	wsID, _, ok, err := s.LookupAPIKey("second-key")
+	keyID, ok, err := s.LookupAPIKey("second-key")
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.Equal(t, "ws1", wsID)
+	require.Equal(t, "ak-default", keyID)
 }
 
 func TestUpsertAPIKeyRejectsEmptyKey(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "observer.db"))
 	require.NoError(t, err)
 	defer s.Close()
-	require.NoError(t, s.UpsertWorkspace(Workspace{ID: "ws1", Name: "Workspace"}))
 
-	require.Error(t, s.UpsertAPIKey("ws1", "ak-default", ""))
+	require.Error(t, s.UpsertAPIKey(APIKeySpec{ID: "ak-default", Key: ""}))
 }
 
 func TestLookupAPIKeyMiss(t *testing.T) {
@@ -870,68 +867,63 @@ func TestLookupAPIKeyMiss(t *testing.T) {
 	require.NoError(t, err)
 	defer s.Close()
 
-	_, _, ok, err := s.LookupAPIKey("unknown")
+	_, ok, err := s.LookupAPIKey("unknown")
 	require.NoError(t, err)
 	require.False(t, ok)
 
-	_, _, ok, err = s.LookupAPIKey("")
+	_, ok, err = s.LookupAPIKey("")
 	require.NoError(t, err)
 	require.False(t, ok)
 }
 
-func TestReplaceAPIKeysForWorkspaceDeletesMissing(t *testing.T) {
+func TestReplaceAPIKeysDeletesMissing(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "observer.db"))
 	require.NoError(t, err)
 	defer s.Close()
-	require.NoError(t, s.UpsertWorkspace(Workspace{ID: "ws1", Name: "Workspace"}))
 
-	require.NoError(t, s.ReplaceAPIKeysForWorkspace("ws1", []APIKeySpec{
+	require.NoError(t, s.ReplaceAPIKeys([]APIKeySpec{
 		{ID: "ak-a", Key: "key-a"},
 		{ID: "ak-b", Key: "key-b"},
 	}))
 
-	_, _, ok, err := s.LookupAPIKey("key-a")
+	_, ok, err := s.LookupAPIKey("key-a")
 	require.NoError(t, err)
 	require.True(t, ok)
 
 	// Reconcile with a shorter list — "ak-a" disappears.
-	require.NoError(t, s.ReplaceAPIKeysForWorkspace("ws1", []APIKeySpec{
+	require.NoError(t, s.ReplaceAPIKeys([]APIKeySpec{
 		{ID: "ak-b", Key: "key-b"},
 	}))
 
-	_, _, ok, err = s.LookupAPIKey("key-a")
+	_, ok, err = s.LookupAPIKey("key-a")
 	require.NoError(t, err)
 	require.False(t, ok, "ak-a should be deleted by reconcile")
 
-	_, _, ok, err = s.LookupAPIKey("key-b")
+	_, ok, err = s.LookupAPIKey("key-b")
 	require.NoError(t, err)
 	require.True(t, ok)
 }
 
-func TestReplaceAPIKeysForWorkspaceScopedByWorkspace(t *testing.T) {
+func TestReplaceAPIKeysRejectsDuplicates(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "observer.db"))
 	require.NoError(t, err)
 	defer s.Close()
-	require.NoError(t, s.UpsertWorkspace(Workspace{ID: "ws1", Name: "Workspace 1"}))
-	require.NoError(t, s.UpsertWorkspace(Workspace{ID: "ws2", Name: "Workspace 2"}))
 
-	require.NoError(t, s.ReplaceAPIKeysForWorkspace("ws1", []APIKeySpec{
+	// Duplicate ID.
+	err = s.ReplaceAPIKeys([]APIKeySpec{
 		{ID: "ak-a", Key: "key-1a"},
-	}))
-	require.NoError(t, s.ReplaceAPIKeysForWorkspace("ws2", []APIKeySpec{
 		{ID: "ak-a", Key: "key-2a"},
-	}))
+	})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "duplicate api key id")
 
-	// Reconcile ws1 with an empty list — ws2's row must survive.
-	require.NoError(t, s.ReplaceAPIKeysForWorkspace("ws1", nil))
-
-	_, _, ok, err := s.LookupAPIKey("key-1a")
-	require.NoError(t, err)
-	require.False(t, ok)
-
-	_, _, ok, err = s.LookupAPIKey("key-2a")
-	require.NoError(t, err)
-	require.True(t, ok, "reconciling ws1 should not touch ws2 rows")
+	// Duplicate key value.
+	err = s.ReplaceAPIKeys([]APIKeySpec{
+		{ID: "ak-a", Key: "same-key"},
+		{ID: "ak-b", Key: "same-key"},
+	})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "duplicate api key value")
 }
 
 func TestApplyAggregate_DeletesMCPServerOnRemoved(t *testing.T) {

@@ -33,6 +33,13 @@ type Workspace struct {
 	Name string
 }
 
+// APIKeySpec is one row of the top-level api_keys table.
+type APIKeySpec struct {
+	ID   string
+	Key  string
+	Note string
+}
+
 type Agent struct {
 	WorkspaceID string
 	ID          string
@@ -316,69 +323,90 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-func (s *Store) UpsertWorkspace(w Workspace) error {
-	_, err := s.db.Exec(`INSERT INTO workspaces(id, name) VALUES(?, ?)
-		ON CONFLICT(id) DO UPDATE SET name=excluded.name`, w.ID, w.Name)
+// UpsertWorkspaceLazy inserts or bumps a workspace row. name is written only on
+// first insert; subsequent calls with different names do NOT overwrite (first
+// writer wins). Every call bumps last_seen_at. Caller must ensure apiKeyID
+// already exists in api_keys table (register handler does LookupAPIKey upstream).
+func (s *Store) UpsertWorkspaceLazy(id, name, apiKeyID string) error {
+	if id == "" {
+		return errors.New("observerstore: workspace id must not be empty")
+	}
+	if apiKeyID == "" {
+		return errors.New("observerstore: apiKeyID must not be empty")
+	}
+	now := nowUTC()
+	_, err := s.db.Exec(
+		`INSERT INTO workspaces(id, name, created_by_api_key_id, created_at, last_seen_at)
+         VALUES(?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET last_seen_at = excluded.last_seen_at`,
+		id, name, apiKeyID, now, now,
+	)
 	return err
 }
 
-func (s *Store) UpsertAgent(a Agent, token string) error {
+func (s *Store) UpsertAgent(a Agent, token, apiKeyID string) error {
 	if token == "" {
 		return errors.New("observerstore: agent token must not be empty")
 	}
-	_, err := s.db.Exec(`INSERT INTO agents(workspace_id, id, role, display_name, token_hash) VALUES(?, ?, ?, ?, ?)
-		ON CONFLICT(workspace_id, id) DO UPDATE SET role=excluded.role, display_name=excluded.display_name, token_hash=excluded.token_hash`,
-		a.WorkspaceID, a.ID, a.Role, a.DisplayName, tokenHash(token))
-	return err
-}
-
-// APIKeySpec is a per-workspace bootstrap credential. Agents present the
-// plaintext Key as a Bearer token against /api/agents/register to mint
-// their own per-agent token.
-type APIKeySpec struct {
-	ID  string
-	Key string
-}
-
-// UpsertAPIKey inserts or replaces the api key identified by
-// (workspaceID, id). The plaintext key is hashed before storage. An empty
-// key is rejected; the workspace must already exist (enforced by FK).
-func (s *Store) UpsertAPIKey(workspaceID, id, key string) error {
-	if key == "" {
-		return errors.New("observerstore: api key must not be empty")
+	if apiKeyID == "" {
+		return errors.New("observerstore: apiKeyID must not be empty")
 	}
-	_, err := s.db.Exec(`INSERT INTO api_keys(workspace_id, id, key_hash, created_at)
-		VALUES(?, ?, ?, ?)
-		ON CONFLICT(workspace_id, id) DO UPDATE SET key_hash=excluded.key_hash, created_at=excluded.created_at`,
-		workspaceID, id, tokenHash(key), nowUTC())
+	_, err := s.db.Exec(
+		`INSERT INTO agents(workspace_id, id, role, display_name, token_hash, created_by_api_key_id)
+         VALUES(?, ?, ?, ?, ?, ?)
+         ON CONFLICT(workspace_id, id) DO UPDATE SET
+            role = excluded.role,
+            display_name = excluded.display_name,
+            token_hash = excluded.token_hash`,
+		a.WorkspaceID, a.ID, a.Role, a.DisplayName, tokenHash(token), apiKeyID,
+	)
 	return err
 }
 
-// LookupAPIKey returns the workspace_id and key id whose key_hash matches
-// the plaintext key. ok=false means no row matched; err is reserved for
-// real DB errors. An empty input returns ok=false without consulting the DB.
-func (s *Store) LookupAPIKey(key string) (workspaceID, keyID string, ok bool, err error) {
+// UpsertAPIKey inserts or refreshes one api_keys row.
+func (s *Store) UpsertAPIKey(spec APIKeySpec) error {
+	if spec.ID == "" {
+		return errors.New("observerstore: api key id must not be empty")
+	}
+	if spec.Key == "" {
+		return errors.New("observerstore: api key value must not be empty")
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO api_keys(id, key_hash, note, created_at)
+         VALUES(?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+            key_hash = excluded.key_hash,
+            note = excluded.note,
+            created_at = excluded.created_at`,
+		spec.ID, tokenHash(spec.Key), spec.Note, nowUTC(),
+	)
+	return err
+}
+
+// LookupAPIKey looks up an api_key id by key_hash. ok=false means no match;
+// err is reserved for real DB errors. Empty input returns ok=false.
+func (s *Store) LookupAPIKey(key string) (keyID string, ok bool, err error) {
 	if key == "" {
-		return "", "", false, nil
+		return "", false, nil
 	}
 	err = s.db.QueryRow(
-		`SELECT workspace_id, id FROM api_keys WHERE key_hash=?`,
+		`SELECT id FROM api_keys WHERE key_hash=?`,
 		tokenHash(key),
-	).Scan(&workspaceID, &keyID)
+	).Scan(&keyID)
 	if err == sql.ErrNoRows {
-		return "", "", false, nil
+		return "", false, nil
 	}
 	if err != nil {
-		return "", "", false, err
+		return "", false, err
 	}
-	return workspaceID, keyID, true, nil
+	return keyID, true, nil
 }
 
-// ReplaceAPIKeysForWorkspace deletes every api_keys row for workspaceID,
-// then inserts the supplied spec set in a single transaction. Used at
-// observer boot to reconcile yaml ↔ db so that keys removed from yaml
-// stop working after restart.
-func (s *Store) ReplaceAPIKeysForWorkspace(workspaceID string, keys []APIKeySpec) error {
+// ReplaceAPIKeys deletes all existing api_keys rows then inserts the supplied
+// set, in one transaction. Called once at observer boot to reconcile yaml<->db.
+func (s *Store) ReplaceAPIKeys(keys []APIKeySpec) error {
+	seenID := map[string]bool{}
+	seenHash := map[string]bool{}
 	for i, k := range keys {
 		if k.ID == "" {
 			return fmt.Errorf("observerstore: api key[%d] id must not be empty", i)
@@ -386,22 +414,29 @@ func (s *Store) ReplaceAPIKeysForWorkspace(workspaceID string, keys []APIKeySpec
 		if k.Key == "" {
 			return fmt.Errorf("observerstore: api key[%s] value must not be empty", k.ID)
 		}
+		if seenID[k.ID] {
+			return fmt.Errorf("observerstore: duplicate api key id %q", k.ID)
+		}
+		h := tokenHash(k.Key)
+		if seenHash[h] {
+			return fmt.Errorf("observerstore: duplicate api key value (id=%q)", k.ID)
+		}
+		seenID[k.ID] = true
+		seenHash[h] = true
 	}
-
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
-
-	if _, err := tx.Exec(`DELETE FROM api_keys WHERE workspace_id=?`, workspaceID); err != nil {
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.Exec(`DELETE FROM api_keys`); err != nil {
 		return err
 	}
 	now := nowUTC()
 	for _, k := range keys {
 		if _, err := tx.Exec(
-			`INSERT INTO api_keys(workspace_id, id, key_hash, created_at) VALUES(?, ?, ?, ?)`,
-			workspaceID, k.ID, tokenHash(k.Key), now,
+			`INSERT INTO api_keys(id, key_hash, note, created_at) VALUES(?, ?, ?, ?)`,
+			k.ID, tokenHash(k.Key), k.Note, now,
 		); err != nil {
 			return err
 		}

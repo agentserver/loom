@@ -1,14 +1,25 @@
+CREATE TABLE IF NOT EXISTS api_keys (
+    id          TEXT PRIMARY KEY,
+    key_hash    TEXT NOT NULL UNIQUE,
+    note        TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS workspaces (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL
+    id                     TEXT PRIMARY KEY,
+    name                   TEXT NOT NULL DEFAULT '',
+    created_by_api_key_id  TEXT NOT NULL REFERENCES api_keys(id),
+    created_at             TEXT NOT NULL,
+    last_seen_at           TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS agents (
-    workspace_id TEXT NOT NULL,
-    id TEXT NOT NULL,
-    role TEXT NOT NULL,
-    display_name TEXT NOT NULL,
-    token_hash TEXT NOT NULL,
+    workspace_id           TEXT NOT NULL,
+    id                     TEXT NOT NULL,
+    role                   TEXT NOT NULL,
+    display_name           TEXT NOT NULL,
+    token_hash             TEXT NOT NULL,
+    created_by_api_key_id  TEXT NOT NULL REFERENCES api_keys(id),
     PRIMARY KEY (workspace_id, id)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_token_hash ON agents(token_hash);
@@ -163,13 +174,3 @@ CREATE TABLE IF NOT EXISTS resource_snapshots (
 CREATE INDEX IF NOT EXISTS idx_resource_snapshots_latest
 ON resource_snapshots(workspace_id, created_at);
 
-CREATE TABLE IF NOT EXISTS api_keys (
-    workspace_id TEXT NOT NULL,
-    id           TEXT NOT NULL,
-    key_hash     TEXT NOT NULL,
-    created_at   TEXT NOT NULL,
-    PRIMARY KEY (workspace_id, id),
-    FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
