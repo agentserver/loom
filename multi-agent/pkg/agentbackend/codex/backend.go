@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
@@ -31,6 +32,9 @@ func New(cfg agentbackend.CodexConfig, env []string) *Backend {
 func (b *Backend) Kind() agentbackend.Kind { return agentbackend.KindCodex }
 func (b *Backend) Run(ctx context.Context, t agentbackend.Task, s agentbackend.Sink) (agentbackend.Result, error) {
 	return b.exec.Run(ctx, t, s)
+}
+func (b *Backend) RunResume(ctx context.Context, sessionID, answer string, s agentbackend.Sink) (agentbackend.Result, error) {
+	return agentbackend.Result{}, fmt.Errorf("codex RunResume not yet wired; implemented in Task 10")
 }
 func (b *Backend) LLM() agentbackend.LLMRunner          { return b.llm }
 func (b *Backend) Permissions() agentbackend.PermissionsStore { return b.perm }
