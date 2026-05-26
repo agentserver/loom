@@ -26,7 +26,7 @@ func newTestHandler(t *testing.T) (http.Handler, *observerstore.Store) {
 	st, err := observerstore.New(filepath.Join(t.TempDir(), "observer.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { st.Close() })
-	return New(st), st
+	return New(st, nil), st
 }
 
 // seedAPIKey adds one api_key row to st.

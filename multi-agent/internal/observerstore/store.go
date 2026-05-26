@@ -325,6 +325,15 @@ func isDuplicateColumn(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "duplicate column")
 }
 
+// DB returns the underlying *sql.DB so sibling packages (internal/userspace,
+// future internal/marketplace) can attach their own tables to the same
+// SQLite file. Callers MUST keep their table names in their own namespace
+// (e.g. userspace_*) — do NOT query observer's business tables (events,
+// tasks, artifacts, agents, workspaces) via this handle.
+func (s *Store) DB() *sql.DB {
+	return s.db
+}
+
 func (s *Store) Close() error {
 	return s.db.Close()
 }
