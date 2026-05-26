@@ -14,9 +14,8 @@
 
 | Spec | 主题 | 备注 |
 |---|---|---|
-| [2026-05-25-observer-user-workspace-design.md](specs/2026-05-25-observer-user-workspace-design.md) | Observer 单用户 / 多 workspace 重塑（api_key 顶层化 + agent 自带 workspace_id + lazy 建 workspace） | 仅 spec；userspace 折叠的前置；下一步按本 spec §10 拆 plan |
 | [2026-05-25-mcp-marketplace-design.md](specs/2026-05-25-mcp-marketplace-design.md) | MCP server 市场（registry + publish + driver 端 fork/remix） | 仅 spec；下一步：写 plan（按 §11 实施顺序拆 8 步），起点 `internal/mcpmarket/{manifest,pack,sig,scanner}` |
-| [2026-05-25-personal-mcp-skill-space-design.md](specs/2026-05-25-personal-mcp-skill-space-design.md) | 用户私有 MCP + Skill space（多设备同步 / 私有检索 / 可选 promote 到 marketplace） | **本 spec 将被 superseded**：观待 observer-user-workspace 落地后，重写为"observer extension"形态；包 PK → `(workspace_id, slug)`，无 users 表 |
+| [2026-05-25-personal-mcp-skill-space-design.md](specs/2026-05-25-personal-mcp-skill-space-design.md) | 用户私有 MCP + Skill space（observer extension; pip+venv 心智；MCP 与 skill 同收） | **已重写 v2**：折进 observer-server / 复用 agent token / slug 用户全局唯一 / 无 sig·TOFU·diff-approve；依赖 marketplace 先落 `internal/mcpmarket/*`；下一步按本 spec §12 拆 plan |
 
 ---
 
@@ -38,6 +37,7 @@
 | [observer-api-key-registration](specs/2026-05-20-observer-api-key-registration-design.md) | [observer-api-key-registration](plans/2026-05-20-observer-api-key-registration.md) | Observer API key 注册 |
 | [codex-backend](specs/2026-05-23-codex-backend-design.md) | [codex-backend](plans/2026-05-23-codex-backend.md) | 可插拔 coding-agent（Claude + Codex） |
 | [unregister-mcp](specs/2026-05-25-unregister-mcp-design.md) | [unregister-mcp](plans/2026-05-25-unregister-mcp.md) | `unregister_mcp` skill + driver tool |
+| [observer-user-workspace](specs/2026-05-25-observer-user-workspace-design.md) | [observer-user-workspace](plans/2026-05-25-observer-user-workspace.md) | Observer 单用户 / 多 workspace 重塑（api_key 顶层化 + agent 自带 workspace_id + lazy 建 workspace）|
 
 ---
 
