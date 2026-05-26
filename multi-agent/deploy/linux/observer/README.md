@@ -22,7 +22,7 @@ notes in `../../../tests/prod_test/README.md` (not version-controlled).
    ```bash
    # Option A — pre-built (replace amd64 with arm64)
    mkdir -p ../bin && curl -L -o ../bin/observer-server.linux-amd64 \
-     https://github.com/agentserver/loom/releases/download/v0.0.1/observer-server.linux-amd64
+     https://github.com/agentserver/loom/releases/latest/download/observer-server.linux-amd64
    chmod +x ../bin/observer-server.linux-amd64
 
    # Option B — build from source (from multi-agent/ )

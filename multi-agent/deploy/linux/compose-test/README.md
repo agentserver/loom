@@ -40,7 +40,7 @@ left as the operator's job — the test surfaces the URLs prominently.
    cd ../bin
    for n in observer-server driver-agent slave-agent; do
      curl -L -o "$n.linux-amd64" \
-       "https://github.com/agentserver/loom/releases/download/v0.0.1/$n.linux-amd64"
+       "https://github.com/agentserver/loom/releases/download/v0.0.2/$n.linux-amd64"
      chmod +x "$n.linux-amd64"
    done
    ```

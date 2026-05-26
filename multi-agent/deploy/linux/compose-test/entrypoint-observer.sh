@@ -16,7 +16,7 @@ if [[ ! -x "$BIN" ]]; then
 ERROR: missing $BIN
        Drop the observer binary into deploy/linux/bin/ before 'docker compose up':
          curl -L -o deploy/linux/bin/observer-server.linux-amd64 \\
-           https://github.com/agentserver/loom/releases/download/v0.0.1/observer-server.linux-amd64
+           https://github.com/agentserver/loom/releases/download/v0.0.2/observer-server.linux-amd64
          chmod +x deploy/linux/bin/observer-server.linux-amd64
 EOF
   exit 1

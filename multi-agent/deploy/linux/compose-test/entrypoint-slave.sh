@@ -17,7 +17,7 @@ if [[ ! -x "$BIN" ]]; then
 ERROR: missing $BIN
        Drop the slave binary into deploy/linux/bin/ before 'docker compose up':
          curl -L -o deploy/linux/bin/slave-agent.linux-amd64 \\
-           https://github.com/agentserver/loom/releases/download/v0.0.1/slave-agent.linux-amd64
+           https://github.com/agentserver/loom/releases/download/v0.0.2/slave-agent.linux-amd64
          chmod +x deploy/linux/bin/slave-agent.linux-amd64
 EOF
   exit 1

@@ -36,8 +36,8 @@
 # Prereqs:
 #   * Binary downloaded or built into ../bin/slave-agent.linux-{amd64,arm64}
 #     (override with --bin PATH). Downloads:
-#       https://github.com/agentserver/loom/releases/download/v0.0.1/slave-agent.linux-amd64
-#       https://github.com/agentserver/loom/releases/download/v0.0.1/slave-agent.linux-arm64
+#       https://github.com/agentserver/loom/releases/latest/download/slave-agent.linux-amd64
+#       https://github.com/agentserver/loom/releases/latest/download/slave-agent.linux-arm64
 #   * `claude` CLI installed and in PATH for the service user (or set claude.bin
 #     in config.yaml to its absolute path post-install)
 
@@ -99,7 +99,7 @@ BIN="${BIN_OVERRIDE:-$BIN_DIR/$BIN_NAME}"
 [[ -x "$BIN" ]] || {
   echo "ERROR: missing $BIN" >&2
   echo "  download:  curl -L -o $BIN_DIR/$BIN_NAME \\" >&2
-  echo "    https://github.com/agentserver/loom/releases/download/v0.0.1/$BIN_NAME && chmod +x $BIN_DIR/$BIN_NAME" >&2
+  echo "    https://github.com/agentserver/loom/releases/latest/download/$BIN_NAME && chmod +x $BIN_DIR/$BIN_NAME" >&2
   echo "  or build from multi-agent/ :" >&2
   echo "    CGO_ENABLED=0 GOOS=linux GOARCH=$CPU_ARCH go build -trimpath -ldflags='-s -w' \\" >&2
   echo "      -o deploy/linux/bin/$BIN_NAME ./cmd/slave-agent" >&2

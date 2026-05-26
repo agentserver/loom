@@ -36,8 +36,8 @@
 #                         (default: ../bin/driver-agent.linux-{arch})
 #
 # Binary download:
-#   https://github.com/agentserver/loom/releases/download/v0.0.1/driver-agent.linux-amd64
-#   https://github.com/agentserver/loom/releases/download/v0.0.1/driver-agent.linux-arm64
+#   https://github.com/agentserver/loom/releases/latest/download/driver-agent.linux-amd64
+#   https://github.com/agentserver/loom/releases/latest/download/driver-agent.linux-arm64
 
 set -euo pipefail
 
@@ -88,7 +88,7 @@ BIN="${BIN_OVERRIDE:-$BIN_DIR/$BIN_NAME}"
 [[ -x "$BIN" ]] || {
   echo "ERROR: missing $BIN" >&2
   echo "  download:  curl -L -o $BIN_DIR/$BIN_NAME \\" >&2
-  echo "    https://github.com/agentserver/loom/releases/download/v0.0.1/$BIN_NAME && chmod +x $BIN_DIR/$BIN_NAME" >&2
+  echo "    https://github.com/agentserver/loom/releases/latest/download/$BIN_NAME && chmod +x $BIN_DIR/$BIN_NAME" >&2
   echo "  or build from multi-agent/ :" >&2
   echo "    CGO_ENABLED=0 GOOS=linux GOARCH=$CPU_ARCH go build -trimpath -ldflags='-s -w' \\" >&2
   echo "      -o deploy/linux/bin/$BIN_NAME ./cmd/driver-agent" >&2

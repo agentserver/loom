@@ -7,11 +7,15 @@
 #          LOOM_WORKSPACE_ID=WS_ID \
 #          LOOM_API_KEY='YOUR_API_KEY'
 #   bash <(curl -fsSL \
-#     https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-slave.sh) \
+#     https://github.com/agentserver/loom/releases/latest/download/bootstrap-slave.sh) \
 #     --name slave-myhost            # foreground / Termux
 #
 #   bash <(curl -fsSL .../bootstrap-slave.sh) \
 #     --name slave-myhost --systemd  # systemd-managed (Linux only; needs sudo)
+#
+# Release pinning: this script downloads from the latest release by default.
+# Pin with `--release v0.0.2` or `export LOOM_RELEASE_TAG=v0.0.2` to roll
+# back or get reproducible installs.
 #
 # Layout after install (default — see --loom-home below to override):
 #   ~/.loom/<NAME>/
@@ -37,8 +41,19 @@
 
 set -euo pipefail
 
-RELEASE_TAG="${LOOM_RELEASE_TAG:-v0.0.1}"
-RELEASE_BASE="https://github.com/agentserver/loom/releases/download/${RELEASE_TAG}"
+RELEASE_TAG="${LOOM_RELEASE_TAG:-latest}"
+# `latest` uses GitHub's /releases/latest/download/<asset> alias which
+# 302-redirects to the newest published (non-prerelease) release. Any other
+# value pins to /releases/download/<TAG>/<asset>. The two URL shapes differ
+# structurally, so they cannot be folded into a single concat.
+compute_release_base() {
+  if [[ "$1" == "latest" ]]; then
+    echo "https://github.com/agentserver/loom/releases/latest/download"
+  else
+    echo "https://github.com/agentserver/loom/releases/download/$1"
+  fi
+}
+RELEASE_BASE="$(compute_release_base "$RELEASE_TAG")"
 
 NAME=""
 OBSERVER_URL="${LOOM_OBSERVER_URL:-}"
@@ -63,8 +78,8 @@ while (( $# )); do
     --tag)           TAGS+=("$2"); shift 2 ;;
     --desc)          DESC="$2"; shift 2 ;;
     --systemd)       USE_SYSTEMD=1; shift ;;
-    --release)       RELEASE_TAG="$2"; RELEASE_BASE="https://github.com/agentserver/loom/releases/download/${RELEASE_TAG}"; shift 2 ;;
-    -h|--help)       sed -n '2,30p' "$0"; exit 0 ;;
+    --release)       RELEASE_TAG="$2"; RELEASE_BASE="$(compute_release_base "$RELEASE_TAG")"; shift 2 ;;
+    -h|--help)       sed -n '2,34p' "$0"; exit 0 ;;
     *)               echo "unknown flag: $1" >&2; exit 2 ;;
   esac
 done

@@ -21,7 +21,7 @@ pre-registered), see `../../../tests/prod_test/driver/`.
    ```bash
    # Option A — pre-built (replace amd64 with arm64 for aarch64 hosts)
    mkdir -p ../bin && curl -L -o ../bin/driver-agent.linux-amd64 \
-     https://github.com/agentserver/loom/releases/download/v0.0.1/driver-agent.linux-amd64
+     https://github.com/agentserver/loom/releases/latest/download/driver-agent.linux-amd64
    chmod +x ../bin/driver-agent.linux-amd64
 
    # Option B — build from source (from multi-agent/ )

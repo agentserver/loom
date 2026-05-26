@@ -6,11 +6,16 @@
 #   export LOOM_WORKSPACE_ID=ws-prod          # optional, default ws-default
 #   export LOOM_API_KEY='YOUR_API_KEY'        # optional; random 32-byte hex if unset
 #   bash <(curl -fsSL \
-#     https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-observer.sh) \
+#     https://github.com/agentserver/loom/releases/latest/download/bootstrap-observer.sh) \
 #     --name obs-prod            # foreground
 #
 #   bash <(curl -fsSL .../bootstrap-observer.sh) \
 #     --name obs-prod --systemd  # systemd-managed (needs sudo)
+#
+# Release pinning: by default this script downloads the binary from the
+# latest published release. To pin a specific tag (e.g. for reproducibility
+# or to roll back), pass `--release v0.0.2` or `export LOOM_RELEASE_TAG=v0.0.2`
+# before running.
 #
 # Layout after install (default — see --loom-home below to override):
 #   ~/.loom/<NAME>/
@@ -32,8 +37,19 @@
 
 set -euo pipefail
 
-RELEASE_TAG="${LOOM_RELEASE_TAG:-v0.0.1}"
-RELEASE_BASE="https://github.com/agentserver/loom/releases/download/${RELEASE_TAG}"
+RELEASE_TAG="${LOOM_RELEASE_TAG:-latest}"
+# `latest` uses GitHub's /releases/latest/download/<asset> alias which
+# 302-redirects to the newest published (non-prerelease) release. Any other
+# value pins to /releases/download/<TAG>/<asset>. The two URL shapes differ
+# structurally, so they cannot be folded into a single concat.
+compute_release_base() {
+  if [[ "$1" == "latest" ]]; then
+    echo "https://github.com/agentserver/loom/releases/latest/download"
+  else
+    echo "https://github.com/agentserver/loom/releases/download/$1"
+  fi
+}
+RELEASE_BASE="$(compute_release_base "$RELEASE_TAG")"
 
 NAME=""
 LISTEN_ADDR="${LOOM_LISTEN_ADDR:-:8090}"
@@ -52,8 +68,8 @@ while (( $# )); do
     --api-key)         API_KEY="$2"; shift 2 ;;
     --loom-home)       LOOM_HOME_OVERRIDE="$2"; shift 2 ;;
     --systemd)         USE_SYSTEMD=1; shift ;;
-    --release)         RELEASE_TAG="$2"; RELEASE_BASE="https://github.com/agentserver/loom/releases/download/${RELEASE_TAG}"; shift 2 ;;
-    -h|--help)         sed -n '2,28p' "$0"; exit 0 ;;
+    --release)         RELEASE_TAG="$2"; RELEASE_BASE="$(compute_release_base "$RELEASE_TAG")"; shift 2 ;;
+    -h|--help)         sed -n '2,33p' "$0"; exit 0 ;;
     *)                 echo "unknown flag: $1" >&2; exit 2 ;;
   esac
 done
