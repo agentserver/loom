@@ -27,6 +27,8 @@
 - 完整版本回滚 UI —— 服务端保留所有版本，回滚走 `pull --version X`，CLI-only
 - Realtime / push sync —— 拉取模式，不做长连接推送
 - 把 marketplace 公开包"装"进 userspace —— marketplace 自有 pull 链路，userspace 只做单向 promote（私有→公开）
+- `promote --to-marketplace` —— marketplace 本身延期，本 round 不实施（接口 / 代码位置预留，§7.5 仍保留设计，标 v1.1）
+- `risk_flags` 静态扫描器 —— §10.3 标信息性、不阻塞 install；本 round 推迟，CLI 占位"无 scan_report"
 
 ---
 
@@ -57,11 +59,12 @@
 - 现有 `agents`、`workspaces`、`api_keys` 表（用作 scope 与权限）
 - `observerweb` 把 userspace 路由挂在同一 mux 上（一个端口、一套 token、一套日志）
 
-### 2.2 复用 mcpmarket（marketplace spec，待落）
-- `internal/mcpmarket/manifest` —— manifest schema 校验 + JCS canonicalize（userspace 用同款 manifest.json，扩展 `kind` 字段）
-- `internal/mcpmarket/pack` —— 确定性 tar.gz 打包/解包（同 marketplace §3 规范）
-- `internal/mcpmarket/scanner` —— 静态扫描（risk_flags，用于显示给用户参考，**不作为 install 阻塞闸**）
-- 不复用：`internal/mcpmarket/sig`（本期 userspace 不签名）
+### 2.2 共享 `internal/mcpmarket/*`（marketplace 延期 → 由本 spec 先落）
+原 marketplace spec 计划把 manifest / pack / scanner / sig 四个子包做成 driver 与 registry 共用的基础。因 marketplace 延期，本 spec 直接**落 manifest 与 pack 两个**（personal-space 必需），marketplace 未来作为下游消费者复用同一份代码。
+- `internal/mcpmarket/manifest` —— manifest schema 校验 + JCS canonicalize（userspace 用同款 manifest.json，扩展 `kind` 字段）；本 plan 第 1 步建
+- `internal/mcpmarket/pack` —— 确定性 tar.gz 打包/解包（USTAR / mtime=0 / 字典序 / mode 标准化）；本 plan 第 2 步建
+- `internal/mcpmarket/scanner` —— 静态扫描（risk_flags，信息性，**不作为 install 阻塞闸**）；§10.3 起 install 时只显示不阻塞，**本 plan 推迟到 v1.1 再加**
+- `internal/mcpmarket/sig` —— 签名相关；本期 userspace 不签名（§1 决策），完全不实现
 
 ### 2.3 不复用 / 独有
 - 审核队列（无，自审自信）
@@ -427,7 +430,9 @@ multi-agent/
 │   │   └── promote/                      # → marketplace 翻译层
 │   ├── observerweb/                      # 已存在；本 feature 在 mux.HandleFunc 段挂 /api/userspace/*
 │   ├── observerstore/                    # 已存在；不动；userspace/store 通过 `Store.DB()` 借 *sql.DB
-│   └── mcpmarket/                        # 来自 marketplace spec；本 feature 是 consumer
+│   └── mcpmarket/                        # 新；由本 plan 第 1-2 步建（manifest + pack）；marketplace 未来共享
+│       ├── manifest/                     # schema 校验 + JCS canonicalize
+│       └── pack/                         # 确定性 tar.gz 打包/解包
 └── skills/
     └── userspace-publish/                # 新；driver 内引导用户把 generated_mcp/<x> push 上去
         └── SKILL.md
@@ -442,19 +447,24 @@ multi-agent/
 
 ---
 
-## 12. 实施顺序（依赖 marketplace 先落 `internal/mcpmarket/*`）
+## 12. 实施顺序（marketplace 延期 → 本 plan 自带共享基础）
 
-1. `observerstore.Store.DB()` 暴露 + userspace 表 schema 在 `internal/userspace/store/schema.sql`；启动时 observer-server 调一次 `userspace.store.Migrate(db)` 建表
-2. `internal/userspace/store` —— CRUD + blob refcount，含单测
-3. `internal/userspace/blob` —— fs 寻址 + GC
-4. `internal/userspace/pack` + `skillpack` —— kind 分流，依赖 mcpmarket/pack
-5. `internal/userspace/api` —— chi handlers；`observerweb` 在 mux 上挂 `/api/userspace/*`
-6. `cmd/mcp-userspace` —— CLI；login + push + search + pull + install + sync
-7. 端到端：本机灰度 observer + CLI 跑 push → 装另一 workspace → 跑通；遵守 [[e2e_required_for_features_and_fixes]]
-8. `internal/userspace/promote` + `mcp-userspace promote` —— marketplace 通路（依赖 marketplace 已落 + 当前用户有 publisher 身份）
-9. `skills/userspace-publish/SKILL.md` —— driver 内 authoring 引导
+1. `internal/mcpmarket/manifest` —— manifest.json schema struct + JCS canonicalize；含单测（JCS 稳定性 / kind 字段校验）
+2. `internal/mcpmarket/pack` —— 确定性 tar.gz 打包/解包（USTAR / mtime=0 / 字典序 / mode 标准化 / zip-slip 防护）；含单测（10 次 pack 字节稳定、跨平台稳定）
+3. `observerstore.Store.DB()` 暴露 + userspace 表 schema 在 `internal/userspace/store/schema.sql`；observer-server 启动调一次 `userspace.store.Migrate(db)` 建表
+4. `internal/userspace/store` —— CRUD（packages / package_versions / workspace_installations）+ blob refcount；单测覆盖 §9.2 #1/#2/#5
+5. `internal/userspace/blob` —— fs sha256 寻址 + 引用计数 + GC
+6. `internal/userspace/skillpack` —— SKILL.md frontmatter 解析 + install scope 处理（user vs project）
+7. `internal/userspace/api` —— chi handlers；`observerweb` 在 mux 上挂 `/api/userspace/*`；用 observer 现有 agent token 中间件
+8. `cmd/mcp-userspace` —— CLI（login / push / search / pull / install / list / sync / yank）
+9. 端到端：本机灰度 observer + CLI 跑 push → 切到另一 workspace → pull + install 跑通；遵守 [[e2e_required_for_features_and_fixes]]
+10. `skills/userspace-publish/SKILL.md` —— driver 内 authoring 引导
 
-每步独立可测，每步一个 PR / 一组 commits。
+每步独立可测，每步一组 commits。
+
+**推迟项（v1.1 / 后续 plan）**：
+- `internal/mcpmarket/scanner`（risk_flags 信息性扫描）—— 不阻塞 v1 install
+- `internal/userspace/promote` + `mcp-userspace promote` —— 依赖 marketplace 已落 + 用户有 publisher 身份；marketplace 不动它就不动
 
 ---
 
