@@ -120,6 +120,10 @@ func run(cfgPath string) error {
 		"mcp": mcpExec,
 		"":    backendExecutor{backend},
 	}
+	routes["chat_resume"] = executor.NewChatResume(executor.ChatResumeConfig{
+		Backend:  resumeAdapter{backend},
+		FlockDir: filepath.Join(workdir, "humanloop"),
+	})
 	if hasSkill(cfg.Discovery.Skills, "bash") {
 		routes["bash"] = executor.NewBashExecutor(executor.BashConfig{WorkDir: cfg.Claude.WorkDir})
 	}
@@ -216,6 +220,17 @@ type backendExecutor struct {
 
 func (be backendExecutor) Run(ctx context.Context, t executor.Task, sink executor.Sink) (executor.Result, error) {
 	return be.b.Run(ctx, t, sink)
+}
+
+// resumeAdapter adapts agentbackend.Backend to executor.ResumeBackend so
+// ChatResumeExecutor can call RunResume without importing agentbackend.
+type resumeAdapter struct{ b agentbackend.Backend }
+
+func (a resumeAdapter) Run(ctx context.Context, t executor.Task, s executor.Sink) (executor.Result, error) {
+	return a.b.Run(ctx, t, s)
+}
+func (a resumeAdapter) RunResume(ctx context.Context, sid, ans string, s executor.Sink) (executor.Result, error) {
+	return a.b.RunResume(ctx, sid, ans, s)
 }
 
 func hasSkill(skills []string, want string) bool {
