@@ -3,13 +3,19 @@
 #
 # What it does:
 #   1. Detects host arch (amd64 / arm64), picks ../bin/observer-server.linux-<arch>.
-#   2. Renders observer.yaml from the template, filling in instance name,
-#      install dir, listen address, single workspace + bootstrap api-key.
+#   2. Renders observer.yaml from the template, filling in install dir,
+#      listen address, and a bootstrap api-key entry.
 #   3. Generates a random api-key if --api-key was not passed (printed once).
 #   4. Copies the binary + config into LOOM_HOME.
 #   5. With --systemd: installs the unit under /etc/systemd/system/, daemon-reloads,
 #      enables + starts the service.
 #   6. Without --systemd: prints the foreground command so you can smoke-test.
+#
+# Workspaces are NOT enumerated in observer config — they are created lazily
+# at register time from each agent's declared observer.workspace_id, gated by
+# a valid bootstrap api-key. --workspace / --workspace-name on this script are
+# operator hints (used only in the post-install echo to remind you which
+# workspace the key is intended for) and do not feed observer.yaml.
 #
 # Usage:
 #   ./install.sh --name obs-prod                                  # foreground-mode install
@@ -22,9 +28,10 @@
 #   --user USER           service user (default: current $USER); home dir is read from /etc/passwd
 #   --loom-home PATH      install dir (default: <service user's $HOME>/.loom/<NAME>)
 #   --listen ADDR         listen_addr (default: ":8090")
-#   --workspace ID        workspace.id (default: ws-default)
-#   --workspace-name TEXT workspace.name (default: same as --workspace)
-#   --api-key KEY         bootstrap api-key for that workspace
+#   --workspace ID        operator hint for which workspace the api-key targets
+#                         (default: ws-default); see note above
+#   --workspace-name TEXT operator hint; defaults to --workspace
+#   --api-key KEY         bootstrap api-key any agent can use to register
 #                         (default: 32-byte random hex printed to stdout)
 #   --bin PATH            override observer-server binary path
 #                         (default: ../bin/observer-server.linux-<arch>)
@@ -100,13 +107,15 @@ if [[ -z "$API_KEY" ]]; then
   GENERATED_KEY=1
 fi
 
-# Render config
+# Render config. Workspace id/name are no longer pinned in observer config —
+# they're lazy-upserted from the agent's observer.workspace_id at register
+# time. The --workspace / --workspace-name flags are kept on this script for
+# back-compat with operator muscle memory but only feed the post-install
+# echo, not the config file.
 CONFIG_OUT="$(mktemp)"
 sed \
   -e "s|__LISTEN_ADDR__|$LISTEN_ADDR|g" \
   -e "s|__LOOM_HOME__|$LOOM_HOME|g" \
-  -e "s|__WORKSPACE_ID__|$WORKSPACE_ID|g" \
-  -e "s|__WORKSPACE_NAME__|$WORKSPACE_NAME|g" \
   -e "s|__WS_APIKEY__|$API_KEY|g" \
   "$HERE/config.yaml.template" > "$CONFIG_OUT"
 

@@ -1,13 +1,12 @@
 listen_addr: "__LISTEN_ADDR__"
 db_path: __LOOM_HOME__/observer.db
 
-# Workspaces are the units other agents register against. Each workspace's
-# api_keys[] entries are shared bootstrap keys: slaves and drivers POST one
-# of them as Bearer on /api/agents/register to mint a per-agent token.
-# Add more workspaces (or more api_keys per workspace) by hand after install.
-workspaces:
-  - id: __WORKSPACE_ID__
-    name: __WORKSPACE_NAME__
-    api_keys:
-      - id: bootstrap
-        key: "__WS_APIKEY__"
+# api_keys[] are the bootstrap keys agents POST as Bearer on
+# /api/agents/register to mint a per-agent token. Workspaces are created
+# lazily at register time from the agent's declared observer.workspace_id,
+# so they don't need to be enumerated here. Add more keys by hand to rotate
+# or scope access (e.g. one key per workspace).
+api_keys:
+  - id: bootstrap
+    key: "__WS_APIKEY__"
+    note: "shared bootstrap key (workspace lazy-upserted at register)"
