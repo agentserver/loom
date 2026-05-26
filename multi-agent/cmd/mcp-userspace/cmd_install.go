@@ -15,6 +15,7 @@ func runInstall(args []string) {
 	scope := fs.String("scope", "user", "user|project (skill only)")
 	projectRoot := fs.String("project-root", ".", "for --scope=project")
 	overwrite := fs.Bool("overwrite", false, "overwrite existing install")
+	workspace := fs.String("workspace", "", "workspace_id to record install against on server (required to track install server-side)")
 	fs.Parse(args)
 	if fs.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "usage: mcp-userspace install <slug>@<ver>")
@@ -27,7 +28,8 @@ func runInstall(args []string) {
 	}
 	cfg, err := loadConfig()
 	failIf(err)
-	tarball, err := newClient(cfg).PullTarball(slug, ver)
+	client := newClient(cfg)
+	tarball, err := client.PullTarball(slug, ver)
 	failIf(err)
 	_, files, err := pack.ReadTarball(tarball)
 	failIf(err)
@@ -71,6 +73,18 @@ func runInstall(args []string) {
 	default:
 		fmt.Fprintln(os.Stderr, "unknown --as:", kind)
 		os.Exit(2)
+	}
+
+	// Record install server-side so `list --workspace mine` reflects it and
+	// other workspaces' search results show the right installed_version.
+	if *workspace != "" {
+		if err := client.Install(*workspace, slug, ver); err != nil {
+			fmt.Fprintln(os.Stderr, "warn: failed to record install server-side:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("recorded installation in workspace %s\n", *workspace)
+	} else {
+		fmt.Fprintln(os.Stderr, "note: install only extracted locally; pass --workspace <id> to record on server")
 	}
 }
 

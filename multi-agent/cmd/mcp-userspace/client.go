@@ -94,6 +94,25 @@ func (c *Client) PullTarball(slug, ver string) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
+// Install records on the server that workspaceID is now using slug@version.
+// The server enforces that workspaceID equals the caller's authenticated
+// workspace (cross-workspace writes return 403).
+func (c *Client) Install(workspaceID, slug, version string) error {
+	body := []byte(fmt.Sprintf(`{"version":%q}`, version))
+	resp, err := c.do(http.MethodPost,
+		fmt.Sprintf("/api/userspace/workspaces/%s/installations/%s", workspaceID, slug),
+		bytes.NewReader(body), "application/json")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 204 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("install HTTP %d: %s", resp.StatusCode, b)
+	}
+	return nil
+}
+
 func (c *Client) Yank(slug, ver string) error {
 	resp, err := c.do(http.MethodPost,
 		fmt.Sprintf("/api/userspace/packages/%s/yank/%s", slug, ver), nil, "")
