@@ -87,3 +87,27 @@ Do not call `register_slave_mcp` directly from a one-shot Claude generation: `re
 - Asking slave Claude Code to edit its own permissions; permission changes go through native `skill:"claude_permissions"` for now.
 - Using `127.0.0.1` or local file paths as if they were reachable from other machines.
 - Hand-rolling `cat <<EOF` or base64-decode payloads over `run_slave_bash` to ship a file when the slave advertises `file` — use `write_slave_file`. Same for `cat`-via-bash to pull a log back; use `read_slave_file` (returns a `blob_handle` + driver-local `cache_path`, bytes stay out of LLM context).
+- Auto-answering an `awaiting_user` question without surfacing it to the
+  real human (you are the proxy, not the decider).
+- Treating "approve" answers to `request_permission` as if they granted new
+  permissions — they don't.
+
+## Mid-chat human-in-the-loop
+
+Chat tasks (`skill="chat"`) can pause mid-conversation. `wait_task` may
+return `status:"awaiting_user"` instead of `completed`. When that happens:
+
+- The `question` field carries `kind` (`ask_user` | `request_permission`),
+  `question` text, optional `options`, optional `context`.
+- **Default behaviour: surface the question to the human via
+  `AskUserQuestion`. Do not invent an answer.** Only auto-answer when the
+  question text itself explicitly says e.g. *"do not ask user, decide based
+  on X"*.
+- Call `resume_task(last_task_id=<current_task_id>, answer=<user's reply>)`
+  to continue. `resume_task` returns the same shape as `wait_task` — keep
+  looping until you see `status:"completed"`.
+
+`request_permission` is **advisory**, not enforcement. Answering "approve"
+does NOT grant the slave new abilities; if the user wants to actually
+elevate permissions, call `update_slave_claude_permissions` /
+`register_slave_mcp` separately.
