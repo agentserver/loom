@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -197,4 +198,41 @@ func TestExecutorPausesOnHumanloopIPC(t *testing.T) {
 	require.NotNil(t, res.AwaitingUser)
 	require.Equal(t, "approve?", res.AwaitingUser.Question)
 	require.Equal(t, "sess-pause", res.SessionID)
+}
+
+// TestExecutorFailsWhenPauseWithoutSessionID — if the model invokes ask_user
+// but the backend never emitted a system frame with session_id, we cannot
+// resume; treat as failure even though AwaitingUser is set. Spec §Boundaries A.
+func TestExecutorFailsWhenPauseWithoutSessionID(t *testing.T) {
+	// Fake claude that emits NO system frame, just hangs on stdin like the
+	// pause-case helper.
+	dir := t.TempDir()
+	script := filepath.Join(dir, "claude")
+	body := `#!/bin/bash
+# deliberately NO system frame — we want session_id to stay empty
+cat > /dev/null
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"bye"}]}}'
+`
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	sockHook := func(path string) {
+		time.Sleep(200 * time.Millisecond)
+		c, err := humanloop.DialIPC(path)
+		if err != nil {
+			t.Logf("DialIPC: %v", err)
+			return
+		}
+		defer c.Close()
+		_ = c.Send(humanloop.Payload{Kind: "ask_user", Question: "doomed"})
+	}
+	ex := newExecutorWithSocketHook(agentbackend.ClaudeConfig{Bin: script, WorkDir: t.TempDir()}, nil, sockHook)
+	_, err := ex.Run(context.Background(), agentbackend.Task{Prompt: "hi"}, &captureSink{})
+	if err == nil {
+		t.Fatal("expected error when AwaitingUser set but SessionID empty")
+	}
+	if !strings.Contains(err.Error(), "session_id") {
+		t.Errorf("expected session_id in error, got %v", err)
+	}
 }

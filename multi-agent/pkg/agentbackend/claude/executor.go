@@ -210,6 +210,10 @@ func (e *executor) Run(ctx context.Context, t agentbackend.Task, sink agentbacke
 	if change != "" {
 		sink.Write("capability", change)
 	}
+	if awaiting != nil && sessionID == "" {
+		sink.Close()
+		return agentbackend.Result{}, fmt.Errorf("backend never emitted session_id; cannot resume")
+	}
 	sink.Close()
 	return agentbackend.Result{
 		Summary:          summary,
