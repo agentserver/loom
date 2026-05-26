@@ -82,6 +82,11 @@ func (e *executor) Run(ctx context.Context, t agentbackend.Task, sink agentbacke
 		// permission_denials, never pausing the chat). The two tools are the
 		// whole point of the injection — they must be callable.
 		"--allowedTools", "mcp__loom_humanloop__ask_user,mcp__loom_humanloop__request_permission",
+		// Disable the built-in AskUserQuestion: in --print mode no human is
+		// attached to answer it, so claude returns a synthetic "cancel" and
+		// the model degrades to plain-text questions, bypassing humanloop.
+		// Force the model onto mcp__loom_humanloop__ask_user instead.
+		"--disallowedTools", "AskUserQuestion",
 	}, e.cfg.ExtraArgs...)
 
 	cmd := exec.CommandContext(ctx, e.cfg.Bin, args...)
