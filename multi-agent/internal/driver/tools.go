@@ -475,19 +475,19 @@ func (g *getTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMe
 	if taskID == "" {
 		taskID = args.TaskID
 	}
-	isAwaiting, unwrappedOutput, question := unwrapResultMarker(info)
-	// Fall back to observer-recorded final output: when slave writes via
-	// task.Complete the agentserver TaskInfo.Output may be empty; observer's
-	// progress.FinalOutput captures the wrapped marker.
+	// Prefer observer-recorded FinalOutput because it carries the dispatch's
+	// wrapped marker verbatim; agentserver's TaskInfo.Output may be just the
+	// assistant text streamed before a pause, which doesn't carry the marker.
 	progress := g.t.observerProgress(ctx, taskID)
-	markerSessionID := sessionIDFromMarker(info.Output, string(info.Result), progress.FinalOutput)
-	if !isAwaiting && unwrappedOutput == "" && progress.FinalOutput != "" {
-		if a, s, q := unwrapKindMarker(progress.FinalOutput); a {
-			isAwaiting, question = a, q
-		} else if s != "" {
-			unwrappedOutput = s
-		}
+	var isAwaiting bool
+	var unwrappedOutput string
+	var question json.RawMessage
+	if a, s, q := unwrapKindMarker(progress.FinalOutput); a || s != "" {
+		isAwaiting, unwrappedOutput, question = a, s, q
+	} else {
+		isAwaiting, unwrappedOutput, question = unwrapResultMarker(info)
 	}
+	markerSessionID := sessionIDFromMarker(progress.FinalOutput, info.Output, string(info.Result))
 	if isAwaiting {
 		g.t.emit(observer.Event{
 			Type:   observer.EventDriverTaskStatus,
@@ -585,20 +585,17 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 			if taskID == "" {
 				taskID = args.TaskID
 			}
-			isAwaiting, unwrappedOutput, question := unwrapResultMarker(info)
-			// Fall back to observer-recorded final output: when slave writes
-			// via task.Complete the agentserver TaskInfo.Output may be empty;
-			// observer's progress.FinalOutput captures the wrapped marker.
-			var progress taskProgress
-			if !isAwaiting && unwrappedOutput == "" {
-				progress = w.t.observerProgress(ctx, taskID)
-				if progress.FinalOutput != "" {
-					if a, s, q := unwrapKindMarker(progress.FinalOutput); a {
-						isAwaiting, question = a, q
-					} else if s != "" {
-						unwrappedOutput = s
-					}
-				}
+			// Prefer observer-recorded FinalOutput because it carries the
+			// dispatch's wrapped marker verbatim; agentserver's TaskInfo.Output
+			// may be just the assistant text streamed before a pause.
+			progress := w.t.observerProgress(ctx, taskID)
+			var isAwaiting bool
+			var unwrappedOutput string
+			var question json.RawMessage
+			if a, s, q := unwrapKindMarker(progress.FinalOutput); a || s != "" {
+				isAwaiting, unwrappedOutput, question = a, s, q
+			} else {
+				isAwaiting, unwrappedOutput, question = unwrapResultMarker(info)
 			}
 			if isAwaiting && info.Status == "completed" {
 				w.t.emit(observer.Event{
@@ -634,9 +631,6 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 			}
 			written := w.t.reg.WrittenFiles(args.TaskID)
 			w.t.reg.ForgetTask(args.TaskID)
-			if progress.LatestProgressAt == "" { // only fetch if not already done above
-				progress = w.t.observerProgress(ctx, taskID)
-			}
 			output := unwrappedOutput
 			return json.Marshal(struct {
 				Status              string        `json:"status"`
