@@ -15,7 +15,7 @@
 | Spec | 主题 | 备注 |
 |---|---|---|
 | [2026-05-25-mcp-marketplace-design.md](specs/2026-05-25-mcp-marketplace-design.md) | MCP server 市场（registry + publish + driver 端 fork/remix） | 仅 spec；下一步：写 plan（按 §11 实施顺序拆 8 步），起点 `internal/mcpmarket/{manifest,pack,sig,scanner}` |
-| [2026-05-25-personal-mcp-skill-space-design.md](specs/2026-05-25-personal-mcp-skill-space-design.md) | 用户私有 MCP + Skill space（observer extension; pip+venv 心智；MCP 与 skill 同收） | **已重写 v2**：折进 observer-server / 复用 agent token / slug 用户全局唯一 / 无 sig·TOFU·diff-approve；依赖 marketplace 先落 `internal/mcpmarket/*`；下一步按本 spec §12 拆 plan |
+| [2026-05-25-personal-mcp-skill-space-design.md](specs/2026-05-25-personal-mcp-skill-space-design.md) | 用户私有 MCP + Skill space（observer extension; pip+venv 心智；MCP 与 skill 同收） | spec v2 + plan: [2026-05-26-personal-mcp-skill-space](plans/2026-05-26-personal-mcp-skill-space.md)（10 tasks；自带 `internal/mcpmarket/{manifest,pack}`，marketplace 未来共享）|
 
 ---
 
