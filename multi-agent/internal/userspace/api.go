@@ -73,8 +73,12 @@ func (h *Handler) push(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tarFile.Close()
 	tarBytes, err := io.ReadAll(io.LimitReader(tarFile, pack.MaxCompressedBytes+1))
-	if err != nil || len(tarBytes) > pack.MaxCompressedBytes {
-		http.Error(w, "tarball read/oversize", http.StatusRequestEntityTooLarge)
+	if err != nil {
+		http.Error(w, "tarball read: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if len(tarBytes) > pack.MaxCompressedBytes {
+		http.Error(w, "tarball too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 	actual := ComputeSHA256Hex(tarBytes)
@@ -97,8 +101,7 @@ func (h *Handler) push(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("kind mismatch: slug %s already registered as %s", mfp.Slug, existing.Kind), http.StatusBadRequest)
 		return
 	}
-	existingRefcount := 0
-	_ = h.Store.db.QueryRow(`SELECT refcount FROM userspace_blobs WHERE sha256=?`, actual).Scan(&existingRefcount)
+	existingRefcount, _ := h.Store.BlobRefcount(actual)
 	dedup := existingRefcount > 0
 	if _, err := h.Blobs.Put(tarBytes); err != nil {
 		http.Error(w, "blob put: "+err.Error(), http.StatusInternalServerError)
@@ -248,6 +251,10 @@ func (h *Handler) getVersionOrSource(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
+	if v.Status == "yanked" {
+		http.Error(w, "version yanked", http.StatusGone)
+		return
+	}
 	if len(parts) == 4 && parts[3] == "source.tar.gz" {
 		rc, sz, err := h.Blobs.Open(v.BlobSHA256)
 		if err != nil {
@@ -313,6 +320,10 @@ func (h *Handler) installVersion(w http.ResponseWriter, r *http.Request) {
 	v, err := h.Store.GetVersion(slug, body.Version)
 	if err != nil || v == nil {
 		http.Error(w, "version not found", http.StatusNotFound)
+		return
+	}
+	if v.Status == "yanked" {
+		http.Error(w, "version yanked", http.StatusGone)
 		return
 	}
 	if err := h.Store.UpsertInstallation(InstallationRow{

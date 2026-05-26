@@ -77,15 +77,26 @@ func TestSearchPackages_FTSFindsByCardMD(t *testing.T) {
 func TestYankVersion_HidesFromLatest(t *testing.T) {
 	db := newTestDB(t)
 	s := NewStore(db)
-	_, _ = db.Exec(`INSERT INTO workspaces(id) VALUES('ws-a')`)
+	_, _ = db.Exec(`INSERT INTO workspaces(id) VALUES('ws-a'),('ws-b')`)
 	_, _ = db.Exec(`INSERT INTO userspace_blobs(sha256,size_bytes,blob_path,created_at) VALUES('h1',10,'p1',?)`, nowUTC())
 	require.NoError(t, s.UpsertPackage(PackageRow{Slug: "foo", Kind: "mcp"}))
 	require.NoError(t, s.InsertVersion(VersionRow{Slug: "foo", Version: "1.0.0",
 		CreatedInWorkspace: "ws-a", CreatedByAgentID: "x", ManifestJSON: []byte(`{}`),
 		CardMD: "c", TarballSHA256: "h1", BlobSHA256: "h1"}))
+	// ws-b installs before yank
+	require.NoError(t, s.UpsertInstallation(InstallationRow{
+		WorkspaceID: "ws-b", Slug: "foo", InstalledVersion: "1.0.0", InstalledByAgent: "x"}))
 	require.NoError(t, s.YankVersion("foo", "1.0.0"))
-	results, err := s.SearchPackages("", "ws-a", "all", 10)
+
+	// ws-a never installed — ghost slug is suppressed
+	resultsA, err := s.SearchPackages("", "ws-a", "all", 10)
 	require.NoError(t, err)
-	require.Len(t, results, 1) // package row still there
-	require.Equal(t, "", results[0].LatestVersion, "yanked version no longer the latest ready")
+	require.Len(t, resultsA, 0, "ws-a never installed: ghost slug must be hidden")
+
+	// ws-b still has it installed — package row still appears with empty latest_version
+	resultsB, err := s.SearchPackages("", "ws-b", "all", 10)
+	require.NoError(t, err)
+	require.Len(t, resultsB, 1, "ws-b installed it: should still appear")
+	require.Equal(t, "", resultsB[0].LatestVersion, "yanked version no longer the latest ready")
+	require.Equal(t, "1.0.0", resultsB[0].InstalledVersion, "installed_version preserved")
 }

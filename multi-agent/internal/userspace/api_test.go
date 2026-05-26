@@ -19,7 +19,7 @@ func newTestHandler(t *testing.T) (*Handler, *httptest.Server) {
 	t.Helper()
 	db := newTestDB(t)
 	// Insert workspaces needed by FK constraint in userspace_workspace_installations.
-	for _, ws := range []string{"ws-a", "ws-OTHER"} {
+	for _, ws := range []string{"ws-a", "ws-b", "ws-OTHER"} {
 		_, err := db.Exec(`INSERT OR IGNORE INTO workspaces(id) VALUES(?)`, ws)
 		require.NoError(t, err)
 	}
@@ -186,4 +186,79 @@ func readBody(r *http.Response) string {
 	b, _ := io.ReadAll(r.Body)
 	r.Body.Close()
 	return string(b)
+}
+
+func TestAPI_InstallYankedVersionRejected(t *testing.T) {
+	_, srv := newTestHandler(t)
+	defer srv.Close()
+	doPush(t, srv, manifest.KindMCP, "foo", "1.0.0", "ws-a", "ag", 200)
+	// yank via the routePackagePost path
+	req, _ := http.NewRequest(http.MethodPost,
+		srv.URL+"/api/userspace/packages/foo/yank/1.0.0", nil)
+	req.Header.Set("X-Test-WS", "ws-a")
+	req.Header.Set("X-Test-Agent", "ag")
+	resp, _ := srv.Client().Do(req)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	// attempt to install the yanked version
+	body := bytes.NewReader([]byte(`{"version":"1.0.0"}`))
+	req2, _ := http.NewRequest(http.MethodPost,
+		srv.URL+"/api/userspace/workspaces/ws-a/installations/foo", body)
+	req2.Header.Set("X-Test-WS", "ws-a")
+	req2.Header.Set("X-Test-Agent", "ag")
+	req2.Header.Set("Content-Type", "application/json")
+	resp2, _ := srv.Client().Do(req2)
+	require.Equal(t, http.StatusGone, resp2.StatusCode)
+}
+
+func TestAPI_YankedSourceTarballGone(t *testing.T) {
+	_, srv := newTestHandler(t)
+	defer srv.Close()
+	doPush(t, srv, manifest.KindMCP, "foo", "1.0.0", "ws-a", "ag", 200)
+	req, _ := http.NewRequest(http.MethodPost,
+		srv.URL+"/api/userspace/packages/foo/yank/1.0.0", nil)
+	req.Header.Set("X-Test-WS", "ws-a")
+	req.Header.Set("X-Test-Agent", "ag")
+	_, _ = srv.Client().Do(req)
+
+	req2, _ := http.NewRequest(http.MethodGet,
+		srv.URL+"/api/userspace/packages/foo/versions/1.0.0/source.tar.gz", nil)
+	req2.Header.Set("X-Test-WS", "ws-a")
+	req2.Header.Set("X-Test-Agent", "ag")
+	resp, _ := srv.Client().Do(req2)
+	require.Equal(t, http.StatusGone, resp.StatusCode)
+}
+
+func TestAPI_GhostSlugsHiddenFromSearch(t *testing.T) {
+	_, srv := newTestHandler(t)
+	defer srv.Close()
+	doPush(t, srv, manifest.KindMCP, "ghost", "1.0.0", "ws-a", "ag", 200)
+	// yank — workspace ws-a still has it installed from auto-install on push
+	req, _ := http.NewRequest(http.MethodPost,
+		srv.URL+"/api/userspace/packages/ghost/yank/1.0.0", nil)
+	req.Header.Set("X-Test-WS", "ws-a")
+	req.Header.Set("X-Test-Agent", "ag")
+	_, _ = srv.Client().Do(req)
+
+	// ws-a still tracks it as installed → appears in search
+	req2, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/userspace/search?q=ghost", nil)
+	req2.Header.Set("X-Test-WS", "ws-a")
+	req2.Header.Set("X-Test-Agent", "ag")
+	resp, _ := srv.Client().Do(req2)
+	var out struct {
+		Results []PackageView `json:"results"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+	require.Len(t, out.Results, 1, "ws-a should still see ghost because it has it installed")
+
+	// ws-b never installed it → should NOT see ghost
+	req3, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/userspace/search?q=ghost", nil)
+	req3.Header.Set("X-Test-WS", "ws-b")
+	req3.Header.Set("X-Test-Agent", "ag2")
+	resp3, _ := srv.Client().Do(req3)
+	var out3 struct {
+		Results []PackageView `json:"results"`
+	}
+	require.NoError(t, json.NewDecoder(resp3.Body).Decode(&out3))
+	require.Len(t, out3.Results, 0, "ws-b must not see fully-yanked ghost slug")
 }

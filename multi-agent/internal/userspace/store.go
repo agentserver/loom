@@ -141,7 +141,7 @@ func (s *Store) InsertVersion(v VersionRow) error {
 	// Mirror into FTS5 for search.
 	_, err = s.db.Exec(`
 		INSERT INTO userspace_pkg_fts(slug, description, card_md)
-		VALUES(?, ?, ?)`, v.Slug, "", v.CardMD)
+		VALUES(?, ?, ?)`, v.Slug, v.CardMD, v.CardMD)
 	return err
 }
 
@@ -320,7 +320,29 @@ func (s *Store) SearchPackages(q, workspaceID, kindFilter string, limit int) ([]
 		_ = json.Unmarshal([]byte(tagsJSON), &pv.Tags)
 		out = append(out, pv)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Suppress ghost slugs whose only versions are yanked (no ready latest).
+	// Empty installed_version means caller's workspace isn't tracking it either.
+	filtered := out[:0]
+	for _, pv := range out {
+		if pv.LatestVersion != "" || pv.InstalledVersion != "" {
+			filtered = append(filtered, pv)
+		}
+	}
+	out = filtered
+	return out, nil
+}
+
+// BlobRefcount returns the current refcount for a blob sha; 0 if no row.
+func (s *Store) BlobRefcount(sha256hex string) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT refcount FROM userspace_blobs WHERE sha256=?`, sha256hex).Scan(&n)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return n, err
 }
 
 func nullIfEmpty(b []byte) any {
