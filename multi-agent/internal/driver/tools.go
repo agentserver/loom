@@ -474,13 +474,36 @@ func (g *getTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMe
 	if taskID == "" {
 		taskID = args.TaskID
 	}
+	isAwaiting, unwrappedOutput, question := unwrapResultMarker(info)
+	if isAwaiting {
+		g.t.emit(observer.Event{
+			Type:   observer.EventDriverTaskStatus,
+			TaskID: taskID,
+			Status: "awaiting_user",
+		})
+		return json.Marshal(struct {
+			Status        string          `json:"status"`
+			IsFinal       bool            `json:"is_final"`
+			SessionID     string          `json:"session_id"`
+			CurrentTaskID string          `json:"current_task_id"`
+			TargetID      string          `json:"target_id"`
+			Question      json.RawMessage `json:"question"`
+		}{
+			Status:        "awaiting_user",
+			IsFinal:       false,
+			SessionID:     info.SessionID,
+			CurrentTaskID: taskID,
+			TargetID:      info.TargetID,
+			Question:      question,
+		})
+	}
 	g.t.emit(observer.Event{
 		Type:   observer.EventDriverTaskStatus,
 		TaskID: taskID,
 		Status: info.Status,
 	})
 	progress := g.t.observerProgress(ctx, taskID)
-	output := sdkTaskOutput(info)
+	output := unwrappedOutput
 	finalOutput := progress.FinalOutput
 	if finalOutput == "" && isTerminalStatus(info.Status) {
 		finalOutput = output
@@ -550,6 +573,29 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 			if taskID == "" {
 				taskID = args.TaskID
 			}
+			isAwaiting, unwrappedOutput, question := unwrapResultMarker(info)
+			if isAwaiting && info.Status == "completed" {
+				w.t.emit(observer.Event{
+					Type:   observer.EventDriverTaskStatus,
+					TaskID: taskID,
+					Status: "awaiting_user",
+				})
+				return json.Marshal(struct {
+					Status        string          `json:"status"`
+					IsFinal       bool            `json:"is_final"`
+					SessionID     string          `json:"session_id"`
+					CurrentTaskID string          `json:"current_task_id"`
+					TargetID      string          `json:"target_id"`
+					Question      json.RawMessage `json:"question"`
+				}{
+					Status:        "awaiting_user",
+					IsFinal:       false,
+					SessionID:     info.SessionID,
+					CurrentTaskID: taskID,
+					TargetID:      info.TargetID,
+					Question:      question,
+				})
+			}
 			w.t.emit(observer.Event{
 				Type:   observer.EventDriverTaskStatus,
 				TaskID: taskID,
@@ -563,7 +609,7 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 			written := w.t.reg.WrittenFiles(args.TaskID)
 			w.t.reg.ForgetTask(args.TaskID)
 			progress := w.t.observerProgress(ctx, taskID)
-			output := sdkTaskOutput(info)
+			output := unwrappedOutput
 			return json.Marshal(struct {
 				Status              string        `json:"status"`
 				Output              string        `json:"output"`
@@ -603,6 +649,32 @@ func isTerminalStatus(status string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// unwrapResultMarker parses TaskInfo.Result for the chat-skill kind marker.
+// Returns whether this is an awaiting_user pause and the unwrapped fields.
+// Non-chat skills (no recognised kind) → isAwaiting=false, output uses the
+// existing sdkTaskOutput path.
+func unwrapResultMarker(info *agentsdk.TaskInfo) (isAwaiting bool, output string, question json.RawMessage) {
+	if info == nil || len(info.Result) == 0 {
+		return false, sdkTaskOutput(info), nil
+	}
+	var kw struct {
+		Kind     string          `json:"kind"`
+		Summary  string          `json:"summary"`
+		Question json.RawMessage `json:"question"`
+	}
+	if err := json.Unmarshal(info.Result, &kw); err != nil {
+		return false, sdkTaskOutput(info), nil
+	}
+	switch kw.Kind {
+	case "awaiting_user":
+		return true, "", kw.Question
+	case "final":
+		return false, kw.Summary, nil
+	default:
+		return false, sdkTaskOutput(info), nil
 	}
 }
 
