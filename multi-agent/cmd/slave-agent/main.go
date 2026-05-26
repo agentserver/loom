@@ -31,6 +31,12 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "humanloop-mcp" {
+		if err := runHumanloopMCP(os.Args[2:]); err != nil {
+			log.Fatalf("slave_agent humanloop-mcp: %v", err)
+		}
+		return
+	}
 	cfgPath := "config.yaml"
 	if len(os.Args) > 1 {
 		cfgPath = os.Args[1]
