@@ -99,10 +99,14 @@ func (e *executor) Run(ctx context.Context, t agentbackend.Task, sink agentbacke
 	}
 
 	// Send the prompt; signal completion so the pause goroutine doesn't close
-	// stdin mid-write.
+	// stdin mid-write. We MUST close stdin after writing because `claude --print`
+	// reads stdin until EOF to know the prompt is complete — without the close
+	// it hangs indefinitely on the happy path. The pause goroutine's later
+	// stdin.Close is a no-op double-close (harmless, ignored error).
 	promptDone := make(chan struct{})
 	go func() {
 		defer close(promptDone)
+		defer stdin.Close()
 		if t.SystemContext != "" {
 			_, _ = io.WriteString(stdin, t.SystemContext+"\n\n")
 		}

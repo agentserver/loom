@@ -147,9 +147,11 @@ func writeFakeClaude(t *testing.T, frames []string) string {
 	return script
 }
 
-// writeFakeClaudeReadsStdinThenExits emits a system frame then blocks on stdin;
-// when the parent closes stdin (pause path), it emits a final assistant frame
-// and exits 0.
+// writeFakeClaudeReadsStdinThenExits emits a system frame, reads stdin until
+// the parent closes it (the writer goroutine closes stdin right after writing
+// the prompt — real claude reads stdin until EOF, then runs the conversation),
+// then sleeps a beat so the IPC hook has time to dial in and trigger a pause,
+// then emits a final assistant frame and exits 0.
 func writeFakeClaudeReadsStdinThenExits(t *testing.T, sessionID string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -157,6 +159,9 @@ func writeFakeClaudeReadsStdinThenExits(t *testing.T, sessionID string) string {
 	body := fmt.Sprintf(`#!/bin/bash
 echo '{"type":"system","session_id":"%s"}'
 cat > /dev/null
+# Sleep simulates real claude's "model is processing" gap between stdin EOF
+# and the model's first response/tool-call; gives the IPC hook a window.
+sleep 0.5
 echo '{"type":"assistant","message":{"content":[{"type":"text","text":"bye"}]}}'
 `, sessionID)
 	require.NoError(t, os.WriteFile(script, []byte(body), 0o755))
@@ -211,6 +216,8 @@ func TestExecutorFailsWhenPauseWithoutSessionID(t *testing.T) {
 	body := `#!/bin/bash
 # deliberately NO system frame — we want session_id to stay empty
 cat > /dev/null
+# Sleep so the IPC hook has a window to dial in before the fake exits.
+sleep 0.5
 echo '{"type":"assistant","message":{"content":[{"type":"text","text":"bye"}]}}'
 `
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
