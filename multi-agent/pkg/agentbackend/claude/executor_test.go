@@ -2,6 +2,8 @@ package claude
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/yourorg/multi-agent/internal/humanloop"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
@@ -127,4 +130,71 @@ func TestExecutor_GarbageLines_StillCompletes(t *testing.T) {
 	res, err := b.Run(context.Background(), agentbackend.Task{Prompt: "ignored"}, sink)
 	require.NoError(t, err)
 	require.Equal(t, "ok", res.Summary)
+}
+
+// writeFakeClaude builds a one-shot fake claude binary that emits the given
+// stream-json frames (one per line) and exits 0.
+func writeFakeClaude(t *testing.T, frames []string) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "claude")
+	body := "#!/bin/bash\n"
+	for _, f := range frames {
+		body += "echo '" + f + "'\n"
+	}
+	require.NoError(t, os.WriteFile(script, []byte(body), 0o755))
+	return script
+}
+
+// writeFakeClaudeReadsStdinThenExits emits a system frame then blocks on stdin;
+// when the parent closes stdin (pause path), it emits a final assistant frame
+// and exits 0.
+func writeFakeClaudeReadsStdinThenExits(t *testing.T, sessionID string) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "claude")
+	body := fmt.Sprintf(`#!/bin/bash
+echo '{"type":"system","session_id":"%s"}'
+cat > /dev/null
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"bye"}]}}'
+`, sessionID)
+	require.NoError(t, os.WriteFile(script, []byte(body), 0o755))
+	return script
+}
+
+// TestExecutorCapturesSessionID checks that the first {"type":"system","session_id":...}
+// frame in the stream-json transcript is stored on Result.SessionID.
+func TestExecutorCapturesSessionID(t *testing.T) {
+	bin := writeFakeClaude(t, []string{
+		`{"type":"system","session_id":"sess-abc"}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}`,
+	})
+	ex := newExecutor(agentbackend.ClaudeConfig{Bin: bin, WorkDir: t.TempDir()}, nil)
+	res, err := ex.Run(context.Background(), agentbackend.Task{Prompt: "hi"}, &captureSink{})
+	require.NoError(t, err)
+	require.Equal(t, "sess-abc", res.SessionID)
+	require.Nil(t, res.AwaitingUser)
+}
+
+// TestExecutorPausesOnHumanloopIPC simulates the humanloop subprocess sending
+// an ask_user payload while the chat is running; the executor should close
+// stdin, wait for the fake claude to exit, and return Result.AwaitingUser set.
+func TestExecutorPausesOnHumanloopIPC(t *testing.T) {
+	bin := writeFakeClaudeReadsStdinThenExits(t, "sess-pause")
+	sockHook := func(path string) {
+		time.Sleep(200 * time.Millisecond)
+		c, err := humanloop.DialIPC(path)
+		if err != nil {
+			t.Logf("DialIPC: %v", err)
+			return
+		}
+		defer c.Close()
+		_ = c.Send(humanloop.Payload{Kind: "ask_user", Question: "approve?"})
+	}
+	ex := newExecutorWithSocketHook(agentbackend.ClaudeConfig{Bin: bin, WorkDir: t.TempDir()}, nil, sockHook)
+	res, err := ex.Run(context.Background(), agentbackend.Task{Prompt: "hi"}, &captureSink{})
+	require.NoError(t, err)
+	require.NotNil(t, res.AwaitingUser)
+	require.Equal(t, "approve?", res.AwaitingUser.Question)
+	require.Equal(t, "sess-pause", res.SessionID)
 }
