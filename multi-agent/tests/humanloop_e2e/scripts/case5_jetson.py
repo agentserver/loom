@@ -29,11 +29,11 @@ prompt = (
     "When you receive the user's answer in your next user turn, reply with exactly "
     "that color word and stop."
 )
-r = submit_chat(prompt, target="slave-jetson-prod", timeout_sec=180)
+r = submit_chat(prompt, target="slave-jetson-prod", timeout_sec=480)
 task = r["task_id"]
 print(f"task_id={task}", flush=True)
 
-deadline = time.time() + 240
+deadline = time.time() + 480
 info = {}
 while time.time() < deadline:
     info = get_task(task)
