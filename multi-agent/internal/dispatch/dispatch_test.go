@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,7 +138,10 @@ func TestDispatcher_EmitsObserverLifecycleEvents(t *testing.T) {
 	require.Equal(t, "completed", obs.events[1].Status)
 	var payload map[string]string
 	require.NoError(t, json.Unmarshal(obs.events[1].Payload, &payload))
-	require.Equal(t, "ok", payload["output"])
+	// Empty Skill is treated as chat, so observer payload now sees the wrapped
+	// kind:final marker (matches what driver reads back from store.Output).
+	require.Contains(t, payload["output"], `"kind":"final"`)
+	require.Contains(t, payload["output"], `"summary":"ok"`)
 }
 
 func TestDispatcher_EmitsObserverFailurePayloadForExecutorError(t *testing.T) {
@@ -250,6 +254,77 @@ func TestContractEnvelope_AbsentPassesThrough(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, plain, exec.gotTask.Prompt)
+}
+
+func TestRunChatWrapsFinalResult(t *testing.T) {
+	s := newStore(t)
+	exec := &stubExec{res: executor.Result{Summary: "done", SessionID: "S-1"}}
+	d := New(map[string]executor.Executor{"": exec}, &stubJournal{}, s, nil)
+	res, err := d.Run(context.Background(), executor.Task{ID: "T1", Skill: "", Prompt: "hi"})
+	require.NoError(t, err)
+
+	row, _, err := s.GetTaskWithChunks("T1")
+	require.NoError(t, err)
+	if !strings.Contains(row.Output, `"kind":"final"`) {
+		t.Errorf("expected kind:final in stored output, got %q", row.Output)
+	}
+	if !strings.Contains(row.Output, `"session_id":"S-1"`) {
+		t.Errorf("expected session_id in stored output, got %q", row.Output)
+	}
+	if !strings.Contains(row.Output, `"summary":"done"`) {
+		t.Errorf("expected summary in stored output, got %q", row.Output)
+	}
+	if res.Summary != "done" {
+		t.Errorf("res.Summary returned by Run should stay unwrapped, got %q", res.Summary)
+	}
+}
+
+func TestRunChatWrapsAwaitingUser(t *testing.T) {
+	s := newStore(t)
+	exec := &stubExec{res: executor.Result{
+		SessionID: "S-2",
+		AwaitingUser: &executor.AskUserPayload{
+			Kind: "ask_user", Question: "pick one?", Options: []string{"a", "b"},
+		},
+	}}
+	d := New(map[string]executor.Executor{"chat": exec}, &stubJournal{}, s, nil)
+	_, err := d.Run(context.Background(), executor.Task{ID: "T2", Skill: "chat", Prompt: "hi"})
+	require.NoError(t, err)
+	row, _, err := s.GetTaskWithChunks("T2")
+	require.NoError(t, err)
+	for _, want := range []string{`"kind":"awaiting_user"`, `"session_id":"S-2"`, `"question":"pick one?"`, `"options":["a","b"]`} {
+		if !strings.Contains(row.Output, want) {
+			t.Errorf("missing %s in %s", want, row.Output)
+		}
+	}
+}
+
+func TestRunBashLeavesResultUnwrapped(t *testing.T) {
+	s := newStore(t)
+	exec := &stubExec{res: executor.Result{Summary: "raw bash output"}}
+	d := New(map[string]executor.Executor{"bash": exec}, &stubJournal{}, s, nil)
+	_, err := d.Run(context.Background(), executor.Task{ID: "T3", Skill: "bash", Prompt: "ls"})
+	require.NoError(t, err)
+	row, _, err := s.GetTaskWithChunks("T3")
+	require.NoError(t, err)
+	if strings.Contains(row.Output, `"kind"`) {
+		t.Errorf("non-chat skill should not be wrapped; got %s", row.Output)
+	}
+	if row.Output != "raw bash output" {
+		t.Errorf("expected raw summary, got %q", row.Output)
+	}
+}
+
+func TestRunChatResumeWrapsResult(t *testing.T) {
+	s := newStore(t)
+	exec := &stubExec{res: executor.Result{Summary: "resumed", SessionID: "S-3"}}
+	d := New(map[string]executor.Executor{"chat_resume": exec}, &stubJournal{}, s, nil)
+	_, err := d.Run(context.Background(), executor.Task{ID: "T4", Skill: "chat_resume", Prompt: "{}"})
+	require.NoError(t, err)
+	row, _, _ := s.GetTaskWithChunks("T4")
+	if !strings.Contains(row.Output, `"kind":"final"`) || !strings.Contains(row.Output, `"summary":"resumed"`) {
+		t.Errorf("chat_resume should be wrapped; got %s", row.Output)
+	}
 }
 
 // TestRespectsTaskTimeout verifies that a per-task TimeoutSec is enforced: the

@@ -119,7 +119,30 @@ func (d *Dispatcher) Run(ctx context.Context, t executor.Task) (executor.Result,
 		})
 		return executor.Result{}, err
 	}
-	if err := d.store.Complete(t.ID, res.Summary); err != nil {
+	// For chat / chat_resume only, wrap the result in a structured marker so
+	// the driver can distinguish "final" from "awaiting_user" without parsing
+	// the summary text. See spec §3.4.
+	stored := res.Summary
+	if t.Skill == "" || t.Skill == "chat" || t.Skill == "chat_resume" {
+		var wrapper any
+		if res.AwaitingUser != nil {
+			wrapper = map[string]any{
+				"kind":       "awaiting_user",
+				"session_id": res.SessionID,
+				"question":   res.AwaitingUser,
+			}
+		} else {
+			wrapper = map[string]any{
+				"kind":       "final",
+				"summary":    res.Summary,
+				"session_id": res.SessionID,
+			}
+		}
+		if b, jerr := json.Marshal(wrapper); jerr == nil {
+			stored = string(b)
+		}
+	}
+	if err := d.store.Complete(t.ID, stored); err != nil {
 		return res, err
 	}
 	d.emit(observer.Event{
@@ -127,7 +150,7 @@ func (d *Dispatcher) Run(ctx context.Context, t executor.Task) (executor.Result,
 		TaskID:  t.ID,
 		Summary: summary,
 		Status:  "completed",
-		Payload: observerPayload(map[string]string{"output": res.Summary}),
+		Payload: observerPayload(map[string]string{"output": stored}),
 	})
 
 	if res.CapabilityChange != "" {
