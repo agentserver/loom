@@ -359,3 +359,37 @@ func TestLoad_ObserverSuccessWithAPIKeyAndPath(t *testing.T) {
 	require.Equal(t, "ak_x", c.Observer.APIKey)
 	require.Equal(t, tokenPath, c.Observer.TokenStatePath)
 }
+
+func TestLoadHumanloopDefaults(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(p, []byte("server:\n  url: \"http://x\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Humanloop.ShutdownGraceSec != 10 {
+		t.Errorf("ShutdownGraceSec default = %d, want 10", cfg.Humanloop.ShutdownGraceSec)
+	}
+	if cfg.Humanloop.MaxQuestionsPerTask != 5 {
+		t.Errorf("MaxQuestionsPerTask default = %d, want 5", cfg.Humanloop.MaxQuestionsPerTask)
+	}
+}
+
+func TestLoadHumanloopOverrides(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.yaml")
+	yaml := "server:\n  url: \"http://x\"\nhumanloop:\n  shutdown_grace_sec: 3\n  max_questions_per_task: 99\n"
+	if err := os.WriteFile(p, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Humanloop.ShutdownGraceSec != 3 || cfg.Humanloop.MaxQuestionsPerTask != 99 {
+		t.Errorf("override failed: got %+v", cfg.Humanloop)
+	}
+}
