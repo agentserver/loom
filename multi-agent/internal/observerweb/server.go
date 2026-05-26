@@ -17,6 +17,7 @@ import (
 
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/observerstore"
+	"github.com/yourorg/multi-agent/internal/userspace"
 )
 
 const maxEventBodyBytes = 1 << 20
@@ -50,7 +51,9 @@ type Store interface {
 	UpsertAgent(a observerstore.Agent, token, apiKeyID string) error
 }
 
-func New(s Store) http.Handler {
+// New constructs the observerweb HTTP handler. If usHandler is non-nil,
+// /api/userspace/* routes are mounted on the same mux.
+func New(s Store, usHandler *userspace.Handler) http.Handler {
 	h := &handler{s: s}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/events", h.postEvent)
@@ -71,6 +74,9 @@ func New(s Store) http.Handler {
 	mux.HandleFunc("/masters", h.page("Masters", "masters"))
 	mux.HandleFunc("/slaves", h.page("Slaves", "slaves"))
 	mux.HandleFunc("/", h.dashboard)
+	if usHandler != nil {
+		userspace.MountRoutes(mux, usHandler)
+	}
 	return mux
 }
 
@@ -155,6 +161,22 @@ func bearerToken(auth string) (string, bool) {
 	}
 	token := strings.TrimSpace(strings.TrimPrefix(auth, prefix))
 	return token, token != ""
+}
+
+// AgentFromRequest validates the Bearer token and returns the authenticated
+// agent's workspace_id + agent_id. ok=false means anonymous or invalid.
+// Sibling packages (internal/userspace) call this when mounting routes on
+// the same mux so token validation lives in one place.
+func AgentFromRequest(s Store, r *http.Request) (string, string, bool) {
+	tok, ok := bearerToken(r.Header.Get("Authorization"))
+	if !ok {
+		return "", "", false
+	}
+	agent, ok, err := s.ValidateToken(tok)
+	if err != nil || !ok {
+		return "", "", false
+	}
+	return agent.WorkspaceID, agent.ID, true
 }
 
 func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) (observerstore.Agent, bool) {

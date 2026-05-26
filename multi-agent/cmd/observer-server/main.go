@@ -7,11 +7,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/yourorg/multi-agent/internal/observerstore"
 	"github.com/yourorg/multi-agent/internal/observerweb"
+	"github.com/yourorg/multi-agent/internal/userspace"
 )
 
 type Config struct {
@@ -50,8 +52,27 @@ func main() {
 	}
 	log.Printf("observer-server loaded %d api_keys", len(specs))
 
+	if err := userspace.Migrate(st.DB()); err != nil {
+		log.Fatalf("userspace migrate: %v", err)
+	}
+	blobRoot := filepath.Join(filepath.Dir(cfg.DBPath), "userspace-blobs")
+	if cfg.DBPath == ":memory:" || cfg.DBPath == "" {
+		blobRoot = filepath.Join(os.TempDir(), "userspace-blobs")
+	}
+	blobs, err := userspace.NewBlobStore(st.DB(), blobRoot)
+	if err != nil {
+		log.Fatalf("userspace blob store: %v", err)
+	}
+	usHandler := &userspace.Handler{
+		Store: userspace.NewStore(st.DB()),
+		Blobs: blobs,
+		Resolver: func(r *http.Request) (string, string, bool) {
+			return observerweb.AgentFromRequest(st, r)
+		},
+	}
+
 	log.Printf("observer-server listening on %s", cfg.ListenAddr)
-	log.Fatal(http.ListenAndServe(cfg.ListenAddr, observerweb.New(st)))
+	log.Fatal(http.ListenAndServe(cfg.ListenAddr, observerweb.New(st, usHandler)))
 }
 
 func loadConfig(path string) (*Config, error) {
