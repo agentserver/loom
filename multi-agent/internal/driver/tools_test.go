@@ -1629,3 +1629,43 @@ func TestSubmitTask_ChatStillGetsManifest(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, gotPrompt, "<USER_FILES_MANIFEST")
 }
+
+// TestSubmitTaskReturnsSessionID verifies that submit_task surfaces the
+// SessionID returned by agentserver's DelegateTaskResponse.
+func TestSubmitTaskReturnsSessionID(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{
+					AgentID:     "ag-1",
+					DisplayName: "slave-A",
+					Status:      "available",
+					Card:        json.RawMessage(`{"skills":["fanout","chat"]}`),
+				},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			return &agentsdk.DelegateTaskResponse{
+				TaskID:    "T-1",
+				SessionID: "S-abc",
+				Status:    "assigned",
+			}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	submit := toolByName(t, tools, "submit_task")
+	raw, err := submit.Call(context.Background(),
+		json.RawMessage(`{"prompt":"hi","target_display_name":"slave-A"}`))
+	require.NoError(t, err)
+	var got struct {
+		TaskID    string `json:"task_id"`
+		SessionID string `json:"session_id"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &got))
+	if got.TaskID != "T-1" {
+		t.Errorf("task_id = %q, want T-1", got.TaskID)
+	}
+	if got.SessionID != "S-abc" {
+		t.Errorf("session_id = %q, want S-abc", got.SessionID)
+	}
+}

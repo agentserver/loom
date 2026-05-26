@@ -437,6 +437,7 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 
 	return json.Marshal(map[string]interface{}{
 		"task_id":             resp.TaskID,
+		"session_id":          resp.SessionID,
 		"target_id":           targetID,
 		"target_display_name": targetName,
 		"manifest":            manifest,
