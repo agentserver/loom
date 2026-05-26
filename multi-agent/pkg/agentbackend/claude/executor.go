@@ -77,6 +77,11 @@ func (e *executor) Run(ctx context.Context, t agentbackend.Task, sink agentbacke
 		"--verbose",
 		"--append-system-prompt", agentbackend.CapabilityEpilogue,
 		"--mcp-config", mcpConfigPath,
+		// Allow humanloop tools without prompting (default permission mode
+		// would reject the MCP tool call and end the turn with
+		// permission_denials, never pausing the chat). The two tools are the
+		// whole point of the injection — they must be callable.
+		"--allowedTools", "mcp__loom_humanloop__ask_user,mcp__loom_humanloop__request_permission",
 	}, e.cfg.ExtraArgs...)
 
 	cmd := exec.CommandContext(ctx, e.cfg.Bin, args...)

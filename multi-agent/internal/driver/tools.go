@@ -476,6 +476,18 @@ func (g *getTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMe
 		taskID = args.TaskID
 	}
 	isAwaiting, unwrappedOutput, question := unwrapResultMarker(info)
+	// Fall back to observer-recorded final output: when slave writes via
+	// task.Complete the agentserver TaskInfo.Output may be empty; observer's
+	// progress.FinalOutput captures the wrapped marker.
+	progress := g.t.observerProgress(ctx, taskID)
+	markerSessionID := sessionIDFromMarker(info.Output, string(info.Result), progress.FinalOutput)
+	if !isAwaiting && unwrappedOutput == "" && progress.FinalOutput != "" {
+		if a, s, q := unwrapKindMarker(progress.FinalOutput); a {
+			isAwaiting, question = a, q
+		} else if s != "" {
+			unwrappedOutput = s
+		}
+	}
 	if isAwaiting {
 		g.t.emit(observer.Event{
 			Type:   observer.EventDriverTaskStatus,
@@ -492,7 +504,7 @@ func (g *getTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMe
 		}{
 			Status:        "awaiting_user",
 			IsFinal:       false,
-			SessionID:     info.SessionID,
+			SessionID:     firstNonEmpty(info.SessionID, markerSessionID),
 			CurrentTaskID: taskID,
 			TargetID:      info.TargetID,
 			Question:      question,
@@ -503,7 +515,6 @@ func (g *getTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMe
 		TaskID: taskID,
 		Status: info.Status,
 	})
-	progress := g.t.observerProgress(ctx, taskID)
 	output := unwrappedOutput
 	finalOutput := progress.FinalOutput
 	if finalOutput == "" && isTerminalStatus(info.Status) {
@@ -575,6 +586,20 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 				taskID = args.TaskID
 			}
 			isAwaiting, unwrappedOutput, question := unwrapResultMarker(info)
+			// Fall back to observer-recorded final output: when slave writes
+			// via task.Complete the agentserver TaskInfo.Output may be empty;
+			// observer's progress.FinalOutput captures the wrapped marker.
+			var progress taskProgress
+			if !isAwaiting && unwrappedOutput == "" {
+				progress = w.t.observerProgress(ctx, taskID)
+				if progress.FinalOutput != "" {
+					if a, s, q := unwrapKindMarker(progress.FinalOutput); a {
+						isAwaiting, question = a, q
+					} else if s != "" {
+						unwrappedOutput = s
+					}
+				}
+			}
 			if isAwaiting && info.Status == "completed" {
 				w.t.emit(observer.Event{
 					Type:   observer.EventDriverTaskStatus,
@@ -591,7 +616,7 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 				}{
 					Status:        "awaiting_user",
 					IsFinal:       false,
-					SessionID:     info.SessionID,
+					SessionID:     firstNonEmpty(info.SessionID, sessionIDFromMarker(info.Output, string(info.Result), progress.FinalOutput)),
 					CurrentTaskID: taskID,
 					TargetID:      info.TargetID,
 					Question:      question,
@@ -609,7 +634,9 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 			}
 			written := w.t.reg.WrittenFiles(args.TaskID)
 			w.t.reg.ForgetTask(args.TaskID)
-			progress := w.t.observerProgress(ctx, taskID)
+			if progress.LatestProgressAt == "" { // only fetch if not already done above
+				progress = w.t.observerProgress(ctx, taskID)
+			}
 			output := unwrappedOutput
 			return json.Marshal(struct {
 				Status              string        `json:"status"`
@@ -653,21 +680,41 @@ func isTerminalStatus(status string) bool {
 	}
 }
 
-// unwrapResultMarker parses TaskInfo.Result for the chat-skill kind marker.
-// Returns whether this is an awaiting_user pause and the unwrapped fields.
-// Non-chat skills (no recognised kind) → isAwaiting=false, output uses the
-// existing sdkTaskOutput path.
-func unwrapResultMarker(info *agentsdk.TaskInfo) (isAwaiting bool, output string, question json.RawMessage) {
-	if info == nil || len(info.Result) == 0 {
-		return false, sdkTaskOutput(info), nil
+// sessionIDFromMarker extracts a session_id from the first candidate string
+// that parses as a kind marker with a non-empty session_id. Callers pass
+// info.Output, info.Result, progress.FinalOutput (in that priority order).
+func sessionIDFromMarker(candidates ...string) string {
+	for _, s := range candidates {
+		if s == "" {
+			continue
+		}
+		var kw struct {
+			SessionID string `json:"session_id"`
+		}
+		if err := json.Unmarshal([]byte(s), &kw); err == nil && kw.SessionID != "" {
+			return kw.SessionID
+		}
+	}
+	return ""
+}
+
+// unwrapKindMarker parses a chat-skill {kind:...} marker out of a string.
+// Returns (isAwaiting, finalSummary, questionRaw) where:
+//   - isAwaiting=true when the marker is {"kind":"awaiting_user", ...}
+//   - finalSummary is the inner summary when {"kind":"final", "summary":"..."}
+//   - returns (false, "", nil) when the string is not a recognised marker
+//     (legacy non-chat skills, or empty)
+func unwrapKindMarker(s string) (isAwaiting bool, finalSummary string, question json.RawMessage) {
+	if s == "" {
+		return false, "", nil
 	}
 	var kw struct {
 		Kind     string          `json:"kind"`
 		Summary  string          `json:"summary"`
 		Question json.RawMessage `json:"question"`
 	}
-	if err := json.Unmarshal(info.Result, &kw); err != nil {
-		return false, sdkTaskOutput(info), nil
+	if err := json.Unmarshal([]byte(s), &kw); err != nil {
+		return false, "", nil
 	}
 	switch kw.Kind {
 	case "awaiting_user":
@@ -675,8 +722,30 @@ func unwrapResultMarker(info *agentsdk.TaskInfo) (isAwaiting bool, output string
 	case "final":
 		return false, kw.Summary, nil
 	default:
-		return false, sdkTaskOutput(info), nil
+		return false, "", nil
 	}
+}
+
+// unwrapResultMarker checks TaskInfo for a chat-skill kind marker. It tries
+// info.Output first (where the slave writes via task.Complete), then
+// info.Result (legacy). Caller is responsible for also trying observer's
+// progress.FinalOutput when neither field contains the marker — see
+// wait_task / get_task.
+func unwrapResultMarker(info *agentsdk.TaskInfo) (isAwaiting bool, output string, question json.RawMessage) {
+	if info == nil {
+		return false, "", nil
+	}
+	if info.Output != "" {
+		if a, s, q := unwrapKindMarker(info.Output); a || s != "" {
+			return a, s, q
+		}
+	}
+	if len(info.Result) > 0 {
+		if a, s, q := unwrapKindMarker(string(info.Result)); a || s != "" {
+			return a, s, q
+		}
+	}
+	return false, sdkTaskOutput(info), nil
 }
 
 func sdkTaskOutput(info *agentsdk.TaskInfo) string {
@@ -882,7 +951,10 @@ func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	if err != nil {
 		return nil, &MCPToolError{Message: "get_task: " + err.Error()}
 	}
-	// Validate: status == completed AND kind == awaiting_user
+	// Validate: status == completed AND kind == awaiting_user. The marker
+	// can live in info.Output (string), info.Result (legacy json.RawMessage),
+	// or — when the slave reports via observer-only path — in observer's
+	// recorded final output. Try all three.
 	var kw struct {
 		Kind     string `json:"kind"`
 		Question struct {
@@ -890,8 +962,20 @@ func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		} `json:"question"`
 		SessionID string `json:"session_id"`
 	}
-	if len(info.Result) > 0 {
-		_ = json.Unmarshal(info.Result, &kw)
+	for _, candidate := range []string{info.Output, string(info.Result)} {
+		if candidate == "" {
+			continue
+		}
+		if err := json.Unmarshal([]byte(candidate), &kw); err == nil && kw.Kind != "" {
+			break
+		}
+	}
+	if kw.Kind != "awaiting_user" {
+		// Fall back to observer-recorded final output.
+		prog := r.t.observerProgress(ctx, args.LastTaskID)
+		if prog.FinalOutput != "" {
+			_ = json.Unmarshal([]byte(prog.FinalOutput), &kw)
+		}
 	}
 	if info.Status != "completed" || kw.Kind != "awaiting_user" {
 		return nil, &MCPToolError{Message: fmt.Sprintf(
