@@ -229,6 +229,26 @@ func (e *executor) Run(ctx context.Context, t agentbackend.Task, sink agentbacke
 	}, nil
 }
 
+// RunResume re-invokes the claude backend with --resume <sessionID> so the
+// model continues the conversation it paused. The prompt is rendered as
+// "User answered: <answer>" so the model sees a natural user turn responding
+// to its prior ask_user / request_permission call.
+//
+// Like Run, RunResume injects the humanloop MCP server so the model can pause
+// AGAIN (multi-round questions are explicitly supported).
+func (e *executor) RunResume(ctx context.Context, sessionID, answer string, sink agentbackend.Sink) (agentbackend.Result, error) {
+	// Build a sub-executor with --resume <sessionID> prepended to ExtraArgs,
+	// then delegate to Run. The "User answered:" prefix is the contract
+	// between us and the model: the spec's CapabilityEpilogue paragraph (Task
+	// 15) explains that any user turn after an ask_user/request_permission
+	// tool call carries this prefix.
+	cfg := e.cfg
+	cfg.ExtraArgs = append([]string{"--resume", sessionID}, cfg.ExtraArgs...)
+	sub := *e
+	sub.cfg = cfg
+	return sub.Run(ctx, agentbackend.Task{Prompt: "User answered: " + answer}, sink)
+}
+
 func writeHumanloopMCPConfig(path, binSelf, sockPath string, max int) error {
 	cfg := map[string]any{
 		"mcpServers": map[string]any{

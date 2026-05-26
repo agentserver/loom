@@ -286,3 +286,53 @@ exec sleep 30 < /dev/null > /dev/null 2>&1
 		t.Errorf("test took too long (%s); SIGTERM didn't end it", elapsed)
 	}
 }
+
+// TestExecutorRunResumeFeedsAnswer — RunResume should:
+// 1. invoke the binary with --resume <sessionID> somewhere in argv
+// 2. write "User answered: <answer>" as the prompt to stdin
+// 3. return a normal Result (no AwaitingUser if model didn't call ask_user)
+func TestExecutorRunResumeFeedsAnswer(t *testing.T) {
+	// Fake claude that:
+	// - echoes all args to a sentinel file so we can assert on argv
+	// - emits a system frame (with NEW session_id, claude re-assigns on resume)
+	// - reads stdin, then emits it back as an assistant text frame so we can check it
+	dir := t.TempDir()
+	script := filepath.Join(dir, "claude")
+	sentinel := filepath.Join(dir, "args.txt")
+	// The parent doesn't close stdin on the happy path, so we read with a
+	// short timeout via `dd` to capture the prompt and then proceed.
+	body := fmt.Sprintf(`#!/bin/bash
+echo "$@" > %q
+echo '{"type":"system","session_id":"sess-1-resumed"}'
+# Wait briefly for the parent to finish writing the prompt, then snapshot
+# stdin without blocking on EOF.
+sleep 0.2
+INPUT=$(dd bs=4096 count=1 iflag=nonblock 2>/dev/null || true)
+# stream-json escaping: replace " with \"
+ESCAPED=$(printf '%%s' "$INPUT" | sed 's/"/\\"/g')
+echo "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"$ESCAPED\"}]}}"
+`, sentinel)
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ex := newExecutor(agentbackend.ClaudeConfig{Bin: script, WorkDir: t.TempDir()}, nil)
+	res, err := ex.RunResume(context.Background(), "sess-1", "the user's answer", &captureSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	args, err := os.ReadFile(sentinel)
+	if err != nil {
+		t.Fatalf("read sentinel: %v", err)
+	}
+	if !strings.Contains(string(args), "--resume sess-1") {
+		t.Errorf("expected '--resume sess-1' in argv, got %q", string(args))
+	}
+	if !strings.Contains(res.Summary, "User answered: the user's answer") {
+		t.Errorf("expected \"User answered: the user's answer\" in summary, got %q", res.Summary)
+	}
+	if res.AwaitingUser != nil {
+		t.Errorf("AwaitingUser should be nil for a non-pausing resume")
+	}
+}

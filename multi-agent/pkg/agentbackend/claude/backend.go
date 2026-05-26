@@ -2,7 +2,6 @@ package claude
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
@@ -37,7 +36,7 @@ func (b *Backend) Run(ctx context.Context, t agentbackend.Task, sink agentbacken
 
 // RunResume implements agentbackend.Backend.
 func (b *Backend) RunResume(ctx context.Context, sessionID, answer string, sink agentbackend.Sink) (agentbackend.Result, error) {
-	return agentbackend.Result{}, fmt.Errorf("claude RunResume not yet wired; implemented in Task 9")
+	return b.exec.RunResume(ctx, sessionID, answer, sink)
 }
 
 // LLM implements agentbackend.Backend.
