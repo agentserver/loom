@@ -27,7 +27,7 @@ on stdout — copy it, slaves/drivers need it):
 ```bash
 export LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'   # both optional
 bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-observer.sh) \
+  https://github.com/agentserver/loom/releases/latest/download/bootstrap-observer.sh) \
   --name obs-prod --systemd
 ```
 
@@ -38,7 +38,7 @@ bootstrap api-key（不传 `LOOM_API_KEY` 就随机生成并打印一次，slave
 ```bash
 export LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'   # 两个都可省
 bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-observer.sh) \
+  https://github.com/agentserver/loom/releases/latest/download/bootstrap-observer.sh) \
   --name obs-prod --systemd
 ```
 
@@ -53,7 +53,7 @@ the driver MCP and skills:
 ```bash
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
 bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-driver.sh) \
+  https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
   --name driver-myhost
 ```
 
@@ -63,7 +63,7 @@ bash <(curl -fsSL \
 ```bash
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
 bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-driver.sh) \
+  https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
   --name driver-myhost
 ```
 
@@ -79,7 +79,7 @@ instead of `.mcp.json`, and lay an `AGENTS.md` Codex can read on first launch:
 ```bash
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
 bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-driver.sh) \
+  https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
   --name driver-myhost --agent codex
 ```
 
@@ -88,7 +88,7 @@ bash <(curl -fsSL \
 ```bash
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
 bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-driver.sh) \
+  https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
   --name driver-myhost --agent codex
 ```
 
@@ -107,7 +107,7 @@ unit (Linux only, sudo); omit it for foreground / Termux:
 ```bash
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
 bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-slave.sh) \
+  https://github.com/agentserver/loom/releases/latest/download/bootstrap-slave.sh) \
   --name slave-myhost --systemd          # drop --systemd on Termux/Android
 ```
 
@@ -118,7 +118,7 @@ CPU / 内存 / 架构自动探测）。加 `--systemd` 走 systemd 托管（仅 
 ```bash
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
 bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-slave.sh) \
+  https://github.com/agentserver/loom/releases/latest/download/bootstrap-slave.sh) \
   --name slave-myhost --systemd          # Termux/Android 上去掉 --systemd
 ```
 
@@ -135,7 +135,7 @@ One slave process = one backend; the choice is per-slave:
 ```bash
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
 bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-slave.sh) \
+  https://github.com/agentserver/loom/releases/latest/download/bootstrap-slave.sh) \
   --name slave-myhost --agent codex --systemd   # drop --systemd on Termux
 ```
 
@@ -145,7 +145,7 @@ bash <(curl -fsSL \
 ```bash
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
 bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-slave.sh) \
+  https://github.com/agentserver/loom/releases/latest/download/bootstrap-slave.sh) \
   --name slave-myhost --agent codex --systemd   # Termux 上去掉 --systemd
 ```
 

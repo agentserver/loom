@@ -23,31 +23,31 @@ sudo; drop on Termux).
 # observer (control plane) — random api-key is generated and printed if LOOM_API_KEY is unset
 export LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
 bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-observer.sh) \
+  https://github.com/agentserver/loom/releases/latest/download/bootstrap-observer.sh) \
   --name obs-prod --systemd
 
 # driver — Claude Code variant (default)
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
 bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-driver.sh) \
+  https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
   --name driver-myhost
 
 # driver — Codex variant (writes .codex/config.toml + AGENTS.md instead of .mcp.json)
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
 bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-driver.sh) \
+  https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
   --name driver-myhost --agent codex
 
 # slave — Claude Code variant (executor; drop --systemd on Termux/Android)
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
 bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-slave.sh) \
+  https://github.com/agentserver/loom/releases/latest/download/bootstrap-slave.sh) \
   --name slave-myhost --systemd
 
 # slave — Codex variant (chat skill drives codex exec --json; mix freely with Claude Code slaves)
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
 bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/download/v0.0.1/bootstrap-slave.sh) \
+  https://github.com/agentserver/loom/releases/latest/download/bootstrap-slave.sh) \
   --name slave-myhost --agent codex --systemd
 ```
 
