@@ -235,7 +235,11 @@ func (t *Tools) waitDelegatedTask(ctx context.Context, taskID string, timeoutSec
 			return nil, &MCPToolError{Message: "get task " + taskID + ": " + err.Error()}
 		}
 		if isTerminalStatus(info.Status) {
-			output := sdkTaskOutput(info)
+			isAwaiting, unwrappedOutput, question := unwrapResultMarker(info)
+			if isAwaiting && info.Status == "completed" {
+				return marshalDelegatedAwaitingUser(taskID, info, question)
+			}
+			output := unwrappedOutput
 			if info.Status != "completed" {
 				return nil, &MCPToolError{Message: "task " + taskID + " " + info.Status + ": " + firstNonEmpty(info.FailureReason, output)}
 			}
@@ -250,6 +254,26 @@ func (t *Tools) waitDelegatedTask(ctx context.Context, taskID string, timeoutSec
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+func marshalDelegatedAwaitingUser(taskID string, info *agentsdk.TaskInfo, question json.RawMessage) (json.RawMessage, error) {
+	return json.Marshal(struct {
+		TaskID        string          `json:"task_id"`
+		Status        string          `json:"status"`
+		IsFinal       bool            `json:"is_final"`
+		SessionID     string          `json:"session_id"`
+		CurrentTaskID string          `json:"current_task_id"`
+		TargetID      string          `json:"target_id"`
+		Question      json.RawMessage `json:"question"`
+	}{
+		TaskID:        firstNonEmpty(info.TaskID, taskID),
+		Status:        "awaiting_user",
+		IsFinal:       false,
+		SessionID:     info.SessionID,
+		CurrentTaskID: firstNonEmpty(info.TaskID, taskID),
+		TargetID:      info.TargetID,
+		Question:      question,
+	})
 }
 
 func marshalDelegatedTaskOutput(taskID string, info *agentsdk.TaskInfo, output string) (json.RawMessage, error) {

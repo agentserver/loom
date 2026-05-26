@@ -3,6 +3,7 @@
 Slaves advertise skills through their discovery card. The driver and planner should dispatch by `skill`:
 
 - `chat`: natural-language Claude Code task.
+- `chat_resume`: driver-only continuation of a paused `chat` task (see below).
 - `mcp`: direct call to a configured or generated MCP server.
 - `register_mcp`: register a pre-built MCP server file (paired with bash to generate and validate).
 - `bash`: run explicit Bash through native slave-agent code.
@@ -12,6 +13,40 @@ Slaves advertise skills through their discovery card. The driver and planner sho
 ## `chat`
 
 Prompt is natural language. Use for work that needs Claude Code reasoning or file editing inside the slave workspace. Do not ask chat to call MCP when a direct `skill:"mcp"` JSON call is available.
+
+### humanloop MCP server (auto-injected into all chat backends)
+
+Every `chat` and `chat_resume` invocation runs with the `loom_humanloop`
+MCP server attached. The server exposes two tools to the model:
+
+- `ask_user(question, options?, context?)` — pause and ask the human
+- `request_permission(intent, target, reason?)` — pause and request approval
+
+When the model calls either, the slave executor stashes the payload, kills
+the backend gracefully, and finalises the task with
+`result.kind="awaiting_user"`. The driver's `wait_task` / `get_task`
+recognises that marker and surfaces it as `status:"awaiting_user"` to the
+caller.
+
+Per-task question quota defaults to 5; beyond that the tool returns
+`{"status":"refused"}` to the model without pausing.
+
+## `chat_resume`
+
+JSON-prompt skill. **Driver-only:** the driver's `resume_task` tool
+delegates to this; do not call directly from `submit_task` unless you know
+what you're doing.
+
+Prompt shape:
+
+```json
+{ "session_id": "S-uuid", "answer": "...", "kind": "ask_user|request_permission" }
+```
+
+Slave re-runs the chat backend with `claude --resume <S>` (or `codex exec
+resume <S>`), feeding `"User answered: <answer>"` as the next user turn.
+A per-session flock at `$LOOM_HOME/<agent>/humanloop/<session>.lock`
+prevents concurrent resumes; the loser fails with `session busy`.
 
 ## `mcp`
 

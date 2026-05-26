@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1628,4 +1629,249 @@ func TestSubmitTask_ChatStillGetsManifest(t *testing.T) {
 	_, err := toolByName(t, tools, "submit_task").Call(context.Background(), args)
 	require.NoError(t, err)
 	require.Contains(t, gotPrompt, "<USER_FILES_MANIFEST")
+}
+
+// TestSubmitTaskReturnsSessionID verifies that submit_task surfaces the
+// SessionID returned by agentserver's DelegateTaskResponse.
+func TestSubmitTaskReturnsSessionID(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{
+					AgentID:     "ag-1",
+					DisplayName: "slave-A",
+					Status:      "available",
+					Card:        json.RawMessage(`{"skills":["fanout","chat"]}`),
+				},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			return &agentsdk.DelegateTaskResponse{
+				TaskID:    "T-1",
+				SessionID: "S-abc",
+				Status:    "assigned",
+			}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	submit := toolByName(t, tools, "submit_task")
+	raw, err := submit.Call(context.Background(),
+		json.RawMessage(`{"prompt":"hi","target_display_name":"slave-A"}`))
+	require.NoError(t, err)
+	var got struct {
+		TaskID    string `json:"task_id"`
+		SessionID string `json:"session_id"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &got))
+	if got.TaskID != "T-1" {
+		t.Errorf("task_id = %q, want T-1", got.TaskID)
+	}
+	if got.SessionID != "S-abc" {
+		t.Errorf("session_id = %q, want S-abc", got.SessionID)
+	}
+}
+
+func TestWaitTaskReturnsAwaitingUserWhenResultMarker(t *testing.T) {
+	sdk := &fakeSDK{
+		getTaskFunc: func(id string, includeOutput bool) (*agentsdk.TaskInfo, error) {
+			return &agentsdk.TaskInfo{
+				TaskID: "T-1", Status: "completed", SessionID: "S-abc", TargetID: "ag-X",
+				Result: json.RawMessage(`{"kind":"awaiting_user","session_id":"S-abc","question":{"kind":"ask_user","question":"pick?","options":["a","b"]}}`),
+			}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	raw, err := toolByName(t, tools, "wait_task").Call(context.Background(),
+		json.RawMessage(`{"task_id":"T-1","timeout_sec":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Status        string          `json:"status"`
+		IsFinal       bool            `json:"is_final"`
+		SessionID     string          `json:"session_id"`
+		CurrentTaskID string          `json:"current_task_id"`
+		TargetID      string          `json:"target_id"`
+		Question      json.RawMessage `json:"question"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "awaiting_user" {
+		t.Errorf("status = %q", got.Status)
+	}
+	if got.IsFinal {
+		t.Errorf("is_final should be false")
+	}
+	if got.SessionID != "S-abc" {
+		t.Errorf("session_id = %q", got.SessionID)
+	}
+	if got.CurrentTaskID != "T-1" {
+		t.Errorf("current_task_id = %q", got.CurrentTaskID)
+	}
+	if got.TargetID != "ag-X" {
+		t.Errorf("target_id = %q", got.TargetID)
+	}
+	if !strings.Contains(string(got.Question), `"question":"pick?"`) {
+		t.Errorf("question payload not propagated: %s", got.Question)
+	}
+}
+
+func TestWaitTaskUnwrapsKindFinal(t *testing.T) {
+	sdk := &fakeSDK{
+		getTaskFunc: func(id string, includeOutput bool) (*agentsdk.TaskInfo, error) {
+			return &agentsdk.TaskInfo{
+				TaskID: "T-2", Status: "completed", SessionID: "S-z",
+				Result: json.RawMessage(`{"kind":"final","summary":"all done","session_id":"S-z"}`),
+			}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	raw, err := toolByName(t, tools, "wait_task").Call(context.Background(),
+		json.RawMessage(`{"task_id":"T-2","timeout_sec":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct{ Status, Output string }
+	_ = json.Unmarshal(raw, &got)
+	if got.Status != "completed" {
+		t.Errorf("status = %q", got.Status)
+	}
+	if got.Output != "all done" {
+		t.Errorf("output = %q, want 'all done'", got.Output)
+	}
+}
+
+func TestWaitTaskPassesThroughLegacyResultUnwrapped(t *testing.T) {
+	sdk := &fakeSDK{
+		getTaskFunc: func(id string, includeOutput bool) (*agentsdk.TaskInfo, error) {
+			return &agentsdk.TaskInfo{
+				TaskID: "T-3", Status: "completed", Output: "bash ran",
+			}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	raw, err := toolByName(t, tools, "wait_task").Call(context.Background(),
+		json.RawMessage(`{"task_id":"T-3","timeout_sec":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct{ Status, Output string }
+	_ = json.Unmarshal(raw, &got)
+	if got.Status != "completed" {
+		t.Errorf("status = %q", got.Status)
+	}
+	if got.Output != "bash ran" {
+		t.Errorf("output = %q, want 'bash ran'", got.Output)
+	}
+}
+
+func TestGetTaskReturnsAwaitingUserWhenResultMarker(t *testing.T) {
+	sdk := &fakeSDK{
+		getTaskFunc: func(id string, includeOutput bool) (*agentsdk.TaskInfo, error) {
+			return &agentsdk.TaskInfo{
+				TaskID: "T-1", Status: "completed", SessionID: "S-abc", TargetID: "ag-X",
+				Result: json.RawMessage(`{"kind":"awaiting_user","session_id":"S-abc","question":{"kind":"ask_user","question":"pick?"}}`),
+			}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	raw, err := toolByName(t, tools, "get_task").Call(context.Background(),
+		json.RawMessage(`{"task_id":"T-1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct{ Status string }
+	_ = json.Unmarshal(raw, &got)
+	if got.Status != "awaiting_user" {
+		t.Errorf("get_task status = %q, want awaiting_user", got.Status)
+	}
+}
+
+func TestResumeTaskHappy(t *testing.T) {
+	var delegated agentsdk.DelegateTaskRequest
+	sdk := &fakeSDK{
+		getTaskFunc: func(id string, includeOutput bool) (*agentsdk.TaskInfo, error) {
+			// Two states: T-1 = the paused task; T-2 = the new chat_resume task.
+			switch id {
+			case "T-1":
+				return &agentsdk.TaskInfo{
+					TaskID: "T-1", Status: "completed", SessionID: "S-abc", TargetID: "ag-X",
+					Result: json.RawMessage(`{"kind":"awaiting_user","session_id":"S-abc","question":{"kind":"ask_user","question":"q?"}}`),
+				}, nil
+			case "T-2":
+				return &agentsdk.TaskInfo{
+					TaskID: "T-2", Status: "completed", SessionID: "S-abc",
+					Result: json.RawMessage(`{"kind":"final","summary":"finalised","session_id":"S-abc"}`),
+				}, nil
+			}
+			return nil, fmt.Errorf("unknown task: %s", id)
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			delegated = req
+			return &agentsdk.DelegateTaskResponse{TaskID: "T-2", SessionID: "S-abc"}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	raw, err := toolByName(t, tools, "resume_task").Call(context.Background(),
+		json.RawMessage(`{"last_task_id":"T-1","answer":"yes","timeout_sec":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if delegated.Skill != "chat_resume" {
+		t.Errorf("Skill = %q, want chat_resume", delegated.Skill)
+	}
+	if delegated.TargetID != "ag-X" {
+		t.Errorf("TargetID = %q, want ag-X", delegated.TargetID)
+	}
+	var body struct {
+		SessionID string `json:"session_id"`
+		Answer    string `json:"answer"`
+		Kind      string `json:"kind"`
+	}
+	if err := json.Unmarshal([]byte(delegated.Prompt), &body); err != nil {
+		t.Fatalf("Prompt is not JSON: %v (%q)", err, delegated.Prompt)
+	}
+	if body.SessionID != "S-abc" || body.Answer != "yes" || body.Kind != "ask_user" {
+		t.Errorf("Prompt body = %+v", body)
+	}
+	var got struct{ Status, Output string }
+	_ = json.Unmarshal(raw, &got)
+	if got.Status != "completed" || got.Output != "finalised" {
+		t.Errorf("expected completed/finalised, got %+v", got)
+	}
+}
+
+func TestResumeTaskRejectsWhenNotAwaitingUser(t *testing.T) {
+	sdk := &fakeSDK{
+		getTaskFunc: func(id string, includeOutput bool) (*agentsdk.TaskInfo, error) {
+			return &agentsdk.TaskInfo{
+				TaskID: "T-1", Status: "completed",
+				Result: json.RawMessage(`{"kind":"final","summary":"x"}`),
+			}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	_, err := toolByName(t, tools, "resume_task").Call(context.Background(),
+		json.RawMessage(`{"last_task_id":"T-1","answer":"a"}`))
+	if err == nil || !strings.Contains(err.Error(), "not awaiting_user") {
+		t.Errorf("expected not-awaiting-user error, got %v", err)
+	}
+}
+
+func TestResumeTaskRejectsMissingArgs(t *testing.T) {
+	tools := newTestTools(t, &fakeSDK{})
+	cases := []string{
+		`{"answer":"x"}`,                   // missing last_task_id
+		`{"last_task_id":"T"}`,             // missing answer
+		`{"last_task_id":"T","answer":""}`, // empty answer
+		`{"last_task_id":"","answer":"x"}`, // empty last_task_id
+	}
+	for _, body := range cases {
+		_, err := toolByName(t, tools, "resume_task").Call(context.Background(), json.RawMessage(body))
+		if err == nil || !strings.Contains(err.Error(), "required") {
+			t.Errorf("body=%s expected 'required' error, got %v", body, err)
+		}
+	}
 }

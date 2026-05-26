@@ -79,6 +79,7 @@ func (t *Tools) All() []Tool {
 		&submitContractTaskTool{t},
 		&getTaskTool{t},
 		&waitTaskTool{t},
+		&resumeTaskTool{t},
 		&tailSubtasksTool{t},
 		&cancelTaskTool{t},
 	}
@@ -162,7 +163,7 @@ func agentAvailable(c agentsdk.AgentCard) bool {
 // skills submit_task forwards the caller's prompt verbatim.
 func jsonPromptSkill(skill string) bool {
 	switch skill {
-	case "mcp", "bash", "register_mcp", "unregister_mcp", "claude_permissions", "file":
+	case "mcp", "bash", "register_mcp", "unregister_mcp", "claude_permissions", "file", "chat_resume":
 		return true
 	}
 	return false
@@ -438,6 +439,7 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 
 	return json.Marshal(map[string]interface{}{
 		"task_id":             resp.TaskID,
+		"session_id":          resp.SessionID,
 		"target_id":           targetID,
 		"target_display_name": targetName,
 		"manifest":            manifest,
@@ -474,13 +476,47 @@ func (g *getTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMe
 	if taskID == "" {
 		taskID = args.TaskID
 	}
+	// Prefer observer-recorded FinalOutput because it carries the dispatch's
+	// wrapped marker verbatim; agentserver's TaskInfo.Output may be just the
+	// assistant text streamed before a pause, which doesn't carry the marker.
+	progress := g.t.observerProgress(ctx, taskID)
+	var isAwaiting bool
+	var unwrappedOutput string
+	var question json.RawMessage
+	if a, s, q := unwrapKindMarker(progress.FinalOutput); a || s != "" {
+		isAwaiting, unwrappedOutput, question = a, s, q
+	} else {
+		isAwaiting, unwrappedOutput, question = unwrapResultMarker(info)
+	}
+	markerSessionID := sessionIDFromMarker(progress.FinalOutput, info.Output, string(info.Result))
+	if isAwaiting {
+		g.t.emit(observer.Event{
+			Type:   observer.EventDriverTaskStatus,
+			TaskID: taskID,
+			Status: "awaiting_user",
+		})
+		return json.Marshal(struct {
+			Status        string          `json:"status"`
+			IsFinal       bool            `json:"is_final"`
+			SessionID     string          `json:"session_id"`
+			CurrentTaskID string          `json:"current_task_id"`
+			TargetID      string          `json:"target_id"`
+			Question      json.RawMessage `json:"question"`
+		}{
+			Status:        "awaiting_user",
+			IsFinal:       false,
+			SessionID:     firstNonEmpty(info.SessionID, markerSessionID),
+			CurrentTaskID: taskID,
+			TargetID:      info.TargetID,
+			Question:      question,
+		})
+	}
 	g.t.emit(observer.Event{
 		Type:   observer.EventDriverTaskStatus,
 		TaskID: taskID,
 		Status: info.Status,
 	})
-	progress := g.t.observerProgress(ctx, taskID)
-	output := sdkTaskOutput(info)
+	output := unwrappedOutput
 	finalOutput := progress.FinalOutput
 	if finalOutput == "" && isTerminalStatus(info.Status) {
 		finalOutput = output
@@ -550,6 +586,40 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 			if taskID == "" {
 				taskID = args.TaskID
 			}
+			// Prefer observer-recorded FinalOutput because it carries the
+			// dispatch's wrapped marker verbatim; agentserver's TaskInfo.Output
+			// may be just the assistant text streamed before a pause.
+			progress := w.t.observerProgress(ctx, taskID)
+			var isAwaiting bool
+			var unwrappedOutput string
+			var question json.RawMessage
+			if a, s, q := unwrapKindMarker(progress.FinalOutput); a || s != "" {
+				isAwaiting, unwrappedOutput, question = a, s, q
+			} else {
+				isAwaiting, unwrappedOutput, question = unwrapResultMarker(info)
+			}
+			if isAwaiting && info.Status == "completed" {
+				w.t.emit(observer.Event{
+					Type:   observer.EventDriverTaskStatus,
+					TaskID: taskID,
+					Status: "awaiting_user",
+				})
+				return json.Marshal(struct {
+					Status        string          `json:"status"`
+					IsFinal       bool            `json:"is_final"`
+					SessionID     string          `json:"session_id"`
+					CurrentTaskID string          `json:"current_task_id"`
+					TargetID      string          `json:"target_id"`
+					Question      json.RawMessage `json:"question"`
+				}{
+					Status:        "awaiting_user",
+					IsFinal:       false,
+					SessionID:     firstNonEmpty(info.SessionID, sessionIDFromMarker(info.Output, string(info.Result), progress.FinalOutput)),
+					CurrentTaskID: taskID,
+					TargetID:      info.TargetID,
+					Question:      question,
+				})
+			}
 			w.t.emit(observer.Event{
 				Type:   observer.EventDriverTaskStatus,
 				TaskID: taskID,
@@ -562,8 +632,7 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 			}
 			written := w.t.reg.WrittenFiles(args.TaskID)
 			w.t.reg.ForgetTask(args.TaskID)
-			progress := w.t.observerProgress(ctx, taskID)
-			output := sdkTaskOutput(info)
+			output := unwrappedOutput
 			return json.Marshal(struct {
 				Status              string        `json:"status"`
 				Output              string        `json:"output"`
@@ -604,6 +673,74 @@ func isTerminalStatus(status string) bool {
 	default:
 		return false
 	}
+}
+
+// sessionIDFromMarker extracts a session_id from the first candidate string
+// that parses as a kind marker with a non-empty session_id. Callers pass
+// info.Output, info.Result, progress.FinalOutput (in that priority order).
+func sessionIDFromMarker(candidates ...string) string {
+	for _, s := range candidates {
+		if s == "" {
+			continue
+		}
+		var kw struct {
+			SessionID string `json:"session_id"`
+		}
+		if err := json.Unmarshal([]byte(s), &kw); err == nil && kw.SessionID != "" {
+			return kw.SessionID
+		}
+	}
+	return ""
+}
+
+// unwrapKindMarker parses a chat-skill {kind:...} marker out of a string.
+// Returns (isAwaiting, finalSummary, questionRaw) where:
+//   - isAwaiting=true when the marker is {"kind":"awaiting_user", ...}
+//   - finalSummary is the inner summary when {"kind":"final", "summary":"..."}
+//   - returns (false, "", nil) when the string is not a recognised marker
+//     (legacy non-chat skills, or empty)
+func unwrapKindMarker(s string) (isAwaiting bool, finalSummary string, question json.RawMessage) {
+	if s == "" {
+		return false, "", nil
+	}
+	var kw struct {
+		Kind     string          `json:"kind"`
+		Summary  string          `json:"summary"`
+		Question json.RawMessage `json:"question"`
+	}
+	if err := json.Unmarshal([]byte(s), &kw); err != nil {
+		return false, "", nil
+	}
+	switch kw.Kind {
+	case "awaiting_user":
+		return true, "", kw.Question
+	case "final":
+		return false, kw.Summary, nil
+	default:
+		return false, "", nil
+	}
+}
+
+// unwrapResultMarker checks TaskInfo for a chat-skill kind marker. It tries
+// info.Output first (where the slave writes via task.Complete), then
+// info.Result (legacy). Caller is responsible for also trying observer's
+// progress.FinalOutput when neither field contains the marker — see
+// wait_task / get_task.
+func unwrapResultMarker(info *agentsdk.TaskInfo) (isAwaiting bool, output string, question json.RawMessage) {
+	if info == nil {
+		return false, "", nil
+	}
+	if info.Output != "" {
+		if a, s, q := unwrapKindMarker(info.Output); a || s != "" {
+			return a, s, q
+		}
+	}
+	if len(info.Result) > 0 {
+		if a, s, q := unwrapKindMarker(string(info.Result)); a || s != "" {
+			return a, s, q
+		}
+	}
+	return false, sdkTaskOutput(info), nil
 }
 
 func sdkTaskOutput(info *agentsdk.TaskInfo) string {
@@ -774,6 +911,100 @@ func (c *cancelTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		"status": info.Status,
 		"note":   "cancel_task is not implemented in v1; query get_task and wait for natural completion or timeout",
 	})
+}
+
+// =========================================================================
+// resume_task
+// =========================================================================
+
+type resumeTaskTool struct{ t *Tools }
+
+func (r *resumeTaskTool) Name() string { return "resume_task" }
+func (r *resumeTaskTool) Description() string {
+	return "Resume a paused chat: pass the last_task_id (from wait_task's awaiting_user) and the user's answer. Returns the next wait_task-shaped result (completed, or another awaiting_user for multi-round questions, or failed)."
+}
+func (r *resumeTaskTool) InputSchema() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{
+        "last_task_id":{"type":"string"},
+        "answer":{"type":"string"},
+        "timeout_sec":{"type":"integer"}
+    },"required":["last_task_id","answer"]}`)
+}
+func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	var args struct {
+		LastTaskID string `json:"last_task_id"`
+		Answer     string `json:"answer"`
+		TimeoutSec int    `json:"timeout_sec"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, &MCPToolError{Message: "invalid args: " + err.Error()}
+	}
+	if args.LastTaskID == "" || args.Answer == "" {
+		return nil, &MCPToolError{Message: "last_task_id and answer are required"}
+	}
+	info, err := r.t.sdk.GetTask(ctx, args.LastTaskID, true)
+	if err != nil {
+		return nil, &MCPToolError{Message: "get_task: " + err.Error()}
+	}
+	// Validate: status == completed AND kind == awaiting_user. The marker
+	// can live in info.Output (string), info.Result (legacy json.RawMessage),
+	// or — when the slave reports via observer-only path — in observer's
+	// recorded final output. Try all three.
+	var kw struct {
+		Kind     string `json:"kind"`
+		Question struct {
+			Kind string `json:"kind"`
+		} `json:"question"`
+		SessionID string `json:"session_id"`
+	}
+	for _, candidate := range []string{info.Output, string(info.Result)} {
+		if candidate == "" {
+			continue
+		}
+		if err := json.Unmarshal([]byte(candidate), &kw); err == nil && kw.Kind != "" {
+			break
+		}
+	}
+	if kw.Kind != "awaiting_user" {
+		// Fall back to observer-recorded final output.
+		prog := r.t.observerProgress(ctx, args.LastTaskID)
+		if prog.FinalOutput != "" {
+			_ = json.Unmarshal([]byte(prog.FinalOutput), &kw)
+		}
+	}
+	if info.Status != "completed" || kw.Kind != "awaiting_user" {
+		return nil, &MCPToolError{Message: fmt.Sprintf(
+			"not awaiting_user; status=%s, kind=%s", info.Status, kw.Kind)}
+	}
+	sessionID := firstNonEmpty(info.SessionID, kw.SessionID)
+	if sessionID == "" {
+		return nil, &MCPToolError{Message: "missing session_id; cannot resume"}
+	}
+
+	body, _ := json.Marshal(map[string]string{
+		"session_id": sessionID,
+		"answer":     args.Answer,
+		"kind":       kw.Question.Kind,
+	})
+	timeout := args.TimeoutSec
+	if timeout == 0 {
+		timeout = r.t.cfg.DriverDefaults.TaskTimeoutSec
+	}
+	if timeout == 0 {
+		timeout = 600
+	}
+
+	resp, err := r.t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
+		TargetID:       info.TargetID,
+		Skill:          "chat_resume",
+		Prompt:         string(body),
+		TimeoutSeconds: timeout,
+	})
+	if err != nil {
+		return nil, &MCPToolError{Message: "delegate chat_resume: " + err.Error()}
+	}
+
+	return r.t.waitDelegatedTask(ctx, resp.TaskID, timeout)
 }
 
 // toTokenSource adapts an ObserverSink (the 1-method Emit interface) into

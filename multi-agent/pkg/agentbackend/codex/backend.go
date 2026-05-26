@@ -32,6 +32,9 @@ func (b *Backend) Kind() agentbackend.Kind { return agentbackend.KindCodex }
 func (b *Backend) Run(ctx context.Context, t agentbackend.Task, s agentbackend.Sink) (agentbackend.Result, error) {
 	return b.exec.Run(ctx, t, s)
 }
+func (b *Backend) RunResume(ctx context.Context, sessionID, answer string, s agentbackend.Sink) (agentbackend.Result, error) {
+	return b.exec.RunResume(ctx, sessionID, answer, s)
+}
 func (b *Backend) LLM() agentbackend.LLMRunner          { return b.llm }
 func (b *Backend) Permissions() agentbackend.PermissionsStore { return b.perm }
 func (b *Backend) Detect(ctx context.Context) error      { return detect(ctx, b.cfg.Bin) }

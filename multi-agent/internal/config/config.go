@@ -21,6 +21,12 @@ type Config struct {
 	Fanout      Fanout               `yaml:"fanout"`
 	Resources   *Resources           `yaml:"resources,omitempty"`
 	Observer    Observer             `yaml:"observer,omitempty"`
+	Humanloop   HumanloopConfig      `yaml:"humanloop"`
+}
+
+type HumanloopConfig struct {
+	ShutdownGraceSec    int `yaml:"shutdown_grace_sec"`
+	MaxQuestionsPerTask int `yaml:"max_questions_per_task"`
 }
 
 type Agent struct {
@@ -140,6 +146,12 @@ func Load(path string) (*Config, error) {
 	}
 	if c.Fanout.SubTaskDefaults.TimeoutSec == 0 {
 		c.Fanout.SubTaskDefaults.TimeoutSec = 600
+	}
+	if c.Humanloop.ShutdownGraceSec == 0 {
+		c.Humanloop.ShutdownGraceSec = 10
+	}
+	if c.Humanloop.MaxQuestionsPerTask == 0 {
+		c.Humanloop.MaxQuestionsPerTask = 5
 	}
 	if c.Observer.URL != "" {
 		if c.Observer.AgentID == "" {

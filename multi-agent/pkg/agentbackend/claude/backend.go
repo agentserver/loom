@@ -34,6 +34,11 @@ func (b *Backend) Run(ctx context.Context, t agentbackend.Task, sink agentbacken
 	return b.exec.Run(ctx, t, sink)
 }
 
+// RunResume implements agentbackend.Backend.
+func (b *Backend) RunResume(ctx context.Context, sessionID, answer string, sink agentbackend.Sink) (agentbackend.Result, error) {
+	return b.exec.RunResume(ctx, sessionID, answer, sink)
+}
+
 // LLM implements agentbackend.Backend.
 func (b *Backend) LLM() agentbackend.LLMRunner { return b.llm }
 

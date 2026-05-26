@@ -128,6 +128,11 @@ Use for simple ad hoc direct tasks. Prefer `submit_contract_task` for coordinate
 
 `read_paths` and `write_paths` are driver-local paths. The driver converts them into file manifests and observer or peer-proxy URLs for remote agents.
 
+The response now includes `session_id` (from the agentserver
+`DelegateTaskResponse`). For chat tasks this is the backend session id that
+ties together follow-up `resume_task` calls; for non-chat skills it may be
+empty — ignore it.
+
 ### `get_task`
 
 Input:
@@ -138,6 +143,10 @@ Input:
 
 Returns status, output, latest progress, final output, and whether the task is final.
 
+May also return the `awaiting_user` variant described under `wait_task`
+below — chat tasks paused mid-conversation surface the same way through
+`get_task`.
+
 ### `wait_task`
 
 Input:
@@ -147,6 +156,51 @@ Input:
 ```
 
 Blocks until terminal status and returns `written_files` for PUT-back outputs.
+
+**`awaiting_user` variant** (chat task paused mid-conversation):
+
+```json
+{
+  "status": "awaiting_user",
+  "is_final": false,
+  "session_id": "S-uuid",
+  "current_task_id": "T-1",
+  "target_id": "ag-X",
+  "question": {
+    "kind": "ask_user | request_permission",
+    "question": "...",
+    "options": ["..."],
+    "context": "...",
+    "intent": "...", "target": "...", "reason": "..."
+  }
+}
+```
+
+When you see this, surface the question to the human via
+`AskUserQuestion`, then call `resume_task(last_task_id=current_task_id,
+answer=...)`. Loop until `status:"completed"`.
+
+### `resume_task`
+
+Input:
+
+```json
+{
+  "last_task_id": "T-1",
+  "answer": "the user's reply",
+  "timeout_sec": 600
+}
+```
+
+Continues a chat task that `wait_task` returned as
+`status:"awaiting_user"`. The driver is **stateless**: it re-reads
+`last_task_id` via `GetTask` to recover `session_id` and `target_id`, then
+delegates a new `chat_resume` task to the same slave.
+
+Returns the same shape as `wait_task` — may itself be another
+`awaiting_user` (multi-round questions), or a final `completed`, or
+`failed` / `cancelled` if the resume fails on the slave (session not found,
+slave offline, etc.).
 
 ### `tail_subtasks`
 
