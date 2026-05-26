@@ -236,3 +236,53 @@ echo '{"type":"assistant","message":{"content":[{"type":"text","text":"bye"}]}}'
 		t.Errorf("expected session_id in error, got %v", err)
 	}
 }
+
+// TestExecutorFailsWhenGraceWindowExceeded — if claude doesn't exit after
+// stdin close within the grace window, we SIGTERM/SIGKILL it and report the
+// task as failed. Spec §Boundaries A row 3.
+func TestExecutorFailsWhenGraceWindowExceeded(t *testing.T) {
+	// Fake claude that emits a session frame, then ignores stdin close and
+	// sleeps "forever" — only SIGTERM/SIGKILL will end it.
+	dir := t.TempDir()
+	script := filepath.Join(dir, "claude")
+	body := `#!/bin/bash
+echo '{"type":"system","session_id":"sess-stuck"}'
+trap '' PIPE
+# exec replaces bash with sleep so SIGTERM hits sleep directly (bash would
+# defer signals until its foreground child finishes). Redirect all fds so
+# the parent's pipes get EOF immediately and the scanner doesn't block.
+exec sleep 30 < /dev/null > /dev/null 2>&1
+`
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	sockHook := func(path string) {
+		time.Sleep(50 * time.Millisecond)
+		c, err := humanloop.DialIPC(path)
+		if err != nil {
+			t.Logf("DialIPC: %v", err)
+			return
+		}
+		defer c.Close()
+		_ = c.Send(humanloop.Payload{Kind: "ask_user", Question: "stuck"})
+	}
+	ex := newExecutorWithSocketHook(agentbackend.ClaudeConfig{Bin: script, WorkDir: t.TempDir()}, nil, sockHook)
+	ex.shutdownGraceSec = 1 // shrink to 1s for fast test
+
+	start := time.Now()
+	_, err := ex.Run(context.Background(), agentbackend.Task{Prompt: "hi"}, &captureSink{})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error when grace window exceeded")
+	}
+	if !strings.Contains(err.Error(), "grace window") {
+		t.Errorf("expected 'grace window' in error, got %v", err)
+	}
+	// Total should be ≈ 1s grace + ≤ 5s SIGTERM grace; the fake exits cleanly
+	// on SIGTERM since `trap '' PIPE` only ignores PIPE, not TERM.
+	if elapsed > 7*time.Second {
+		t.Errorf("test took too long (%s); SIGTERM didn't end it", elapsed)
+	}
+}

@@ -166,6 +166,7 @@ func (e *executor) Run(ctx context.Context, t agentbackend.Task, sink agentbacke
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 
+	killed := false
 	select {
 	case err := <-done:
 		if awaiting == nil && err != nil {
@@ -180,6 +181,7 @@ func (e *executor) Run(ctx context.Context, t agentbackend.Task, sink agentbacke
 			return agentbackend.Result{}, fmt.Errorf("claude exit: %v: %s", err, tail)
 		}
 	case <-time.After(time.Duration(e.shutdownGraceSec) * time.Second):
+		killed = true
 		_ = cmd.Process.Signal(syscall.SIGTERM)
 		select {
 		case <-done:
@@ -213,6 +215,10 @@ func (e *executor) Run(ctx context.Context, t agentbackend.Task, sink agentbacke
 	if awaiting != nil && sessionID == "" {
 		sink.Close()
 		return agentbackend.Result{}, fmt.Errorf("backend never emitted session_id; cannot resume")
+	}
+	if killed {
+		sink.Close()
+		return agentbackend.Result{}, fmt.Errorf("claude did not exit within %ds grace window after stdin close; SIGTERM/SIGKILL applied", e.shutdownGraceSec)
 	}
 	sink.Close()
 	return agentbackend.Result{
