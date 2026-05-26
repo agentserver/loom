@@ -78,6 +78,7 @@ func (t *Tools) All() []Tool {
 		&submitContractTaskTool{t},
 		&getTaskTool{t},
 		&waitTaskTool{t},
+		&resumeTaskTool{t},
 		&tailSubtasksTool{t},
 		&cancelTaskTool{t},
 	}
@@ -846,6 +847,85 @@ func (c *cancelTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		"status": info.Status,
 		"note":   "cancel_task is not implemented in v1; query get_task and wait for natural completion or timeout",
 	})
+}
+
+// =========================================================================
+// resume_task
+// =========================================================================
+
+type resumeTaskTool struct{ t *Tools }
+
+func (r *resumeTaskTool) Name() string { return "resume_task" }
+func (r *resumeTaskTool) Description() string {
+	return "Resume a paused chat: pass the last_task_id (from wait_task's awaiting_user) and the user's answer. Returns the next wait_task-shaped result (completed, or another awaiting_user for multi-round questions, or failed)."
+}
+func (r *resumeTaskTool) InputSchema() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{
+        "last_task_id":{"type":"string"},
+        "answer":{"type":"string"},
+        "timeout_sec":{"type":"integer"}
+    },"required":["last_task_id","answer"]}`)
+}
+func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	var args struct {
+		LastTaskID string `json:"last_task_id"`
+		Answer     string `json:"answer"`
+		TimeoutSec int    `json:"timeout_sec"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, &MCPToolError{Message: "invalid args: " + err.Error()}
+	}
+	if args.LastTaskID == "" || args.Answer == "" {
+		return nil, &MCPToolError{Message: "last_task_id and answer are required"}
+	}
+	info, err := r.t.sdk.GetTask(ctx, args.LastTaskID, true)
+	if err != nil {
+		return nil, &MCPToolError{Message: "get_task: " + err.Error()}
+	}
+	// Validate: status == completed AND kind == awaiting_user
+	var kw struct {
+		Kind     string `json:"kind"`
+		Question struct {
+			Kind string `json:"kind"`
+		} `json:"question"`
+		SessionID string `json:"session_id"`
+	}
+	if len(info.Result) > 0 {
+		_ = json.Unmarshal(info.Result, &kw)
+	}
+	if info.Status != "completed" || kw.Kind != "awaiting_user" {
+		return nil, &MCPToolError{Message: fmt.Sprintf(
+			"not awaiting_user; status=%s, kind=%s", info.Status, kw.Kind)}
+	}
+	sessionID := firstNonEmpty(info.SessionID, kw.SessionID)
+	if sessionID == "" {
+		return nil, &MCPToolError{Message: "missing session_id; cannot resume"}
+	}
+
+	body, _ := json.Marshal(map[string]string{
+		"session_id": sessionID,
+		"answer":     args.Answer,
+		"kind":       kw.Question.Kind,
+	})
+	timeout := args.TimeoutSec
+	if timeout == 0 {
+		timeout = r.t.cfg.DriverDefaults.TaskTimeoutSec
+	}
+	if timeout == 0 {
+		timeout = 600
+	}
+
+	resp, err := r.t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
+		TargetID:       info.TargetID,
+		Skill:          "chat_resume",
+		Prompt:         string(body),
+		TimeoutSeconds: timeout,
+	})
+	if err != nil {
+		return nil, &MCPToolError{Message: "delegate chat_resume: " + err.Error()}
+	}
+
+	return r.t.waitDelegatedTask(ctx, resp.TaskID, timeout)
 }
 
 // toTokenSource adapts an ObserverSink (the 1-method Emit interface) into
