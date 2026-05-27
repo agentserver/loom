@@ -38,6 +38,8 @@
 | [codex-backend](specs/2026-05-23-codex-backend-design.md) | [codex-backend](plans/2026-05-23-codex-backend.md) | 可插拔 coding-agent（Claude + Codex） |
 | [unregister-mcp](specs/2026-05-25-unregister-mcp-design.md) | [unregister-mcp](plans/2026-05-25-unregister-mcp.md) | `unregister_mcp` skill + driver tool |
 | [observer-user-workspace](specs/2026-05-25-observer-user-workspace-design.md) | [observer-user-workspace](plans/2026-05-25-observer-user-workspace.md) | Observer 单用户 / 多 workspace 重塑（api_key 顶层化 + agent 自带 workspace_id + lazy 建 workspace）|
+| [humanloop-resumable-chat](specs/2026-05-26-humanloop-resumable-chat-design.md) | [humanloop-resumable-chat](plans/2026-05-26-humanloop-resumable-chat.md) | Mid-chat human-in-the-loop（slave chat 内 ask_user/request_permission → pause → driver resume_task → claude --resume 续接 session）|
+| [project-intro-html](specs/2026-05-27-project-intro-html-design.md) | [project-intro-html](plans/2026-05-27-project-intro-html.md) | 项目介绍 HTML 站（`docs/intro/`；agentserver+loom 双段栈 × layer/tier/cycle 三视角 × 15 项目对标）→ [打开 intro/index.html](../intro/index.html) |
 
 ---
 
