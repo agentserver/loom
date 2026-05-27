@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Cycle — 反馈循环视图</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<nav class="intro-nav">
+  <a href="index.html">首页</a>
+  <a href="system-abstraction.html">系统抽象</a>
+  <a href="platform-stack.html">agentserver</a>
+  <a href="layer.html">Layer</a>
+  <a href="tier.html">Tier</a>
+  <a href="cycle.html" class="current">Cycle</a>
+  <a href="related-work.html">相关工作</a>
+  <a href="references.html">参考文献</a>
+</nav>
+<main>
+<h1>Cycle — 反馈循环视图</h1>
+
+<p class="lead">
+四个 cycle 都遵循同一个模式:<strong>失败 → 自修复 → 学习</strong>。
+注册过期就重 OAuth,能力缺失就 scaffold,人介入就 pause-resume。
+集群的弹性不是某个单点的容错给的,是 cycle 数量乘出来的。
+</p>
+
+<h2>Cycle A — agentserver 注册/续约循环</h2>
+
+<p><img src="assets/diagrams/cycle-a-registration.svg" alt="OAuth Device Flow 循环图" style="max-width:100%;"></p>
+
+<p>失败:slave 的 <code>tunnel_token</code> 服务端被轮换 → WS handshake 401。<br>
+自修复:slave 检测到 401 → 触发 OAuth 2.0 Device Authorization Grant<sup><a href="references.html#ref-3">[3]</a></sup>
+→ 把新的 device-code URL 打到 stderr → 真人浏览器批准 → agentserver 颁新 token
+→ slave 把新 token 写回 <code>config.yaml</code> → tunnel reconnect 成功。<br>
+学习:新 token 持久化;下次重启不需要再走一遍。</p>
+
+<pre><code>2026/05/26 06:16:34 agentsdk: connecting to https://agent.cs.ac.cn
+2026/05/26 06:16:34 agentsdk: tunnel disconnected: 401
+2026/05/26 06:16:34 agentsdk: reconnecting in 1s...
+...
+Open this URL to authenticate:
+    https://agent.cs.ac.cn/oauth2/device/verify?user_code=ChuX9Nfn
+...
+2026/05/26 06:17:13 agentsdk: tunnel connected (sandbox: 47d4d7ba-...)</code></pre>
+
+<h2>Cycle B — 任务生命周期循环</h2>
+
+<p><img src="assets/diagrams/cycle-b-task.svg" alt="task 生命周期循环图" style="max-width:100%;"></p>
+
+<p>失败:driver 给一个任务但 slave 处理时崩了,或超时。<br>
+自修复:agentserver 给 task 标 <code>failed</code> 并写 <code>failure_reason</code>;
+driver <code>wait_task</code> 返回失败原因;driver 可以重试、降级、或交回用户。<br>
+学习:失败原因和耗时通过 observer 沉淀;后续任务可以根据这些数据做能力规划。</p>
+
+<pre><code>submit_task(prompt="Reply HELLO", target="slave-local-prod", skill="chat")
+  → agentserver task_id=task_831eafaf-...
+  → slave poll → dispatch → backend.Run
+  → backend session_id=33ec8be3-1573-47c0-...
+  → store.Complete + observer EventSlaveTaskCompleted
+  → driver wait_task returns status:"completed", output:"HELLO"</code></pre>
+
+<h2>Cycle C — 能力演化循环(本栈最有原创性的一环)</h2>
+
+<p><img src="assets/diagrams/cycle-c-capability.svg" alt="capability 演化循环图" style="max-width:100%;"></p>
+
+<p>失败:driver 想做 X,但发现没有任何 slave 公告了 X 这个能力。<br>
+自修复:driver 命令一个有 <code>register_mcp</code> 能力的 slave 去
+<code>scaffold-mcp-server</code> 写一个新 MCP server → 用
+<code>mcp-acceptance</code> skill 跑 <code>cases.jsonl</code> 验真 → 通过则
+<code>register_mcp</code> 接入 → slave republish AgentCard。<br>
+学习:新 MCP 写入 slave 的 <code>dynamic_mcp.yaml</code> 持久化;
+下次重启自动加载;后续任意 driver 任意 task 都可以直接调。</p>
+
+<aside class="card">
+<h4>真实例子</h4>
+线上 <code>slave-jetson-prod</code> 现在公告的 MCP 工具:
+<code>add</code>(基础算术,作为 scaffold 模板)、
+<code>weather_probability</code>(基于 Open-Meteo 历史档案估天气概率)、
+<code>weather_forecast</code>(未来 N 天天气)。这些都不在 slave 部署时存在——
+是某次任务 ad-hoc 长出来的,从此被复用。
+</aside>
+
+<p>这个 cycle 是本栈对"算力封装"立意的最强落地:<strong>能力本身被编码成一个可被
+discovery/添加/版本化/移除的对象</strong>。和其他 multi-agent 框架"tool 是开发期硬编码"
+的写法形成本质区别。</p>
+
+<h2>Cycle D — humanloop pause/resume 循环</h2>
+
+<p><img src="assets/diagrams/cycle-d-humanloop.svg" alt="humanloop pause/resume 循环图" style="max-width:100%;"></p>
+
+<p>失败:chat 模型跑到一半,需要用户的判断/授权才能继续(比如不确定该写哪个文件)。<br>
+自修复:模型调内置 <code>ask_user</code> / <code>request_permission</code> MCP 工具<sup><a href="references.html#ref-2">[2]</a></sup>
+→ humanloop server 拦截 → 通过 unix socket 把问题透给 chat executor
+→ executor 关 stdin,backend 优雅退出 → dispatch 把结果包成
+<code>result.kind="awaiting_user"</code> → driver <code>wait_task</code> 返回
+<code>status:"awaiting_user"</code> + question + session_id → 用户答复
+→ <code>resume_task</code> 起 <code>chat_resume</code> 子任务 →
+<code>claude --resume &lt;session_id&gt;</code> 把 "User answered: ..." 当下一个 user turn 喂进去
+→ 模型可继续,或再 awaiting_user,或 final。<br>
+学习:session_id 由 backend 持久,可以无限多轮;agentserver task 状态机不动。</p>
+
+<pre><code>submit_task → wait_task → status:"awaiting_user" (session_id=53a1de6a-...)
+                                                  question={kind:"ask_user", "pick a color", ["red","blue"]}
+        ↓ 用户答 "blue"
+resume_task(last_task_id, "blue") → 新 task task_d94c1765-... → status:"completed" output:"blue"</code></pre>
+
+<h2>四个 cycle 的共同模式</h2>
+
+<table>
+  <tr><th>Cycle</th><th>失败</th><th>自修复</th><th>学习</th></tr>
+  <tr><td>A 注册</td><td>token 过期 (401)</td><td>device-code OAuth</td><td>新 token 写回 config</td></tr>
+  <tr><td>B 任务</td><td>backend 崩/超时</td><td>失败原因回传 driver</td><td>遥测沉淀</td></tr>
+  <tr><td>C 能力</td><td>能力缺失</td><td>scaffold + acceptance + register</td><td>MCP 持久化到 dynamic_mcp.yaml</td></tr>
+  <tr><td>D humanloop</td><td>模型不确定</td><td>ask_user pause/resume</td><td>session_id 跨任务续接</td></tr>
+</table>
+
+<p>这种"每一种失败都对应一种自修复路径"的密度,是本栈在工程上对竞品形成代差的关键。</p>
+
+<div class="pager">
+  <a href="tier.html">← Tier</a>
+  <a href="related-work.html">相关工作 →</a>
+</div>
+</main>
+</body>
+</html>
