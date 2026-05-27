@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>agentserver + loom — 项目介绍</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<nav class="intro-nav">
+  <a href="index.html" class="current">首页</a>
+  <a href="system-abstraction.html">系统抽象</a>
+  <a href="platform-stack.html">agentserver</a>
+  <a href="layer.html">Layer</a>
+  <a href="tier.html">Tier</a>
+  <a href="cycle.html">Cycle</a>
+  <a href="related-work.html">相关工作</a>
+  <a href="references.html">参考文献</a>
+</nav>
+<main>
+<h1>agentserver + loom</h1>
+
+<p class="lead">
+本项目是同一组织的两段栈:agentserver 把算力变成网络上的可寻址单元;
+loom 在其上织出一张能动态生长的能力网。两段都不是新轮子,而是把
+"算力调用"这一行为从写死的约定升格为机器强制的接口——缺一不可。
+</p>
+
+<h2>TL;DR</h2>
+<table>
+  <tr>
+    <th></th>
+    <th>agentserver</th>
+    <th class="highlight">loom (本项目)</th>
+  </tr>
+  <tr>
+    <td><strong>比喻</strong></td>
+    <td>算力的 socket + DNS</td>
+    <td class="highlight">算力的包管理器 + 编排器</td>
+  </tr>
+  <tr>
+    <td><strong>核心抽象</strong></td>
+    <td>workspace / agent / task / session</td>
+    <td class="highlight">capability / contract / dynamic-MCP / humanloop</td>
+  </tr>
+  <tr>
+    <td><strong>类比已有事物</strong></td>
+    <td>code-server <sup><a href="references.html#ref-15">[15]</a></sup></td>
+    <td class="highlight">没有完整对标(见<a href="related-work.html">相关工作</a>)</td>
+  </tr>
+</table>
+
+<h2>章节导览</h2>
+<div class="toc-cards">
+  <a href="system-abstraction.html">
+    <strong>系统抽象</strong>
+    <small>把算力当作继程序、数据之后的第三种被编码对象;Liskov 风格的论证。</small>
+  </a>
+  <a href="platform-stack.html">
+    <strong>agentserver 平台</strong>
+    <small>agent 成为 workspace 的一等公民——sandboxproxy、cc-broker 等子组件
+    都是这个发明的物化。</small>
+  </a>
+  <a href="layer.html">
+    <strong>Layer (水平 7 层)</strong>
+    <small>从物理算力一路抬到模型层,每一层都对应"下一层不够"的具体问题。</small>
+  </a>
+  <a href="tier.html">
+    <strong>Tier (角色分层)</strong>
+    <small>driver / slave / observer 三个角色;tier 不是层,是同一段代码扮演的角色。</small>
+  </a>
+  <a href="cycle.html">
+    <strong>Cycle (反馈循环)</strong>
+    <small>4 个时间循环共享同一模式:失败 → 自修复 → 学习。</small>
+  </a>
+  <a href="related-work.html">
+    <strong>相关工作</strong>
+    <small>15 项目 × 9 维度对标;为什么没人做出来 agentserver+loom 这个组合。</small>
+  </a>
+</div>
+
+<h2>仓库与许可</h2>
+<ul>
+  <li>agentserver: <a href="https://github.com/agentserver/agentserver">github.com/agentserver/agentserver</a> <sup><a href="references.html#ref-4">[4]</a></sup></li>
+  <li>loom: <a href="https://github.com/agentserver/loom">github.com/agentserver/loom</a> <sup><a href="references.html#ref-5">[5]</a></sup></li>
+</ul>
+
+<div class="pager">
+  <span></span>
+  <a href="system-abstraction.html">系统抽象 →</a>
+</div>
+</main>
+</body>
+</html>
