@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 420"
+     font-family="system-ui, sans-serif" font-size="14">
+  <text x="400" y="30" text-anchor="middle" font-size="18" font-weight="600">Cycle C — 能力演化(scaffold → 验真 → register → 复用)</text>
+
+  <g transform="translate(400,230)">
+    <g>
+      <rect x="-220" y="-150" width="120" height="56" fill="#fbf9f4" stroke="#2c4a7c"/>
+      <text x="-160" y="-128" text-anchor="middle" font-size="12">能力缺失</text>
+      <text x="-160" y="-110" text-anchor="middle" font-size="11" fill="#555">driver 查 card 发现</text>
+    </g>
+    <g>
+      <rect x="100" y="-150" width="140" height="56" fill="#fbf9f4" stroke="#2c4a7c"/>
+      <text x="170" y="-128" text-anchor="middle" font-size="12">scaffold-mcp-server</text>
+      <text x="170" y="-110" text-anchor="middle" font-size="11" fill="#555">slave 写新 MCP</text>
+    </g>
+    <g>
+      <rect x="160" y="20" width="140" height="56" fill="#fbf9f4" stroke="#2c4a7c"/>
+      <text x="230" y="42" text-anchor="middle" font-size="12">mcp-acceptance</text>
+      <text x="230" y="60" text-anchor="middle" font-size="11" fill="#555">cases.jsonl 验真</text>
+    </g>
+    <g>
+      <rect x="-50" y="120" width="140" height="56" fill="#fbf9f4" stroke="#2c4a7c"/>
+      <text x="20" y="142" text-anchor="middle" font-size="12">register_mcp</text>
+      <text x="20" y="160" text-anchor="middle" font-size="11" fill="#555">+ republish card</text>
+    </g>
+    <g>
+      <rect x="-260" y="20" width="140" height="56" fill="#fbf9f4" stroke="#2c4a7c"/>
+      <text x="-190" y="42" text-anchor="middle" font-size="12">下次任务复用</text>
+      <text x="-190" y="60" text-anchor="middle" font-size="11" fill="#555">跨 session 累积</text>
+    </g>
+
+    <g stroke="#2c4a7c" stroke-width="1.5" fill="none" marker-end="url(#arrC)">
+      <path d="M -100,-122 Q 50,-180 100,-122"/>
+      <path d="M 200,-94  Q 280,-30 240,20"/>
+      <path d="M 160,76   Q 100,120 90,148"/>
+      <path d="M -50,148  Q -170,120 -190,76"/>
+      <path d="M -190,20  Q -240,-50 -160,-94"/>
+    </g>
+  </g>
+
+  <defs>
+    <marker id="arrC" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#2c4a7c"/>
+    </marker>
+  </defs>
+</svg>

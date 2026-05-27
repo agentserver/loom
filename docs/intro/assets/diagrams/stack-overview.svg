@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 480"
+     font-family="system-ui, sans-serif" font-size="14">
+  <!-- Title -->
+  <text x="400" y="30" text-anchor="middle" font-size="18" font-weight="600">agentserver + loom 栈全景</text>
+
+  <!-- Model layer (top) -->
+  <rect x="200" y="60" width="400" height="50" fill="#fbf9f4" stroke="#2c4a7c" stroke-width="1.5"/>
+  <text x="400" y="90" text-anchor="middle">模型层 (Claude / Codex / 任意 LLM)</text>
+
+  <!-- loom box -->
+  <rect x="100" y="130" width="600" height="160" fill="#fff" stroke="#2c4a7c" stroke-width="2"/>
+  <text x="120" y="155" font-weight="600" fill="#2c4a7c">loom — 算力应用层与编排</text>
+  <rect x="140" y="170" width="240" height="40" fill="#efebe2" stroke="#555"/>
+  <text x="260" y="195" text-anchor="middle">应用层 (contract / journal / humanloop)</text>
+  <rect x="400" y="170" width="240" height="40" fill="#efebe2" stroke="#555"/>
+  <text x="520" y="195" text-anchor="middle">能力层 (chat / bash / file / mcp / ...)</text>
+  <rect x="270" y="230" width="240" height="40" fill="#efebe2" stroke="#555"/>
+  <text x="390" y="255" text-anchor="middle">调度层 (driver MCP tools + dispatch)</text>
+
+  <!-- agentserver box -->
+  <rect x="100" y="310" width="600" height="120" fill="#fff" stroke="#2c4a7c" stroke-width="2"/>
+  <text x="120" y="335" font-weight="600" fill="#2c4a7c">agentserver — 算力底层网络</text>
+  <rect x="140" y="350" width="240" height="40" fill="#efebe2" stroke="#555"/>
+  <text x="260" y="375" text-anchor="middle">协议层 (workspace / agent / task / session)</text>
+  <rect x="400" y="350" width="240" height="40" fill="#efebe2" stroke="#555"/>
+  <text x="520" y="375" text-anchor="middle">网络层 (tunnel + peer-proxy + broker)</text>
+
+  <!-- Physical layer (bottom) -->
+  <rect x="200" y="440" width="400" height="30" fill="#fbf9f4" stroke="#2c4a7c" stroke-width="1.5"/>
+  <text x="400" y="460" text-anchor="middle">物理层 (host / docker / Jetson / Termux)</text>
+</svg>

@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 360"
+     font-family="system-ui, sans-serif" font-size="14">
+  <text x="400" y="30" text-anchor="middle" font-size="18" font-weight="600">Cycle B — 任务生命周期</text>
+
+  <g font-size="12">
+    <rect x="40"  y="120" width="100" height="50" fill="#fbf9f4" stroke="#2c4a7c"/>
+    <text x="90"  y="150" text-anchor="middle">submit_task</text>
+
+    <rect x="170" y="120" width="100" height="50" fill="#efebe2" stroke="#555"/>
+    <text x="220" y="150" text-anchor="middle">queue (agentserver)</text>
+
+    <rect x="300" y="120" width="100" height="50" fill="#efebe2" stroke="#555"/>
+    <text x="350" y="145" text-anchor="middle">slave poll</text>
+    <text x="350" y="160" text-anchor="middle" font-size="10" fill="#555">+ dispatch</text>
+
+    <rect x="430" y="120" width="100" height="50" fill="#efebe2" stroke="#555"/>
+    <text x="480" y="145" text-anchor="middle">executor.Run</text>
+    <text x="480" y="160" text-anchor="middle" font-size="10" fill="#555">+ chunks → sink</text>
+
+    <rect x="560" y="120" width="100" height="50" fill="#efebe2" stroke="#555"/>
+    <text x="610" y="145" text-anchor="middle">store.Complete</text>
+    <text x="610" y="160" text-anchor="middle" font-size="10" fill="#555">+ observer event</text>
+
+    <rect x="690" y="120" width="80" height="50" fill="#fbf9f4" stroke="#2c4a7c"/>
+    <text x="730" y="145" text-anchor="middle">wait_task</text>
+    <text x="730" y="160" text-anchor="middle" font-size="10" fill="#555">返回</text>
+
+    <g stroke="#2c4a7c" stroke-width="1.5" fill="none" marker-end="url(#arrB)">
+      <line x1="140" y1="145" x2="170" y2="145"/>
+      <line x1="270" y1="145" x2="300" y2="145"/>
+      <line x1="400" y1="145" x2="430" y2="145"/>
+      <line x1="530" y1="145" x2="560" y2="145"/>
+      <line x1="660" y1="145" x2="690" y2="145"/>
+    </g>
+
+    <path d="M 660,145 Q 660,260 90,260 Q 90,180 90,170" stroke="#a04040" stroke-width="1" fill="none" stroke-dasharray="5,3" marker-end="url(#arrFail)"/>
+    <text x="400" y="280" text-anchor="middle" fill="#a04040">失败 → driver 收到 failure_reason → 决定重试/降级/交回用户</text>
+  </g>
+
+  <defs>
+    <marker id="arrB" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#2c4a7c"/>
+    </marker>
+    <marker id="arrFail" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#a04040"/>
+    </marker>
+  </defs>
+</svg>

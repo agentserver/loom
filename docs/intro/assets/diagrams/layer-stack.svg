@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 480"
+     font-family="system-ui, sans-serif" font-size="14">
+  <text x="400" y="30" text-anchor="middle" font-size="18" font-weight="600">7 层堆叠(自底向上)</text>
+
+  <rect x="150" y="60" width="500" height="40" fill="#fbf9f4" stroke="#2c4a7c"/>
+  <text x="170" y="85" font-weight="600">⑦</text>
+  <text x="195" y="85">模型层 (Claude / Codex / 任意 LLM)</text>
+
+  <rect x="150" y="110" width="500" height="40" fill="#efebe2" stroke="#555"/>
+  <text x="170" y="135" font-weight="600">⑥</text>
+  <text x="195" y="135">应用层 (contract / capability journal / humanloop)</text>
+
+  <rect x="150" y="160" width="500" height="40" fill="#efebe2" stroke="#555"/>
+  <text x="170" y="185" font-weight="600">⑤</text>
+  <text x="195" y="185">能力层 (chat / chat_resume / bash / file / mcp / register_mcp)</text>
+
+  <rect x="150" y="210" width="500" height="40" fill="#efebe2" stroke="#555"/>
+  <text x="170" y="235" font-weight="600">④</text>
+  <text x="195" y="235">调度层 (driver MCP tools + dispatch)</text>
+
+  <rect x="150" y="260" width="500" height="40" fill="#fff" stroke="#2c4a7c"/>
+  <text x="170" y="285" font-weight="600">③</text>
+  <text x="195" y="285">协议层 (workspace / agent / task / session) — agentserver</text>
+
+  <rect x="150" y="310" width="500" height="40" fill="#fff" stroke="#2c4a7c"/>
+  <text x="170" y="335" font-weight="600">②</text>
+  <text x="195" y="335">网络层 (tunnel + peer-proxy + broker) — agentserver</text>
+
+  <rect x="150" y="360" width="500" height="40" fill="#fbf9f4" stroke="#2c4a7c"/>
+  <text x="170" y="385" font-weight="600">①</text>
+  <text x="195" y="385">物理层 (host / docker / Jetson arm64 / Termux Android)</text>
+
+  <text x="60" y="135" fill="#2c4a7c" font-weight="600">loom</text>
+  <line x1="130" y1="60" x2="130" y2="250" stroke="#2c4a7c" stroke-width="2"/>
+
+  <text x="60" y="320" fill="#2c4a7c" font-weight="600">agent-</text>
+  <text x="60" y="338" fill="#2c4a7c" font-weight="600">server</text>
+  <line x1="130" y1="260" x2="130" y2="400" stroke="#2c4a7c" stroke-width="2"/>
+</svg>
