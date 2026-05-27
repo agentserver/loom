@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Tier — 角色分层视图</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<nav class="intro-nav">
+  <a href="index.html">首页</a>
+  <a href="system-abstraction.html">系统抽象</a>
+  <a href="platform-stack.html">agentserver</a>
+  <a href="layer.html">Layer</a>
+  <a href="tier.html" class="current">Tier</a>
+  <a href="cycle.html">Cycle</a>
+  <a href="related-work.html">相关工作</a>
+  <a href="references.html">参考文献</a>
+</nav>
+<main>
+<h1>Tier — 角色分层视图</h1>
+
+<p class="lead">
+<strong>Tier 不是层,是角色。</strong>同一个进程可以同时扮演多个 tier;
+"driver/slave/observer"不是物理上的三类机器,而是工程上的三种职责。
+这是本栈和"3-tier client/server"传统架构最大的区别。
+</p>
+
+<p><img src="assets/diagrams/tier-triangle.svg" alt="driver/slave/observer 三角图" style="max-width:100%;"></p>
+
+<h2>三个角色</h2>
+
+<h3>driver-tier — 用户面</h3>
+
+<p>双重身份:</p>
+<ul>
+  <li>在 <strong>agentserver</strong> 看:它是个 agent,有自己的 <code>sandbox_id</code>、出现在 <code>list_agents</code> 输出里。</li>
+  <li>在 <strong>loom</strong> 看:它是个 MCP server,被用户的 Claude Code(或 Codex CLI)当作 tool provider 调用。</li>
+</ul>
+
+<p>用户的"我想要 X"自然语言,通过 Claude Code → driver MCP → driver 用 <code>resolveTarget</code>
+挑 slave → <code>DelegateTask</code> 派出去。driver 自己还负责 fanout 编排——不需要单独的 master agent。</p>
+
+<h3>slave-tier — 执行</h3>
+
+<p>双重身份:</p>
+<ul>
+  <li>在 <strong>agentserver</strong> 看:它是 agent,公告 <code>skills: [chat, bash, file, ...]</code>;poll task queue。</li>
+  <li>在 <strong>loom</strong> 看:它是 chat 模型(Claude/Codex)的运行时 + 一堆 MCP server 的 host。</li>
+</ul>
+
+<p>关键:<strong>slave 的能力可以临时长出来</strong>。driver 看到 slave 缺某个 MCP 工具,
+可以让 slave <code>scaffold-mcp-server</code> 写一个,过 <code>mcp-acceptance</code> 验真,
+<code>register_mcp</code> 接入,然后 republish 自己的 AgentCard。下次任务可以直接调
+(详见 <a href="cycle.html">Cycle C</a>)。</p>
+
+<h3>observer-tier — 遥测 + 回放</h3>
+
+<p>双重身份:</p>
+<ul>
+  <li>在 <strong>agentserver</strong> 看:它是 events sink + workspace registry(也兼用户/工作区管理面)。</li>
+  <li>在 <strong>loom</strong> 看:它是 lazy-artifact relay(大文件不走 driver↔slave,走 observer 中转)+ capability publish 的接收方(slave 注册了新 MCP 后把规格抄送给 observer)。</li>
+</ul>
+
+<p>关键:<strong>observer 与 control-plane 解耦</strong>。observer 短暂离线,driver 和 slave 照样能跑任务;
+只是遥测会暂时丢,以及 lazy-artifact 模式下大文件传输会暂停。这个解耦是 lab/产品环境分离的基础。</p>
+
+<h2>tier 与 layer 的关系</h2>
+
+<p>这是一个常见混淆点:</p>
+
+<table>
+  <tr><th>Layer</th><th>Tier</th></tr>
+  <tr><td>水平,自底向上,每层是一种抽象</td><td>垂直,按职责,每 tier 是一种角色</td></tr>
+  <tr><td>每层都被所有 tier 用到</td><td>每个 tier 都跨多层(物理→模型一路用)</td></tr>
+  <tr><td>"调度层在 chat 之下"</td><td>"driver 是调度+应用+模型的协奏者"</td></tr>
+</table>
+
+<aside class="card">
+<h4>同一进程跨多 tier 的具体例子</h4>
+driver-fanout 模式下,driver 进程既扮演 <strong>driver-tier</strong>(接受用户意图)
+又扮演 <strong>master 编排器的角色</strong>(派子任务到多个 slave)——这两件事在
+其他 multi-agent 框架里通常要两个进程,本栈一个进程做完。
+</aside>
+
+<aside class="card">
+<h4>slave 能力动态长出来</h4>
+"slave 是固定能力的执行节点"是错的。任务 N 用了 slave A 的 <code>weather_forecast</code>;
+任务 N 之前,这个 MCP 不存在——是任务 N-1 临时让 slave A scaffold 出来的。
+slave 是<strong>会学习的执行节点</strong>(详见 <a href="cycle.html">Cycle C</a>)。
+</aside>
+
+<aside class="card">
+<h4>observer 离线不影响业务面</h4>
+observer 是异步 sink,所有 driver/slave 的事件都是 fire-and-forget。
+observer 重启时 driver 不会卡;事件丢失是可接受的代价。这是把
+"control-plane 高可用"和"observability 高可用"故意分开的设计。
+</aside>
+
+<h2>消息流</h2>
+
+<table>
+  <tr><th>方向</th><th>协议</th><th>用途</th></tr>
+  <tr><td>driver → slave</td><td><code>DelegateTask</code> + TASK_CONTRACT envelope</td><td>派任务(带 contract 校验)</td></tr>
+  <tr><td>slave → driver</td><td><code>peer-proxy /files/blob/&lt;sha&gt;</code></td><td>取用户在 driver 上的文件</td></tr>
+  <tr><td>slave → observer</td><td>events stream</td><td>遥测、capability 公告</td></tr>
+  <tr><td>driver → observer</td><td>events stream + artifact create/sync</td><td>遥测、lazy-artifact 注册</td></tr>
+  <tr><td>slave ↔ observer</td><td>lazy-artifact PUT/GET</td><td>大文件中转(避免 driver↔slave 直传)</td></tr>
+</table>
+
+<div class="pager">
+  <a href="layer.html">← Layer</a>
+  <a href="cycle.html">Cycle →</a>
+</div>
+</main>
+</body>
+</html>
