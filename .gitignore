@@ -5,5 +5,6 @@ cmd.md
 .claude/
 .tmp-review-*/
 .worktrees/
+logs/
 __pycache__/
 *.pyc
