@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Layer — 水平分层视图</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<nav class="intro-nav">
+  <a href="index.html">首页</a>
+  <a href="system-abstraction.html">系统抽象</a>
+  <a href="platform-stack.html">agentserver</a>
+  <a href="layer.html" class="current">Layer</a>
+  <a href="tier.html">Tier</a>
+  <a href="cycle.html">Cycle</a>
+  <a href="related-work.html">相关工作</a>
+  <a href="references.html">参考文献</a>
+</nav>
+<main>
+<h1>Layer — 水平分层视图</h1>
+
+<p class="lead">
+本栈 7 层,从物理算力一路抬到模型层。<strong>不是 3 层、不是 10 层——每一层都对应一个
+"下一层不够"的具体问题。</strong>下面的删层思想实验:每删一层都会失去一个真实能力。
+</p>
+
+<p><img src="assets/diagrams/layer-stack.svg" alt="7 层堆叠图(物理→模型)" style="max-width:100%;"></p>
+
+<h2>7 层一览(自底向上)</h2>
+
+<table>
+  <tr><th>层</th><th>名字</th><th>关键模块</th><th>对外契约</th></tr>
+  <tr>
+    <td>①</td><td>物理层</td>
+    <td>host / docker / Jetson Orin (arm64) / Termux (Android)</td>
+    <td>OS + cgroup</td>
+  </tr>
+  <tr>
+    <td>②</td><td>网络层</td>
+    <td>agentserver tunnel(slave 反向 WS)+ peer-proxy(agent↔agent HTTP)+ broker</td>
+    <td>gw portal HTTP/WS</td>
+  </tr>
+  <tr>
+    <td>③</td><td>协议层</td>
+    <td>workspace / agent / task / session 的 REST + WS<sup><a href="references.html#ref-4">[4]</a></sup></td>
+    <td><code>agentsdk</code> Go SDK</td>
+  </tr>
+  <tr>
+    <td>④</td><td>调度层</td>
+    <td>dispatch + driver MCP tools(<code>submit_task</code> / <code>wait_task</code> / <code>resume_task</code> / driver-fanout)</td>
+    <td>routing by <code>Task.Skill</code></td>
+  </tr>
+  <tr>
+    <td>⑤</td><td>能力层</td>
+    <td><code>chat</code> / <code>chat_resume</code> / <code>bash</code> / <code>file</code> / <code>mcp</code> / <code>register_mcp</code> / <code>unregister_mcp</code> / <code>permissions</code></td>
+    <td><code>executor.Executor.Run(ctx,t,sink)</code></td>
+  </tr>
+  <tr>
+    <td>⑥</td><td>应用层</td>
+    <td>TaskContract envelope、capability journal、humanloop ask_user/request_permission</td>
+    <td><code>TaskContract</code> JSON / <code>result.kind</code> marker</td>
+  </tr>
+  <tr>
+    <td>⑦</td><td>模型层</td>
+    <td>Claude / Codex CLI(任意 LLM 通过 <code>llmproxy</code>)</td>
+    <td>stream-json</td>
+  </tr>
+</table>
+
+<h2>删层思想实验</h2>
+
+<p>每删一层,失去什么能力?这是判断一层"必要"的最直接方法。</p>
+
+<aside class="card">
+<h4>删 ② 网络层(tunnel + peer-proxy)</h4>
+slave 在 NAT 后面则不能被 driver 调用。无法跨家庭/办公网部署 slave。
+集群必须全在同一公网 + 同一防火墙策略。
+</aside>
+
+<aside class="card">
+<h4>删 ③ 协议层(workspace/agent/task)</h4>
+没有 workspace 隔离,多团队/多项目共享一台 agentserver 会互相看见任务;
+没有 task 抽象,所有调用退化成裸 HTTP RPC,丢失生命周期追踪。
+</aside>
+
+<aside class="card">
+<h4>删 ④ 调度层(driver MCP tools + dispatch)</h4>
+用户的 Claude Code 没有统一的"派任务"接口,要为每个 slave 写一个 MCP;
+任务 routing/fanout/wait/resume 全要 caller 自己实现。
+</aside>
+
+<aside class="card">
+<h4>删 ⑤ 能力层</h4>
+slave 的"能做什么"只能靠 chat 模型即兴决定;集群无法对外公告能力清单,
+driver 无法做容量规划/能力发现/dry-run。
+</aside>
+
+<aside class="card">
+<h4>删 ⑥ 应用层(contract + capability journal + humanloop)</h4>
+任务边界不清(没有 contract 校验),能力增长不持久(没有 journal),
+模型中途要人决策时只能"猜"(没有 humanloop pause/resume)。
+本栈相对竞品的所有"上层智识贡献"都集中在这一层。
+</aside>
+
+<h2>多平台支持矩阵</h2>
+
+<p>分层抽象的兑现:同一份能力代码在物理层的多种平台上跑。</p>
+
+<table>
+  <tr><th>平台</th><th>arch</th><th>chat backend</th><th>本栈支持状态</th></tr>
+  <tr><td>Linux host (host-native)</td><td>amd64</td><td>Claude / Codex</td><td>✅</td></tr>
+  <tr><td>Linux docker container</td><td>amd64</td><td>Claude / Codex</td><td>✅(loom-slave-local-prod 灰度跑过)</td></tr>
+  <tr><td>NVIDIA Jetson Orin (host-native)</td><td>arm64</td><td>Claude</td><td>✅(case 5 e2e 跨节点验过)</td></tr>
+  <tr><td>Android (Termux, host-native)</td><td>aarch64</td><td>Claude</td><td>✅(bootstrap-slave.sh 支持)</td></tr>
+</table>
+
+<div class="pager">
+  <a href="platform-stack.html">← agentserver</a>
+  <a href="tier.html">Tier →</a>
+</div>
+</main>
+</body>
+</html>
