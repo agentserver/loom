@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>相关工作 — agentserver + loom intro</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<nav class="intro-nav">
+  <a href="index.html">首页</a>
+  <a href="system-abstraction.html">系统抽象</a>
+  <a href="platform-stack.html">agentserver</a>
+  <a href="layer.html">Layer</a>
+  <a href="tier.html">Tier</a>
+  <a href="cycle.html">Cycle</a>
+  <a href="related-work.html" class="current">相关工作</a>
+  <a href="references.html">参考文献</a>
+</nav>
+<main>
+<h1>相关工作</h1>
+
+<p class="lead">
+没人做出来 agentserver + loom 这个组合,不是巧合。
+<strong>上层 multi-agent 框架普遍假设单机 / 同 process;
+底层 coding-agent 平台普遍假设 1:1 用户↔机器。</strong>
+本栈是第一个把这两个假设同时打破的——这就是它的位置。
+</p>
+
+<h2>对比表(15 项目 × 9 维度)</h2>
+
+<p>图例:<code>✅</code> first-class 支持;<code>△</code> 有限或间接支持;<code>×</code> 不支持或不在范围内;
+<code>n/a</code> 对该项目类别不适用;<code>?</code> 闭源/无公开材料无法判断。</p>
+
+<table>
+<tr>
+  <th>项目</th>
+  <th>多机</th>
+  <th>异构平台 (arm/Android)</th>
+  <th>浏览器内 IDE</th>
+  <th>Agent 间 RPC</th>
+  <th>Capability 动态扩</th>
+  <th>自验真 gate</th>
+  <th>HITL pause/resume</th>
+  <th>DAG 编排</th>
+  <th>Compute encoding 立意</th>
+</tr>
+<tr>
+  <td>code-server <sup><a href="references.html#ref-15">[15]</a></sup></td>
+  <td>×</td><td>△</td><td>✅</td><td>×</td><td>×</td><td>×</td><td>×</td><td>×</td><td>×</td>
+</tr>
+<tr>
+  <td>GitHub Codespaces <sup><a href="references.html#ref-17">[17]</a></sup></td>
+  <td>✅(cloud only)</td><td>×</td><td>✅</td><td>×</td><td>×</td><td>×</td><td>×</td><td>×</td><td>×</td>
+</tr>
+<tr>
+  <td>Cursor remote <sup><a href="references.html#ref-18">[18]</a></sup></td>
+  <td>△(SSH 1:1)</td><td>△</td><td>✅</td><td>×</td><td>×</td><td>×</td><td>×</td><td>×</td><td>×</td>
+</tr>
+<tr>
+  <td>opencode <sup><a href="references.html#ref-16">[16]</a></sup></td>
+  <td>△</td><td>△</td><td>△</td><td>×</td><td>×</td><td>×</td><td>×</td><td>×</td><td>×</td>
+</tr>
+<tr>
+  <td><strong>agentserver (alone)</strong> <sup><a href="references.html#ref-4">[4]</a></sup></td>
+  <td>✅</td><td>✅</td><td>✅</td><td>✅(peer-proxy)</td><td>×</td><td>×</td><td>×</td><td>×</td><td>△</td>
+</tr>
+<tr>
+  <td>AutoGen <sup><a href="references.html#ref-6">[6]</a></sup></td>
+  <td>×</td><td>n/a</td><td>×</td><td>△(in-proc)</td><td>×</td><td>×</td><td>△</td><td>✅</td><td>×</td>
+</tr>
+<tr>
+  <td>CrewAI <sup><a href="references.html#ref-7">[7]</a></sup></td>
+  <td>×</td><td>n/a</td><td>×</td><td>△</td><td>×</td><td>×</td><td>△</td><td>✅</td><td>×</td>
+</tr>
+<tr>
+  <td>LangGraph <sup><a href="references.html#ref-8">[8]</a></sup></td>
+  <td>×</td><td>n/a</td><td>×</td><td>△</td><td>×</td><td>×</td><td>△</td><td>✅</td><td>×</td>
+</tr>
+<tr>
+  <td>OpenHands <sup><a href="references.html#ref-9">[9]</a></sup></td>
+  <td>△</td><td>×</td><td>△</td><td>×</td><td>×</td><td>×</td><td>×</td><td>△</td><td>×</td>
+</tr>
+<tr>
+  <td>Letta <sup><a href="references.html#ref-10">[10]</a></sup></td>
+  <td>×</td><td>n/a</td><td>×</td><td>×</td><td>△(memory only)</td><td>×</td><td>×</td><td>×</td><td>×</td>
+</tr>
+<tr>
+  <td>metaGPT <sup><a href="references.html#ref-11">[11]</a></sup></td>
+  <td>×</td><td>n/a</td><td>×</td><td>△</td><td>×</td><td>×</td><td>×</td><td>✅</td><td>×</td>
+</tr>
+<tr>
+  <td>smol-developer <sup><a href="references.html#ref-12">[12]</a></sup></td>
+  <td>×</td><td>n/a</td><td>×</td><td>×</td><td>×</td><td>×</td><td>×</td><td>×</td><td>×</td>
+</tr>
+<tr>
+  <td>aider <sup><a href="references.html#ref-13">[13]</a></sup></td>
+  <td>×</td><td>n/a</td><td>×</td><td>×</td><td>×</td><td>×</td><td>×</td><td>×</td><td>×</td>
+</tr>
+<tr>
+  <td>Devin (closed) <sup><a href="references.html#ref-14">[14]</a></sup></td>
+  <td>✅(cloud)</td><td>×</td><td>✅</td><td>?</td><td>×</td><td>×</td><td>×</td><td>?</td><td>×</td>
+</tr>
+<tr>
+  <td class="highlight"><strong>agentserver + loom (本栈)</strong> <sup><a href="references.html#ref-5">[5]</a></sup></td>
+  <td class="highlight">✅</td><td class="highlight">✅</td><td class="highlight">✅</td><td class="highlight">✅</td>
+  <td class="highlight">✅</td><td class="highlight">✅</td><td class="highlight">✅</td><td class="highlight">✅</td>
+  <td class="highlight">✅</td>
+</tr>
+</table>
+
+<p>关注 <strong>agentserver (alone)</strong> 那行和 <strong>agentserver + loom</strong> 那行的差别:
+loom 这一层在 agentserver 已有底子上,把 Capability 动态扩、自验真 gate、HITL pause/resume
+三列从 × 拉到 ✅——这是本栈相对竞品的工程贡献。</p>
+
+<h2>底层对比:远程 coding-agent 平台</h2>
+
+<p>这一组的所有项目都把"算力 = 一台被用户绑定的机器"当默认。本栈把这个默认改了。</p>
+
+<h3>code-server <sup><a href="references.html#ref-15">[15]</a></sup></h3>
+<p>Coder 出的 VS Code 服务端,目标是"浏览器里编程"。一个 code-server 实例对应一台机器、
+对应一个用户。它解决"我笔记本上没装环境"的问题,不解决"我需要协调 N 台机器的算力"的问题。</p>
+
+<h3>GitHub Codespaces <sup><a href="references.html#ref-17">[17]</a></sup></h3>
+<p>GitHub 托管的云端 dev container。云原生 vendor lock-in;不支持把已有的 self-host 机器拉进来;
+没有 agent 之间互相调用的概念——每个 Codespace 是孤岛。</p>
+
+<h3>Cursor remote <sup><a href="references.html#ref-18">[18]</a></sup></h3>
+<p>Cursor 在 VS Code 之上加了 AI 能力,remote 模式靠 SSH 连一台机器。
+仍然是 1:1 用户↔机器,不存在多机协同的概念。</p>
+
+<h3>opencode <sup><a href="references.html#ref-16">[16]</a></sup></h3>
+<p>SST 的 terminal-based AI 编程工具,在本地跑;有简单的 model provider 抽象。
+单机/单用户路径;没有解决跨机器/跨成员的算力调用。</p>
+
+<h3>agentserver (alone) <sup><a href="references.html#ref-4">[4]</a></sup></h3>
+<p>本组织的底层栈;唯一一个把"workspace 内多 agent + 命名 + 反向 tunnel + peer-proxy"
+做齐的方案。把"算力 = 一台被用户绑定的机器"改成"算力 = workspace 里一群可寻址的命名成员"。
+本栈的下半段就是它。</p>
+
+<h2>上层对比:multi-agent fabric</h2>
+
+<p>这一组的所有项目都把"多 agent = 一个 Python 进程里多个 LLM 对象互相调"当默认。
+本栈把这个默认改了——agent 在不同物理机器上跑,通过 agentserver 互相调用。</p>
+
+<h3>AutoGen <sup><a href="references.html#ref-6">[6]</a></sup></h3>
+<p>Microsoft Research 的多 agent 对话框架。强项:对话编排、UserProxyAgent 实现 in-process HITL。
+弱项:agent 都是同 Python 进程的对象,没有跨机器的算力分布;tool 是开发期硬编码,无运行时扩展。</p>
+
+<h3>CrewAI <sup><a href="references.html#ref-7">[7]</a></sup></h3>
+<p>"Crew of agents with roles" 这个比喻深入人心。强项:role-playing 编排 + 任务流。
+弱项:同 AutoGen,单机/同 process;tool 是 Python 类硬编码;不支持跨成员能力发现。</p>
+
+<h3>LangGraph <sup><a href="references.html#ref-8">[8]</a></sup></h3>
+<p>LangChain 出的把 agent 流程画成 state machine 的库。强项:可视化的 graph 编排、状态持久化。
+弱项:同上,单机假设;HITL 是 graph 节点级而非 chat-turn 级的暂停。</p>
+
+<h3>OpenHands <sup><a href="references.html#ref-9">[9]</a></sup></h3>
+<p>(原 OpenDevin) 开源的 coding agent 平台,有 web UI + sandbox container。
+强项:开源、可自托管。弱项:1 实例对应 1 sandbox,没有"多 agent 互相调"的语义;
+扩展能力靠 plugin 系统,不是 runtime 长出来的。</p>
+
+<h3>Letta <sup><a href="references.html#ref-10">[10]</a></sup></h3>
+<p>原 MemGPT;主打"stateful agent server"。强项:长期记忆的持久层。
+弱项:agent 是一个独立服务,没有跨 agent 的能力发现/编排;多 agent 协作不是核心目标。</p>
+
+<h3>metaGPT <sup><a href="references.html#ref-11">[11]</a></sup></h3>
+<p>"software company simulation"——多 agent 扮演产品经理/工程师/QA 等角色。
+强项:角色清晰、流程拟真。弱项:同 AutoGen/CrewAI,单 process;
+角色和能力都是开发期定的,不能 runtime 长出新角色或新能力。</p>
+
+<h3>smol-developer <sup><a href="references.html#ref-12">[12]</a></sup></h3>
+<p>"in-app embedded developer agent" 的极简实现。强项:简单、嵌入式。
+弱项:不是多 agent,不是分布式;能力固定。</p>
+
+<h3>aider <sup><a href="references.html#ref-13">[13]</a></sup></h3>
+<p>终端里的 AI pair programmer。强项:repo map、git 集成、HITL prompting。
+弱项:单 user / 单 repo / 单机;不存在 agent 协作的概念。</p>
+
+<h3>Devin <sup><a href="references.html#ref-14">[14]</a></sup></h3>
+<p>Cognition 的闭源 AI software engineer 产品。能跑在云端,可能内部有分布式架构,
+但闭源 + 公开材料有限,无法判断"跨成员能力发现/编排"的支持情况;HITL 也未公开。</p>
+
+<h2>本栈的智识贡献</h2>
+
+<p>对应上面对比表中本栈独占的列(✅ vs 其他全是 × 或 △):</p>
+
+<ol>
+  <li><strong>跨机器的多 agent 协调</strong> — 不是 in-process,而是真的跨物理机器。底层依赖 agentserver。</li>
+  <li><strong>异构平台齐活</strong> — amd64/arm64/Android 同时支持,jetson + termux 都能跑(见 <a href="layer.html">layer</a>)。</li>
+  <li><strong>Capability 动态扩</strong> — slave 缺能力 → driver 让 slave scaffold 一个新 MCP → 接入 → 后续复用(<a href="cycle.html">Cycle C</a>)。</li>
+  <li><strong>自验真 gate</strong> — 新能力必须过 mcp-acceptance 验真才能 register。不是"模型说写好了就接入"。</li>
+  <li><strong>HITL pause/resume</strong> — 不是 prompting 时的 yes/no,而是 chat 中途真正的 backend session 暂停 + 续接(<a href="cycle.html">Cycle D</a>)。</li>
+  <li><strong>Compute encoding 立意</strong> — 把算力作为继程序、数据之后的第三种被编码对象(见 <a href="system-abstraction.html">系统抽象</a>),不是把 LLM 当 SDK 工具。</li>
+</ol>
+
+<div class="pager">
+  <a href="cycle.html">← Cycle</a>
+  <a href="references.html">参考文献 →</a>
+</div>
+</main>
+</body>
+</html>
