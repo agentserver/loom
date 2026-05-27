@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "loom-py"
+version = "0.1.0.dev0"
+description = "Python client for the loom multi-agent fabric on agentserver"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "agentserver" }]
+dependencies = []  # zero runtime deps; stdlib only
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-timeout>=2.3"]
+
+[project.urls]
+Homepage = "https://github.com/agentserver/loom"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+  "integration: requires driver-agent binary",
+  "e2e: requires live prod_test fleet (slave-local-prod, slave-jetson-prod)",
+]
+timeout = 60
