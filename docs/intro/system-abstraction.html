@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>系统抽象 — 算力作为第三种被编码对象</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<nav class="intro-nav">
+  <a href="index.html">首页</a>
+  <a href="system-abstraction.html" class="current">系统抽象</a>
+  <a href="platform-stack.html">agentserver</a>
+  <a href="layer.html">Layer</a>
+  <a href="tier.html">Tier</a>
+  <a href="cycle.html">Cycle</a>
+  <a href="related-work.html">相关工作</a>
+  <a href="references.html">参考文献</a>
+</nav>
+<main>
+<h1>系统抽象:算力作为第三种被编码对象</h1>
+
+<p class="lead">
+今天调用算力的方式(写死 GPU 型号、写死区域、写死并发数、写死框架版本),
+正是 1970 年前调用数据的方式:依赖约定、依赖文档、依赖人记得。
+本栈做的事很简单:把这一层写死的"约定"变成机器强制的"接口"。
+</p>
+
+<h2>三次编码的历史类比</h2>
+
+<table>
+  <tr>
+    <th>被编码对象</th><th>编码形态</th><th>新能力</th><th>由此带来的新世界</th>
+  </tr>
+  <tr>
+    <td>算法</td><td>程序(源码、字节码)</td><td>调度、迁移、热更新、版本化</td><td>操作系统、多任务、跨平台</td>
+  </tr>
+  <tr>
+    <td>信息</td><td>数据(结构化/非结构化)</td><td>查询、变换、复制、加密、流转</td><td>数据库、互联网、AI</td>
+  </tr>
+  <tr>
+    <td><strong>算力</strong></td><td><strong>?</strong></td><td><strong>?</strong></td><td><strong>?</strong></td>
+  </tr>
+</table>
+
+<p>规律是清晰的:<strong>一个对象一旦被编码,就从"被使用的现场"变成"可被独立操作的对象",
+新的产业和方法论随即出现。</strong></p>
+
+<h2>Liskov 数据抽象在算力上的复现</h2>
+
+<p>1974 年 Liskov 与 Zilles<sup><a href="references.html#ref-1">[1]</a></sup>论证:
+<em>"对象的行为完全由一组操作刻画,使用者无需知道表示。"</em>
+这一句话改写过数据访问的写法。同样的精神在算力上同样成立:</p>
+
+<aside class="card">
+<h4>Liskov 风格的算力定义</h4>
+算力的行为应由一组操作刻画,使用者无需知道它是 H100 还是 A100、
+是本地还是云端、是单机还是集群、甚至是 LLM 还是人类。
+</aside>
+
+<p>Liskov 还说了一句更狠的:<em>"惯例无法替代强制约束。"</em>
+这正是本栈出现的理由——把"调用算力时写死的约定"变成"机器强制的接口"。</p>
+
+<h2>栈的两段定位</h2>
+
+<h3>agentserver = 算力底层网络</h3>
+
+<p>解决四件事,缺一不可:</p>
+<ul>
+  <li><strong>命名</strong>:算力被分配 <code>agent_id</code> 与 <code>display_name</code>;集群中可寻址。</li>
+  <li><strong>隔离</strong>:每个 agent 在自己的 sandbox 里跑,文件、进程、网络都受限。</li>
+  <li><strong>穿透</strong>:slave 在 NAT 后面也能被 driver 调用——靠反向 WS tunnel + peer-proxy。</li>
+  <li><strong>身份</strong>:OAuth 2.0 Device Flow<sup><a href="references.html#ref-3">[3]</a></sup>给每个 agent 颁发 sandbox token + proxy token;调用即鉴权。</li>
+</ul>
+
+<p>没有这一层,算力还是"哪台机、IP 多少、能不能 SSH 进去"的运维问题,不是工程问题。</p>
+
+<h3>loom = 算力应用层与编排</h3>
+
+<p>在 agentserver 之上,loom 把"算力的接口"再向上抬了一层:</p>
+<ul>
+  <li><strong>能力命名</strong>:每个 slave 通过 <code>AgentCard.skills</code> 公告自己有 <code>chat/bash/file/register_mcp</code> 等能力;driver 用 <code>inspect_capabilities</code> 发现。</li>
+  <li><strong>能力组合</strong>:driver 用 <code>TaskContract</code> 把多个 slave 的能力组合成一个任务的 DAG。</li>
+  <li><strong>能力扩展</strong>:slave 缺能力时,driver 可以让 slave 在线 scaffold 一个新的 MCP server,过 acceptance gate,<code>register_mcp</code> 接入;下次任务可直接调。</li>
+  <li><strong>能力中断</strong>:chat 中模型可以调 <code>ask_user</code> 暂停;driver 把问题透给真人,真人回答后用 <code>resume_task</code> 续上 backend session。</li>
+</ul>
+
+<p>没有这一层,agentserver 还只是一个"分布式 coding-agent 平台"——能远程跑 Claude,
+但任务的形状、能力的命名、跨任务的能力沉淀都不存在。</p>
+
+<h2>合栈的承诺</h2>
+
+<p>两段栈合起来兑现的一句话承诺:<strong>用户可以把一段意图(自然语言)交给驱动方,
+后者用集群中现有的、被命名的、随时可被扩展的算力把它执行了,中途可以介入,
+执行的痕迹被记录,新增的能力被复用。</strong></p>
+
+<p>本栈不是另一个 multi-agent 框架;multi-agent 框架普遍假设单机 in-process。
+本栈也不是另一个 coding-agent 平台;coding-agent 平台普遍假设 1:1 用户↔机器。
+本栈把这两层合在一起做(见<a href="related-work.html">相关工作</a>的对比表)。</p>
+
+<h2>三种视角入口</h2>
+
+<p>把"算力被编码"这个抽象命题拆成三个可工程化的视角,后续三页分别展开:</p>
+
+<ul>
+  <li><a href="layer.html"><strong>Layer</strong>:水平 7 层堆叠</a> — 物理算力到模型层,每一层都对应"下一层不够"。</li>
+  <li><a href="tier.html"><strong>Tier</strong>:角色分层</a> — driver / slave / observer 各扮演什么,如何同一段代码跨多 tier。</li>
+  <li><a href="cycle.html"><strong>Cycle</strong>:反馈循环</a> — 4 个时间维度的循环共享同一模式:失败 → 自修复 → 学习。</li>
+</ul>
+
+<p><img src="assets/diagrams/stack-overview.svg" alt="agentserver + loom 栈全景图" style="max-width:100%;"></p>
+
+<div class="pager">
+  <a href="index.html">← 首页</a>
+  <a href="platform-stack.html">agentserver 平台 →</a>
+</div>
+</main>
+</body>
+</html>
