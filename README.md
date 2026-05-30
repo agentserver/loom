@@ -108,23 +108,29 @@ codex 是 `docker exec` 按需调起，不是 PID 1）以及 `permissions` skill
 - **Driver-first 编排**：用户在 Claude Code / VS Code 扩展里直接和 driver 对话；driver 既是一个 stdio MCP server，也是 agentserver workspace 里的一个普通 agent，能把用户本地的文件清单透传给 master/slave。
 - **能力可发现**：每个 slave 启动时会把自己的 skills、MCP servers、资源、运行时信息写到 `journal/CAPABILITIES.md`；driver 通过 `inspect_capabilities` 决定路由——这也正是"按需建能力"得以闭环的基础。
 
-## 四个二进制
+## 五个二进制
 
 | Binary | 角色 | 文档 |
 |---|---|---|
-| `cmd/driver-agent` | 本地 driver，作为 Claude Code 的 stdio MCP server，承载工作区上下文与编排工具 | [cmd/driver-agent/README.md](multi-agent/cmd/driver-agent/README.md) |
+| `cmd/driver-agent` | 本地 driver，作为 Claude Code / Codex 的 stdio MCP server，承载工作区上下文与编排工具 | [cmd/driver-agent/README.md](multi-agent/cmd/driver-agent/README.md) |
 | `cmd/master-agent` | 编排器，使用 claude 作为 planner / router / reducer，把任务委派给 workspace 中其它 agent | [cmd/master-agent/README.md](multi-agent/cmd/master-agent/README.md) |
-| `cmd/slave-agent` | 工作 agent，接受任务并通过 claude 或 MCP 执行，维护能力清单 | [cmd/slave-agent/README.md](multi-agent/cmd/slave-agent/README.md) |
-| `cmd/observer-server` | 独立 HTTP observer，存储并展示 driver / master / slave 遥测 | [cmd/observer-server/config.example.yaml](multi-agent/cmd/observer-server/config.example.yaml) |
+| `cmd/slave-agent` | 工作 agent，接受任务并通过 claude / codex / MCP 执行，维护能力清单 | [cmd/slave-agent/README.md](multi-agent/cmd/slave-agent/README.md) |
+| `cmd/observer-server` | 独立 HTTP observer，存储并展示 driver / master / slave 遥测；同时托管 userspace 包仓库 | [cmd/observer-server/config.example.yaml](multi-agent/cmd/observer-server/config.example.yaml) |
+| `cmd/mcp-userspace` | 命令行客户端，把验证过的 MCP server / skill 打成包推送到 observer 的 userspace，再在另一台机器上 `install` | [cmd/mcp-userspace/](multi-agent/cmd/mcp-userspace/) |
 
 ### Slave 公开的核心 skills
 
-- `chat` — 自然语言任务，由 slave 内嵌的 claude 执行
+- `chat` — 自然语言任务，由 slave 内嵌的 claude（或 codex）执行
 - `mcp` — JSON 调用 `{server, tool, args}`，直接打到某个 MCP server
 - `register_mcp` — 注册一段已经在 slave 上写好并通过烟雾测试的 MCP server 源码
 - `unregister_mcp` — 解除注册某个 dynamic MCP server（从 `dynamic_mcp.yaml` 移除、杀掉子进程、刷新 CAPABILITIES）；不删源码文件
 - `bash` — 由 slave 原生 Go executor 执行的确定性 shell 任务
 - `claude_permissions` — 通过任务通道读取 / 修改 slave 上 Claude Code 的 project 权限（过渡方案）
+
+`chat` skill 内还提供 **humanloop** 工具：slave 端的 claude/codex 可以调
+`ask_user` / `request_permission` 主动暂停一轮，driver 把问题透传给坐在
+Claude Code / VS Code 前的用户，回答到位再恢复执行。详见
+`internal/humanloop/` 与 `docs/superpowers/specs/2026-05-26-humanloop-resumable-chat-design.md`。
 
 ### Driver MCP 工具
 
@@ -138,28 +144,74 @@ codex 是 `docker exec` 按需调起，不是 PID 1）以及 `permissions` skill
 
 完整 schema 参见 `docs/superpowers/specs/2026-05-09-generic-driver-agent-design.md` 与 `skills/multiagent`。
 
+### Python 客户端：loom-py
+
+如果你想在 Python 脚本 / 笔记本里直接驱动 driver，而不打开 Claude Code，
+可以用仓库内的 `multi-agent/python/`（PyPI 名 `loom`）。它把 driver MCP
+封装成 fluent 的 workflow API，覆盖 chat / wait / expect_or_ask /
+find_slave / 文件 IO 占位符等核心动作：
+
+```python
+import loom
+
+with loom.workflow(goal="say HELLO") as wf:
+    res = wf.chat("Reply with HELLO and stop.",
+                  target="slave-local-prod").wait()
+print(res.output)
+```
+
+零运行时依赖，唯一外部要求是 `driver-agent` 二进制在 PATH 上。详见
+[`multi-agent/python/README.md`](multi-agent/python/README.md) 与
+`docs/superpowers/specs/2026-05-27-loom-python-library-design.md`。
+
+### Userspace：跨机器复用自己造的能力
+
+当你在某台 driver 上让 slave 现场造出一个 MCP server（或写了一个新的
+skill），可以用 `mcp-userspace` CLI 把它打成包推到 observer 上自己的
+个人空间，再在另一台机器 / 另一个 workspace 上 `install`：
+
+```bash
+mcp-userspace login --url http://observer:8090 --token $TOKEN
+mcp-userspace push  --slug wedding_almanac --bump-patch ./generated_mcp/wedding_almanac
+mcp-userspace install --as mcp --workspace ws-work --overwrite wedding_almanac@1.0.0
+```
+
+服务端逻辑在 `internal/userspace` + `internal/mcpmarket`；driver 侧配套
+的 `userspace-publish` skill 会在用户说"保存到我的空间"时被触发。
+
 ## 仓库结构
 
 ```
 .
 ├── README.md / README.en.md          顶层文档（你正在看的）
-├── skills/multiagent/                Claude Code / Codex 侧的 multiagent skill
-├── docs/superpowers/                 设计 spec 与执行计划
+├── skills/                           Claude Code / Codex 侧 skills
+│   ├── multiagent/                   driver tools / slave skills / task contract / orchestration
+│   ├── scaffold-mcp-server/          spec.json → stdio JSON-RPC 骨架
+│   ├── mcp-acceptance/               register 前的语义验真 gate
+│   └── userspace-publish/            把验证过的 MCP / skill 推到个人 userspace
+├── docs/
+│   ├── superpowers/                  设计 spec 与执行计划
+│   └── intro/                        项目介绍 HTML 站（零依赖 SVG 图解）
 └── multi-agent/                      Go module（项目代号 Loom，路径暂未重命名）
     ├── go.mod                        module github.com/yourorg/multi-agent
     ├── cmd/
     │   ├── driver-agent/             stdio MCP + workspace agent
     │   ├── master-agent/             编排 agent
     │   ├── slave-agent/              工作 agent
-    │   └── observer-server/          遥测后端
+    │   ├── observer-server/          遥测后端 + userspace 包仓库
+    │   └── mcp-userspace/            userspace 推 / 拉 / install CLI
     ├── internal/
     │   ├── config, store, webui, tunnel, poller          全员共享
     │   ├── executor, journal, dispatch, capability(doc)  slave 侧
     │   ├── orchestrator, orchestration, planner          master 侧
     │   ├── driver, contract, claudeperm, progress        driver 侧
+    │   ├── humanloop                                     chat 期 ask_user / request_permission
+    │   ├── userspace, mcpmarket                          observer 上的个人包仓库
     │   └── buildspec, observer, observerclient,
     │       observerstore, observerweb                    遥测 / 构建规范
     ├── pkg/transport                 对外可复用的传输辅助
+    ├── python/                       loom-py：driver 的 Python fluent workflow 客户端
+    ├── deploy/                       生产部署模板 + bootstrap 脚本
     ├── examples/
     │   ├── driver-first/             driver-first 编排范例
     │   ├── dynamic-mcp/              bash → register_mcp 闭环
@@ -175,7 +227,8 @@ codex 是 `docker exec` 按需调起，不是 PID 1）以及 `permissions` skill
         ├── contract/                 build tag: contract
         ├── runtime/                  runtime 镜像与权限文档
         ├── smoke/                    build tag: smoke（手工，需 ANTHROPIC_API_KEY）
-        └── claude_driver/            Claude Code driver 用例 fixtures（matmul 等）
+        ├── claude_driver/            Claude Code driver 用例 fixtures（matmul 等）
+        └── prod_test/                内部 prod 灰度配置（gitignored）
 ```
 
 ## 构建与测试
@@ -198,6 +251,7 @@ go build -o cmd/driver-agent/driver-agent       ./cmd/driver-agent
 go build -o cmd/master-agent/master-agent       ./cmd/master-agent
 go build -o cmd/slave-agent/slave-agent         ./cmd/slave-agent
 go build -o bin/observer-server                  ./cmd/observer-server
+go build -o bin/mcp-userspace                    ./cmd/mcp-userspace
 ```
 
 ## Self-host 一套
@@ -250,7 +304,15 @@ observer:
 
 ## Skill 与文档
 
-Claude Code / Codex 侧用的 multiagent skill 在仓库根目录的 `skills/multiagent/`，配套 reference 文档覆盖 driver tools / slave skills / task contract / orchestration patterns。
+仓库根目录 `skills/` 下现有四个 skill，由 driver 端 Claude Code / Codex 加载：
+
+- `multiagent` —— 主 skill，囊括 driver tools / slave skills / task contract / orchestration patterns 的 reference
+- `scaffold-mcp-server` —— 从 `spec.json` 生成 stdio JSON-RPC 骨架（重跑保留 handler）
+- `mcp-acceptance` —— `register_mcp` 之前必须过的语义验真 gate（exit 0 才能 register）
+- `userspace-publish` —— 把验证过的 MCP / skill 推到 observer 上自己的 userspace
+
+`docs/intro/` 是项目介绍 HTML 站（layered stack / cycle / related-work
+等图解，零 JS 依赖），可以直接本地打开 `index.html`。
 
 设计与计划文档在 `docs/superpowers/`，按时间排序，最近的几篇值得先看：
 
@@ -259,6 +321,8 @@ Claude Code / Codex 侧用的 multiagent skill 在仓库根目录的 `skills/mul
 - `specs/2026-05-13-typed-buildmcp-progress-design.md`
 - `specs/2026-05-14-distributed-driver-master-contract-design.md`
 - `specs/2026-05-14-observer-artifact-relay-temporary-design.md`
+- `specs/2026-05-26-humanloop-resumable-chat-design.md`
+- `specs/2026-05-27-loom-python-library-design.md`
 - `plans/2026-05-19-bash-driven-mcp-registration.md`
 
 早期的 slave / master 设计文档（`2026-04-27`、`2026-04-28`）仍可参考，但其中的目录命名 (`slave_agent/...`) 早于本次重命名，不再随 refactor 自动同步。

@@ -111,22 +111,30 @@ Net effect: **the cluster starts from a minimal skeleton (just claude + bash) an
 - **Driver-first orchestration.** The user talks to the driver inside Claude Code (CLI or VS Code extension). The driver is both a stdio MCP server and a regular workspace agent, so it can pass the user's local file manifest through to master/slaves.
 - **Discoverable capabilities.** On startup each slave writes its skills, MCP servers, resources, and runtime info into `journal/CAPABILITIES.md`. The driver consults `inspect_capabilities` to decide routing — this is also what makes "capabilities on demand" loop-closable.
 
-## Four binaries
+## Five binaries
 
 | Binary | Role | Docs |
 |---|---|---|
-| `cmd/driver-agent` | Local driver — Claude Code's stdio MCP server, holds workspace context and orchestration tools | [cmd/driver-agent/README.md](multi-agent/cmd/driver-agent/README.md) |
+| `cmd/driver-agent` | Local driver — Claude Code / Codex stdio MCP server, holds workspace context and orchestration tools | [cmd/driver-agent/README.md](multi-agent/cmd/driver-agent/README.md) |
 | `cmd/master-agent` | Orchestrator — uses claude as planner / router / reducer to delegate work to other workspace agents | [cmd/master-agent/README.md](multi-agent/cmd/master-agent/README.md) |
-| `cmd/slave-agent` | Worker — accepts tasks and runs them via claude or MCP, maintains a capability journal | [cmd/slave-agent/README.md](multi-agent/cmd/slave-agent/README.md) |
-| `cmd/observer-server` | Standalone HTTP observer — stores and displays driver / master / slave telemetry | [cmd/observer-server/config.example.yaml](multi-agent/cmd/observer-server/config.example.yaml) |
+| `cmd/slave-agent` | Worker — accepts tasks and runs them via claude / codex / MCP, maintains a capability journal | [cmd/slave-agent/README.md](multi-agent/cmd/slave-agent/README.md) |
+| `cmd/observer-server` | Standalone HTTP observer — stores driver / master / slave telemetry; also hosts the userspace package registry | [cmd/observer-server/config.example.yaml](multi-agent/cmd/observer-server/config.example.yaml) |
+| `cmd/mcp-userspace` | CLI for packaging a validated MCP server / skill and pushing it to observer userspace, then `install`-ing on another host | [cmd/mcp-userspace/](multi-agent/cmd/mcp-userspace/) |
 
 ### Core slave skills
 
-- `chat` — natural-language tasks executed by the slave's embedded claude
+- `chat` — natural-language tasks executed by the slave's embedded claude (or codex)
 - `mcp` — JSON `{server, tool, args}` call dispatched to a configured MCP server
 - `register_mcp` — install an MCP server source file that has already been authored and smoke-tested on the slave
+- `unregister_mcp` — deregister a dynamic MCP server (remove from `dynamic_mcp.yaml`, kill the child, refresh CAPABILITIES); source files are kept
 - `bash` — deterministic shell tasks executed by the slave's native Go executor
 - `claude_permissions` — read / patch the slave's Claude Code project permissions via the task channel (a transitional bridge)
+
+Inside `chat`, the slave-side claude/codex can call the **humanloop**
+tools `ask_user` / `request_permission` to pause mid-turn — the driver
+hands the question to the user sitting in Claude Code / VS Code, then
+resumes the chat with the answer. See `internal/humanloop/` and
+`docs/superpowers/specs/2026-05-26-humanloop-resumable-chat-design.md`.
 
 ### Driver MCP tools
 
@@ -135,33 +143,81 @@ The driver's tool namespace appears under `driver/` inside Claude Code. The freq
 - `inspect_capabilities` / `list_agents`
 - `draft_task_contract` / `dry_run_contract` / `submit_contract_task`
 - `get_task` / `wait_task` / `tail_subtasks` / `cancel_task`
-- `run_slave_bash` / `register_slave_mcp`
+- `run_slave_bash` / `register_slave_mcp` / `unregister_slave_mcp`
 - `get_slave_claude_permissions` / `update_slave_claude_permissions`
 
 Full schemas live in `docs/superpowers/specs/2026-05-09-generic-driver-agent-design.md` and `skills/multiagent`.
+
+### Python client: loom-py
+
+If you'd rather drive the driver from a Python script or notebook
+instead of opening Claude Code, use `multi-agent/python/` (PyPI name
+`loom`). It wraps the driver MCP surface as a fluent workflow API —
+chat / wait / `expect_or_ask` / `find_slave` / file-IO placeholders:
+
+```python
+import loom
+
+with loom.workflow(goal="say HELLO") as wf:
+    res = wf.chat("Reply with HELLO and stop.",
+                  target="slave-local-prod").wait()
+print(res.output)
+```
+
+Zero runtime deps; the only requirement is `driver-agent` on PATH. See
+[`multi-agent/python/README.md`](multi-agent/python/README.md) and
+`docs/superpowers/specs/2026-05-27-loom-python-library-design.md`.
+
+### Userspace: reuse what you built on another host
+
+When a driver has had a slave author a new MCP server (or you wrote a
+fresh skill), you can package it with `mcp-userspace` and push to your
+personal space on observer — then `install` it on another host or into
+another workspace:
+
+```bash
+mcp-userspace login --url http://observer:8090 --token $TOKEN
+mcp-userspace push  --slug wedding_almanac --bump-patch ./generated_mcp/wedding_almanac
+mcp-userspace install --as mcp --workspace ws-work --overwrite wedding_almanac@1.0.0
+```
+
+Server-side bits live in `internal/userspace` + `internal/mcpmarket`;
+the driver-side `userspace-publish` skill fires when the user says "save
+this to my space".
 
 ## Repository layout
 
 ```
 .
 ├── README.md / README.en.md          top-level docs (you're reading them)
-├── skills/multiagent/                Claude Code / Codex multiagent skill
-├── docs/superpowers/                 design specs and execution plans
+├── skills/                           Claude Code / Codex side skills
+│   ├── multiagent/                   driver tools / slave skills / task contract / orchestration
+│   ├── scaffold-mcp-server/          spec.json → stdio JSON-RPC skeleton
+│   ├── mcp-acceptance/               semantic acceptance gate run before register_mcp
+│   └── userspace-publish/            push validated MCP / skill to personal userspace
+├── docs/
+│   ├── superpowers/                  design specs and execution plans
+│   └── intro/                        project intro HTML site (zero-dep SVG diagrams)
 └── multi-agent/                      Go module (project codename Loom; path not renamed yet)
     ├── go.mod                        module github.com/yourorg/multi-agent
     ├── cmd/
     │   ├── driver-agent/             stdio MCP + workspace agent
     │   ├── master-agent/             orchestrator agent
     │   ├── slave-agent/              worker agent
-    │   └── observer-server/          telemetry backend
+    │   ├── observer-server/          telemetry backend + userspace package registry
+    │   └── mcp-userspace/            push / pull / install CLI for userspace
     ├── internal/
     │   ├── config, store, webui, tunnel, poller          shared by all
     │   ├── executor, journal, dispatch, capability(doc)  slave-side
     │   ├── orchestrator, orchestration, planner          master-side
     │   ├── driver, contract, claudeperm, progress        driver-side
+    │   ├── humanloop                                     in-chat ask_user / request_permission
+    │   ├── userspace, mcpmarket                          personal package registry on observer
     │   └── buildspec, observer, observerclient,
     │       observerstore, observerweb                    telemetry / build spec
     ├── pkg/transport                 reusable transport helpers
+    ├── python/                       loom-py: Python fluent workflow client for driver
+    ├── deploy/                       production deploy templates + bootstrap scripts
     ├── examples/
     │   ├── driver-first/             driver-first orchestration walk-through
     │   ├── dynamic-mcp/              bash → register_mcp loop
@@ -177,7 +233,8 @@ Full schemas live in `docs/superpowers/specs/2026-05-09-generic-driver-agent-des
         ├── contract/                 build tag: contract
         ├── runtime/                  runtime image + permission docs
         ├── smoke/                    build tag: smoke (manual, needs ANTHROPIC_API_KEY)
-        └── claude_driver/            Claude Code driver test fixtures (matmul, etc.)
+        ├── claude_driver/            Claude Code driver test fixtures (matmul, etc.)
+        └── prod_test/                internal prod-staging bundle (gitignored)
 ```
 
 ## Build and test
@@ -200,6 +257,7 @@ go build -o cmd/driver-agent/driver-agent       ./cmd/driver-agent
 go build -o cmd/master-agent/master-agent       ./cmd/master-agent
 go build -o cmd/slave-agent/slave-agent         ./cmd/slave-agent
 go build -o bin/observer-server                  ./cmd/observer-server
+go build -o bin/mcp-userspace                    ./cmd/mcp-userspace
 ```
 
 ## Self-host a stack
@@ -252,7 +310,16 @@ Views:
 
 ## Skills and design docs
 
-The multiagent skill used by Claude Code / Codex lives at the repo root in `skills/multiagent/`, with reference docs covering driver tools, slave skills, the task contract, and orchestration patterns.
+The repo's `skills/` directory ships four skills, loaded by the
+driver-side Claude Code / Codex:
+
+- `multiagent` — the main skill, with reference docs for driver tools, slave skills, the task contract, and orchestration patterns
+- `scaffold-mcp-server` — generates a stdio JSON-RPC skeleton from `spec.json` (re-runs preserve hand-written handlers)
+- `mcp-acceptance` — the semantic acceptance gate that must pass before `register_mcp` is allowed
+- `userspace-publish` — push a validated MCP / skill to your personal userspace on observer
+
+`docs/intro/` is the project-intro HTML site (layered-stack / cycle /
+related-work SVG diagrams, no JS), openable straight from `index.html`.
 
 Design and plan documents live in `docs/superpowers/`. The most relevant recent ones:
 
@@ -261,6 +328,8 @@ Design and plan documents live in `docs/superpowers/`. The most relevant recent 
 - `specs/2026-05-13-typed-buildmcp-progress-design.md`
 - `specs/2026-05-14-distributed-driver-master-contract-design.md`
 - `specs/2026-05-14-observer-artifact-relay-temporary-design.md`
+- `specs/2026-05-26-humanloop-resumable-chat-design.md`
+- `specs/2026-05-27-loom-python-library-design.md`
 - `plans/2026-05-19-bash-driven-mcp-registration.md`
 
 The earlier slave / master design docs (`2026-04-27`, `2026-04-28`) are still useful, but their directory naming (`slave_agent/...`) predates the rename refactor and is not kept in sync automatically.

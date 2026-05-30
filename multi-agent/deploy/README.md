@@ -157,10 +157,18 @@ bash <(curl -fsSL \
 
 | Path | Target |
 |---|---|
-| [`linux/observer`](linux/observer/) | Generic `observer-server` install. SQLite-backed HTTP daemon (default `:8090`); foreground or `--systemd`. amd64 / arm64. |
-| [`linux/driver`](linux/driver/) | Generic `driver-agent` install into a coding-agent project dir (no systemd — the coding agent launches the MCP server on demand). |
-| [`linux/slave`](linux/slave/) | Generic `slave-agent` install on any Linux host. Foreground smoke mode or `--systemd` for a managed service. amd64 / arm64. |
+| [`linux/observer`](linux/observer/) | Generic `observer-server` install. SQLite-backed HTTP daemon (default `:8090`); foreground or `--systemd`. amd64 / arm64. Also serves the `mcp-userspace` package registry. |
+| [`linux/driver`](linux/driver/) | Generic `driver-agent` install into a coding-agent project dir (no systemd — the coding agent launches the MCP server on demand). Supports `--agent claude` (default) and `--agent codex`. |
+| [`linux/slave`](linux/slave/) | Generic `slave-agent` install on any Linux host. Foreground smoke mode or `--systemd` for a managed service. amd64 / arm64. Supports `--agent claude` / `--agent codex` per slave. |
 | [`linux/compose-test`](linux/compose-test/) | docker-compose end-to-end test wiring all three installers together against a local observer; surfaces the device-code "join workspace" URLs each role prints on first start. |
+| [`bin/`](bin/) | Local cache of release binaries used by `install.sh` when `--bin PATH` isn't supplied. |
+
+`agent-backends.md` covers the per-backend config differences (Claude
+Code vs Codex): example `[model_providers.<name>]` block for pointing
+Codex CLI at any OpenAI-compatible endpoint, the container caveat that
+project-level `.codex/config.toml` needs an interactive trust prompt
+(mount the global config in containers instead), and `permissions`-skill
+JSON examples for both backends.
 
 Pre-built binaries for each release are published at
 <https://github.com/agentserver/loom/releases>. Each `install.sh` accepts
@@ -171,3 +179,18 @@ For the pre-wired prod-test bundle (`driver-prod`, `slave-jetson-prod`,
 `slave-local-prod` against `agent.cs.ac.cn` / `ws-prod`), see
 [`../tests/prod_test/`](../tests/prod_test/) — that bundle is for the
 project's own staging environment and is gitignored.
+
+## Related: clients that talk to a deployed driver
+
+These don't ship via `deploy/` because they live next to the driver on
+the user's machine, not on a server, but the same release publishes them:
+
+- **`mcp-userspace` CLI** — `cmd/mcp-userspace/`. Push validated MCP
+  servers / skills to your observer-hosted personal space and `install`
+  them on another device or workspace. See the
+  [`userspace-publish`](../../skills/userspace-publish/SKILL.md) skill
+  for the driver-side flow.
+- **`loom-py` Python client** — [`multi-agent/python/`](../python/),
+  PyPI name `loom`. Wraps the driver MCP surface as a fluent workflow
+  API for scripts / notebooks; needs `driver-agent` on PATH but no
+  Claude Code / Codex window open.
