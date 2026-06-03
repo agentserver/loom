@@ -14,10 +14,10 @@ func TestObserverScriptDryRunStartBuildsConfiguresAndStartsServer(t *testing.T) 
 		"bin/observer-server --config observer.yaml",
 		".run/observer/observer-server.pid",
 		".run/observer/observer-server.log",
-		"http://127.0.0.1:8090/",
-		"http://127.0.0.1:8090/drivers",
-		"http://127.0.0.1:8090/masters",
-		"http://127.0.0.1:8090/slaves",
+		"http://127.0.0.1:8090",
+		"/api/agents/register",
+		"/api/events",
+		"/api/tasks/{id}/progress",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("dry-run observer start missing %q\noutput:\n%s", want, out)
@@ -39,14 +39,15 @@ func TestObserverScriptDryRunStopUsesPidFileAndScopedFallback(t *testing.T) {
 	}
 }
 
-func TestObserverScriptDryRunStatusMentionsLogPidAndViews(t *testing.T) {
+func TestObserverScriptDryRunStatusMentionsLogPidAndAPI(t *testing.T) {
 	out := runNamedScript(t, "scripts/observer.sh", "--dry-run", "status")
 
 	for _, want := range []string{
 		"observer-server",
 		".run/observer/observer-server.pid",
 		".run/observer/observer-server.log",
-		"http://127.0.0.1:8090/",
+		"http://127.0.0.1:8090",
+		"/api/events",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("dry-run observer status missing %q\noutput:\n%s", want, out)
