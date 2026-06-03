@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"io"
 	"log"
 	"net/http"
@@ -25,8 +24,7 @@ const maxEventBodyBytes = 1 << 20
 type Store interface {
 	ValidateToken(token string) (observerstore.Agent, bool, error)
 	Ingest(ev observer.Event) error
-	ListTasks() ([]observerstore.TaskView, error)
-	ListEvents(taskID string) ([]observer.Event, error)
+	GetTaskProgress(workspaceID, taskID string) (observerstore.TaskProgress, bool, error)
 	CreateArtifact(observerstore.ArtifactCreate) (observerstore.Artifact, error)
 	RequestArtifact(workspaceID, requesterAgentID, artifactID string) (observerstore.ArtifactRequest, error)
 	ListArtifactRequests(workspaceID, ownerAgentID string) ([]observerstore.ArtifactRequest, error)
@@ -56,9 +54,12 @@ type Store interface {
 func New(s Store, usHandler *userspace.Handler) http.Handler {
 	h := &handler{s: s}
 	mux := http.NewServeMux()
+	// Ingest only. The legacy GET /api/events read endpoint was removed when
+	// the unauthenticated dashboard came down; agents that need to replay
+	// events must use a tokened endpoint we haven't built yet.
 	mux.HandleFunc("/api/events", h.postEvent)
 	mux.HandleFunc("/api/agents/register", h.register)
-	mux.HandleFunc("/api/tasks", h.apiTasks)
+	mux.HandleFunc("/api/tasks/", h.taskRouter)
 	mux.HandleFunc("/api/artifacts", h.artifacts)
 	mux.HandleFunc("/api/artifacts/", h.artifactRouter)
 	mux.HandleFunc("/api/artifact-requests", h.artifactRequests)
@@ -70,10 +71,6 @@ func New(s Store, usHandler *userspace.Handler) http.Handler {
 	mux.HandleFunc("/api/resource-snapshots", h.resourceSnapshots)
 	mux.HandleFunc("/api/resource-snapshots/latest", h.latestResourceSnapshot)
 	mux.HandleFunc("/api/workspaces", h.guardWebToken(h.listWorkspaces))
-	mux.HandleFunc("/drivers", h.page("Drivers", "drivers"))
-	mux.HandleFunc("/masters", h.page("Masters", "masters"))
-	mux.HandleFunc("/slaves", h.page("Slaves", "slaves"))
-	mux.HandleFunc("/", h.dashboard)
 	if usHandler != nil {
 		userspace.MountRoutes(mux, usHandler)
 	}
@@ -85,10 +82,6 @@ type handler struct {
 }
 
 func (h *handler) postEvent(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodGet {
-		h.apiEvents(w, r)
-		return
-	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -140,18 +133,6 @@ func (h *handler) postEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)
-}
-
-func (h *handler) apiEvents(w http.ResponseWriter, r *http.Request) {
-	events, err := h.s.ListEvents(r.URL.Query().Get("task_id"))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(events); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
 }
 
 func bearerToken(auth string) (string, bool) {
@@ -576,96 +557,44 @@ func (h *handler) latestResourceSnapshot(w http.ResponseWriter, r *http.Request)
 	json.NewEncoder(w).Encode(got)
 }
 
-func (h *handler) apiTasks(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	tasks, err := h.s.ListTasks()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(tasks); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
-}
-
-func (h *handler) dashboard(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
+// taskRouter handles GET /api/tasks/{task_id}/progress. The legacy
+// unauthenticated GET /api/tasks (full-list) endpoint was removed; only this
+// tokened, per-(workspace, task) lookup remains for driver's awaiting_user
+// marker recovery path.
+func (h *handler) taskRouter(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/tasks/")
+	if !strings.HasSuffix(rest, "/progress") {
 		http.NotFound(w, r)
 		return
 	}
-	h.renderPage(w, r, "Dashboard", "dashboard")
-}
-
-func (h *handler) page(title, view string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		h.renderPage(w, r, title, view)
+	taskID := strings.TrimSuffix(rest, "/progress")
+	if taskID == "" || strings.Contains(taskID, "/") {
+		http.Error(w, "bad task id", http.StatusBadRequest)
+		return
 	}
+	h.getTaskProgress(w, r, taskID)
 }
 
-func (h *handler) renderPage(w http.ResponseWriter, r *http.Request, title, view string) {
+func (h *handler) getTaskProgress(w http.ResponseWriter, r *http.Request, taskID string) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	tasks, err := h.s.ListTasks()
+	agent, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	prog, found, err := h.s.GetTaskProgress(agent.WorkspaceID, taskID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	tasks = filterTasksForView(tasks, view)
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := pageTemplate.Execute(w, map[string]interface{}{
-		"Title": title,
-		"View":  view,
-		"Tasks": tasks,
-	}); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if !found {
+		http.Error(w, "task not found", http.StatusNotFound)
+		return
 	}
-}
-
-func filterTasksForView(tasks []observerstore.TaskView, view string) []observerstore.TaskView {
-	if view == "dashboard" {
-		return tasks
-	}
-	out := make([]observerstore.TaskView, 0, len(tasks))
-	for _, task := range tasks {
-		switch view {
-		case "drivers":
-			if task.DriverID != "" {
-				out = append(out, task)
-			}
-		case "masters":
-			if task.MasterID != "" || len(task.Subtasks) > 0 {
-				out = append(out, task)
-			}
-		case "slaves":
-			if hasSlaveActivity(task) {
-				out = append(out, task)
-			}
-		default:
-			out = append(out, task)
-		}
-	}
-	return out
-}
-
-func hasSlaveActivity(task observerstore.TaskView) bool {
-	if task.SlaveID != "" {
-		return true
-	}
-	if task.DriverID == "" && task.MasterID == "" {
-		return true
-	}
-	for _, subtask := range task.Subtasks {
-		if subtask.ChildTaskID != "" || subtask.SlaveID != "" {
-			return true
-		}
-	}
-	return false
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(prog)
 }
 
 type registerRequest struct {
@@ -853,95 +782,3 @@ func mintAgentToken() (string, error) {
 	}
 	return hex.EncodeToString(buf[:]), nil
 }
-
-var pageTemplate = template.Must(template.New("observer").Parse(`<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>{{.Title}}</title>
-<style>
-body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#f6f8f7;color:#17212b}
-header{background:#24313a;color:white;padding:14px 22px}
-header strong{display:inline-block;margin-right:28px}
-nav{display:inline-block}
-nav a{color:white;margin-right:16px;text-decoration:none}
-main{padding:20px 22px}
-table{border-collapse:collapse;width:100%;background:white;border:1px solid #d8dfda}
-th,td{border-bottom:1px solid #d8dfda;padding:9px 10px;text-align:left;vertical-align:top}
-th{background:#edf2ef}
-.muted{color:#52616b;font-size:13px}
-.status{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
-.subtask{margin-bottom:4px}
-</style>
-</head>
-<body>
-<header><strong>{{.Title}}</strong><nav><a href="/">Dashboard</a><a href="/drivers">Drivers</a><a href="/masters">Masters</a><a href="/slaves">Slaves</a></nav></header>
-<main>
-{{if eq .View "slaves"}}
-<table>
-<thead><tr><th>Task / Subtask</th><th>Slave</th><th>Status</th><th>Output / Error</th><th>MCP</th></tr></thead>
-<tbody>
-{{range .Tasks}}
-{{if .Subtasks}}
-{{range .Subtasks}}
-<tr>
-<td>{{.DisplayLabel}}<div class="muted">{{.ChildTaskID}}</div>{{if .LatestProgress}}<div class="muted">Progress: {{.LatestProgressPhase}} - {{.LatestProgress}}</div>{{end}}</td>
-<td>{{.SlaveID}}</td>
-<td class="status">{{.Status}}</td>
-<td>{{if .Output}}{{.Output}}{{else}}{{.Error}}{{end}}</td>
-<td>{{if .MCPStatus}}{{.MCPStatus}}{{else}}none{{end}}</td>
-</tr>
-{{end}}
-{{else}}
-<tr>
-<td>{{.Summary}}<div class="muted">{{.TaskID}}</div>{{if .LatestProgress}}<div class="muted">Progress: {{.LatestProgressPhase}} - {{.LatestProgress}}</div>{{end}}</td>
-<td>{{.SlaveID}}</td>
-<td class="status">{{.Status}}</td>
-<td>{{if .Output}}{{.Output}}{{else}}{{.Error}}{{end}}</td>
-<td>{{if .MCPStatus}}{{.MCPStatus}}{{else}}none{{end}}</td>
-</tr>
-{{end}}
-{{else}}
-<tr><td colspan="5" class="muted">No slave activity observed yet.</td></tr>
-{{end}}
-</tbody>
-</table>
-{{else if eq .View "masters"}}
-<table>
-<thead><tr><th>Task</th><th>Status</th><th>Master</th><th>Decomposition</th><th>MCP</th></tr></thead>
-<tbody>
-{{range .Tasks}}
-<tr>
-<td>{{.Summary}}<div class="muted">{{.TaskID}}</div>{{if .LatestProgress}}<div class="muted">Progress: {{.LatestProgressPhase}} - {{.LatestProgress}}</div>{{end}}</td>
-<td class="status">{{.Status}}</td>
-<td>{{.MasterID}}</td>
-<td>{{range .Subtasks}}<div class="subtask">{{.DisplayLabel}} <span class="status">{{.Status}}</span> <span class="muted">{{.SlaveID}}</span>{{if .LatestProgress}}<div class="muted">Progress: {{.LatestProgressPhase}} - {{.LatestProgress}}</div>{{end}}</div>{{end}}</td>
-<td>{{if .MCPStatus}}{{.MCPStatus}}{{else}}none{{end}}</td>
-</tr>
-{{else}}
-<tr><td colspan="5" class="muted">No master tasks observed yet.</td></tr>
-{{end}}
-</tbody>
-</table>
-{{else}}
-<table>
-<thead><tr><th>Task</th><th>Status</th><th>Driver</th><th>Master</th><th>Slaves</th><th>MCP</th></tr></thead>
-<tbody>
-{{range .Tasks}}
-<tr>
-<td>{{.Summary}}<div class="muted">{{.TaskID}}</div>{{if .LatestProgress}}<div class="muted">Progress: {{.LatestProgressPhase}} - {{.LatestProgress}}</div>{{end}}</td>
-<td class="status">{{.Status}}</td>
-<td>{{.DriverID}}</td>
-<td>{{.MasterID}}</td>
-<td>{{range .Subtasks}}<div class="subtask">{{.SlaveID}} <span class="status">{{.Status}}</span>{{if .LatestProgress}}<div class="muted">Progress: {{.LatestProgressPhase}} - {{.LatestProgress}}</div>{{end}}</div>{{end}}</td>
-<td>{{if .MCPStatus}}{{.MCPStatus}}{{else}}none{{end}}</td>
-</tr>
-{{else}}
-<tr><td colspan="6" class="muted">No tasks observed yet.</td></tr>
-{{end}}
-</tbody>
-</table>
-{{end}}
-</main>
-</body>
-</html>`))

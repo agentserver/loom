@@ -79,11 +79,12 @@ build_observer() {
 }
 
 print_urls() {
-  printf 'Observer URLs:\n'
-  printf '  http://127.0.0.1:8090/\n'
-  printf '  http://127.0.0.1:8090/drivers\n'
-  printf '  http://127.0.0.1:8090/masters\n'
-  printf '  http://127.0.0.1:8090/slaves\n'
+  printf 'Observer base URL: http://127.0.0.1:8090\n'
+  printf '  (HTTP API only; HTML dashboard was removed for multi-user safety.)\n'
+  printf '  POST /api/agents/register   (Bearer <api_key>)\n'
+  printf '  POST /api/events            (Bearer <agent_token>)\n'
+  printf '  GET  /api/tasks/{id}/progress (Bearer <agent_token>)\n'
+  printf '  GET  /api/workspaces        (admin, gated by $OBSERVER_WEB_TOKEN if set)\n'
 }
 
 start_observer() {

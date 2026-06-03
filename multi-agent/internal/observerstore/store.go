@@ -646,6 +646,40 @@ func (s *Store) Ingest(ev observer.Event) error {
 	return tx.Commit()
 }
 
+// TaskProgress is the small subset of TaskView that driver needs to interpret
+// awaiting_user markers carried in slave's final_output. Used by the tokened
+// GET /api/tasks/{task_id}/progress endpoint.
+type TaskProgress struct {
+	LatestProgress      string `json:"latest_progress"`
+	LatestProgressPhase string `json:"latest_progress_phase"`
+	LatestProgressAt    string `json:"latest_progress_at"`
+	FinalOutput         string `json:"final_output"`
+	IsFinal             bool   `json:"is_final"`
+}
+
+// GetTaskProgress returns the 5 progress fields of a task. found=false means
+// no such (workspace_id, task_id) row; err is reserved for real DB errors.
+func (s *Store) GetTaskProgress(workspaceID, taskID string) (TaskProgress, bool, error) {
+	if workspaceID == "" || taskID == "" {
+		return TaskProgress{}, false, nil
+	}
+	var p TaskProgress
+	var isFinal int
+	err := s.db.QueryRow(
+		`SELECT latest_progress, latest_progress_phase, latest_progress_at, final_output, is_final
+		   FROM tasks WHERE workspace_id=? AND task_id=?`,
+		workspaceID, taskID,
+	).Scan(&p.LatestProgress, &p.LatestProgressPhase, &p.LatestProgressAt, &p.FinalOutput, &isFinal)
+	if err == sql.ErrNoRows {
+		return TaskProgress{}, false, nil
+	}
+	if err != nil {
+		return TaskProgress{}, false, err
+	}
+	p.IsFinal = isFinal != 0
+	return p, true, nil
+}
+
 func (s *Store) ListTasks() ([]TaskView, error) {
 	rows, err := s.db.Query(`SELECT workspace_id, task_id, COALESCE(driver_agent_id, ''), COALESCE(master_agent_id, ''), COALESCE(slave_agent_id, ''), summary, status, has_mcp, mcp_status, latest_progress, latest_progress_phase, latest_progress_at, final_output, is_final, COALESCE(output, ''), COALESCE(error, '')
 		FROM tasks ORDER BY created_at ASC, task_id ASC`)

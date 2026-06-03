@@ -50,6 +50,11 @@ func (f *fakeObserver) Emit(ev observer.Event) {
 	f.events = append(f.events, ev)
 }
 
+// Token satisfies the driver.TokenSource interface so the tools' observer
+// progress helper authenticates against the fake observer HTTP server. The
+// fake server itself doesn't validate the value, only that one is present.
+func (f *fakeObserver) Token() string { return "fake-token" }
+
 type fakeContractRunner struct {
 	prompt string
 	result orchestration.RunnerResult
@@ -1300,11 +1305,14 @@ func TestTool_GetTask_ReturnsStatus(t *testing.T) {
 
 func TestGetTaskIncludesObserverProgress(t *testing.T) {
 	observerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/tasks" {
+		if r.URL.Path != "/api/tasks/t1/progress" {
 			t.Fatalf("path: %s", r.URL.Path)
 		}
+		if got := r.Header.Get("Authorization"); got != "Bearer fake-token" {
+			t.Fatalf("authorization: %q", got)
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"task_id":"other","latest_progress":"ignore"},{"task_id":"t1","latest_progress":"working","latest_progress_phase":"build","latest_progress_at":"2026-05-13T01:02:03Z","final_output":"not done","is_final":false}]`))
+		_, _ = w.Write([]byte(`{"latest_progress":"working","latest_progress_phase":"build","latest_progress_at":"2026-05-13T01:02:03Z","final_output":"not done","is_final":false}`))
 	}))
 	defer observerServer.Close()
 
@@ -1319,7 +1327,7 @@ func TestGetTaskIncludesObserverProgress(t *testing.T) {
 			return &agentsdk.TaskInfo{TaskID: "t1", Status: "running", Output: "sdk output"}, nil
 		},
 	}
-	tools := newTestTools(t, sdk)
+	tools := newTestToolsWithObserver(t, sdk, &fakeObserver{})
 	tools.cfg.Observer.Enabled = true
 	tools.cfg.Observer.URL = observerServer.URL
 
@@ -1401,11 +1409,11 @@ func TestTool_WaitTask_ReturnsWrittenFiles(t *testing.T) {
 
 func TestWaitTaskTerminalFinalOutputFallsBackToSDKOutput(t *testing.T) {
 	observerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/tasks" {
+		if r.URL.Path != "/api/tasks/t2/progress" {
 			t.Fatalf("path: %s", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"task_id":"t2","latest_progress":"done","latest_progress_phase":"final","latest_progress_at":"2026-05-13T04:05:06Z","final_output":"","is_final":false}]`))
+		_, _ = w.Write([]byte(`{"latest_progress":"done","latest_progress_phase":"final","latest_progress_at":"2026-05-13T04:05:06Z","final_output":"","is_final":false}`))
 	}))
 	defer observerServer.Close()
 
@@ -1414,7 +1422,7 @@ func TestWaitTaskTerminalFinalOutputFallsBackToSDKOutput(t *testing.T) {
 			return &agentsdk.TaskInfo{TaskID: id, Status: "completed", Output: "sdk final"}, nil
 		},
 	}
-	tools := newTestTools(t, sdk)
+	tools := newTestToolsWithObserver(t, sdk, &fakeObserver{})
 	tools.cfg.Observer.Enabled = true
 	tools.cfg.Observer.URL = observerServer.URL
 	tools.reg.RecordWritten("t2", WrittenFile{Path: "/p", Bytes: 5, SHA256: "s"})
@@ -1438,11 +1446,11 @@ func TestWaitTaskTerminalFinalOutputFallsBackToSDKOutput(t *testing.T) {
 
 func TestWaitTaskTerminalFinalOutputFallsBackToSDKResultOutput(t *testing.T) {
 	observerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/tasks" {
+		if r.URL.Path != "/api/tasks/t3/progress" {
 			t.Fatalf("path: %s", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"task_id":"t3","final_output":"","is_final":false}]`))
+		_, _ = w.Write([]byte(`{"final_output":"","is_final":false}`))
 	}))
 	defer observerServer.Close()
 
@@ -1451,7 +1459,7 @@ func TestWaitTaskTerminalFinalOutputFallsBackToSDKResultOutput(t *testing.T) {
 			return &agentsdk.TaskInfo{TaskID: id, Status: "completed", Result: json.RawMessage(`{"output":"result final"}`)}, nil
 		},
 	}
-	tools := newTestTools(t, sdk)
+	tools := newTestToolsWithObserver(t, sdk, &fakeObserver{})
 	tools.cfg.Observer.Enabled = true
 	tools.cfg.Observer.URL = observerServer.URL
 
