@@ -13,6 +13,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/yourorg/multi-agent/internal/objectstore"
 	"github.com/yourorg/multi-agent/internal/observerstore"
 	pgobs "github.com/yourorg/multi-agent/internal/observerstore/postgres"
 	"github.com/yourorg/multi-agent/internal/observerweb"
@@ -126,6 +127,10 @@ func main() {
 	} else {
 		log.Printf("observer-server cleared telemetry api_keys")
 	}
+	objects, err := openObjectStore(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	if err := userspace.Migrate(st.DB()); err != nil {
 		log.Fatalf("userspace migrate: %v", err)
@@ -150,6 +155,7 @@ func main() {
 			Burst:     cfg.Telemetry.RateLimit.Burst,
 		},
 		MaxEventBodyBytes: cfg.Telemetry.MaxBodyBytes,
+		Objects:           objects,
 	})
 	srv := newHTTPServer(cfg.ListenAddr, withHealth(app, func(ctx context.Context) error {
 		return st.DB().PingContext(ctx)
@@ -195,6 +201,34 @@ func openObserverStore(cfg *Config) (observerstore.ManagedStore, error) {
 		})
 	default:
 		return nil, fmt.Errorf("unsupported store driver %q", cfg.Store.Driver)
+	}
+}
+
+func openObjectStore(cfg *Config) (objectstore.Store, error) {
+	switch cfg.ObjectStore.Driver {
+	case "", "filesystem":
+		return nil, nil
+	case "memory":
+		return objectstore.NewMemory(), nil
+	case "s3":
+		accessKey := os.Getenv(cfg.ObjectStore.S3.AccessKeyEnv)
+		if accessKey == "" {
+			return nil, fmt.Errorf("%s is required", cfg.ObjectStore.S3.AccessKeyEnv)
+		}
+		secretKey := os.Getenv(cfg.ObjectStore.S3.SecretKeyEnv)
+		if secretKey == "" {
+			return nil, fmt.Errorf("%s is required", cfg.ObjectStore.S3.SecretKeyEnv)
+		}
+		return objectstore.NewS3(objectstore.S3Config{
+			Endpoint:  cfg.ObjectStore.S3.Endpoint,
+			Region:    cfg.ObjectStore.S3.Region,
+			Bucket:    cfg.ObjectStore.S3.Bucket,
+			UseSSL:    cfg.ObjectStore.S3.UseSSL,
+			AccessKey: accessKey,
+			SecretKey: secretKey,
+		})
+	default:
+		return nil, fmt.Errorf("unsupported object store driver %q", cfg.ObjectStore.Driver)
 	}
 }
 

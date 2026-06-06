@@ -265,6 +265,7 @@ func (h *handler) artifacts(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]interface{}{
 		"artifact_id": art.ID,
 		"state":       art.State,
+		"url":         absoluteURL(r, "/api/artifacts/"+url.PathEscape(art.ID)),
 	}
 	if h.objects != nil {
 		objectKey := objectstore.ArtifactKey(agent.WorkspaceID, art.ID)
@@ -275,8 +276,6 @@ func (h *handler) artifacts(w http.ResponseWriter, r *http.Request) {
 		}
 		resp["put_url"] = putURL
 		resp["object_key"] = objectKey
-	} else {
-		resp["url"] = absoluteURL(r, "/api/artifacts/"+url.PathEscape(art.ID))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -398,6 +397,7 @@ func (h *handler) writeTokens(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := map[string]interface{}{
 		"write_id": wr.ID,
+		"put_url":  absoluteURL(r, "/api/writes/"+url.PathEscape(wr.ID)),
 	}
 	if h.objects != nil {
 		objectKey := objectstore.WriteKey(agent.WorkspaceID, wr.ID)
@@ -406,10 +406,8 @@ func (h *handler) writeTokens(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		resp["put_url"] = putURL
+		resp["object_put_url"] = putURL
 		resp["object_key"] = objectKey
-	} else {
-		resp["put_url"] = absoluteURL(r, "/api/writes/"+url.PathEscape(wr.ID))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)

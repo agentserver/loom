@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/yourorg/multi-agent/internal/objectstore"
 	"github.com/yourorg/multi-agent/internal/observerstore"
 )
 
@@ -106,6 +107,44 @@ func TestConfigureTelemetryAPIKeysClearsPersistedKeysWhenTelemetryDisabled(t *te
 	_, ok, err = st.LookupTelemetryAPIKey("old-secret", "ws1")
 	require.NoError(t, err)
 	require.False(t, ok)
+}
+
+func TestOpenObjectStoreFilesystemReturnsNil(t *testing.T) {
+	objects, err := openObjectStore(&Config{
+		ObjectStore: ObjectStoreConfig{Driver: "filesystem"},
+	})
+	require.NoError(t, err)
+	require.Nil(t, objects)
+}
+
+func TestOpenObjectStoreMemoryReturnsStore(t *testing.T) {
+	objects, err := openObjectStore(&Config{
+		ObjectStore: ObjectStoreConfig{Driver: "memory"},
+	})
+	require.NoError(t, err)
+	require.IsType(t, &objectstore.Memory{}, objects)
+}
+
+func TestOpenObjectStoreS3RequiresCredentialEnvValues(t *testing.T) {
+	const accessEnv = "OBSERVER_TEST_S3_ACCESS_KEY"
+	const secretEnv = "OBSERVER_TEST_S3_SECRET_KEY"
+	t.Setenv(accessEnv, "")
+	t.Setenv(secretEnv, "")
+
+	objects, err := openObjectStore(&Config{
+		ObjectStore: ObjectStoreConfig{
+			Driver: "s3",
+			S3: S3Config{
+				Endpoint:     "s3.internal",
+				Bucket:       "observer-artifacts",
+				AccessKeyEnv: accessEnv,
+				SecretKeyEnv: secretEnv,
+			},
+		},
+	})
+	require.Error(t, err)
+	require.Nil(t, objects)
+	require.Contains(t, err.Error(), accessEnv+" is required")
 }
 
 func TestLoadConfig_RejectsProductionSQLiteWithoutOverride(t *testing.T) {

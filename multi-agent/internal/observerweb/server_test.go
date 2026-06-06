@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -342,17 +343,18 @@ func TestCreateArtifactReturnsPresignedPutURL(t *testing.T) {
 	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
 	require.Contains(t, rr.Body.String(), `"put_url":"memory://put/`)
-	require.NotContains(t, rr.Body.String(), `"url":`)
 
 	var created struct {
 		ArtifactID string `json:"artifact_id"`
 		State      string `json:"state"`
+		URL        string `json:"url"`
 		PutURL     string `json:"put_url"`
 		ObjectKey  string `json:"object_key"`
 	}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &created))
 	require.NotEmpty(t, created.ArtifactID)
 	require.Equal(t, "registered", created.State)
+	require.Contains(t, created.URL, "/api/artifacts/"+created.ArtifactID)
 	require.Equal(t, objectstore.ArtifactKey("ws1", created.ArtifactID), created.ObjectKey)
 	require.NotEmpty(t, created.PutURL)
 }
@@ -404,17 +406,22 @@ func TestCreateWriteTokenReturnsObjectStorePutURL(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
-	require.Contains(t, rr.Body.String(), `"put_url":"memory://put/`)
+	require.Contains(t, rr.Body.String(), `"object_put_url":"memory://put/`)
 
 	var created struct {
-		WriteID   string `json:"write_id"`
-		PutURL    string `json:"put_url"`
-		ObjectKey string `json:"object_key"`
+		WriteID      string `json:"write_id"`
+		PutURL       string `json:"put_url"`
+		ObjectPutURL string `json:"object_put_url"`
+		ObjectKey    string `json:"object_key"`
 	}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &created))
 	require.NotEmpty(t, created.WriteID)
+	require.Contains(t, created.PutURL, "/api/writes/"+created.WriteID)
+	parsedPutURL, err := url.Parse(created.PutURL)
+	require.NoError(t, err)
+	require.True(t, strings.HasPrefix(parsedPutURL.Path, "/api/writes/"), "put_url path=%q", parsedPutURL.Path)
+	require.Contains(t, created.ObjectPutURL, "memory://put/")
 	require.Equal(t, objectstore.WriteKey("ws1", created.WriteID), created.ObjectKey)
-	require.NotEmpty(t, created.PutURL)
 }
 
 func TestTaskProgressEndpoint(t *testing.T) {
