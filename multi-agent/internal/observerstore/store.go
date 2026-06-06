@@ -24,172 +24,21 @@ import (
 //go:embed schema.sql
 var schemaSQL string
 
-type Store struct {
+type SQLiteStore struct {
 	db *sql.DB
-}
-
-type Workspace struct {
-	ID   string
-	Name string
-}
-
-// APIKeySpec is one row of the top-level api_keys table.
-type APIKeySpec struct {
-	ID   string
-	Key  string
-	Note string
-}
-
-type Agent struct {
-	WorkspaceID string
-	ID          string
-	Role        string
-	DisplayName string
-}
-
-type TaskView struct {
-	WorkspaceID         string           `json:"workspace_id"`
-	TaskID              string           `json:"task_id"`
-	DriverID            string           `json:"driver_id"`
-	MasterID            string           `json:"master_id"`
-	SlaveID             string           `json:"slave_id"`
-	Summary             string           `json:"summary"`
-	Status              string           `json:"status"`
-	HasMCP              bool             `json:"has_mcp"`
-	MCPStatus           string           `json:"mcp_status"`
-	LatestProgress      string           `json:"latest_progress"`
-	LatestProgressPhase string           `json:"latest_progress_phase"`
-	LatestProgressAt    string           `json:"latest_progress_at"`
-	FinalOutput         string           `json:"final_output"`
-	IsFinal             bool             `json:"is_final"`
-	Output              string           `json:"output"`
-	Error               string           `json:"error"`
-	Subtasks            []SubtaskView    `json:"subtasks"`
-	MCPServers          []MCPServerView  `json:"mcp_servers"`
-	Events              []observer.Event `json:"events,omitempty"`
-}
-
-type SubtaskView struct {
-	ParentTaskID        string `json:"parent_task_id"`
-	SubtaskID           string `json:"subtask_id"`
-	ChildTaskID         string `json:"child_task_id"`
-	MasterID            string `json:"master_id"`
-	SlaveID             string `json:"slave_id"`
-	Summary             string `json:"summary"`
-	DisplayLabel        string `json:"display_label"`
-	Status              string `json:"status"`
-	MCPStatus           string `json:"mcp_status"`
-	LatestProgress      string `json:"latest_progress"`
-	LatestProgressPhase string `json:"latest_progress_phase"`
-	LatestProgressAt    string `json:"latest_progress_at"`
-	Output              string `json:"output"`
-	Error               string `json:"error"`
-}
-
-type MCPServerView struct {
-	WorkspaceID     string          `json:"workspace_id"`
-	TaskID          string          `json:"task_id"`
-	ParentTaskID    string          `json:"parent_task_id"`
-	SlaveID         string          `json:"slave_id"`
-	Name            string          `json:"name"`
-	Tools           json.RawMessage `json:"tools"`
-	ToolDescriptors json.RawMessage `json:"tool_descriptors,omitempty"`
-}
-
-const (
-	ArtifactStateRegistered = "registered"
-	ArtifactStatePending    = "pending"
-	ArtifactStateAvailable  = "available"
-	WriteStateRegistered    = "registered"
-	WriteStateCompleted     = "completed"
-)
-
-type ArtifactCreate struct {
-	WorkspaceID  string
-	OwnerAgentID string
-	Path         string
-	Kind         string
-	MIME         string
-	Bytes        int64
-	SHA256       string
-	State        string
-}
-
-type Artifact struct {
-	ID           string `json:"artifact_id"`
-	WorkspaceID  string `json:"workspace_id,omitempty"`
-	OwnerAgentID string `json:"owner_agent_id,omitempty"`
-	Path         string `json:"path,omitempty"`
-	Kind         string `json:"kind,omitempty"`
-	MIME         string `json:"mime,omitempty"`
-	State        string `json:"state"`
-	Bytes        int64  `json:"bytes,omitempty"`
-	SHA256       string `json:"sha256,omitempty"`
-}
-
-type ArtifactRequest struct {
-	RequestID    string `json:"request_id"`
-	ArtifactID   string `json:"artifact_id"`
-	Kind         string `json:"kind"`
-	Path         string `json:"path"`
-	State        string `json:"state"`
-	WorkspaceID  string `json:"workspace_id,omitempty"`
-	OwnerAgentID string `json:"owner_agent_id,omitempty"`
-}
-
-type ArtifactContent struct {
-	Artifact
-	Body io.ReadCloser
-}
-
-type WriteCreate struct {
-	WorkspaceID  string
-	OwnerAgentID string
-	TaskID       string
-	Path         string
-	Overwrite    bool
-}
-
-type Write struct {
-	ID            string `json:"write_id"`
-	WorkspaceID   string `json:"workspace_id,omitempty"`
-	OwnerAgentID  string `json:"owner_agent_id,omitempty"`
-	WriterAgentID string `json:"writer_agent_id,omitempty"`
-	TaskID        string `json:"task_id,omitempty"`
-	Path          string `json:"path"`
-	Overwrite     bool   `json:"overwrite"`
-	State         string `json:"state"`
-	MIME          string `json:"mime,omitempty"`
-	Bytes         int64  `json:"bytes,omitempty"`
-	SHA256        string `json:"sha256,omitempty"`
-	Content       []byte `json:"-"`
-}
-
-type TaskContractRecord struct {
-	WorkspaceID    string          `json:"workspace_id"`
-	TaskID         string          `json:"task_id"`
-	ConversationID string          `json:"conversation_id"`
-	OwnerAgentID   string          `json:"owner_agent_id"`
-	Body           json.RawMessage `json:"body"`
-	CreatedAt      string          `json:"created_at,omitempty"`
-	UpdatedAt      string          `json:"updated_at,omitempty"`
-}
-
-type ResourceSnapshotRecord struct {
-	WorkspaceID  string          `json:"workspace_id"`
-	SnapshotID   string          `json:"snapshot_id"`
-	OwnerAgentID string          `json:"owner_agent_id"`
-	Body         json.RawMessage `json:"body"`
-	CreatedAt    string          `json:"created_at,omitempty"`
 }
 
 // New is an alias for Open provided for consistency with packages that prefer
 // the New(path) constructor convention.
-func New(path string) (*Store, error) {
-	return Open(path)
+func New(path string) (*SQLiteStore, error) {
+	return OpenSQLite(path)
 }
 
-func Open(path string) (*Store, error) {
+func Open(path string) (*SQLiteStore, error) {
+	return OpenSQLite(path)
+}
+
+func OpenSQLite(path string) (*SQLiteStore, error) {
 	db, err := sql.Open("sqlite", sqliteDSNWithPragmas(path))
 	if err != nil {
 		return nil, err
@@ -206,7 +55,7 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	return &SQLiteStore{db: db}, nil
 }
 
 func sqliteDSNWithPragmas(path string) string {
@@ -330,11 +179,11 @@ func isDuplicateColumn(err error) bool {
 // SQLite file. Callers MUST keep their table names in their own namespace
 // (e.g. userspace_*) — do NOT query observer's business tables (events,
 // tasks, artifacts, agents, workspaces) via this handle.
-func (s *Store) DB() *sql.DB {
+func (s *SQLiteStore) DB() *sql.DB {
 	return s.db
 }
 
-func (s *Store) Close() error {
+func (s *SQLiteStore) Close() error {
 	return s.db.Close()
 }
 
@@ -342,7 +191,7 @@ func (s *Store) Close() error {
 // first insert; subsequent calls with different names do NOT overwrite (first
 // writer wins). Every call bumps last_seen_at. Caller must ensure apiKeyID
 // already exists in api_keys table (register handler does LookupAPIKey upstream).
-func (s *Store) UpsertWorkspaceLazy(id, name, apiKeyID string) error {
+func (s *SQLiteStore) UpsertWorkspaceLazy(id, name, apiKeyID string) error {
 	if id == "" {
 		return errors.New("observerstore: workspace id must not be empty")
 	}
@@ -359,7 +208,7 @@ func (s *Store) UpsertWorkspaceLazy(id, name, apiKeyID string) error {
 	return err
 }
 
-func (s *Store) UpsertAgent(a Agent, token, apiKeyID string) error {
+func (s *SQLiteStore) UpsertAgent(a Agent, token, apiKeyID string) error {
 	if token == "" {
 		return errors.New("observerstore: agent token must not be empty")
 	}
@@ -380,7 +229,7 @@ func (s *Store) UpsertAgent(a Agent, token, apiKeyID string) error {
 
 // AgentBoundWorkspace returns the workspace_id this agent_id is currently
 // bound to. found=false means the agent_id has never registered.
-func (s *Store) AgentBoundWorkspace(agentID string) (string, bool, error) {
+func (s *SQLiteStore) AgentBoundWorkspace(agentID string) (string, bool, error) {
 	if agentID == "" {
 		return "", false, nil
 	}
@@ -395,19 +244,9 @@ func (s *Store) AgentBoundWorkspace(agentID string) (string, bool, error) {
 	return ws, true, nil
 }
 
-// WorkspaceSummary is one row of the workspaces overview returned by
-// ListWorkspaceSummaries. Used by GET /api/workspaces (added in Task 6).
-type WorkspaceSummary struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	LastSeenAt    string `json:"last_seen_at"`
-	AgentCount    int    `json:"agent_count"`
-	RecentEventAt string `json:"recent_event_at,omitempty"`
-}
-
 // ListWorkspaceSummaries returns all workspaces ordered by last_seen_at DESC,
 // with derived agent_count and recent_event_at.
-func (s *Store) ListWorkspaceSummaries() ([]WorkspaceSummary, error) {
+func (s *SQLiteStore) ListWorkspaceSummaries() ([]WorkspaceSummary, error) {
 	rows, err := s.db.Query(`
         SELECT w.id, w.name, w.last_seen_at,
                COALESCE((SELECT COUNT(*) FROM agents a WHERE a.workspace_id = w.id), 0),
@@ -431,7 +270,7 @@ func (s *Store) ListWorkspaceSummaries() ([]WorkspaceSummary, error) {
 }
 
 // UpsertAPIKey inserts or refreshes one api_keys row.
-func (s *Store) UpsertAPIKey(spec APIKeySpec) error {
+func (s *SQLiteStore) UpsertAPIKey(spec APIKeySpec) error {
 	if spec.ID == "" {
 		return errors.New("observerstore: api key id must not be empty")
 	}
@@ -452,7 +291,7 @@ func (s *Store) UpsertAPIKey(spec APIKeySpec) error {
 
 // LookupAPIKey looks up an api_key id by key_hash. ok=false means no match;
 // err is reserved for real DB errors. Empty input returns ok=false.
-func (s *Store) LookupAPIKey(key string) (keyID string, ok bool, err error) {
+func (s *SQLiteStore) LookupAPIKey(key string) (keyID string, ok bool, err error) {
 	if key == "" {
 		return "", false, nil
 	}
@@ -471,7 +310,7 @@ func (s *Store) LookupAPIKey(key string) (keyID string, ok bool, err error) {
 
 // ReplaceAPIKeys deletes all existing api_keys rows then inserts the supplied
 // set, in one transaction. Called once at observer boot to reconcile yaml<->db.
-func (s *Store) ReplaceAPIKeys(keys []APIKeySpec) error {
+func (s *SQLiteStore) ReplaceAPIKeys(keys []APIKeySpec) error {
 	if len(keys) == 0 {
 		return errors.New("observerstore: ReplaceAPIKeys: refusing to replace with empty set (would lock out all agents)")
 	}
@@ -518,7 +357,7 @@ func (s *Store) ReplaceAPIKeys(keys []APIKeySpec) error {
 // in the same transaction, every agent row whose created_by_api_key_id matches.
 // cascade=false leaves agents intact — they keep valid tokens and can keep
 // ingesting until an admin cleans them up manually.
-func (s *Store) RevokeAPIKey(id string, cascade bool) error {
+func (s *SQLiteStore) RevokeAPIKey(id string, cascade bool) error {
 	if id == "" {
 		return errors.New("observerstore: api key id must not be empty")
 	}
@@ -538,7 +377,7 @@ func (s *Store) RevokeAPIKey(id string, cascade bool) error {
 	return tx.Commit()
 }
 
-func (s *Store) ValidateToken(token string) (Agent, bool, error) {
+func (s *SQLiteStore) ValidateToken(token string) (Agent, bool, error) {
 	if token == "" {
 		return Agent{}, false, nil
 	}
@@ -556,7 +395,7 @@ func (s *Store) ValidateToken(token string) (Agent, bool, error) {
 
 // ListEventsForWorkspace returns all events for the given workspace ordered
 // by ts ASC. Used by tests to verify cross-workspace isolation.
-func (s *Store) ListEventsForWorkspace(workspaceID string) ([]observer.Event, error) {
+func (s *SQLiteStore) ListEventsForWorkspace(workspaceID string) ([]observer.Event, error) {
 	rows, err := s.db.Query(`
 		SELECT event_id, ts, workspace_id, agent_id, agent_role, type, task_id,
 		       COALESCE(parent_task_id, ''), COALESCE(subtask_id, ''), COALESCE(child_task_id, ''),
@@ -595,13 +434,13 @@ func (s *Store) ListEventsForWorkspace(workspaceID string) ([]observer.Event, er
 	return out, rows.Err()
 }
 
-func (s *Store) EventCount() (int, error) {
+func (s *SQLiteStore) EventCount() (int, error) {
 	var count int
 	err := s.db.QueryRow(`SELECT count(*) FROM events`).Scan(&count)
 	return count, err
 }
 
-func (s *Store) Ingest(ev observer.Event) error {
+func (s *SQLiteStore) Ingest(ev observer.Event) error {
 	if ev.TS == "" {
 		ev.TS = nowUTC()
 	}
@@ -646,20 +485,9 @@ func (s *Store) Ingest(ev observer.Event) error {
 	return tx.Commit()
 }
 
-// TaskProgress is the small subset of TaskView that driver needs to interpret
-// awaiting_user markers carried in slave's final_output. Used by the tokened
-// GET /api/tasks/{task_id}/progress endpoint.
-type TaskProgress struct {
-	LatestProgress      string `json:"latest_progress"`
-	LatestProgressPhase string `json:"latest_progress_phase"`
-	LatestProgressAt    string `json:"latest_progress_at"`
-	FinalOutput         string `json:"final_output"`
-	IsFinal             bool   `json:"is_final"`
-}
-
 // GetTaskProgress returns the 5 progress fields of a task. found=false means
 // no such (workspace_id, task_id) row; err is reserved for real DB errors.
-func (s *Store) GetTaskProgress(workspaceID, taskID string) (TaskProgress, bool, error) {
+func (s *SQLiteStore) GetTaskProgress(workspaceID, taskID string) (TaskProgress, bool, error) {
 	if workspaceID == "" || taskID == "" {
 		return TaskProgress{}, false, nil
 	}
@@ -680,7 +508,7 @@ func (s *Store) GetTaskProgress(workspaceID, taskID string) (TaskProgress, bool,
 	return p, true, nil
 }
 
-func (s *Store) ListTasks() ([]TaskView, error) {
+func (s *SQLiteStore) ListTasks() ([]TaskView, error) {
 	rows, err := s.db.Query(`SELECT workspace_id, task_id, COALESCE(driver_agent_id, ''), COALESCE(master_agent_id, ''), COALESCE(slave_agent_id, ''), summary, status, has_mcp, mcp_status, latest_progress, latest_progress_phase, latest_progress_at, final_output, is_final, COALESCE(output, ''), COALESCE(error, '')
 		FROM tasks ORDER BY created_at ASC, task_id ASC`)
 	if err != nil {
@@ -718,7 +546,7 @@ func (s *Store) ListTasks() ([]TaskView, error) {
 	return tasks, nil
 }
 
-func (s *Store) ListEvents(taskID string) ([]observer.Event, error) {
+func (s *SQLiteStore) ListEvents(taskID string) ([]observer.Event, error) {
 	query := `SELECT event_id, ts, workspace_id, agent_id, agent_role, type, task_id, COALESCE(parent_task_id, ''), COALESCE(subtask_id, ''), COALESCE(child_task_id, ''), COALESCE(summary, ''), COALESCE(subtask_summary, ''), COALESCE(status, ''), COALESCE(target_agent_id, ''), COALESCE(target_role, ''), COALESCE(mcp_server_name, ''), COALESCE(mcp_tools, '[]'), COALESCE(payload, '')
 		FROM events`
 	var args []interface{}
@@ -754,7 +582,7 @@ func (s *Store) ListEvents(taskID string) ([]observer.Event, error) {
 	return events, nil
 }
 
-func (s *Store) CreateArtifact(in ArtifactCreate) (Artifact, error) {
+func (s *SQLiteStore) CreateArtifact(in ArtifactCreate) (Artifact, error) {
 	if in.State == "" {
 		in.State = ArtifactStateRegistered
 	}
@@ -779,7 +607,7 @@ func (s *Store) CreateArtifact(in ArtifactCreate) (Artifact, error) {
 	}, nil
 }
 
-func (s *Store) RequestArtifact(workspaceID, requesterAgentID, artifactID string) (ArtifactRequest, error) {
+func (s *SQLiteStore) RequestArtifact(workspaceID, requesterAgentID, artifactID string) (ArtifactRequest, error) {
 	var owner, path, kind, state string
 	err := s.db.QueryRow(`SELECT owner_agent_id, path, kind, state FROM artifacts WHERE workspace_id=? AND id=?`, workspaceID, artifactID).
 		Scan(&owner, &path, &kind, &state)
@@ -814,7 +642,7 @@ func (s *Store) RequestArtifact(workspaceID, requesterAgentID, artifactID string
 	return ArtifactRequest{RequestID: existing, ArtifactID: artifactID, Kind: kind, Path: path, State: ArtifactStatePending, WorkspaceID: workspaceID, OwnerAgentID: owner}, nil
 }
 
-func (s *Store) ListArtifactRequests(workspaceID, ownerAgentID string) ([]ArtifactRequest, error) {
+func (s *SQLiteStore) ListArtifactRequests(workspaceID, ownerAgentID string) ([]ArtifactRequest, error) {
 	rows, err := s.db.Query(`SELECT r.id, r.artifact_id, a.kind, a.path, r.state
 		FROM artifact_requests r JOIN artifacts a ON a.workspace_id=r.workspace_id AND a.id=r.artifact_id
 		WHERE r.workspace_id=? AND r.owner_agent_id=? AND r.state=?
@@ -836,7 +664,7 @@ func (s *Store) ListArtifactRequests(workspaceID, ownerAgentID string) ([]Artifa
 	return out, rows.Err()
 }
 
-func (s *Store) StoreArtifactContent(workspaceID, ownerAgentID, artifactID, mime string, body io.Reader) error {
+func (s *SQLiteStore) StoreArtifactContent(workspaceID, ownerAgentID, artifactID, mime string, body io.Reader) error {
 	data, sha, err := readAndHash(body)
 	if err != nil {
 		return err
@@ -860,7 +688,7 @@ func (s *Store) StoreArtifactContent(workspaceID, ownerAgentID, artifactID, mime
 	return err
 }
 
-func (s *Store) OpenArtifactContent(workspaceID, artifactID string) (ArtifactContent, error) {
+func (s *SQLiteStore) OpenArtifactContent(workspaceID, artifactID string) (ArtifactContent, error) {
 	var a ArtifactContent
 	var content []byte
 	err := s.db.QueryRow(`SELECT id, owner_agent_id, path, kind, mime, state, bytes, sha256, content
@@ -880,7 +708,7 @@ func (s *Store) OpenArtifactContent(workspaceID, artifactID string) (ArtifactCon
 	return a, nil
 }
 
-func (s *Store) CreateWrite(in WriteCreate) (Write, error) {
+func (s *SQLiteStore) CreateWrite(in WriteCreate) (Write, error) {
 	if in.WorkspaceID == "" || in.OwnerAgentID == "" || in.TaskID == "" || in.Path == "" {
 		return Write{}, errors.New("observerstore: workspace, owner, task, and path are required")
 	}
@@ -901,7 +729,7 @@ func (s *Store) CreateWrite(in WriteCreate) (Write, error) {
 	return Write{ID: id, WorkspaceID: in.WorkspaceID, OwnerAgentID: in.OwnerAgentID, TaskID: in.TaskID, Path: in.Path, Overwrite: in.Overwrite, State: WriteStateRegistered}, nil
 }
 
-func (s *Store) StoreWriteContent(workspaceID, writerAgentID, writeID, mime string, body io.Reader) error {
+func (s *SQLiteStore) StoreWriteContent(workspaceID, writerAgentID, writeID, mime string, body io.Reader) error {
 	data, sha, err := readAndHash(body)
 	if err != nil {
 		return err
@@ -923,7 +751,7 @@ func (s *Store) StoreWriteContent(workspaceID, writerAgentID, writeID, mime stri
 	return nil
 }
 
-func (s *Store) UpdateWriteTaskID(workspaceID, ownerAgentID, writeID, taskID string) error {
+func (s *SQLiteStore) UpdateWriteTaskID(workspaceID, ownerAgentID, writeID, taskID string) error {
 	if taskID == "" {
 		return errors.New("observerstore: task_id is required")
 	}
@@ -942,7 +770,7 @@ func (s *Store) UpdateWriteTaskID(workspaceID, ownerAgentID, writeID, taskID str
 	return nil
 }
 
-func (s *Store) ListCompletedWrites(workspaceID, ownerAgentID, taskID string) ([]Write, error) {
+func (s *SQLiteStore) ListCompletedWrites(workspaceID, ownerAgentID, taskID string) ([]Write, error) {
 	rows, err := s.db.Query(`SELECT id, writer_agent_id, path, overwrite, mime, bytes, sha256, content
 		FROM writes WHERE workspace_id=? AND owner_agent_id=? AND task_id=? AND state=?
 		ORDER BY updated_at ASC`, workspaceID, ownerAgentID, taskID, WriteStateCompleted)
@@ -967,7 +795,7 @@ func (s *Store) ListCompletedWrites(workspaceID, ownerAgentID, taskID string) ([
 	return out, rows.Err()
 }
 
-func (s *Store) SaveTaskContract(in TaskContractRecord) error {
+func (s *SQLiteStore) SaveTaskContract(in TaskContractRecord) error {
 	if in.WorkspaceID == "" || in.TaskID == "" || in.ConversationID == "" || in.OwnerAgentID == "" || len(in.Body) == 0 {
 		return errors.New("observerstore: workspace, task, conversation, owner, and body are required")
 	}
@@ -1005,7 +833,7 @@ func (s *Store) SaveTaskContract(in TaskContractRecord) error {
 	return tx.Commit()
 }
 
-func (s *Store) GetTaskContract(workspaceID, taskID string) (TaskContractRecord, error) {
+func (s *SQLiteStore) GetTaskContract(workspaceID, taskID string) (TaskContractRecord, error) {
 	var out TaskContractRecord
 	var body string
 	err := s.db.QueryRow(`SELECT workspace_id, task_id, conversation_id, owner_agent_id, body, created_at, updated_at
@@ -1021,7 +849,7 @@ func (s *Store) GetTaskContract(workspaceID, taskID string) (TaskContractRecord,
 	return out, nil
 }
 
-func (s *Store) SaveResourceSnapshot(in ResourceSnapshotRecord) error {
+func (s *SQLiteStore) SaveResourceSnapshot(in ResourceSnapshotRecord) error {
 	if in.WorkspaceID == "" || in.SnapshotID == "" || in.OwnerAgentID == "" || len(in.Body) == 0 {
 		return errors.New("observerstore: workspace, snapshot, owner, and body are required")
 	}
@@ -1031,7 +859,7 @@ func (s *Store) SaveResourceSnapshot(in ResourceSnapshotRecord) error {
 	return err
 }
 
-func (s *Store) GetLatestResourceSnapshot(workspaceID string) (ResourceSnapshotRecord, error) {
+func (s *SQLiteStore) GetLatestResourceSnapshot(workspaceID string) (ResourceSnapshotRecord, error) {
 	var out ResourceSnapshotRecord
 	var body string
 	err := s.db.QueryRow(`SELECT workspace_id, snapshot_id, owner_agent_id, body, created_at
@@ -1047,7 +875,7 @@ func (s *Store) GetLatestResourceSnapshot(workspaceID string) (ResourceSnapshotR
 	return out, nil
 }
 
-func (s *Store) listSubtasks(workspaceID, taskID string) ([]SubtaskView, error) {
+func (s *SQLiteStore) listSubtasks(workspaceID, taskID string) ([]SubtaskView, error) {
 	rows, err := s.db.Query(`SELECT parent_task_id, subtask_id, COALESCE(child_task_id, ''), COALESCE(master_agent_id, ''), COALESCE(slave_agent_id, ''), summary, display_label, status, mcp_status, latest_progress, latest_progress_phase, latest_progress_at, COALESCE(output, ''), COALESCE(error, '')
 		FROM subtasks WHERE workspace_id=? AND parent_task_id=? ORDER BY created_at ASC, subtask_id ASC`, workspaceID, taskID)
 	if err != nil {
@@ -1069,7 +897,7 @@ func (s *Store) listSubtasks(workspaceID, taskID string) ([]SubtaskView, error) 
 	return subtasks, nil
 }
 
-func (s *Store) listMCPServers(workspaceID, taskID string) ([]MCPServerView, error) {
+func (s *SQLiteStore) listMCPServers(workspaceID, taskID string) ([]MCPServerView, error) {
 	rows, err := s.db.Query(`SELECT workspace_id, task_id, COALESCE(parent_task_id, ''), slave_agent_id, name, tools, COALESCE(tool_descriptors, '')
 		FROM mcp_servers WHERE workspace_id=? AND (task_id=? OR parent_task_id=?) ORDER BY created_at ASC, name ASC`, workspaceID, taskID, taskID)
 	if err != nil {
