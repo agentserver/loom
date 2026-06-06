@@ -23,6 +23,9 @@ import (
 
 const defaultMaxEventBodyBytes = 256 << 10
 const defaultObjectPresignTTL = 15 * time.Minute
+const defaultMaxObjectProxyBytes = 8 << 20
+
+var errObjectProxyTooLarge = errors.New("object proxy content too large")
 
 type Store = observerstore.Store
 
@@ -32,9 +35,10 @@ type RateLimitConfig struct {
 }
 
 type Options struct {
-	TelemetryRateLimit RateLimitConfig
-	MaxEventBodyBytes  int64
-	Objects            objectstore.Store
+	TelemetryRateLimit  RateLimitConfig
+	MaxEventBodyBytes   int64
+	Objects             objectstore.Store
+	MaxObjectProxyBytes int64
 }
 
 // New constructs the observerweb HTTP handler. If usHandler is non-nil,
@@ -56,11 +60,15 @@ func NewWithOptions(s Store, usHandler *userspace.Handler, opts Options) http.Ha
 	if opts.MaxEventBodyBytes == 0 {
 		opts.MaxEventBodyBytes = defaultMaxEventBodyBytes
 	}
+	if opts.MaxObjectProxyBytes <= 0 {
+		opts.MaxObjectProxyBytes = defaultMaxObjectProxyBytes
+	}
 	h := &handler{
-		s:                 s,
-		objects:           opts.Objects,
-		telemetryLimiter:  newTelemetryLimiter(opts.TelemetryRateLimit.PerMinute, opts.TelemetryRateLimit.Burst),
-		maxEventBodyBytes: opts.MaxEventBodyBytes,
+		s:                   s,
+		objects:             opts.Objects,
+		telemetryLimiter:    newTelemetryLimiter(opts.TelemetryRateLimit.PerMinute, opts.TelemetryRateLimit.Burst),
+		maxEventBodyBytes:   opts.MaxEventBodyBytes,
+		maxObjectProxyBytes: opts.MaxObjectProxyBytes,
 	}
 	mux := http.NewServeMux()
 	mountRoutes(mux, h, usHandler)
@@ -91,10 +99,11 @@ func mountRoutes(mux *http.ServeMux, h *handler, usHandler *userspace.Handler) {
 }
 
 type handler struct {
-	s                 Store
-	objects           objectstore.Store
-	telemetryLimiter  *telemetryLimiter
-	maxEventBodyBytes int64
+	s                   Store
+	objects             objectstore.Store
+	telemetryLimiter    *telemetryLimiter
+	maxEventBodyBytes   int64
+	maxObjectProxyBytes int64
 }
 
 func (h *handler) postEvent(w http.ResponseWriter, r *http.Request) {
@@ -321,11 +330,20 @@ func (h *handler) getArtifact(w http.ResponseWriter, r *http.Request, id string)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			defer body.Close()
+			data, err := h.readObjectProxy(body)
+			closeErr := body.Close()
+			if err != nil {
+				writeObjectProxyError(w, err)
+				return
+			}
+			if closeErr != nil {
+				http.Error(w, closeErr.Error(), http.StatusInternalServerError)
+				return
+			}
 			if content.MIME != "" {
 				w.Header().Set("Content-Type", content.MIME)
 			}
-			io.Copy(w, body) //nolint:errcheck
+			_, _ = w.Write(data)
 			return
 		}
 		if content.MIME != "" {
@@ -361,9 +379,11 @@ func (h *handler) putArtifactContent(w http.ResponseWriter, r *http.Request, id 
 	}
 	if h.objects != nil {
 		objectKey := objectstore.ArtifactKey(agent.WorkspaceID, id)
-		info, err := h.objects.Put(r.Context(), objectKey, r.Header.Get("Content-Type"), r.Body)
+		body := http.MaxBytesReader(w, r.Body, h.maxObjectProxyBytes)
+		info, err := h.objects.Put(r.Context(), objectKey, r.Header.Get("Content-Type"), body)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			_ = h.objects.Delete(r.Context(), objectKey)
+			writeObjectProxyError(w, err)
 			return
 		}
 		if err := h.s.MarkArtifactAvailable(agent.WorkspaceID, agent.ID, id, r.Header.Get("Content-Type"), info.SHA256, objectKey, info.Bytes); err != nil {
@@ -463,9 +483,11 @@ func (h *handler) writeRouter(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/api/writes/")
 	if h.objects != nil {
 		objectKey := objectstore.WriteKey(agent.WorkspaceID, id)
-		info, err := h.objects.Put(r.Context(), objectKey, r.Header.Get("Content-Type"), r.Body)
+		body := http.MaxBytesReader(w, r.Body, h.maxObjectProxyBytes)
+		info, err := h.objects.Put(r.Context(), objectKey, r.Header.Get("Content-Type"), body)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			_ = h.objects.Delete(r.Context(), objectKey)
+			writeObjectProxyError(w, err)
 			return
 		}
 		if err := h.s.MarkWriteCompleted(agent.WorkspaceID, agent.ID, id, r.Header.Get("Content-Type"), info.SHA256, objectKey, info.Bytes); err != nil {
@@ -546,10 +568,10 @@ func (h *handler) writes(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			content, err = io.ReadAll(body)
+			content, err = h.readObjectProxy(body)
 			closeErr := body.Close()
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				writeObjectProxyError(w, err)
 				return
 			}
 			if closeErr != nil {
@@ -565,6 +587,26 @@ func (h *handler) writes(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"writes": resp})
+}
+
+func (h *handler) readObjectProxy(body io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, h.maxObjectProxyBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > h.maxObjectProxyBytes {
+		return nil, errObjectProxyTooLarge
+	}
+	return data, nil
+}
+
+func writeObjectProxyError(w http.ResponseWriter, err error) {
+	var maxBytesErr *http.MaxBytesError
+	if errors.Is(err, errObjectProxyTooLarge) || errors.As(err, &maxBytesErr) {
+		http.Error(w, "object proxy content too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	http.Error(w, err.Error(), http.StatusInternalServerError)
 }
 
 func (h *handler) taskContracts(w http.ResponseWriter, r *http.Request) {

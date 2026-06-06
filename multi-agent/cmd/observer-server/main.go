@@ -149,18 +149,23 @@ func main() {
 	}
 
 	log.Printf("observer-server listening on %s", cfg.ListenAddr)
-	app := observerweb.NewWithOptions(st, usHandler, observerweb.Options{
-		TelemetryRateLimit: observerweb.RateLimitConfig{
-			PerMinute: cfg.Telemetry.RateLimit.PerMinute,
-			Burst:     cfg.Telemetry.RateLimit.Burst,
-		},
-		MaxEventBodyBytes: cfg.Telemetry.MaxBodyBytes,
-		Objects:           objects,
-	})
+	app := observerweb.NewWithOptions(st, usHandler, observerWebOptions(cfg, objects))
 	srv := newHTTPServer(cfg.ListenAddr, withHealth(app, func(ctx context.Context) error {
 		return st.DB().PingContext(ctx)
 	}))
 	log.Fatal(srv.ListenAndServe())
+}
+
+func observerWebOptions(cfg *Config, objects objectstore.Store) observerweb.Options {
+	return observerweb.Options{
+		TelemetryRateLimit: observerweb.RateLimitConfig{
+			PerMinute: cfg.Telemetry.RateLimit.PerMinute,
+			Burst:     cfg.Telemetry.RateLimit.Burst,
+		},
+		MaxEventBodyBytes:   cfg.Telemetry.MaxBodyBytes,
+		Objects:             objects,
+		MaxObjectProxyBytes: cfg.ObjectStore.Proxy.MaxBytes,
+	}
 }
 
 func configureTelemetryAPIKeys(st observerstore.ManagedStore, cfg *Config) error {

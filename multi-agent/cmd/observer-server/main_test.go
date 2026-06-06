@@ -125,6 +125,24 @@ func TestOpenObjectStoreMemoryReturnsStore(t *testing.T) {
 	require.IsType(t, &objectstore.Memory{}, objects)
 }
 
+func TestObserverWebOptionsIncludesObjectProxyLimit(t *testing.T) {
+	objects := objectstore.NewMemory()
+	cfg := &Config{
+		ObjectStore: ObjectStoreConfig{Proxy: ProxyConfig{MaxBytes: 1234}},
+		Telemetry: TelemetryConfig{
+			MaxBodyBytes: 4567,
+			RateLimit:    TelemetryRateLimitConfig{PerMinute: 8, Burst: 9},
+		},
+	}
+
+	opts := observerWebOptions(cfg, objects)
+	require.Same(t, objects, opts.Objects)
+	require.Equal(t, int64(1234), opts.MaxObjectProxyBytes)
+	require.Equal(t, int64(4567), opts.MaxEventBodyBytes)
+	require.Equal(t, 8, opts.TelemetryRateLimit.PerMinute)
+	require.Equal(t, 9, opts.TelemetryRateLimit.Burst)
+}
+
 func TestOpenObjectStoreS3RequiresCredentialEnvValues(t *testing.T) {
 	const accessEnv = "OBSERVER_TEST_S3_ACCESS_KEY"
 	const secretEnv = "OBSERVER_TEST_S3_SECRET_KEY"

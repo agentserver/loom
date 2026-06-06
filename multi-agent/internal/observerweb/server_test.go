@@ -2,7 +2,9 @@ package observerweb
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +18,27 @@ import (
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/observerstore"
 )
+
+type failingObjectStore struct {
+	*objectstore.Memory
+	openKey string
+	err     error
+}
+
+func (s failingObjectStore) Open(ctx context.Context, key string) (io.ReadCloser, error) {
+	if key == s.openKey {
+		return io.NopCloser(failingReader{err: s.err}), nil
+	}
+	return s.Memory.Open(ctx, key)
+}
+
+type failingReader struct {
+	err error
+}
+
+func (r failingReader) Read([]byte) (int, error) {
+	return 0, r.err
+}
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -405,6 +428,75 @@ func TestArtifactLegacyProxyRoundTripUsesObjectStore(t *testing.T) {
 	require.Equal(t, "text/plain", rr.Header().Get("Content-Type"))
 }
 
+func TestArtifactObjectStoreGetReadErrorReturnsServerError(t *testing.T) {
+	_, st := newTestHandler(t)
+	objectKey := objectstore.ArtifactKey("ws1", "artifact-missing")
+	h := NewWithOptions(st, nil, Options{
+		Objects: failingObjectStore{
+			Memory:  objectstore.NewMemory(),
+			openKey: objectKey,
+			err:     errors.New("object read failed"),
+		},
+	})
+	seedWorkspaceAndAgents(t, st)
+	art, err := st.CreateArtifact(observerstore.ArtifactCreate{
+		WorkspaceID: "ws1", OwnerAgentID: "driver", Path: "/tmp/missing.txt", Kind: "file",
+	})
+	require.NoError(t, err)
+	require.NoError(t, st.MarkArtifactAvailable("ws1", "driver", art.ID, "text/plain", "sha", objectKey, 10))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/artifacts/"+art.ID, nil)
+	req.Header.Set("Authorization", "Bearer slave-token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusInternalServerError, rr.Code)
+	require.Contains(t, rr.Body.String(), "object read failed")
+}
+
+func TestArtifactObjectStoreGetRejectsOversizedProxyRead(t *testing.T) {
+	_, st := newTestHandler(t)
+	objects := objectstore.NewMemory()
+	h := NewWithOptions(st, nil, Options{Objects: objects, MaxObjectProxyBytes: 4})
+	seedWorkspaceAndAgents(t, st)
+	art, err := st.CreateArtifact(observerstore.ArtifactCreate{
+		WorkspaceID: "ws1", OwnerAgentID: "driver", Path: "/tmp/large.txt", Kind: "file",
+	})
+	require.NoError(t, err)
+	objectKey := objectstore.ArtifactKey("ws1", art.ID)
+	_, err = objects.Put(context.Background(), objectKey, "text/plain", strings.NewReader("12345"))
+	require.NoError(t, err)
+	require.NoError(t, st.MarkArtifactAvailable("ws1", "driver", art.ID, "text/plain", "sha", objectKey, 5))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/artifacts/"+art.ID, nil)
+	req.Header.Set("Authorization", "Bearer slave-token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusRequestEntityTooLarge, rr.Code)
+}
+
+func TestArtifactLegacyProxyRejectsOversizedObjectStoreUpload(t *testing.T) {
+	_, st := newTestHandler(t)
+	objects := objectstore.NewMemory()
+	h := NewWithOptions(st, nil, Options{Objects: objects, MaxObjectProxyBytes: 4})
+	seedWorkspaceAndAgents(t, st)
+	art, err := st.CreateArtifact(observerstore.ArtifactCreate{
+		WorkspaceID: "ws1", OwnerAgentID: "driver", Path: "/tmp/large.txt", Kind: "file",
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/artifacts/"+art.ID+"/content", strings.NewReader("12345"))
+	req.Header.Set("Authorization", "Bearer driver-token")
+	req.Header.Set("Content-Type", "text/plain")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusRequestEntityTooLarge, rr.Code)
+
+	_, err = st.OpenArtifactContent("ws1", art.ID)
+	require.Error(t, err)
+	_, err = objects.Open(req.Context(), objectstore.ArtifactKey("ws1", art.ID))
+	require.Error(t, err)
+}
+
 func TestWriteHTTPFlow(t *testing.T) {
 	h, st := newTestHandler(t)
 	seedWorkspaceAndAgents(t, st)
@@ -513,6 +605,51 @@ func TestWriteLegacyProxyRoundTripUsesObjectStore(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	require.Contains(t, rr.Body.String(), `"object_key":"`+created.ObjectKey+`"`)
 	require.Contains(t, rr.Body.String(), `"content":"ZG9uZSB2aWEgb2JqZWN0IHN0b3Jl"`)
+}
+
+func TestWriteLegacyProxyRejectsOversizedObjectStoreUpload(t *testing.T) {
+	_, st := newTestHandler(t)
+	objects := objectstore.NewMemory()
+	h := NewWithOptions(st, nil, Options{Objects: objects, MaxObjectProxyBytes: 4})
+	seedWorkspaceAndAgents(t, st)
+	wr, err := st.CreateWrite(observerstore.WriteCreate{
+		WorkspaceID: "ws1", OwnerAgentID: "driver", TaskID: "task-1", Path: "/tmp/large.txt",
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/writes/"+wr.ID, strings.NewReader("12345"))
+	req.Header.Set("Authorization", "Bearer slave-token")
+	req.Header.Set("Content-Type", "text/plain")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusRequestEntityTooLarge, rr.Code)
+
+	writes, err := st.ListCompletedWrites("ws1", "driver", "task-1")
+	require.NoError(t, err)
+	require.Empty(t, writes)
+	_, err = objects.Open(req.Context(), objectstore.WriteKey("ws1", wr.ID))
+	require.Error(t, err)
+}
+
+func TestObjectBackedWritesListRejectsOversizedProxyRead(t *testing.T) {
+	_, st := newTestHandler(t)
+	objects := objectstore.NewMemory()
+	h := NewWithOptions(st, nil, Options{Objects: objects, MaxObjectProxyBytes: 4})
+	seedWorkspaceAndAgents(t, st)
+	wr, err := st.CreateWrite(observerstore.WriteCreate{
+		WorkspaceID: "ws1", OwnerAgentID: "driver", TaskID: "task-1", Path: "/tmp/large.txt",
+	})
+	require.NoError(t, err)
+	objectKey := objectstore.WriteKey("ws1", wr.ID)
+	_, err = objects.Put(context.Background(), objectKey, "text/plain", strings.NewReader("12345"))
+	require.NoError(t, err)
+	require.NoError(t, st.MarkWriteCompleted("ws1", "slave", wr.ID, "text/plain", "sha", objectKey, 5))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/writes?task_id=task-1", nil)
+	req.Header.Set("Authorization", "Bearer driver-token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusRequestEntityTooLarge, rr.Code)
 }
 
 func TestObjectBackedWritesRequireConfiguredObjectStore(t *testing.T) {
