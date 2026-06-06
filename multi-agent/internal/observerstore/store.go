@@ -130,6 +130,7 @@ func ensureColumns(db *sql.DB) error {
 		state TEXT NOT NULL,
 		bytes INTEGER NOT NULL DEFAULT 0,
 		sha256 TEXT NOT NULL DEFAULT '',
+		object_key TEXT NOT NULL DEFAULT '',
 		content BLOB,
 		created_at TEXT NOT NULL,
 		updated_at TEXT NOT NULL,
@@ -153,6 +154,9 @@ func ensureColumns(db *sql.DB) error {
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_artifact_requests_owner_state ON artifact_requests(workspace_id, owner_agent_id, state)`); err != nil {
 		return err
 	}
+	if _, err := db.Exec(`ALTER TABLE artifacts ADD COLUMN object_key TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
+		return err
+	}
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS writes (
 		workspace_id TEXT NOT NULL,
 		id TEXT NOT NULL,
@@ -165,6 +169,7 @@ func ensureColumns(db *sql.DB) error {
 		mime TEXT NOT NULL DEFAULT '',
 		bytes INTEGER NOT NULL DEFAULT 0,
 		sha256 TEXT NOT NULL DEFAULT '',
+		object_key TEXT NOT NULL DEFAULT '',
 		content BLOB,
 		created_at TEXT NOT NULL,
 		updated_at TEXT NOT NULL,
@@ -173,6 +178,9 @@ func ensureColumns(db *sql.DB) error {
 		return err
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_writes_owner_task_state ON writes(workspace_id, owner_agent_id, task_id, state)`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE writes ADD COLUMN object_key TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
 		return err
 	}
 	return nil
@@ -750,9 +758,29 @@ func (s *SQLiteStore) StoreArtifactContent(workspaceID, ownerAgentID, artifactID
 		return err
 	}
 	now := NowUTC()
-	res, err := s.db.Exec(`UPDATE artifacts SET state=?, mime=CASE WHEN ?='' THEN mime ELSE ? END, bytes=?, sha256=?, content=?, updated_at=?
+	res, err := s.db.Exec(`UPDATE artifacts SET state=?, mime=CASE WHEN ?='' THEN mime ELSE ? END, bytes=?, sha256=?, object_key='', content=?, updated_at=?
 		WHERE workspace_id=? AND id=? AND owner_agent_id=?`,
 		ArtifactStateAvailable, mime, mime, len(data), sha, data, now, workspaceID, artifactID, ownerAgentID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("artifact not found")
+	}
+	_, err = s.db.Exec(`UPDATE artifact_requests SET state=?, updated_at=? WHERE workspace_id=? AND artifact_id=? AND owner_agent_id=? AND state=?`,
+		ArtifactStateAvailable, now, workspaceID, artifactID, ownerAgentID, ArtifactStatePending)
+	return err
+}
+
+func (s *SQLiteStore) MarkArtifactAvailable(workspaceID, ownerAgentID, artifactID, mime, sha256, objectKey string, bytes int64) error {
+	now := NowUTC()
+	res, err := s.db.Exec(`UPDATE artifacts SET state=?, mime=CASE WHEN ?='' THEN mime ELSE ? END, bytes=?, sha256=?, object_key=?, content=NULL, updated_at=?
+		WHERE workspace_id=? AND id=? AND owner_agent_id=?`,
+		ArtifactStateAvailable, mime, mime, bytes, sha256, objectKey, now, workspaceID, artifactID, ownerAgentID)
 	if err != nil {
 		return err
 	}
@@ -771,9 +799,9 @@ func (s *SQLiteStore) StoreArtifactContent(workspaceID, ownerAgentID, artifactID
 func (s *SQLiteStore) OpenArtifactContent(workspaceID, artifactID string) (ArtifactContent, error) {
 	var a ArtifactContent
 	var content []byte
-	err := s.db.QueryRow(`SELECT id, owner_agent_id, path, kind, mime, state, bytes, sha256, content
+	err := s.db.QueryRow(`SELECT id, owner_agent_id, path, kind, mime, state, bytes, sha256, object_key, content
 		FROM artifacts WHERE workspace_id=? AND id=?`, workspaceID, artifactID).
-		Scan(&a.ID, &a.OwnerAgentID, &a.Path, &a.Kind, &a.MIME, &a.State, &a.Bytes, &a.SHA256, &content)
+		Scan(&a.ID, &a.OwnerAgentID, &a.Path, &a.Kind, &a.MIME, &a.State, &a.Bytes, &a.SHA256, &a.ObjectKey, &content)
 	if err == sql.ErrNoRows {
 		return ArtifactContent{}, fmt.Errorf("artifact not found")
 	}
@@ -815,9 +843,27 @@ func (s *SQLiteStore) StoreWriteContent(workspaceID, writerAgentID, writeID, mim
 		return err
 	}
 	now := NowUTC()
-	res, err := s.db.Exec(`UPDATE writes SET writer_agent_id=?, state=?, mime=?, bytes=?, sha256=?, content=?, updated_at=?
+	res, err := s.db.Exec(`UPDATE writes SET writer_agent_id=?, state=?, mime=?, bytes=?, sha256=?, object_key='', content=?, updated_at=?
 		WHERE workspace_id=? AND id=? AND state=?`,
 		writerAgentID, WriteStateCompleted, mime, len(data), sha, data, now, workspaceID, writeID, WriteStateRegistered)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("write not found or already completed")
+	}
+	return nil
+}
+
+func (s *SQLiteStore) MarkWriteCompleted(workspaceID, writerAgentID, writeID, mime, sha256, objectKey string, bytes int64) error {
+	now := NowUTC()
+	res, err := s.db.Exec(`UPDATE writes SET writer_agent_id=?, state=?, mime=?, bytes=?, sha256=?, object_key=?, content=NULL, updated_at=?
+		WHERE workspace_id=? AND id=? AND state=?`,
+		writerAgentID, WriteStateCompleted, mime, bytes, sha256, objectKey, now, workspaceID, writeID, WriteStateRegistered)
 	if err != nil {
 		return err
 	}
@@ -851,7 +897,7 @@ func (s *SQLiteStore) UpdateWriteTaskID(workspaceID, ownerAgentID, writeID, task
 }
 
 func (s *SQLiteStore) ListCompletedWrites(workspaceID, ownerAgentID, taskID string) ([]Write, error) {
-	rows, err := s.db.Query(`SELECT id, writer_agent_id, path, overwrite, mime, bytes, sha256, content
+	rows, err := s.db.Query(`SELECT id, writer_agent_id, path, overwrite, mime, bytes, sha256, object_key, content
 		FROM writes WHERE workspace_id=? AND owner_agent_id=? AND task_id=? AND state=?
 		ORDER BY updated_at ASC`, workspaceID, ownerAgentID, taskID, WriteStateCompleted)
 	if err != nil {
@@ -866,7 +912,7 @@ func (s *SQLiteStore) ListCompletedWrites(workspaceID, ownerAgentID, taskID stri
 		w.OwnerAgentID = ownerAgentID
 		w.TaskID = taskID
 		w.State = WriteStateCompleted
-		if err := rows.Scan(&w.ID, &w.WriterAgentID, &w.Path, &overwrite, &w.MIME, &w.Bytes, &w.SHA256, &w.Content); err != nil {
+		if err := rows.Scan(&w.ID, &w.WriterAgentID, &w.Path, &overwrite, &w.MIME, &w.Bytes, &w.SHA256, &w.ObjectKey, &w.Content); err != nil {
 			return nil, err
 		}
 		w.Overwrite = overwrite != 0

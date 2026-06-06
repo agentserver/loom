@@ -105,6 +105,7 @@ type Artifact struct {
 	State        string `json:"state"`
 	Bytes        int64  `json:"bytes,omitempty"`
 	SHA256       string `json:"sha256,omitempty"`
+	ObjectKey    string `json:"object_key,omitempty"`
 }
 
 type ArtifactRequest struct {
@@ -142,6 +143,7 @@ type Write struct {
 	MIME          string `json:"mime,omitempty"`
 	Bytes         int64  `json:"bytes,omitempty"`
 	SHA256        string `json:"sha256,omitempty"`
+	ObjectKey     string `json:"object_key,omitempty"`
 	Content       []byte `json:"-"`
 }
 
@@ -198,9 +200,11 @@ type Store interface {
 	RequestArtifact(workspaceID, requesterAgentID, artifactID string) (ArtifactRequest, error)
 	ListArtifactRequests(workspaceID, ownerAgentID string) ([]ArtifactRequest, error)
 	StoreArtifactContent(workspaceID, ownerAgentID, artifactID, mime string, body io.Reader) error
+	MarkArtifactAvailable(workspaceID, ownerAgentID, artifactID, mime, sha256, objectKey string, bytes int64) error
 	OpenArtifactContent(workspaceID, artifactID string) (ArtifactContent, error)
 	CreateWrite(WriteCreate) (Write, error)
 	StoreWriteContent(workspaceID, writerAgentID, writeID, mime string, body io.Reader) error
+	MarkWriteCompleted(workspaceID, writerAgentID, writeID, mime, sha256, objectKey string, bytes int64) error
 	UpdateWriteTaskID(workspaceID, ownerAgentID, writeID, taskID string) error
 	ListCompletedWrites(workspaceID, ownerAgentID, taskID string) ([]Write, error)
 	SaveTaskContract(TaskContractRecord) error

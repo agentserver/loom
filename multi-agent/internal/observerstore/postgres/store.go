@@ -363,6 +363,26 @@ func (s *Store) StoreArtifactContent(workspaceID, ownerAgentID, artifactID, mime
 	return errors.New("observerstore/postgres: content storage requires object store")
 }
 
+func (s *Store) MarkArtifactAvailable(workspaceID, ownerAgentID, artifactID, mime, sha256, objectKey string, bytes int64) error {
+	now := observerstore.NowUTC()
+	res, err := s.db.Exec(`UPDATE artifacts SET state=$1, mime=CASE WHEN $2='' THEN mime ELSE $3 END, bytes=$4, sha256=$5, object_key=$6, updated_at=$7
+		WHERE workspace_id=$8 AND id=$9 AND owner_agent_id=$10`,
+		observerstore.ArtifactStateAvailable, mime, mime, bytes, sha256, objectKey, now, workspaceID, artifactID, ownerAgentID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("artifact not found")
+	}
+	_, err = s.db.Exec(`UPDATE artifact_requests SET state=$1, updated_at=$2 WHERE workspace_id=$3 AND artifact_id=$4 AND owner_agent_id=$5 AND state=$6`,
+		observerstore.ArtifactStateAvailable, now, workspaceID, artifactID, ownerAgentID, observerstore.ArtifactStatePending)
+	return err
+}
+
 func (s *Store) OpenArtifactContent(workspaceID, artifactID string) (observerstore.ArtifactContent, error) {
 	return observerstore.ArtifactContent{}, errors.New("observerstore/postgres: content storage requires object store")
 }
@@ -388,6 +408,23 @@ func (s *Store) StoreWriteContent(workspaceID, writerAgentID, writeID, mime stri
 	return errors.New("observerstore/postgres: content storage requires object store")
 }
 
+func (s *Store) MarkWriteCompleted(workspaceID, writerAgentID, writeID, mime, sha256, objectKey string, bytes int64) error {
+	res, err := s.db.Exec(`UPDATE writes SET writer_agent_id=$1, state=$2, mime=$3, bytes=$4, sha256=$5, object_key=$6, updated_at=$7
+		WHERE workspace_id=$8 AND id=$9 AND state=$10`,
+		writerAgentID, observerstore.WriteStateCompleted, mime, bytes, sha256, objectKey, observerstore.NowUTC(), workspaceID, writeID, observerstore.WriteStateRegistered)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("write not found or already completed")
+	}
+	return nil
+}
+
 func (s *Store) UpdateWriteTaskID(workspaceID, ownerAgentID, writeID, taskID string) error {
 	if taskID == "" {
 		return errors.New("observerstore: task_id is required")
@@ -408,7 +445,7 @@ func (s *Store) UpdateWriteTaskID(workspaceID, ownerAgentID, writeID, taskID str
 }
 
 func (s *Store) ListCompletedWrites(workspaceID, ownerAgentID, taskID string) ([]observerstore.Write, error) {
-	rows, err := s.db.Query(`SELECT id, writer_agent_id, path, overwrite, mime, bytes, sha256
+	rows, err := s.db.Query(`SELECT id, writer_agent_id, path, overwrite, mime, bytes, sha256, object_key
 		FROM writes WHERE workspace_id=$1 AND owner_agent_id=$2 AND task_id=$3 AND state=$4
 		ORDER BY updated_at ASC`, workspaceID, ownerAgentID, taskID, observerstore.WriteStateCompleted)
 	if err != nil {
@@ -422,7 +459,7 @@ func (s *Store) ListCompletedWrites(workspaceID, ownerAgentID, taskID string) ([
 		w.OwnerAgentID = ownerAgentID
 		w.TaskID = taskID
 		w.State = observerstore.WriteStateCompleted
-		if err := rows.Scan(&w.ID, &w.WriterAgentID, &w.Path, &w.Overwrite, &w.MIME, &w.Bytes, &w.SHA256); err != nil {
+		if err := rows.Scan(&w.ID, &w.WriterAgentID, &w.Path, &w.Overwrite, &w.MIME, &w.Bytes, &w.SHA256, &w.ObjectKey); err != nil {
 			return nil, err
 		}
 		out = append(out, w)

@@ -21,9 +21,11 @@ type portableWebStore interface {
 	RequestArtifact(workspaceID, requesterAgentID, artifactID string) (ArtifactRequest, error)
 	ListArtifactRequests(workspaceID, ownerAgentID string) ([]ArtifactRequest, error)
 	StoreArtifactContent(workspaceID, ownerAgentID, artifactID, mime string, body io.Reader) error
+	MarkArtifactAvailable(workspaceID, ownerAgentID, artifactID, mime, sha256, objectKey string, bytes int64) error
 	OpenArtifactContent(workspaceID, artifactID string) (ArtifactContent, error)
 	CreateWrite(WriteCreate) (Write, error)
 	StoreWriteContent(workspaceID, writerAgentID, writeID, mime string, body io.Reader) error
+	MarkWriteCompleted(workspaceID, writerAgentID, writeID, mime, sha256, objectKey string, bytes int64) error
 	UpdateWriteTaskID(workspaceID, ownerAgentID, writeID, taskID string) error
 	ListCompletedWrites(workspaceID, ownerAgentID, taskID string) ([]Write, error)
 	SaveTaskContract(TaskContractRecord) error

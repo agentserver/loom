@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/yourorg/multi-agent/internal/objectstore"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/observerstore"
 )
@@ -326,6 +327,36 @@ func TestArtifactLazyHTTPFlow(t *testing.T) {
 	require.Equal(t, "hello", rr.Body.String())
 }
 
+func TestCreateArtifactReturnsPresignedPutURL(t *testing.T) {
+	_, st := newTestHandler(t)
+	h := NewWithOptions(st, nil, Options{Objects: objectstore.NewMemory()})
+	seedAPIKey(t, st, "ak-default", "ak_secret")
+	registerBody := postRegister(t, h, "ak_secret",
+		`{"agent_id":"driver","role":"driver","display_name":"Driver","workspace_id":"ws1"}`,
+		http.StatusOK)
+	token := extractToken(t, registerBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/artifacts", strings.NewReader(`{"path":"/tmp/out.txt","kind":"file"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), `"put_url":"memory://put/`)
+	require.NotContains(t, rr.Body.String(), `"url":`)
+
+	var created struct {
+		ArtifactID string `json:"artifact_id"`
+		State      string `json:"state"`
+		PutURL     string `json:"put_url"`
+		ObjectKey  string `json:"object_key"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &created))
+	require.NotEmpty(t, created.ArtifactID)
+	require.Equal(t, "registered", created.State)
+	require.Equal(t, objectstore.ArtifactKey("ws1", created.ArtifactID), created.ObjectKey)
+	require.NotEmpty(t, created.PutURL)
+}
+
 func TestWriteHTTPFlow(t *testing.T) {
 	h, st := newTestHandler(t)
 	seedWorkspaceAndAgents(t, st)
@@ -357,6 +388,33 @@ func TestWriteHTTPFlow(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	require.Contains(t, rr.Body.String(), `"path":"/tmp/out.txt"`)
 	require.Contains(t, rr.Body.String(), `"content":"ZG9uZQ=="`)
+}
+
+func TestCreateWriteTokenReturnsObjectStorePutURL(t *testing.T) {
+	_, st := newTestHandler(t)
+	h := NewWithOptions(st, nil, Options{Objects: objectstore.NewMemory()})
+	seedAPIKey(t, st, "ak-default", "ak_secret")
+	registerBody := postRegister(t, h, "ak_secret",
+		`{"agent_id":"driver","role":"driver","display_name":"Driver","workspace_id":"ws1"}`,
+		http.StatusOK)
+	token := extractToken(t, registerBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/write-tokens", bytes.NewBufferString(`{"task_id":"task-1","path":"/tmp/out.txt","overwrite":true}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), `"put_url":"memory://put/`)
+
+	var created struct {
+		WriteID   string `json:"write_id"`
+		PutURL    string `json:"put_url"`
+		ObjectKey string `json:"object_key"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &created))
+	require.NotEmpty(t, created.WriteID)
+	require.Equal(t, objectstore.WriteKey("ws1", created.WriteID), created.ObjectKey)
+	require.NotEmpty(t, created.PutURL)
 }
 
 func TestTaskProgressEndpoint(t *testing.T) {

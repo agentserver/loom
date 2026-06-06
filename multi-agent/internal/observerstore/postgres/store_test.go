@@ -224,3 +224,63 @@ func TestPostgresStoreTelemetryAPIKeys(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, ok)
 }
+
+func TestPostgresStoreObjectMetadataMethods(t *testing.T) {
+	st, err := Open(Config{DSN: testDSN(t)})
+	require.NoError(t, err)
+	defer st.Close()
+
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 10)
+	workspaceID := "ws-test-" + suffix
+	ownerID := "driver-" + suffix
+	writerID := "slave-" + suffix
+	taskID := "task-" + suffix
+
+	art, err := st.CreateArtifact(observerstore.ArtifactCreate{
+		WorkspaceID: workspaceID, OwnerAgentID: ownerID, Path: "/tmp/input.txt",
+		Kind: "file", State: observerstore.ArtifactStateRegistered,
+	})
+	require.NoError(t, err)
+	_, err = st.RequestArtifact(workspaceID, writerID, art.ID)
+	require.NoError(t, err)
+
+	artifactObjectKey := "workspaces/" + workspaceID + "/artifacts/" + art.ID
+	err = st.MarkArtifactAvailable(workspaceID, ownerID, art.ID, "text/plain", "sha-art", artifactObjectKey, 123)
+	require.NoError(t, err)
+
+	var artifactState, artifactMIME, artifactSHA, gotArtifactKey string
+	var artifactBytes int64
+	err = st.db.QueryRow(`SELECT state, mime, bytes, sha256, object_key FROM artifacts WHERE workspace_id=$1 AND id=$2`, workspaceID, art.ID).
+		Scan(&artifactState, &artifactMIME, &artifactBytes, &artifactSHA, &gotArtifactKey)
+	require.NoError(t, err)
+	require.Equal(t, observerstore.ArtifactStateAvailable, artifactState)
+	require.Equal(t, "text/plain", artifactMIME)
+	require.Equal(t, int64(123), artifactBytes)
+	require.Equal(t, "sha-art", artifactSHA)
+	require.Equal(t, artifactObjectKey, gotArtifactKey)
+
+	var requestState string
+	err = st.db.QueryRow(`SELECT state FROM artifact_requests WHERE workspace_id=$1 AND artifact_id=$2`, workspaceID, art.ID).
+		Scan(&requestState)
+	require.NoError(t, err)
+	require.Equal(t, observerstore.ArtifactStateAvailable, requestState)
+
+	wr, err := st.CreateWrite(observerstore.WriteCreate{
+		WorkspaceID: workspaceID, OwnerAgentID: ownerID, TaskID: taskID,
+		Path: "/tmp/out.txt", Overwrite: true,
+	})
+	require.NoError(t, err)
+
+	writeObjectKey := "workspaces/" + workspaceID + "/writes/" + wr.ID
+	err = st.MarkWriteCompleted(workspaceID, writerID, wr.ID, "text/plain", "sha-write", writeObjectKey, 456)
+	require.NoError(t, err)
+
+	writes, err := st.ListCompletedWrites(workspaceID, ownerID, taskID)
+	require.NoError(t, err)
+	require.Len(t, writes, 1)
+	require.Equal(t, wr.ID, writes[0].ID)
+	require.Equal(t, writerID, writes[0].WriterAgentID)
+	require.Equal(t, int64(456), writes[0].Bytes)
+	require.Equal(t, "sha-write", writes[0].SHA256)
+	require.Equal(t, writeObjectKey, writes[0].ObjectKey)
+}

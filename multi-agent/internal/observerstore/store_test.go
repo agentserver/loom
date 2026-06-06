@@ -728,6 +728,40 @@ func TestArtifactLazyLifecycle(t *testing.T) {
 	require.Equal(t, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", got.SHA256)
 }
 
+func TestMarkArtifactAvailableStoresObjectMetadata(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	art, err := s.CreateArtifact(ArtifactCreate{
+		WorkspaceID: "ws1", OwnerAgentID: "driver", Path: "/tmp/input.txt",
+		Kind: "file", State: ArtifactStateRegistered,
+	})
+	require.NoError(t, err)
+
+	req, err := s.RequestArtifact("ws1", "slave", art.ID)
+	require.NoError(t, err)
+	require.Equal(t, ArtifactStatePending, req.State)
+
+	objectKey := "workspaces/ws1/artifacts/" + art.ID
+	err = s.MarkArtifactAvailable("ws1", "driver", art.ID, "text/plain", "sha-art", objectKey, 123)
+	require.NoError(t, err)
+
+	got, err := s.OpenArtifactContent("ws1", art.ID)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, got.Body.Close()) })
+	require.Equal(t, objectKey, got.ObjectKey)
+	require.Equal(t, "text/plain", got.MIME)
+	require.Equal(t, int64(123), got.Bytes)
+	require.Equal(t, "sha-art", got.SHA256)
+	body, err := io.ReadAll(got.Body)
+	require.NoError(t, err)
+	require.Empty(t, body)
+
+	pending, err := s.ListArtifactRequests("ws1", "driver")
+	require.NoError(t, err)
+	require.Empty(t, pending)
+}
+
 func TestWriteLifecycle(t *testing.T) {
 	s := testStore(t)
 	defer s.Close()
@@ -749,6 +783,32 @@ func TestWriteLifecycle(t *testing.T) {
 	require.Equal(t, int64(4), writes[0].Bytes)
 	require.Equal(t, "a4c3ed04a95a3da14a9d235c83d868bed7c0f45cf7f3faa751ee8f50598d2211", writes[0].SHA256)
 	require.Equal(t, "done", string(writes[0].Content))
+}
+
+func TestMarkWriteCompletedStoresObjectMetadata(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	wr, err := s.CreateWrite(WriteCreate{
+		WorkspaceID: "ws1", OwnerAgentID: "driver", TaskID: "task-1",
+		Path: "/tmp/out.txt", Overwrite: true,
+	})
+	require.NoError(t, err)
+
+	objectKey := "workspaces/ws1/writes/" + wr.ID
+	err = s.MarkWriteCompleted("ws1", "slave", wr.ID, "text/plain", "sha-write", objectKey, 456)
+	require.NoError(t, err)
+
+	writes, err := s.ListCompletedWrites("ws1", "driver", "task-1")
+	require.NoError(t, err)
+	require.Len(t, writes, 1)
+	require.Equal(t, wr.ID, writes[0].ID)
+	require.Equal(t, "slave", writes[0].WriterAgentID)
+	require.Equal(t, "text/plain", writes[0].MIME)
+	require.Equal(t, int64(456), writes[0].Bytes)
+	require.Equal(t, "sha-write", writes[0].SHA256)
+	require.Equal(t, objectKey, writes[0].ObjectKey)
+	require.Empty(t, writes[0].Content)
 }
 
 func TestTaskContractPersistence(t *testing.T) {

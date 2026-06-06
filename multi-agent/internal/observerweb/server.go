@@ -15,12 +15,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yourorg/multi-agent/internal/objectstore"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/observerstore"
 	"github.com/yourorg/multi-agent/internal/userspace"
 )
 
 const defaultMaxEventBodyBytes = 256 << 10
+const defaultObjectPresignTTL = 15 * time.Minute
 
 type Store = observerstore.Store
 
@@ -32,6 +34,7 @@ type RateLimitConfig struct {
 type Options struct {
 	TelemetryRateLimit RateLimitConfig
 	MaxEventBodyBytes  int64
+	Objects            objectstore.Store
 }
 
 // New constructs the observerweb HTTP handler. If usHandler is non-nil,
@@ -55,6 +58,7 @@ func NewWithOptions(s Store, usHandler *userspace.Handler, opts Options) http.Ha
 	}
 	h := &handler{
 		s:                 s,
+		objects:           opts.Objects,
 		telemetryLimiter:  newTelemetryLimiter(opts.TelemetryRateLimit.PerMinute, opts.TelemetryRateLimit.Burst),
 		maxEventBodyBytes: opts.MaxEventBodyBytes,
 	}
@@ -88,6 +92,7 @@ func mountRoutes(mux *http.ServeMux, h *handler, usHandler *userspace.Handler) {
 
 type handler struct {
 	s                 Store
+	objects           objectstore.Store
 	telemetryLimiter  *telemetryLimiter
 	maxEventBodyBytes int64
 }
@@ -257,13 +262,25 @@ func (h *handler) artifacts(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	resp := map[string]interface{}{
+		"artifact_id": art.ID,
+		"state":       art.State,
+	}
+	if h.objects != nil {
+		objectKey := objectstore.ArtifactKey(agent.WorkspaceID, art.ID)
+		putURL, err := h.objects.PutPresignedURL(r.Context(), objectKey, req.MIME, defaultObjectPresignTTL)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		resp["put_url"] = putURL
+		resp["object_key"] = objectKey
+	} else {
+		resp["url"] = absoluteURL(r, "/api/artifacts/"+url.PathEscape(art.ID))
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"artifact_id": art.ID,
-		"url":         absoluteURL(r, "/api/artifacts/"+url.PathEscape(art.ID)),
-		"state":       art.State,
-	})
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (h *handler) artifactRouter(w http.ResponseWriter, r *http.Request) {
@@ -379,12 +396,24 @@ func (h *handler) writeTokens(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	resp := map[string]interface{}{
+		"write_id": wr.ID,
+	}
+	if h.objects != nil {
+		objectKey := objectstore.WriteKey(agent.WorkspaceID, wr.ID)
+		putURL, err := h.objects.PutPresignedURL(r.Context(), objectKey, "", defaultObjectPresignTTL)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		resp["put_url"] = putURL
+		resp["object_key"] = objectKey
+	} else {
+		resp["put_url"] = absoluteURL(r, "/api/writes/"+url.PathEscape(wr.ID))
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"write_id": wr.ID,
-		"put_url":  absoluteURL(r, "/api/writes/"+url.PathEscape(wr.ID)),
-	})
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (h *handler) writeRouter(w http.ResponseWriter, r *http.Request) {
@@ -454,6 +483,7 @@ func (h *handler) writes(w http.ResponseWriter, r *http.Request) {
 		MIME          string `json:"mime,omitempty"`
 		Bytes         int64  `json:"bytes,omitempty"`
 		SHA256        string `json:"sha256,omitempty"`
+		ObjectKey     string `json:"object_key,omitempty"`
 		Content       []byte `json:"content"`
 		WriterAgentID string `json:"writer_agent_id,omitempty"`
 	}
@@ -462,7 +492,7 @@ func (h *handler) writes(w http.ResponseWriter, r *http.Request) {
 		resp[i] = writeResponse{
 			WriteID: row.ID, Path: row.Path, Overwrite: row.Overwrite,
 			State: row.State, MIME: row.MIME, Bytes: row.Bytes, SHA256: row.SHA256,
-			Content: row.Content, WriterAgentID: row.WriterAgentID,
+			ObjectKey: row.ObjectKey, Content: row.Content, WriterAgentID: row.WriterAgentID,
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
