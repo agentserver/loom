@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -384,7 +385,25 @@ func (s *Store) MarkArtifactAvailable(workspaceID, ownerAgentID, artifactID, mim
 }
 
 func (s *Store) OpenArtifactContent(workspaceID, artifactID string) (observerstore.ArtifactContent, error) {
-	return observerstore.ArtifactContent{}, errors.New("observerstore/postgres: content storage requires object store")
+	var a observerstore.ArtifactContent
+	err := s.db.QueryRow(`SELECT id, owner_agent_id, path, kind, mime, state, bytes, sha256, object_key
+		FROM artifacts WHERE workspace_id=$1 AND id=$2`, workspaceID, artifactID).
+		Scan(&a.ID, &a.OwnerAgentID, &a.Path, &a.Kind, &a.MIME, &a.State, &a.Bytes, &a.SHA256, &a.ObjectKey)
+	if err == sql.ErrNoRows {
+		return observerstore.ArtifactContent{}, fmt.Errorf("artifact not found")
+	}
+	if err != nil {
+		return observerstore.ArtifactContent{}, err
+	}
+	if a.State != observerstore.ArtifactStateAvailable {
+		return observerstore.ArtifactContent{}, fmt.Errorf("artifact not available")
+	}
+	if a.ObjectKey == "" {
+		return observerstore.ArtifactContent{}, errors.New("observerstore/postgres: content storage requires object store")
+	}
+	a.WorkspaceID = workspaceID
+	a.Body = io.NopCloser(bytes.NewReader(nil))
+	return a, nil
 }
 
 func (s *Store) CreateWrite(create observerstore.WriteCreate) (observerstore.Write, error) {

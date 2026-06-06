@@ -359,6 +359,52 @@ func TestCreateArtifactReturnsPresignedPutURL(t *testing.T) {
 	require.NotEmpty(t, created.PutURL)
 }
 
+func TestArtifactLegacyProxyRoundTripUsesObjectStore(t *testing.T) {
+	_, st := newTestHandler(t)
+	objects := objectstore.NewMemory()
+	h := NewWithOptions(st, nil, Options{Objects: objects})
+	seedWorkspaceAndAgents(t, st)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/artifacts", strings.NewReader(`{"path":"/tmp/input.txt","kind":"file","mime":"text/plain"}`))
+	req.Header.Set("Authorization", "Bearer driver-token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+	var created struct {
+		ArtifactID string `json:"artifact_id"`
+		URL        string `json:"url"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &created))
+	require.Contains(t, created.URL, "/api/artifacts/"+created.ArtifactID)
+
+	req = httptest.NewRequest(http.MethodPut, "/api/artifacts/"+created.ArtifactID+"/content", bytes.NewBufferString("hello from object store"))
+	req.Header.Set("Authorization", "Bearer driver-token")
+	req.Header.Set("Content-Type", "text/plain")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	meta, err := st.OpenArtifactContent("ws1", created.ArtifactID)
+	require.NoError(t, err)
+	require.NoError(t, meta.Body.Close())
+	objectKey := objectstore.ArtifactKey("ws1", created.ArtifactID)
+	require.Equal(t, objectKey, meta.ObjectKey)
+	stored, err := objects.Open(req.Context(), objectKey)
+	require.NoError(t, err)
+	storedBytes, err := io.ReadAll(stored)
+	require.NoError(t, err)
+	require.NoError(t, stored.Close())
+	require.Equal(t, "hello from object store", string(storedBytes))
+
+	req = httptest.NewRequest(http.MethodGet, "/api/artifacts/"+created.ArtifactID, nil)
+	req.Header.Set("Authorization", "Bearer slave-token")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Equal(t, "hello from object store", rr.Body.String())
+	require.Equal(t, "text/plain", rr.Header().Get("Content-Type"))
+}
+
 func TestWriteHTTPFlow(t *testing.T) {
 	h, st := newTestHandler(t)
 	seedWorkspaceAndAgents(t, st)
@@ -422,6 +468,69 @@ func TestCreateWriteTokenReturnsObjectStorePutURL(t *testing.T) {
 	require.True(t, strings.HasPrefix(parsedPutURL.Path, "/api/writes/"), "put_url path=%q", parsedPutURL.Path)
 	require.Contains(t, created.ObjectPutURL, "memory://put/")
 	require.Equal(t, objectstore.WriteKey("ws1", created.WriteID), created.ObjectKey)
+}
+
+func TestWriteLegacyProxyRoundTripUsesObjectStore(t *testing.T) {
+	_, st := newTestHandler(t)
+	objects := objectstore.NewMemory()
+	h := NewWithOptions(st, nil, Options{Objects: objects})
+	seedWorkspaceAndAgents(t, st)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/write-tokens", bytes.NewBufferString(`{"task_id":"task-1","path":"/tmp/out.txt","overwrite":true}`))
+	req.Header.Set("Authorization", "Bearer driver-token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+	var created struct {
+		WriteID      string `json:"write_id"`
+		PutURL       string `json:"put_url"`
+		ObjectPutURL string `json:"object_put_url"`
+		ObjectKey    string `json:"object_key"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &created))
+	require.Contains(t, created.PutURL, "/api/writes/"+created.WriteID)
+	require.Contains(t, created.ObjectPutURL, "memory://put/")
+	require.Equal(t, objectstore.WriteKey("ws1", created.WriteID), created.ObjectKey)
+
+	req = httptest.NewRequest(http.MethodPut, "/api/writes/"+created.WriteID, bytes.NewBufferString("done via object store"))
+	req.Header.Set("Authorization", "Bearer slave-token")
+	req.Header.Set("Content-Type", "text/plain")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	stored, err := objects.Open(req.Context(), created.ObjectKey)
+	require.NoError(t, err)
+	storedBytes, err := io.ReadAll(stored)
+	require.NoError(t, err)
+	require.NoError(t, stored.Close())
+	require.Equal(t, "done via object store", string(storedBytes))
+
+	req = httptest.NewRequest(http.MethodGet, "/api/writes?task_id=task-1", nil)
+	req.Header.Set("Authorization", "Bearer driver-token")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), `"object_key":"`+created.ObjectKey+`"`)
+	require.Contains(t, rr.Body.String(), `"content":"ZG9uZSB2aWEgb2JqZWN0IHN0b3Jl"`)
+}
+
+func TestObjectBackedWritesRequireConfiguredObjectStore(t *testing.T) {
+	h, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
+
+	wr, err := st.CreateWrite(observerstore.WriteCreate{
+		WorkspaceID: "ws1", OwnerAgentID: "driver", TaskID: "task-1", Path: "/tmp/out.txt",
+	})
+	require.NoError(t, err)
+	require.NoError(t, st.MarkWriteCompleted("ws1", "slave", wr.ID, "text/plain", "sha", objectstore.WriteKey("ws1", wr.ID), 4))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/writes?task_id=task-1", nil)
+	req.Header.Set("Authorization", "Bearer driver-token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusInternalServerError, rr.Code)
+	require.Contains(t, rr.Body.String(), "object store not configured")
 }
 
 func TestTaskProgressEndpoint(t *testing.T) {

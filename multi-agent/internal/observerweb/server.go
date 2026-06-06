@@ -310,6 +310,24 @@ func (h *handler) getArtifact(w http.ResponseWriter, r *http.Request, id string)
 	}
 	content, err := h.s.OpenArtifactContent(agent.WorkspaceID, id)
 	if err == nil {
+		if content.ObjectKey != "" {
+			defer content.Body.Close()
+			if h.objects == nil {
+				http.Error(w, "object store not configured", http.StatusInternalServerError)
+				return
+			}
+			body, err := h.objects.Open(r.Context(), content.ObjectKey)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			defer body.Close()
+			if content.MIME != "" {
+				w.Header().Set("Content-Type", content.MIME)
+			}
+			io.Copy(w, body) //nolint:errcheck
+			return
+		}
 		if content.MIME != "" {
 			w.Header().Set("Content-Type", content.MIME)
 		}
@@ -339,6 +357,21 @@ func (h *handler) putArtifactContent(w http.ResponseWriter, r *http.Request, id 
 	}
 	agent, ok := h.authenticate(w, r)
 	if !ok {
+		return
+	}
+	if h.objects != nil {
+		objectKey := objectstore.ArtifactKey(agent.WorkspaceID, id)
+		info, err := h.objects.Put(r.Context(), objectKey, r.Header.Get("Content-Type"), r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := h.s.MarkArtifactAvailable(agent.WorkspaceID, agent.ID, id, r.Header.Get("Content-Type"), info.SHA256, objectKey, info.Bytes); err != nil {
+			_ = h.objects.Delete(r.Context(), objectKey)
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 	if err := h.s.StoreArtifactContent(agent.WorkspaceID, agent.ID, id, r.Header.Get("Content-Type"), r.Body); err != nil {
@@ -428,6 +461,21 @@ func (h *handler) writeRouter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/writes/")
+	if h.objects != nil {
+		objectKey := objectstore.WriteKey(agent.WorkspaceID, id)
+		info, err := h.objects.Put(r.Context(), objectKey, r.Header.Get("Content-Type"), r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := h.s.MarkWriteCompleted(agent.WorkspaceID, agent.ID, id, r.Header.Get("Content-Type"), info.SHA256, objectKey, info.Bytes); err != nil {
+			_ = h.objects.Delete(r.Context(), objectKey)
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	if err := h.s.StoreWriteContent(agent.WorkspaceID, agent.ID, id, r.Header.Get("Content-Type"), r.Body); err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -487,10 +535,32 @@ func (h *handler) writes(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := make([]writeResponse, len(rows))
 	for i, row := range rows {
+		content := row.Content
+		if row.ObjectKey != "" {
+			if h.objects == nil {
+				http.Error(w, "object store not configured", http.StatusInternalServerError)
+				return
+			}
+			body, err := h.objects.Open(r.Context(), row.ObjectKey)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			content, err = io.ReadAll(body)
+			closeErr := body.Close()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if closeErr != nil {
+				http.Error(w, closeErr.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
 		resp[i] = writeResponse{
 			WriteID: row.ID, Path: row.Path, Overwrite: row.Overwrite,
 			State: row.State, MIME: row.MIME, Bytes: row.Bytes, SHA256: row.SHA256,
-			ObjectKey: row.ObjectKey, Content: row.Content, WriterAgentID: row.WriterAgentID,
+			ObjectKey: row.ObjectKey, Content: content, WriterAgentID: row.WriterAgentID,
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")

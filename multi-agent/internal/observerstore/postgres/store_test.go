@@ -248,6 +248,11 @@ func TestPostgresStoreObjectMetadataMethods(t *testing.T) {
 	err = st.MarkArtifactAvailable(workspaceID, ownerID, art.ID, "text/plain", "sha-art", artifactObjectKey, 123)
 	require.NoError(t, err)
 
+	artifactMeta, err := st.OpenArtifactContent(workspaceID, art.ID)
+	require.NoError(t, err)
+	require.Equal(t, artifactObjectKey, artifactMeta.ObjectKey)
+	require.NoError(t, artifactMeta.Body.Close())
+
 	var artifactState, artifactMIME, artifactSHA, gotArtifactKey string
 	var artifactBytes int64
 	err = st.db.QueryRow(`SELECT state, mime, bytes, sha256, object_key FROM artifacts WHERE workspace_id=$1 AND id=$2`, workspaceID, art.ID).
