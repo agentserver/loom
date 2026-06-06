@@ -419,11 +419,28 @@ Chart decisions:
   configuration, but real secrets are not embedded.
 - `secret.yaml` creates Kubernetes Secrets only when values explicitly provide
   secret material; production should prefer `existingSecret`.
-- `values-local-minio.yaml` targets kind/minikube/prod_test with MinIO.
+- `values-local-minio.yaml` is kept for render checks and optional developer
+  smoke only; it is not the acceptance target for this project.
 - `values-production.example.yaml` documents managed PostgreSQL, PgBouncer, and
   external object-store settings.
 - chart templates render migration and retention Jobs, but they are controlled
   by values flags.
+
+Target cluster:
+
+All real Helm deployment, migration, retention, integration, and smoke testing
+for this project targets this Kubernetes context:
+
+```yaml
+- cluster:
+    server: https://k8s-prod.nj.cs.ac.cn
+  name: k8s-nj-prod
+```
+
+Implementation plans must use `kubectl --context k8s-nj-prod` and
+`helm --kube-context k8s-nj-prod` for cluster operations. Local `kind`,
+`minikube`, or prod_test clusters may be used only for chart rendering or
+developer-only checks; they do not satisfy deployment or acceptance testing.
 
 Deployment template:
 
@@ -558,15 +575,26 @@ Phase 5: Helm deployment
 - add migration Job and retention CronJob
 - add MinIO local values file
 - document production Secret requirements
+- deploy and test the chart on kube context `k8s-nj-prod`
 
 Phase 6: Load and failure testing
 
 - verify event ingest under expected telemetry volume
 - verify object upload/download without observer proxying content
 - verify rate limit and retention behavior
-- verify multi-replica observer pods against one PostgreSQL database
+- verify multi-replica observer pods against one PostgreSQL database on
+  `k8s-nj-prod`
 
 ## Testing Strategy
+
+Cluster target:
+
+- use `kubectl --context k8s-nj-prod` for Kubernetes inspection and smoke checks
+- use `helm --kube-context k8s-nj-prod` for install, upgrade, rollback, and
+  rendered-release validation
+- use server `https://k8s-prod.nj.cs.ac.cn`
+- do not count local `kind`, `minikube`, or prod_test deployment as acceptance
+  testing unless the user explicitly changes this decision
 
 Unit tests:
 
@@ -588,7 +616,8 @@ Integration tests:
 
 Production smoke:
 
-- deploy local K8s or kind with PostgreSQL and MinIO through Helm
+- deploy to Kubernetes context `k8s-nj-prod` through Helm
+- run the migration Job on `k8s-nj-prod`
 - register driver/slave
 - verify no telemetry is accepted without ops key
 - enable telemetry explicitly and verify one event is accepted
