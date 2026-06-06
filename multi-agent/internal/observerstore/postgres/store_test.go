@@ -1,8 +1,12 @@
 package postgres
 
 import (
+	"database/sql"
+	"errors"
+	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,7 +21,79 @@ func testDSN(t *testing.T) string {
 	if dsn == "" {
 		t.Skip("set OBSERVER_POSTGRES_TEST_DSN to run PostgreSQL integration tests")
 	}
-	return dsn
+
+	schema := "observer_test_" + strconv.Itoa(os.Getpid()) + "_" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	adminDB, err := sql.Open("pgx", dsn)
+	require.NoError(t, err)
+
+	created := false
+	t.Cleanup(func() {
+		if created {
+			_, err := adminDB.Exec(`DROP SCHEMA IF EXISTS ` + quoteIdentifier(schema) + ` CASCADE`)
+			require.NoError(t, err)
+		}
+		require.NoError(t, adminDB.Close())
+	})
+
+	_, err = adminDB.Exec(`CREATE SCHEMA ` + quoteIdentifier(schema))
+	require.NoError(t, err)
+	created = true
+
+	isolatedDSN, err := dsnWithSearchPath(dsn, schema)
+	require.NoError(t, err)
+	return isolatedDSN
+}
+
+func dsnWithSearchPath(dsn, schema string) (string, error) {
+	if schema == "" {
+		return "", errors.New("postgres test schema must not be empty")
+	}
+
+	lower := strings.ToLower(dsn)
+	if strings.HasPrefix(lower, "postgres://") || strings.HasPrefix(lower, "postgresql://") {
+		parsed, err := url.Parse(dsn)
+		if err != nil {
+			return "", err
+		}
+		q := parsed.Query()
+		q.Set("search_path", schema)
+		parsed.RawQuery = q.Encode()
+		return parsed.String(), nil
+	}
+
+	trimmed := strings.TrimSpace(dsn)
+	if trimmed == "" || !strings.Contains(trimmed, "=") {
+		return "", errors.New("postgres test DSN must be a URL or keyword/value connection string")
+	}
+	return trimmed + " search_path=" + quoteKeywordValue(schema), nil
+}
+
+func quoteIdentifier(identifier string) string {
+	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`
+}
+
+func quoteKeywordValue(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `'`, `\'`)
+	return "'" + value + "'"
+}
+
+func TestDSNWithSearchPathURL(t *testing.T) {
+	got, err := dsnWithSearchPath("postgres://user:pass@localhost/testdb?sslmode=disable&search_path=public", "observer_test_123")
+	require.NoError(t, err)
+
+	parsed, err := url.Parse(got)
+	require.NoError(t, err)
+	require.Equal(t, "postgres", parsed.Scheme)
+	require.Equal(t, "disable", parsed.Query().Get("sslmode"))
+	require.Equal(t, "observer_test_123", parsed.Query().Get("search_path"))
+}
+
+func TestDSNWithSearchPathKeyword(t *testing.T) {
+	got, err := dsnWithSearchPath("host=localhost dbname=testdb sslmode=disable", "observer_test_123")
+	require.NoError(t, err)
+
+	require.Equal(t, "host=localhost dbname=testdb sslmode=disable search_path='observer_test_123'", got)
 }
 
 func TestMigrateCreatesCoreTables(t *testing.T) {
@@ -26,10 +102,7 @@ func TestMigrateCreatesCoreTables(t *testing.T) {
 	defer st.Close()
 
 	var exists bool
-	err = st.db.QueryRow(`SELECT EXISTS (
-		SELECT 1 FROM information_schema.tables
-		WHERE table_schema = 'public' AND table_name = 'events'
-	)`).Scan(&exists)
+	err = st.db.QueryRow(`SELECT to_regclass('events') IS NOT NULL`).Scan(&exists)
 	require.NoError(t, err)
 	require.True(t, exists)
 }
@@ -77,32 +150,40 @@ func TestPostgresStoreRegistrationAndEventProjection(t *testing.T) {
 	require.NoError(t, err)
 	defer st.Close()
 
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 10)
+	apiKeyID := "ak-test-" + suffix
+	apiKey := "secret-" + suffix
+	workspaceID := "ws-test-" + suffix
+	agentID := "driver-" + suffix
+	token := "token-driver-" + suffix
+	taskID := "task-" + suffix
+
 	require.NoError(t, st.ReplaceAPIKeys([]observerstore.APIKeySpec{
-		{ID: "ak-test", Key: "secret"},
+		{ID: apiKeyID, Key: apiKey},
 	}))
-	keyID, ok, err := st.LookupAPIKey("secret")
+	keyID, ok, err := st.LookupAPIKey(apiKey)
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.Equal(t, "ak-test", keyID)
+	require.Equal(t, apiKeyID, keyID)
 
-	require.NoError(t, st.UpsertWorkspaceLazy("ws1", "Workspace", keyID))
+	require.NoError(t, st.UpsertWorkspaceLazy(workspaceID, "Workspace", keyID))
 	require.NoError(t, st.UpsertAgent(observerstore.Agent{
-		WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "driver",
-	}, "token-driver", keyID))
+		WorkspaceID: workspaceID, ID: agentID, Role: observer.RoleDriver, DisplayName: "driver",
+	}, token, keyID))
 
-	agent, ok, err := st.ValidateToken("token-driver")
+	agent, ok, err := st.ValidateToken(token)
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.Equal(t, "ws1", agent.WorkspaceID)
+	require.Equal(t, workspaceID, agent.WorkspaceID)
 
 	err = st.Ingest(observer.Event{
-		EventID: "ev1", TS: "2026-06-07T00:00:00Z",
-		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
-		Type: observer.EventDriverTaskSubmitted, TaskID: "task1", Summary: "do it", Status: "assigned",
+		EventID: "ev-" + suffix, TS: "2026-06-07T00:00:00Z",
+		WorkspaceID: workspaceID, AgentID: agentID, AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: taskID, Summary: "do it", Status: "assigned",
 	})
 	require.NoError(t, err)
 
-	progress, found, err := st.GetTaskProgress("ws1", "task1")
+	progress, found, err := st.GetTaskProgress(workspaceID, taskID)
 	require.NoError(t, err)
 	require.True(t, found)
 	require.False(t, progress.IsFinal)
