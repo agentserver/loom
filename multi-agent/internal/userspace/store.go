@@ -34,12 +34,14 @@ type VersionRow struct {
 	Version            string
 	CreatedInWorkspace string
 	CreatedByAgentID   string
+	CreatedByUserID    string
 	ManifestJSON       []byte
 	SpecJSON           []byte // may be nil for kind=skill
 	CardMD             string
 	TarballSHA256      string
 	BlobSHA256         string
 	Status             string
+	Visibility         string
 	CreatedAt          string
 }
 
@@ -121,16 +123,19 @@ func (s *Store) InsertVersion(v VersionRow) error {
 	if v.Status == "" {
 		v.Status = "ready"
 	}
+	if v.Visibility == "" {
+		v.Visibility = "workspace"
+	}
 	v.CreatedAt = nowUTC()
 	res, err := s.db.Exec(`
 		INSERT OR IGNORE INTO userspace_package_versions
 		  (slug, version, created_in_workspace, created_by_agent_id,
 		   manifest_json, spec_json, card_md, tarball_sha256, blob_sha256,
-		   status, created_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		   status, visibility, created_by_user_id, created_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		v.Slug, v.Version, v.CreatedInWorkspace, v.CreatedByAgentID,
 		string(v.ManifestJSON), nullIfEmpty(v.SpecJSON), v.CardMD,
-		v.TarballSHA256, v.BlobSHA256, v.Status, v.CreatedAt)
+		v.TarballSHA256, v.BlobSHA256, v.Status, v.Visibility, v.CreatedByUserID, v.CreatedAt)
 	if err != nil {
 		return err
 	}
@@ -151,12 +156,12 @@ func (s *Store) GetVersion(slug, version string) (*VersionRow, error) {
 	err := s.db.QueryRow(`
 		SELECT slug, version, created_in_workspace, created_by_agent_id,
 		       manifest_json, spec_json, card_md, tarball_sha256, blob_sha256,
-		       status, created_at
+		       status, visibility, created_by_user_id, created_at
 		  FROM userspace_package_versions WHERE slug=? AND version=?`,
 		slug, version,
 	).Scan(&v.Slug, &v.Version, &v.CreatedInWorkspace, &v.CreatedByAgentID,
 		&v.ManifestJSON, &specJSON, &v.CardMD, &v.TarballSHA256, &v.BlobSHA256,
-		&v.Status, &v.CreatedAt)
+		&v.Status, &v.Visibility, &v.CreatedByUserID, &v.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -173,7 +178,7 @@ func (s *Store) GetVersion(slug, version string) (*VersionRow, error) {
 func (s *Store) ListVersions(slug string) ([]VersionRow, error) {
 	rows, err := s.db.Query(`
 		SELECT slug, version, created_in_workspace, created_by_agent_id,
-		       tarball_sha256, blob_sha256, status, created_at
+		       tarball_sha256, blob_sha256, status, visibility, created_by_user_id, created_at
 		  FROM userspace_package_versions WHERE slug=?
 		 ORDER BY created_at DESC`, slug)
 	if err != nil {
@@ -185,7 +190,7 @@ func (s *Store) ListVersions(slug string) ([]VersionRow, error) {
 		var v VersionRow
 		if err := rows.Scan(&v.Slug, &v.Version, &v.CreatedInWorkspace,
 			&v.CreatedByAgentID, &v.TarballSHA256, &v.BlobSHA256,
-			&v.Status, &v.CreatedAt); err != nil {
+			&v.Status, &v.Visibility, &v.CreatedByUserID, &v.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, v)

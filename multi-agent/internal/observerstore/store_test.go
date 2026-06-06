@@ -60,6 +60,63 @@ func TestOpenConfiguresSQLiteBusyTimeoutOnNewConnections(t *testing.T) {
 	require.GreaterOrEqual(t, busyTimeout, 5000)
 }
 
+func TestSchemaIncludesExternalIdentityColumns(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer s.Close()
+
+	require.Contains(t, tableColumns(t, s, "workspaces"), "external_user_id")
+	agentColumns := tableColumns(t, s, "agents")
+	require.Contains(t, agentColumns, "external_sandbox_id")
+	require.Contains(t, agentColumns, "external_user_id")
+}
+
+func TestUpsertAgentRecordsExternalIdentity(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer s.Close()
+	require.NoError(t, s.UpsertAPIKey(APIKeySpec{ID: "ak-test", Key: "test-key"}))
+
+	require.NoError(t, s.UpsertWorkspaceLazyWithExternalUser("ws-agentserver", "Agentserver WS", "ak-test", "user-1"))
+	require.NoError(t, s.UpsertAgentWithExternalIdentity(Agent{
+		WorkspaceID:       "ws-agentserver",
+		ID:                "short-1",
+		Role:              observer.RoleSlave,
+		DisplayName:       "Agentserver Slave",
+		ExternalSandboxID: "sandbox-1",
+		ExternalUserID:    "user-1",
+	}, "agentserver-token", "ak-test"))
+
+	var workspaceExternalUser string
+	require.NoError(t, s.db.QueryRow(`SELECT external_user_id FROM workspaces WHERE id=?`, "ws-agentserver").Scan(&workspaceExternalUser))
+	require.Equal(t, "user-1", workspaceExternalUser)
+
+	a, ok, err := s.ValidateToken("agentserver-token")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "sandbox-1", a.ExternalSandboxID)
+	require.Equal(t, "user-1", a.ExternalUserID)
+}
+
+func tableColumns(t *testing.T, s *Store, table string) map[string]bool {
+	t.Helper()
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	require.NoError(t, err)
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue interface{}
+		var pk int
+		require.NoError(t, rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk))
+		out[name] = true
+	}
+	require.NoError(t, rows.Err())
+	return out
+}
+
 func mustJSON(t *testing.T, v interface{}) []byte {
 	t.Helper()
 	out, err := json.Marshal(v)
