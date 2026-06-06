@@ -118,6 +118,15 @@ func (h *handler) postEvent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing telemetry api key", http.StatusForbidden)
 		return
 	}
+	telemetryKeyID, ok, err := h.s.LookupTelemetryAPIKey(telemetryKey, agent.WorkspaceID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.Error(w, "invalid telemetry api key", http.StatusForbidden)
+		return
+	}
 
 	var ev observer.Event
 	r.Body = http.MaxBytesReader(w, r.Body, h.maxEventBodyBytes)
@@ -143,15 +152,6 @@ func (h *handler) postEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	if ev.WorkspaceID != agent.WorkspaceID || ev.AgentID != agent.ID || ev.AgentRole != agent.Role {
 		http.Error(w, "workspace or agent mismatch", http.StatusForbidden)
-		return
-	}
-	telemetryKeyID, ok, err := h.s.LookupTelemetryAPIKey(telemetryKey, agent.WorkspaceID)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if !ok {
-		http.Error(w, "invalid telemetry api key", http.StatusForbidden)
 		return
 	}
 	rateKey := agent.WorkspaceID + "\x00" + agent.ID + "\x00" + telemetryKeyID

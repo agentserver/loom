@@ -156,6 +156,43 @@ func TestPostEventAcceptsValidTelemetryKey(t *testing.T) {
 	require.Equal(t, http.StatusAccepted, rr.Code, rr.Body.String())
 }
 
+func TestPostEventInvalidTelemetryKeyPrecedesIdentityValidation(t *testing.T) {
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-default", "ak_secret")
+	seedTelemetryKey(t, st, "ops", "ops-secret", "*")
+	registerBody := postRegister(t, h, "ak_secret",
+		`{"agent_id":"agent1","role":"slave","display_name":"Agent 1","workspace_id":"ws1"}`,
+		http.StatusOK)
+	token := extractToken(t, registerBody)
+	body := []byte(`{"workspace_id":"other-ws","agent_id":"other-agent","agent_role":"slave","type":"slave_task_started","task_id":"t1"}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Loom-Telemetry-Key", "bad")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code)
+	require.Contains(t, rr.Body.String(), "invalid telemetry api key")
+}
+
+func TestPostEventInvalidTelemetryKeyPrecedesJSONValidation(t *testing.T) {
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-default", "ak_secret")
+	seedTelemetryKey(t, st, "ops", "ops-secret", "*")
+	registerBody := postRegister(t, h, "ak_secret",
+		`{"agent_id":"agent1","role":"slave","display_name":"Agent 1","workspace_id":"ws1"}`,
+		http.StatusOK)
+	token := extractToken(t, registerBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/events", strings.NewReader(`{`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Loom-Telemetry-Key", "bad")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code)
+	require.Contains(t, rr.Body.String(), "invalid telemetry api key")
+}
+
 func TestPostEventRateLimit(t *testing.T) {
 	_, st := newTestHandler(t)
 	require.NoError(t, st.ReplaceTelemetryAPIKeys([]observerstore.TelemetryAPIKeySpec{
