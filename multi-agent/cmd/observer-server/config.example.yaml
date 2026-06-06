@@ -9,3 +9,15 @@ api_keys:
   - id: ak-personal
     key: REPLACE_ME_OPENSSL_RAND_HEX_32
     note: "main operator key"
+
+store:
+  driver: sqlite
+  sqlite:
+    path: observer.db
+  allow_sqlite_in_production: false
+
+object_store:
+  driver: filesystem
+
+telemetry:
+  enabled: false

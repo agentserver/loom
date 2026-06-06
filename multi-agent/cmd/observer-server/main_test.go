@@ -1,6 +1,10 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,6 +34,93 @@ func TestLoadDistributedObserverExampleConfig(t *testing.T) {
 	require.Equal(t, "observer.db", cfg.DBPath)
 	require.Len(t, cfg.APIKeys, 1)
 	require.Equal(t, "ak-dev", cfg.APIKeys[0].ID)
+}
+
+func TestLoadConfig_PostgresObjectStoreTelemetryAndGatewayDefaults(t *testing.T) {
+	cfg := loadConfigFromString(t, `
+listen_addr: ":8090"
+api_keys:
+  - id: ak-default
+    key: ak_secret
+store:
+  driver: postgres
+  postgres:
+    dsn_env: OBSERVER_DATABASE_URL
+object_store:
+  driver: s3
+  s3:
+    endpoint: s3.internal
+    bucket: observer-artifacts
+    access_key_env: OBSERVER_S3_ACCESS_KEY
+    secret_key_env: OBSERVER_S3_SECRET_KEY
+telemetry:
+  enabled: true
+  api_keys:
+    - id: ops-global
+      key_env: OBSERVER_TELEMETRY_KEY_GLOBAL
+      workspace_id: "*"
+`)
+	require.Equal(t, "postgres", cfg.Store.Driver)
+	require.Equal(t, "OBSERVER_DATABASE_URL", cfg.Store.Postgres.DSNEnv)
+	require.Equal(t, "s3", cfg.ObjectStore.Driver)
+	require.Equal(t, "observer-artifacts", cfg.ObjectStore.S3.Bucket)
+	require.True(t, cfg.Telemetry.Enabled)
+	require.Equal(t, "ops-global", cfg.Telemetry.APIKeys[0].ID)
+}
+
+func TestLoadConfig_RejectsProductionSQLiteWithoutOverride(t *testing.T) {
+	path := writeConfig(t, `
+api_keys:
+  - id: ak-default
+    key: ak_secret
+store:
+  driver: sqlite
+  sqlite:
+    path: observer.db
+production: true
+`)
+	_, err := loadConfig(path)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "sqlite store is not allowed in production")
+}
+
+func TestWithHealthHandlesLivenessReadinessAndApp(t *testing.T) {
+	app := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("app\n"))
+	})
+	handler := withHealth(app, func(ctx context.Context) error {
+		return nil
+	})
+
+	health := httptest.NewRecorder()
+	handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	require.Equal(t, http.StatusOK, health.Code)
+	require.Equal(t, "ok\n", health.Body.String())
+
+	ready := httptest.NewRecorder()
+	handler.ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	require.Equal(t, http.StatusOK, ready.Code)
+	require.Equal(t, "ready\n", ready.Body.String())
+
+	disallowed := httptest.NewRecorder()
+	handler.ServeHTTP(disallowed, httptest.NewRequest(http.MethodPost, "/healthz", nil))
+	require.Equal(t, http.StatusMethodNotAllowed, disallowed.Code)
+
+	passthrough := httptest.NewRecorder()
+	handler.ServeHTTP(passthrough, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
+	require.Equal(t, http.StatusOK, passthrough.Code)
+	require.Equal(t, "app\n", passthrough.Body.String())
+}
+
+func TestWithHealthReturnsUnavailableWhenReadyFails(t *testing.T) {
+	handler := withHealth(http.NotFoundHandler(), func(ctx context.Context) error {
+		return errors.New("database unavailable")
+	})
+
+	ready := httptest.NewRecorder()
+	handler.ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	require.Equal(t, http.StatusServiceUnavailable, ready.Code)
+	require.Contains(t, ready.Body.String(), "database unavailable")
 }
 
 func TestLoadConfigRejectsObsoleteWorkspacesField(t *testing.T) {
