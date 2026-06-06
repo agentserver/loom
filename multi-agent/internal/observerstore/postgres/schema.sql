@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
 CREATE TABLE IF NOT EXISTS workspaces (
   id text PRIMARY KEY,
   name text NOT NULL DEFAULT '',
-  created_by_api_key_id text NOT NULL REFERENCES api_keys(id),
+  created_by_api_key_id text NOT NULL,
   created_at timestamptz NOT NULL,
   last_seen_at timestamptz NOT NULL
 );
@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS agents (
   role text NOT NULL,
   display_name text NOT NULL,
   token_hash text NOT NULL,
-  created_by_api_key_id text NOT NULL REFERENCES api_keys(id),
+  created_by_api_key_id text NOT NULL,
   PRIMARY KEY (workspace_id, id)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_token_hash ON agents(token_hash);
