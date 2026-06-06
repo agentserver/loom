@@ -2,6 +2,7 @@ package observerweb
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/yourorg/multi-agent/internal/identity"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/observerstore"
 )
@@ -92,6 +94,22 @@ func seedSecondWorkspaceAgent(t *testing.T, st *observerstore.Store) {
 	))
 }
 
+type fakeIdentityResolver struct {
+	byToken map[string]identity.Identity
+	err     error
+}
+
+func (f fakeIdentityResolver) Resolve(_ context.Context, token string) (identity.Identity, error) {
+	if f.err != nil {
+		return identity.Identity{}, f.err
+	}
+	ident, ok := f.byToken[token]
+	if !ok {
+		return identity.Identity{}, identity.ErrInvalid
+	}
+	return ident, nil
+}
+
 // ---------------------------------------------------------------------------
 // Event / view tests (non-register)
 // ---------------------------------------------------------------------------
@@ -109,6 +127,63 @@ func TestPostEventAuth(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusAccepted, rr.Code)
+}
+
+func TestPostEventAgentserverIdentity(t *testing.T) {
+	_, st := newTestHandler(t)
+	h := NewWithResolver(st, nil, fakeIdentityResolver{byToken: map[string]identity.Identity{
+		"proxy-token": {
+			UserID:      "user-1",
+			WorkspaceID: "ws1",
+			AgentID:     "agentserver-driver",
+			Role:        observer.RoleDriver,
+			SandboxID:   "sandbox-1",
+			Source:      identity.SourceAgentserver,
+		},
+	}})
+
+	body, _ := json.Marshal(observer.Event{
+		WorkspaceID: "ws1", AgentID: "agentserver-driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "t-agentserver", Summary: "build thing", Status: "assigned",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer proxy-token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusAccepted, rr.Code, rr.Body.String())
+
+	count, err := st.EventCount()
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+}
+
+func TestPostEventIdentityErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantRetry  string
+	}{
+		{name: "invalid", err: identity.ErrInvalid, wantStatus: http.StatusUnauthorized},
+		{name: "revoked", err: identity.ErrRevoked, wantStatus: http.StatusForbidden},
+		{name: "upstream", err: identity.ErrUpstream, wantStatus: http.StatusServiceUnavailable, wantRetry: "5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, st := newTestHandler(t)
+			h := NewWithResolver(st, nil, fakeIdentityResolver{err: tc.err})
+			body, _ := json.Marshal(observer.Event{
+				WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+				Type: observer.EventDriverTaskSubmitted, TaskID: "t1",
+			})
+			req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer token")
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+
+			require.Equal(t, tc.wantStatus, rr.Code, rr.Body.String())
+			require.Equal(t, tc.wantRetry, rr.Header().Get("Retry-After"))
+		})
+	}
 }
 
 func TestPostEventRejectsWrongAgent(t *testing.T) {
