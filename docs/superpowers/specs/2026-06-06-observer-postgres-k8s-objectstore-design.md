@@ -403,6 +403,7 @@ deploy/charts/observer/
     _helpers.tpl
     deployment.yaml
     service.yaml
+    httproute.yaml
     configmap.yaml
     secret.yaml
     migration-job.yaml
@@ -432,6 +433,57 @@ Deployment template:
 - read DB DSN, telemetry keys, and object-store credentials from Secret
 - set resource requests and limits
 - configure liveness and readiness probes
+
+Gateway API HTTPRoute template:
+
+- follow the current agentserver Helm chart style from
+  `deploy/helm/agentserver/templates/httproute.yaml`
+- use `apiVersion: gateway.networking.k8s.io/v1`
+- gate rendering behind `gateway.enabled`
+- configure parent Gateways through `gateway.parentRefs`
+- configure the external hostname through `gateway.host`
+- route `PathPrefix /` to the observer Service `backendRefs`
+- do not add URL rewrites for observer's main route
+
+Expected values shape:
+
+```yaml
+gateway:
+  enabled: false
+  parentRefs:
+    - name: cilium-gateway
+      namespace: cilium-gateway
+  host: observer.example.com
+```
+
+Expected template shape:
+
+```yaml
+{{- if .Values.gateway.enabled }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "observer.fullname" . }}
+spec:
+  parentRefs:
+    {{- toYaml .Values.gateway.parentRefs | nindent 4 }}
+  hostnames:
+    - {{ .Values.gateway.host | quote }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: {{ include "observer.fullname" . }}
+          port: {{ .Values.service.port }}
+{{- end }}
+```
+
+If a future observer subdomain needs an internal path mount, use the
+agentserver `codex-auth` precedent: a dedicated HTTPRoute with
+`filters.type: URLRewrite` and `urlRewrite.path.type: ReplacePrefixMatch`.
+The main observer route must stay un-rewritten.
 
 Health endpoints:
 
@@ -501,6 +553,8 @@ Phase 4: Object store
 Phase 5: Helm deployment
 
 - add Helm chart under `deploy/charts/observer/`
+- add Gateway API `HTTPRoute` template using the same values shape as the
+  current agentserver Helm chart
 - add migration Job and retention CronJob
 - add MinIO local values file
 - document production Secret requirements
@@ -530,7 +584,7 @@ Integration tests:
 - telemetry key workspace scope enforcement
 - artifact/write metadata round trip with MinIO
 - Helm chart renders expected Deployment, Service, Job, CronJob, ConfigMap,
-  Secret references, and optional Ingress
+  Secret references, optional Ingress, and Gateway API HTTPRoute
 
 Production smoke:
 
