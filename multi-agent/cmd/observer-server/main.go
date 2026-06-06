@@ -14,6 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/yourorg/multi-agent/internal/observerstore"
+	pgobs "github.com/yourorg/multi-agent/internal/observerstore/postgres"
 	"github.com/yourorg/multi-agent/internal/observerweb"
 	"github.com/yourorg/multi-agent/internal/userspace"
 )
@@ -102,8 +103,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	sqlitePath := effectiveSQLitePath(cfg)
-	st, err := observerstore.Open(sqlitePath)
+	st, err := openObserverStore(cfg)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func main() {
 	if err := userspace.Migrate(st.DB()); err != nil {
 		log.Fatalf("userspace migrate: %v", err)
 	}
-	blobRoot := userspaceBlobRoot(sqlitePath)
+	blobRoot := userspaceBlobRoot(effectiveSQLitePath(cfg))
 	blobs, err := userspace.NewBlobStore(st.DB(), blobRoot)
 	if err != nil {
 		log.Fatalf("userspace blob store: %v", err)
@@ -140,6 +140,30 @@ func main() {
 		return st.DB().PingContext(ctx)
 	}))
 	log.Fatal(srv.ListenAndServe())
+}
+
+func openObserverStore(cfg *Config) (observerstore.ManagedStore, error) {
+	switch cfg.Store.Driver {
+	case "sqlite":
+		return observerstore.Open(cfg.Store.SQLite.Path)
+	case "postgres":
+		dsn := os.Getenv(cfg.Store.Postgres.DSNEnv)
+		if dsn == "" {
+			return nil, fmt.Errorf("%s is required", cfg.Store.Postgres.DSNEnv)
+		}
+		lifetime, err := time.ParseDuration(cfg.Store.Postgres.ConnMaxLifetime)
+		if err != nil {
+			return nil, fmt.Errorf("store.postgres.conn_max_lifetime: %w", err)
+		}
+		return pgobs.Open(pgobs.Config{
+			DSN:             dsn,
+			MaxOpenConns:    cfg.Store.Postgres.MaxOpenConns,
+			MaxIdleConns:    cfg.Store.Postgres.MaxIdleConns,
+			ConnMaxLifetime: lifetime,
+		})
+	default:
+		return nil, fmt.Errorf("unsupported store driver %q", cfg.Store.Driver)
+	}
 }
 
 func loadConfig(path string) (*Config, error) {
