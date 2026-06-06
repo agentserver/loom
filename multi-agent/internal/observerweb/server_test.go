@@ -21,7 +21,7 @@ import (
 
 // newTestHandler creates a fresh store + HTTP handler pair backed by a
 // temporary on-disk SQLite database (avoids multi-connection ":memory:" issues).
-func newTestHandler(t *testing.T) (http.Handler, *observerstore.SQLiteStore) {
+func newTestHandler(t *testing.T) (http.Handler, *observerstore.Store) {
 	t.Helper()
 	st, err := observerstore.New(filepath.Join(t.TempDir(), "observer.db"))
 	require.NoError(t, err)
@@ -30,7 +30,7 @@ func newTestHandler(t *testing.T) (http.Handler, *observerstore.SQLiteStore) {
 }
 
 // seedAPIKey adds one api_key row to st.
-func seedAPIKey(t *testing.T, st *observerstore.SQLiteStore, id, key string) {
+func seedAPIKey(t *testing.T, st *observerstore.Store, id, key string) {
 	t.Helper()
 	require.NoError(t, st.UpsertAPIKey(observerstore.APIKeySpec{ID: id, Key: key}))
 }
@@ -61,7 +61,7 @@ func extractToken(t *testing.T, body string) string {
 
 // seedWorkspaceAndAgents is a helper that sets up a workspace with some agents
 // for tests that don't exercise the register endpoint.
-func seedWorkspaceAndAgents(t *testing.T, st *observerstore.SQLiteStore) {
+func seedWorkspaceAndAgents(t *testing.T, st *observerstore.Store) {
 	t.Helper()
 	require.NoError(t, st.UpsertAPIKey(observerstore.APIKeySpec{ID: "ak-seed", Key: "seed-key"}))
 	require.NoError(t, st.UpsertWorkspaceLazy("ws1", "Workspace", "ak-seed"))
@@ -82,7 +82,7 @@ func seedWorkspaceAndAgents(t *testing.T, st *observerstore.SQLiteStore) {
 // seedSecondWorkspaceAgent provisions a second workspace with one driver agent
 // bound to a distinct bearer token ("other-token"). Used to verify cross-
 // workspace isolation on tokened lookup endpoints.
-func seedSecondWorkspaceAgent(t *testing.T, st *observerstore.SQLiteStore) {
+func seedSecondWorkspaceAgent(t *testing.T, st *observerstore.Store) {
 	t.Helper()
 	require.NoError(t, st.UpsertAPIKey(observerstore.APIKeySpec{ID: "ak-seed-2", Key: "seed-key-2"}))
 	require.NoError(t, st.UpsertWorkspaceLazy("ws2", "Other", "ak-seed-2"))
@@ -445,10 +445,10 @@ func TestRegisterRejectsBadAgentID(t *testing.T) {
 	seedAPIKey(t, st, "ak-default", "ak_real")
 
 	cases := []string{
-		`{"agent_id":"","role":"slave","workspace_id":"ws1"}`,                                // empty
-		`{"agent_id":"has space","role":"slave","workspace_id":"ws1"}`,                       // space
-		`{"agent_id":"weird/slash","role":"slave","workspace_id":"ws1"}`,                     // slash
-		`{"agent_id":"` + strings.Repeat("a", 65) + `","role":"slave","workspace_id":"ws1"}`, // too long
+		`{"agent_id":"","role":"slave","workspace_id":"ws1"}`,                                     // empty
+		`{"agent_id":"has space","role":"slave","workspace_id":"ws1"}`,                            // space
+		`{"agent_id":"weird/slash","role":"slave","workspace_id":"ws1"}`,                          // slash
+		`{"agent_id":"` + strings.Repeat("a", 65) + `","role":"slave","workspace_id":"ws1"}`,     // too long
 	}
 	for _, body := range cases {
 		postRegister(t, h, "ak_real", body, http.StatusBadRequest)

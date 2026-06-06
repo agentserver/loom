@@ -21,7 +21,33 @@ import (
 
 const maxEventBodyBytes = 1 << 20
 
-type Store = observerstore.Store
+type Store interface {
+	ValidateToken(token string) (observerstore.Agent, bool, error)
+	Ingest(ev observer.Event) error
+	GetTaskProgress(workspaceID, taskID string) (observerstore.TaskProgress, bool, error)
+	CreateArtifact(observerstore.ArtifactCreate) (observerstore.Artifact, error)
+	RequestArtifact(workspaceID, requesterAgentID, artifactID string) (observerstore.ArtifactRequest, error)
+	ListArtifactRequests(workspaceID, ownerAgentID string) ([]observerstore.ArtifactRequest, error)
+	StoreArtifactContent(workspaceID, ownerAgentID, artifactID, mime string, body io.Reader) error
+	OpenArtifactContent(workspaceID, artifactID string) (observerstore.ArtifactContent, error)
+	CreateWrite(observerstore.WriteCreate) (observerstore.Write, error)
+	StoreWriteContent(workspaceID, writerAgentID, writeID, mime string, body io.Reader) error
+	UpdateWriteTaskID(workspaceID, ownerAgentID, writeID, taskID string) error
+	ListCompletedWrites(workspaceID, ownerAgentID, taskID string) ([]observerstore.Write, error)
+	SaveTaskContract(observerstore.TaskContractRecord) error
+	GetTaskContract(workspaceID, taskID string) (observerstore.TaskContractRecord, error)
+	SaveResourceSnapshot(observerstore.ResourceSnapshotRecord) error
+	GetLatestResourceSnapshot(workspaceID string) (observerstore.ResourceSnapshotRecord, error)
+
+	// Workspace listing.
+	ListWorkspaceSummaries() ([]observerstore.WorkspaceSummary, error)
+
+	// API-key registration support.
+	LookupAPIKey(key string) (keyID string, ok bool, err error)
+	UpsertWorkspaceLazy(id, name, apiKeyID string) error
+	AgentBoundWorkspace(agentID string) (workspaceID string, found bool, err error)
+	UpsertAgent(a observerstore.Agent, token, apiKeyID string) error
+}
 
 // New constructs the observerweb HTTP handler. If usHandler is non-nil,
 // /api/userspace/* routes are mounted on the same mux.

@@ -14,7 +14,7 @@ import (
 	"github.com/yourorg/multi-agent/internal/observer"
 )
 
-func testStore(t *testing.T) *SQLiteStore {
+func testStore(t *testing.T) *Store {
 	t.Helper()
 
 	s, err := Open(filepath.Join(t.TempDir(), "observer.db"))
