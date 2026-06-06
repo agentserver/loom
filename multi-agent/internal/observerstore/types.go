@@ -185,10 +185,6 @@ type TaskProgress struct {
 }
 
 type Store interface {
-	Close() error
-	DB() *sql.DB
-	ReplaceAPIKeys(keys []APIKeySpec) error
-	UpsertAPIKey(spec APIKeySpec) error
 	LookupAPIKey(key string) (keyID string, ok bool, err error)
 	UpsertWorkspaceLazy(id, name, apiKeyID string) error
 	AgentBoundWorkspace(agentID string) (workspaceID string, found bool, err error)
@@ -210,5 +206,11 @@ type Store interface {
 	SaveResourceSnapshot(ResourceSnapshotRecord) error
 	GetLatestResourceSnapshot(workspaceID string) (ResourceSnapshotRecord, error)
 	ListWorkspaceSummaries() ([]WorkspaceSummary, error)
-	EventCount() (int, error)
+}
+
+type ManagedStore interface {
+	Store
+	Close() error
+	DB() *sql.DB
+	ReplaceAPIKeys(keys []APIKeySpec) error
 }
