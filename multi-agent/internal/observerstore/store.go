@@ -2,7 +2,6 @@ package observerstore
 
 import (
 	"bytes"
-	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	_ "embed"
@@ -13,7 +12,6 @@ import (
 	"io"
 	"net/url"
 	"strings"
-	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -198,7 +196,7 @@ func (s *SQLiteStore) UpsertWorkspaceLazy(id, name, apiKeyID string) error {
 	if apiKeyID == "" {
 		return errors.New("observerstore: apiKeyID must not be empty")
 	}
-	now := nowUTC()
+	now := NowUTC()
 	_, err := s.db.Exec(
 		`INSERT INTO workspaces(id, name, created_by_api_key_id, created_at, last_seen_at)
          VALUES(?, ?, ?, ?, ?)
@@ -222,7 +220,7 @@ func (s *SQLiteStore) UpsertAgent(a Agent, token, apiKeyID string) error {
             role = excluded.role,
             display_name = excluded.display_name,
             token_hash = excluded.token_hash`,
-		a.WorkspaceID, a.ID, a.Role, a.DisplayName, tokenHash(token), apiKeyID,
+		a.WorkspaceID, a.ID, a.Role, a.DisplayName, TokenHash(token), apiKeyID,
 	)
 	return err
 }
@@ -284,7 +282,7 @@ func (s *SQLiteStore) UpsertAPIKey(spec APIKeySpec) error {
          ON CONFLICT(id) DO UPDATE SET
             key_hash = excluded.key_hash,
             note = excluded.note`,
-		spec.ID, tokenHash(spec.Key), spec.Note, nowUTC(),
+		spec.ID, TokenHash(spec.Key), spec.Note, NowUTC(),
 	)
 	return err
 }
@@ -297,7 +295,7 @@ func (s *SQLiteStore) LookupAPIKey(key string) (keyID string, ok bool, err error
 	}
 	err = s.db.QueryRow(
 		`SELECT id FROM api_keys WHERE key_hash=?`,
-		tokenHash(key),
+		TokenHash(key),
 	).Scan(&keyID)
 	if err == sql.ErrNoRows {
 		return "", false, nil
@@ -326,7 +324,7 @@ func (s *SQLiteStore) ReplaceAPIKeys(keys []APIKeySpec) error {
 		if seenID[k.ID] {
 			return fmt.Errorf("observerstore: duplicate api key id %q", k.ID)
 		}
-		h := tokenHash(k.Key)
+		h := TokenHash(k.Key)
 		if seenHash[h] {
 			return fmt.Errorf("observerstore: duplicate api key value (id=%q)", k.ID)
 		}
@@ -341,11 +339,11 @@ func (s *SQLiteStore) ReplaceAPIKeys(keys []APIKeySpec) error {
 	if _, err := tx.Exec(`DELETE FROM api_keys`); err != nil {
 		return err
 	}
-	now := nowUTC()
+	now := NowUTC()
 	for _, k := range keys {
 		if _, err := tx.Exec(
 			`INSERT INTO api_keys(id, key_hash, note, created_at) VALUES(?, ?, ?, ?)`,
-			k.ID, tokenHash(k.Key), k.Note, now,
+			k.ID, TokenHash(k.Key), k.Note, now,
 		); err != nil {
 			return err
 		}
@@ -382,7 +380,7 @@ func (s *SQLiteStore) ValidateToken(token string) (Agent, bool, error) {
 		return Agent{}, false, nil
 	}
 	var a Agent
-	err := s.db.QueryRow(`SELECT workspace_id, id, role, display_name FROM agents WHERE token_hash=?`, tokenHash(token)).
+	err := s.db.QueryRow(`SELECT workspace_id, id, role, display_name FROM agents WHERE token_hash=?`, TokenHash(token)).
 		Scan(&a.WorkspaceID, &a.ID, &a.Role, &a.DisplayName)
 	if err == sql.ErrNoRows {
 		return Agent{}, false, nil
@@ -442,11 +440,11 @@ func (s *SQLiteStore) EventCount() (int, error) {
 
 func (s *SQLiteStore) Ingest(ev observer.Event) error {
 	if ev.TS == "" {
-		ev.TS = nowUTC()
+		ev.TS = NowUTC()
 	}
 	if ev.EventID == "" {
 		var err error
-		ev.EventID, err = generatedEventID()
+		ev.EventID, err = GeneratedEventID()
 		if err != nil {
 			return err
 		}
@@ -465,9 +463,9 @@ func (s *SQLiteStore) Ingest(ev observer.Event) error {
 	result, err := tx.Exec(`INSERT OR IGNORE INTO events(event_id, ts, workspace_id, agent_id, agent_role, type, task_id, parent_task_id, subtask_id, child_task_id, summary, subtask_summary, status, target_agent_id, target_role, mcp_server_name, mcp_tools, payload)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ev.EventID, ev.TS, ev.WorkspaceID, ev.AgentID, ev.AgentRole, ev.Type, ev.TaskID,
-		nullString(ev.ParentTaskID), nullString(ev.SubtaskID), nullString(ev.ChildTaskID),
-		nullString(ev.Summary), nullString(ev.SubtaskSummary), nullString(ev.Status),
-		nullString(ev.TargetAgentID), nullString(ev.TargetRole), nullString(ev.MCPServerName),
+		NullString(ev.ParentTaskID), NullString(ev.SubtaskID), NullString(ev.ChildTaskID),
+		NullString(ev.Summary), NullString(ev.SubtaskSummary), NullString(ev.Status),
+		NullString(ev.TargetAgentID), NullString(ev.TargetRole), NullString(ev.MCPServerName),
 		string(tools), string(ev.Payload))
 	if err != nil {
 		return err
@@ -589,11 +587,11 @@ func (s *SQLiteStore) CreateArtifact(in ArtifactCreate) (Artifact, error) {
 	if in.WorkspaceID == "" || in.OwnerAgentID == "" || in.Path == "" || in.Kind == "" {
 		return Artifact{}, errors.New("observerstore: workspace, owner, path, and kind are required")
 	}
-	id, err := prefixedID("art")
+	id, err := PrefixedID("art")
 	if err != nil {
 		return Artifact{}, err
 	}
-	now := nowUTC()
+	now := NowUTC()
 	_, err = s.db.Exec(`INSERT INTO artifacts(workspace_id, id, owner_agent_id, path, kind, mime, state, bytes, sha256, created_at, updated_at)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		in.WorkspaceID, id, in.OwnerAgentID, in.Path, in.Kind, in.MIME, in.State, in.Bytes, in.SHA256, now, now)
@@ -628,11 +626,11 @@ func (s *SQLiteStore) RequestArtifact(workspaceID, requesterAgentID, artifactID 
 	}
 	if existing == "" {
 		var genErr error
-		existing, genErr = prefixedID("fetch")
+		existing, genErr = PrefixedID("fetch")
 		if genErr != nil {
 			return ArtifactRequest{}, genErr
 		}
-		now := nowUTC()
+		now := NowUTC()
 		_, err = s.db.Exec(`INSERT INTO artifact_requests(workspace_id, id, artifact_id, requester_agent_id, owner_agent_id, state, created_at, updated_at)
 			VALUES(?, ?, ?, ?, ?, ?, ?, ?)`, workspaceID, existing, artifactID, requesterAgentID, owner, ArtifactStatePending, now, now)
 		if err != nil {
@@ -669,7 +667,7 @@ func (s *SQLiteStore) StoreArtifactContent(workspaceID, ownerAgentID, artifactID
 	if err != nil {
 		return err
 	}
-	now := nowUTC()
+	now := NowUTC()
 	res, err := s.db.Exec(`UPDATE artifacts SET state=?, mime=CASE WHEN ?='' THEN mime ELSE ? END, bytes=?, sha256=?, content=?, updated_at=?
 		WHERE workspace_id=? AND id=? AND owner_agent_id=?`,
 		ArtifactStateAvailable, mime, mime, len(data), sha, data, now, workspaceID, artifactID, ownerAgentID)
@@ -712,11 +710,11 @@ func (s *SQLiteStore) CreateWrite(in WriteCreate) (Write, error) {
 	if in.WorkspaceID == "" || in.OwnerAgentID == "" || in.TaskID == "" || in.Path == "" {
 		return Write{}, errors.New("observerstore: workspace, owner, task, and path are required")
 	}
-	id, err := prefixedID("wr")
+	id, err := PrefixedID("wr")
 	if err != nil {
 		return Write{}, err
 	}
-	now := nowUTC()
+	now := NowUTC()
 	overwrite := 0
 	if in.Overwrite {
 		overwrite = 1
@@ -734,7 +732,7 @@ func (s *SQLiteStore) StoreWriteContent(workspaceID, writerAgentID, writeID, mim
 	if err != nil {
 		return err
 	}
-	now := nowUTC()
+	now := NowUTC()
 	res, err := s.db.Exec(`UPDATE writes SET writer_agent_id=?, state=?, mime=?, bytes=?, sha256=?, content=?, updated_at=?
 		WHERE workspace_id=? AND id=? AND state=?`,
 		writerAgentID, WriteStateCompleted, mime, len(data), sha, data, now, workspaceID, writeID, WriteStateRegistered)
@@ -756,7 +754,7 @@ func (s *SQLiteStore) UpdateWriteTaskID(workspaceID, ownerAgentID, writeID, task
 		return errors.New("observerstore: task_id is required")
 	}
 	res, err := s.db.Exec(`UPDATE writes SET task_id=?, updated_at=? WHERE workspace_id=? AND owner_agent_id=? AND id=?`,
-		taskID, nowUTC(), workspaceID, ownerAgentID, writeID)
+		taskID, NowUTC(), workspaceID, ownerAgentID, writeID)
 	if err != nil {
 		return err
 	}
@@ -799,7 +797,7 @@ func (s *SQLiteStore) SaveTaskContract(in TaskContractRecord) error {
 	if in.WorkspaceID == "" || in.TaskID == "" || in.ConversationID == "" || in.OwnerAgentID == "" || len(in.Body) == 0 {
 		return errors.New("observerstore: workspace, task, conversation, owner, and body are required")
 	}
-	now := nowUTC()
+	now := NowUTC()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -853,7 +851,7 @@ func (s *SQLiteStore) SaveResourceSnapshot(in ResourceSnapshotRecord) error {
 	if in.WorkspaceID == "" || in.SnapshotID == "" || in.OwnerAgentID == "" || len(in.Body) == 0 {
 		return errors.New("observerstore: workspace, snapshot, owner, and body are required")
 	}
-	now := nowUTC()
+	now := NowUTC()
 	_, err := s.db.Exec(`INSERT INTO resource_snapshots(workspace_id, snapshot_id, owner_agent_id, body, created_at)
 		VALUES(?, ?, ?, ?, ?)`, in.WorkspaceID, in.SnapshotID, in.OwnerAgentID, string(in.Body), now)
 	return err
@@ -975,7 +973,7 @@ func upsertDriverTask(tx *sql.Tx, ev observer.Event) error {
 			has_mcp=CASE WHEN tasks.has_mcp=1 OR excluded.has_mcp=1 THEN 1 ELSE 0 END,
 			mcp_status=CASE WHEN tasks.mcp_status='created' THEN tasks.mcp_status WHEN excluded.mcp_status!='' THEN excluded.mcp_status ELSE tasks.mcp_status END,
 			updated_at=excluded.updated_at`,
-		ev.WorkspaceID, ev.TaskID, ev.AgentID, nullString(masterID), nullString(slaveID), summary, valueOr(ev.Status, "assigned"),
+		ev.WorkspaceID, ev.TaskID, ev.AgentID, NullString(masterID), NullString(slaveID), summary, valueOr(ev.Status, "assigned"),
 		ev.WorkspaceID, ev.TaskID, ev.TaskID, ev.WorkspaceID, ev.TaskID, ev.TaskID, ev.TS, ev.TS)
 	return err
 }
@@ -1014,11 +1012,11 @@ func updateTaskStatus(tx *sql.Tx, ev observer.Event) error {
 func updateLatestProgress(tx *sql.Tx, ev observer.Event) error {
 	message := payloadString(ev.Payload, "message")
 	if !message.Valid {
-		message = nullString(ev.Summary)
+		message = NullString(ev.Summary)
 	}
 	phase := payloadString(ev.Payload, "phase")
 	if !phase.Valid {
-		phase = nullString(ev.Type)
+		phase = NullString(ev.Type)
 	}
 
 	parentTaskID, subtaskID := linkedParentAndSubtask(tx, ev)
@@ -1076,7 +1074,7 @@ func upsertSubtask(tx *sql.Tx, ev observer.Event) error {
 			display_label=excluded.display_label,
 			status=excluded.status,
 			updated_at=excluded.updated_at`,
-		ev.WorkspaceID, parentTaskID, subtaskID, nullString(ev.ChildTaskID), ev.AgentID, nullString(ev.TargetAgentID),
+		ev.WorkspaceID, parentTaskID, subtaskID, NullString(ev.ChildTaskID), ev.AgentID, NullString(ev.TargetAgentID),
 		subtaskSummary, displayLabel, valueOr(ev.Status, "assigned"), ev.TS, ev.TS)
 	if err != nil {
 		return err
@@ -1146,7 +1144,7 @@ func updateSubtaskDone(tx *sql.Tx, ev observer.Event, parentTaskID, subtaskID st
 	displayLabel := joinLabel(parentSummary, subtaskSummary)
 	_, err = tx.Exec(`INSERT INTO subtasks(workspace_id, parent_task_id, subtask_id, child_task_id, master_agent_id, slave_agent_id, summary, display_label, status, output, error, created_at, updated_at)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		ev.WorkspaceID, parentTaskID, subtaskID, nullString(ev.ChildTaskID), ev.AgentID, nullString(ev.TargetAgentID),
+		ev.WorkspaceID, parentTaskID, subtaskID, NullString(ev.ChildTaskID), ev.AgentID, NullString(ev.TargetAgentID),
 		subtaskSummary, displayLabel, status, output, eventErr, ev.TS, ev.TS)
 	return err
 }
@@ -1168,7 +1166,7 @@ func upsertMCPServer(tx *sql.Tx, ev observer.Event) error {
 			slave_agent_id=excluded.slave_agent_id,
 			tools=excluded.tools,
 			tool_descriptors=COALESCE(excluded.tool_descriptors, mcp_servers.tool_descriptors)`,
-		ev.WorkspaceID, ev.TaskID, nullString(parentTaskID), ev.AgentID, ev.MCPServerName, string(tools), nullString(string(descriptors)), ev.TS)
+		ev.WorkspaceID, ev.TaskID, NullString(parentTaskID), ev.AgentID, ev.MCPServerName, string(tools), NullString(string(descriptors)), ev.TS)
 	if err != nil {
 		return err
 	}
@@ -1306,27 +1304,6 @@ func linkedParentAndSubtask(tx *sql.Tx, ev observer.Event) (string, string) {
 	return parentTaskID, subtaskID
 }
 
-func tokenHash(token string) string {
-	sum := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(sum[:])
-}
-
-func generatedEventID() (string, error) {
-	var bytes [16]byte
-	if _, err := rand.Read(bytes[:]); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(bytes[:]), nil
-}
-
-func prefixedID(prefix string) (string, error) {
-	id, err := generatedEventID()
-	if err != nil {
-		return "", err
-	}
-	return prefix + "_" + id, nil
-}
-
 func readAndHash(r io.Reader) ([]byte, string, error) {
 	var buf bytes.Buffer
 	hasher := sha256.New()
@@ -1366,14 +1343,6 @@ func isTerminalStatus(status string) bool {
 	default:
 		return false
 	}
-}
-
-func nowUTC() string {
-	return time.Now().UTC().Format(time.RFC3339Nano)
-}
-
-func nullString(value string) sql.NullString {
-	return sql.NullString{String: value, Valid: value != ""}
 }
 
 func payloadString(payload json.RawMessage, field string) sql.NullString {

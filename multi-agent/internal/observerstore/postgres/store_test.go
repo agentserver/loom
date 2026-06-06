@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/yourorg/multi-agent/internal/observer"
+	"github.com/yourorg/multi-agent/internal/observerstore"
 )
 
 func testDSN(t *testing.T) string {
@@ -68,4 +70,40 @@ func TestSchemaPermitsAPIKeyDeleteWithDependentRows(t *testing.T) {
 
 	_, err = tx.Exec(`DELETE FROM api_keys WHERE id = $1`, apiKeyID)
 	require.NoError(t, err)
+}
+
+func TestPostgresStoreRegistrationAndEventProjection(t *testing.T) {
+	st, err := Open(Config{DSN: testDSN(t)})
+	require.NoError(t, err)
+	defer st.Close()
+
+	require.NoError(t, st.ReplaceAPIKeys([]observerstore.APIKeySpec{
+		{ID: "ak-test", Key: "secret"},
+	}))
+	keyID, ok, err := st.LookupAPIKey("secret")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "ak-test", keyID)
+
+	require.NoError(t, st.UpsertWorkspaceLazy("ws1", "Workspace", keyID))
+	require.NoError(t, st.UpsertAgent(observerstore.Agent{
+		WorkspaceID: "ws1", ID: "driver", Role: observer.RoleDriver, DisplayName: "driver",
+	}, "token-driver", keyID))
+
+	agent, ok, err := st.ValidateToken("token-driver")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "ws1", agent.WorkspaceID)
+
+	err = st.Ingest(observer.Event{
+		EventID: "ev1", TS: "2026-06-07T00:00:00Z",
+		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "task1", Summary: "do it", Status: "assigned",
+	})
+	require.NoError(t, err)
+
+	progress, found, err := st.GetTaskProgress("ws1", "task1")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.False(t, progress.IsFinal)
 }
