@@ -60,6 +60,41 @@ func TestVersionVisibilityRoundTrip(t *testing.T) {
 	require.Equal(t, "user-1", v.CreatedByUserID)
 }
 
+func TestVisibilityFiltering(t *testing.T) {
+	db := newTestDB(t)
+	s := NewStore(db)
+	_, err := db.Exec(`INSERT INTO workspaces(id) VALUES('ws-a'),('ws-b')`)
+	require.NoError(t, err)
+	require.NoError(t, s.UpsertPackage(PackageRow{Slug: "workspace_pkg", Kind: "mcp"}))
+	require.NoError(t, s.UpsertPackage(PackageRow{Slug: "user_pkg", Kind: "mcp"}))
+	require.NoError(t, s.UpsertPackage(PackageRow{Slug: "public_pkg", Kind: "mcp"}))
+	for _, h := range []string{"h1", "h2", "h3"} {
+		_, err = db.Exec(`INSERT INTO userspace_blobs(sha256,size_bytes,blob_path,created_at) VALUES(?,10,?,?)`, h, h, nowUTC())
+		require.NoError(t, err)
+	}
+	require.NoError(t, s.InsertVersion(VersionRow{Slug: "workspace_pkg", Version: "1.0.0",
+		CreatedInWorkspace: "ws-a", CreatedByAgentID: "agent-a",
+		ManifestJSON: []byte(`{}`), CardMD: "workspace", TarballSHA256: "h1", BlobSHA256: "h1"}))
+	require.NoError(t, s.InsertVersion(VersionRow{Slug: "user_pkg", Version: "1.0.0",
+		CreatedInWorkspace: "ws-a", CreatedByAgentID: "agent-a", CreatedByUserID: "user-1", Visibility: "user",
+		ManifestJSON: []byte(`{}`), CardMD: "user", TarballSHA256: "h2", BlobSHA256: "h2"}))
+	require.NoError(t, s.InsertVersion(VersionRow{Slug: "public_pkg", Version: "1.0.0",
+		CreatedInWorkspace: "ws-a", CreatedByAgentID: "agent-a", Visibility: "public",
+		ManifestJSON: []byte(`{}`), CardMD: "public", TarballSHA256: "h3", BlobSHA256: "h3"}))
+
+	wsA, err := s.SearchPackagesForIdentity("", "ws-a", "user-2", "all", 10)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"workspace_pkg", "public_pkg"}, packageSlugs(wsA))
+
+	wsBUser1, err := s.SearchPackagesForIdentity("", "ws-b", "user-1", "all", 10)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"user_pkg", "public_pkg"}, packageSlugs(wsBUser1))
+
+	wsBUser2, err := s.SearchPackagesForIdentity("", "ws-b", "user-2", "all", 10)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"public_pkg"}, packageSlugs(wsBUser2))
+}
+
 func TestInstallation_RoundTrip(t *testing.T) {
 	db := newTestDB(t)
 	s := NewStore(db)
@@ -80,6 +115,14 @@ func TestInstallation_RoundTrip(t *testing.T) {
 	require.Equal(t, "1.0.0", v)
 	_, ok2, _ := s.GetInstallation("ws-a", "foo")
 	require.False(t, ok2)
+}
+
+func packageSlugs(pkgs []PackageView) []string {
+	out := make([]string, 0, len(pkgs))
+	for _, pkg := range pkgs {
+		out = append(out, pkg.Slug)
+	}
+	return out
 }
 
 func TestSearchPackages_FTSFindsByCardMD(t *testing.T) {

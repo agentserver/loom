@@ -66,8 +66,9 @@ func main() {
 	usHandler := &userspace.Handler{
 		Store: userspace.NewStore(st.DB()),
 		Blobs: blobs,
-		Resolver: func(r *http.Request) (string, string, bool) {
-			return observerweb.AgentFromRequest(st, r)
+		Resolver: func(r *http.Request) (userspace.Identity, bool) {
+			ws, agent, ok := observerweb.AgentFromRequest(st, r)
+			return userspace.Identity{WorkspaceID: ws, AgentID: agent}, ok
 		},
 	}
 
