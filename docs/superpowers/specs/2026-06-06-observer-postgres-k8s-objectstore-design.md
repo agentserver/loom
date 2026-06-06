@@ -49,7 +49,7 @@ agents must not report task telemetry unless explicitly enabled and authorized.
 | --- | --- |
 | Production database | PostgreSQL only |
 | Local/unit database | SQLite remains allowed for tests and local smoke |
-| K8s packaging | Plain Kubernetes manifests with Kustomize under `deploy/k8s/observer/` |
+| K8s packaging | Helm chart under `deploy/charts/observer/` |
 | DB migration | Dedicated Kubernetes Job, not observer pod startup |
 | Artifact/write content | S3-compatible object store; PostgreSQL stores metadata only |
 | Object store dev target | MinIO for local/prod_test |
@@ -126,7 +126,7 @@ store:
 
 Production validation rejects `store.driver: sqlite` unless
 `allow_sqlite_in_production: true` is explicitly set. That override is only for
-emergency/manual deployments, not the default K8s manifest.
+emergency/manual deployments, not the default Helm values.
 
 ## PostgreSQL Schema
 
@@ -386,29 +386,45 @@ Metadata flow:
 Small proxy fallback:
 
 - default max proxy upload/download: 8 MiB
-- disabled by default in production manifests
+- disabled by default in production Helm values
 - allowed in local/prod_test
 
 ## K8s Deployment
 
-Add manifests under:
+Ship observer Kubernetes deployment as a Helm chart under:
 
 ```text
-deploy/k8s/observer/
-  base/
+deploy/charts/observer/
+  Chart.yaml
+  values.yaml
+  values-local-minio.yaml
+  values-production.example.yaml
+  templates/
+    _helpers.tpl
     deployment.yaml
     service.yaml
     configmap.yaml
-    secret.example.yaml
+    secret.yaml
     migration-job.yaml
     retention-cronjob.yaml
-    kustomization.yaml
-  overlays/
-    local-minio/
-    production/
+    serviceaccount.yaml
+    ingress.yaml
+    notes.txt
 ```
 
-Deployment:
+Chart decisions:
+
+- `values.yaml` is safe by default: PostgreSQL and object store are enabled by
+  configuration, but real secrets are not embedded.
+- `secret.yaml` creates Kubernetes Secrets only when values explicitly provide
+  secret material; production should prefer `existingSecret`.
+- `values-local-minio.yaml` targets kind/minikube/prod_test with MinIO.
+- `values-production.example.yaml` documents managed PostgreSQL, PgBouncer, and
+  external object-store settings.
+- chart templates render migration and retention Jobs, but they are controlled
+  by values flags.
+
+Deployment template:
 
 - run `observer-server`
 - expose HTTP service
@@ -424,9 +440,13 @@ Health endpoints:
 
 Migration:
 
-- `migration-job.yaml` runs before rollout
+- `templates/migration-job.yaml` runs before rollout, either through a Helm
+  hook or as an explicitly installed Job
 - migration job is idempotent
 - observer pod startup does not apply schema migrations
+
+Helm hooks are allowed for local and simple deployments. Production may disable
+the hook and run the rendered migration Job from CI/CD before `helm upgrade`.
 
 Recommended production topology:
 
@@ -478,11 +498,11 @@ Phase 4: Object store
 - migrate artifact/write content paths to presigned URL flow
 - keep proxy fallback for local/prod_test only
 
-Phase 5: K8s deployment
+Phase 5: Helm deployment
 
-- add Kustomize manifests
+- add Helm chart under `deploy/charts/observer/`
 - add migration Job and retention CronJob
-- add MinIO local overlay
+- add MinIO local values file
 - document production Secret requirements
 
 Phase 6: Load and failure testing
@@ -509,12 +529,12 @@ Integration tests:
 - duplicate event ID is idempotent
 - telemetry key workspace scope enforcement
 - artifact/write metadata round trip with MinIO
-- K8s local overlay renders with expected Deployment, Service, Job, CronJob,
-  ConfigMap, and Secret references
+- Helm chart renders expected Deployment, Service, Job, CronJob, ConfigMap,
+  Secret references, and optional Ingress
 
 Production smoke:
 
-- deploy local K8s or kind with PostgreSQL and MinIO
+- deploy local K8s or kind with PostgreSQL and MinIO through Helm
 - register driver/slave
 - verify no telemetry is accepted without ops key
 - enable telemetry explicitly and verify one event is accepted
@@ -543,9 +563,9 @@ next step if broad telemetry is enabled.
 These are implementation choices, not product decisions:
 
 - whether PostgreSQL migrations use embedded SQL files or a migration library
-- whether the first K8s production overlay assumes an externally managed
-  PostgreSQL endpoint or includes an optional StatefulSet example
-- whether MinIO local overlay should be committed as a full dev environment or
-  only as an example
+- whether the Helm chart should include optional PostgreSQL/MinIO subcharts or
+  require external dependencies in all environments
+- whether production should use Helm hooks for migrations or require CI/CD to
+  run the migration Job explicitly before `helm upgrade`
 
 The product decisions above do not depend on these choices.
