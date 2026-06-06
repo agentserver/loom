@@ -13,8 +13,8 @@ type telemetryLimiter struct {
 }
 
 type telemetryBucket struct {
-	windowStart time.Time
-	count       int
+	last   time.Time
+	tokens float64
 }
 
 func newTelemetryLimiter(perMinute, burst int) *telemetryLimiter {
@@ -23,6 +23,9 @@ func newTelemetryLimiter(perMinute, burst int) *telemetryLimiter {
 	}
 	if burst <= 0 {
 		burst = perMinute
+	}
+	if burst < 1 {
+		burst = 1
 	}
 	return &telemetryLimiter{
 		perMinute: perMinute,
@@ -35,18 +38,20 @@ func (l *telemetryLimiter) allow(key string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	b := l.buckets[key]
-	if b.windowStart.IsZero() || now.Sub(b.windowStart) >= time.Minute {
-		b = telemetryBucket{windowStart: now}
+	if b.last.IsZero() {
+		b = telemetryBucket{last: now, tokens: float64(l.burst)}
+	} else if now.After(b.last) {
+		b.tokens += now.Sub(b.last).Minutes() * float64(l.perMinute)
+		if b.tokens > float64(l.burst) {
+			b.tokens = float64(l.burst)
+		}
+		b.last = now
 	}
-	limit := l.perMinute
-	if l.burst > limit {
-		limit = l.burst
-	}
-	if b.count >= limit {
+	if b.tokens < 1 {
 		l.buckets[key] = b
 		return false
 	}
-	b.count++
+	b.tokens--
 	l.buckets[key] = b
 	return true
 }

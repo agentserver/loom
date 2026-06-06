@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/yourorg/multi-agent/internal/observerstore"
 )
 
 func TestLoadConfigDefaultsAndValidates(t *testing.T) {
@@ -77,6 +78,34 @@ telemetry:
 	require.Equal(t, "observer-artifacts", cfg.ObjectStore.S3.Bucket)
 	require.True(t, cfg.Telemetry.Enabled)
 	require.Equal(t, "ops-global", cfg.Telemetry.APIKeys[0].ID)
+}
+
+func TestConfigureTelemetryAPIKeysClearsPersistedKeysWhenTelemetryDisabled(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+
+	require.NoError(t, st.ReplaceTelemetryAPIKeys([]observerstore.TelemetryAPIKeySpec{
+		{ID: "old", Key: "old-secret", WorkspaceID: "*", Enabled: true},
+	}))
+	keyID, ok, err := st.LookupTelemetryAPIKey("old-secret", "ws1")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "old", keyID)
+
+	cfg := &Config{
+		Telemetry: TelemetryConfig{
+			Enabled: false,
+			APIKeys: []TelemetryAPIKeyConfig{{
+				ID: "ops", KeyEnv: "OBSERVER_TELEMETRY_KEY_SHOULD_NOT_BE_REQUIRED", WorkspaceID: "*",
+			}},
+		},
+	}
+	require.NoError(t, configureTelemetryAPIKeys(st, cfg))
+
+	_, ok, err = st.LookupTelemetryAPIKey("old-secret", "ws1")
+	require.NoError(t, err)
+	require.False(t, ok)
 }
 
 func TestLoadConfig_RejectsProductionSQLiteWithoutOverride(t *testing.T) {

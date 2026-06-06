@@ -118,21 +118,13 @@ func main() {
 	}
 	log.Printf("observer-server loaded %d api_keys", len(specs))
 
+	if err := configureTelemetryAPIKeys(st, cfg); err != nil {
+		log.Fatal(err)
+	}
 	if cfg.Telemetry.Enabled {
-		keys := make([]observerstore.TelemetryAPIKeySpec, 0, len(cfg.Telemetry.APIKeys))
-		for _, k := range cfg.Telemetry.APIKeys {
-			value := os.Getenv(k.KeyEnv)
-			if value == "" {
-				log.Fatalf("%s is required", k.KeyEnv)
-			}
-			keys = append(keys, observerstore.TelemetryAPIKeySpec{
-				ID: k.ID, Key: value, WorkspaceID: k.WorkspaceID, Note: k.Note, Enabled: true,
-			})
-		}
-		if err := st.ReplaceTelemetryAPIKeys(keys); err != nil {
-			log.Fatal(err)
-		}
-		log.Printf("observer-server loaded %d telemetry api_keys", len(keys))
+		log.Printf("observer-server loaded %d telemetry api_keys", len(cfg.Telemetry.APIKeys))
+	} else {
+		log.Printf("observer-server cleared telemetry api_keys")
 	}
 
 	if err := userspace.Migrate(st.DB()); err != nil {
@@ -163,6 +155,23 @@ func main() {
 		return st.DB().PingContext(ctx)
 	}))
 	log.Fatal(srv.ListenAndServe())
+}
+
+func configureTelemetryAPIKeys(st observerstore.ManagedStore, cfg *Config) error {
+	if !cfg.Telemetry.Enabled {
+		return st.ReplaceTelemetryAPIKeys(nil)
+	}
+	keys := make([]observerstore.TelemetryAPIKeySpec, 0, len(cfg.Telemetry.APIKeys))
+	for _, k := range cfg.Telemetry.APIKeys {
+		value := os.Getenv(k.KeyEnv)
+		if value == "" {
+			return fmt.Errorf("%s is required", k.KeyEnv)
+		}
+		keys = append(keys, observerstore.TelemetryAPIKeySpec{
+			ID: k.ID, Key: value, WorkspaceID: k.WorkspaceID, Note: k.Note, Enabled: true,
+		})
+	}
+	return st.ReplaceTelemetryAPIKeys(keys)
 }
 
 func openObserverStore(cfg *Config) (observerstore.ManagedStore, error) {
