@@ -24,6 +24,17 @@ api_keys:
 	require.Equal(t, "observer.db", cfg.DBPath)
 	require.Len(t, cfg.APIKeys, 1)
 	require.Equal(t, "ak-default", cfg.APIKeys[0].ID)
+	require.Equal(t, "sqlite", cfg.Store.Driver)
+	require.Equal(t, cfg.DBPath, cfg.Store.SQLite.Path)
+	require.Equal(t, 20, cfg.Store.Postgres.MaxOpenConns)
+	require.Equal(t, 10, cfg.Store.Postgres.MaxIdleConns)
+	require.Equal(t, "30m", cfg.Store.Postgres.ConnMaxLifetime)
+	require.Equal(t, "filesystem", cfg.ObjectStore.Driver)
+	require.Equal(t, int64(8<<20), cfg.ObjectStore.Proxy.MaxBytes)
+	require.Equal(t, 60, cfg.Telemetry.RateLimit.PerMinute)
+	require.Equal(t, 120, cfg.Telemetry.RateLimit.Burst)
+	require.Equal(t, int64(256<<10), cfg.Telemetry.MaxBodyBytes)
+	require.Equal(t, 30, cfg.Telemetry.RetentionDays)
 }
 
 func TestLoadDistributedObserverExampleConfig(t *testing.T) {
@@ -84,6 +95,27 @@ production: true
 	require.Contains(t, err.Error(), "sqlite store is not allowed in production")
 }
 
+func TestEffectiveSQLitePathUsesStorePathForDatabaseAndBlobRoot(t *testing.T) {
+	cfg := loadConfigFromString(t, `
+db_path: /legacy/observer.db
+api_keys:
+  - id: ak-default
+    key: ak_secret
+store:
+  driver: sqlite
+  sqlite:
+    path: /configured/observer.db
+`)
+
+	path := effectiveSQLitePath(cfg)
+	require.Equal(t, "/configured/observer.db", path)
+	require.Equal(t, "/configured/userspace-blobs", userspaceBlobRoot(path))
+
+	cfg.Store.SQLite.Path = ""
+	require.Equal(t, "/legacy/observer.db", effectiveSQLitePath(cfg))
+	require.Equal(t, filepath.Join(os.TempDir(), "userspace-blobs"), userspaceBlobRoot(":memory:"))
+}
+
 func TestWithHealthHandlesLivenessReadinessAndApp(t *testing.T) {
 	app := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("app\n"))
@@ -120,7 +152,8 @@ func TestWithHealthReturnsUnavailableWhenReadyFails(t *testing.T) {
 	ready := httptest.NewRecorder()
 	handler.ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	require.Equal(t, http.StatusServiceUnavailable, ready.Code)
-	require.Contains(t, ready.Body.String(), "database unavailable")
+	require.Equal(t, "not ready\n", ready.Body.String())
+	require.NotContains(t, ready.Body.String(), "database unavailable")
 }
 
 func TestLoadConfigRejectsObsoleteWorkspacesField(t *testing.T) {
@@ -172,6 +205,72 @@ api_keys:
   - { id: "", key: k1 }
 `,
 			wantErr: "api_keys[0].id is required",
+		},
+		{
+			name: "invalid store driver",
+			yaml: `
+api_keys:
+  - { id: ak-default, key: ak_secret }
+store:
+  driver: mysql
+`,
+			wantErr: "store.driver must be sqlite or postgres",
+		},
+		{
+			name: "postgres missing dsn_env",
+			yaml: `
+api_keys:
+  - { id: ak-default, key: ak_secret }
+store:
+  driver: postgres
+`,
+			wantErr: "store.postgres.dsn_env is required when store.driver is postgres",
+		},
+		{
+			name: "invalid object store driver",
+			yaml: `
+api_keys:
+  - { id: ak-default, key: ak_secret }
+object_store:
+  driver: gcs
+`,
+			wantErr: "object_store.driver must be filesystem, memory, or s3",
+		},
+		{
+			name: "s3 missing endpoint and bucket",
+			yaml: `
+api_keys:
+  - { id: ak-default, key: ak_secret }
+object_store:
+  driver: s3
+  s3:
+    access_key_env: OBSERVER_S3_ACCESS_KEY
+    secret_key_env: OBSERVER_S3_SECRET_KEY
+`,
+			wantErr: "object_store.s3.endpoint and bucket are required",
+		},
+		{
+			name: "s3 missing credentials",
+			yaml: `
+api_keys:
+  - { id: ak-default, key: ak_secret }
+object_store:
+  driver: s3
+  s3:
+    endpoint: s3.internal
+    bucket: observer-artifacts
+`,
+			wantErr: "object_store.s3 access_key_env and secret_key_env are required",
+		},
+		{
+			name: "telemetry enabled without api keys",
+			yaml: `
+api_keys:
+  - { id: ak-default, key: ak_secret }
+telemetry:
+  enabled: true
+`,
+			wantErr: "telemetry.api_keys must contain at least one key when telemetry.enabled is true",
 		},
 	}
 

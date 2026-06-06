@@ -102,7 +102,8 @@ func main() {
 		log.Fatal(err)
 	}
 
-	st, err := observerstore.Open(cfg.DBPath)
+	sqlitePath := effectiveSQLitePath(cfg)
+	st, err := observerstore.Open(sqlitePath)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -120,10 +121,7 @@ func main() {
 	if err := userspace.Migrate(st.DB()); err != nil {
 		log.Fatalf("userspace migrate: %v", err)
 	}
-	blobRoot := filepath.Join(filepath.Dir(cfg.DBPath), "userspace-blobs")
-	if cfg.DBPath == ":memory:" || cfg.DBPath == "" {
-		blobRoot = filepath.Join(os.TempDir(), "userspace-blobs")
-	}
+	blobRoot := userspaceBlobRoot(sqlitePath)
 	blobs, err := userspace.NewBlobStore(st.DB(), blobRoot)
 	if err != nil {
 		log.Fatalf("userspace blob store: %v", err)
@@ -202,6 +200,20 @@ func loadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+func effectiveSQLitePath(cfg *Config) string {
+	if cfg.Store.SQLite.Path != "" {
+		return cfg.Store.SQLite.Path
+	}
+	return cfg.DBPath
+}
+
+func userspaceBlobRoot(sqlitePath string) string {
+	if sqlitePath == ":memory:" || sqlitePath == "" {
+		return filepath.Join(os.TempDir(), "userspace-blobs")
+	}
+	return filepath.Join(filepath.Dir(sqlitePath), "userspace-blobs")
+}
+
 func validateConfig(cfg *Config) error {
 	if len(cfg.APIKeys) == 0 {
 		return fmt.Errorf("config must define at least one api_keys entry")
@@ -274,7 +286,8 @@ func withHealth(app http.Handler, ready func(context.Context) error) http.Handle
 		defer cancel()
 		if ready != nil {
 			if err := ready(ctx); err != nil {
-				http.Error(w, err.Error(), http.StatusServiceUnavailable)
+				log.Printf("observer-server readiness check failed: %v", err)
+				http.Error(w, "not ready", http.StatusServiceUnavailable)
 				return
 			}
 		}
