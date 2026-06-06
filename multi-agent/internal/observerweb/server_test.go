@@ -35,6 +35,13 @@ func seedAPIKey(t *testing.T, st *observerstore.SQLiteStore, id, key string) {
 	require.NoError(t, st.UpsertAPIKey(observerstore.APIKeySpec{ID: id, Key: key}))
 }
 
+func seedTelemetryKey(t *testing.T, st *observerstore.SQLiteStore, id, key, workspaceID string) {
+	t.Helper()
+	require.NoError(t, st.ReplaceTelemetryAPIKeys([]observerstore.TelemetryAPIKeySpec{
+		{ID: id, Key: key, WorkspaceID: workspaceID, Enabled: true},
+	}))
+}
+
 // postRegister POSTs to /api/agents/register and asserts the expected status.
 // Returns the raw body string so callers can inspect it.
 func postRegister(t *testing.T, h http.Handler, apiKey, jsonBody string, wantStatus int) string {
@@ -99,6 +106,7 @@ func seedSecondWorkspaceAgent(t *testing.T, st *observerstore.SQLiteStore) {
 func TestPostEventAuth(t *testing.T) {
 	h, st := newTestHandler(t)
 	seedWorkspaceAndAgents(t, st)
+	seedTelemetryKey(t, st, "ops", "ops-secret", "*")
 
 	body, _ := json.Marshal(observer.Event{
 		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
@@ -106,14 +114,77 @@ func TestPostEventAuth(t *testing.T) {
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer driver-token")
+	req.Header.Set("X-Loom-Telemetry-Key", "ops-secret")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusAccepted, rr.Code)
 }
 
+func TestPostEventRequiresTelemetryKey(t *testing.T) {
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-default", "ak_secret")
+	registerBody := postRegister(t, h, "ak_secret",
+		`{"agent_id":"agent1","role":"slave","display_name":"Agent 1","workspace_id":"ws1"}`,
+		http.StatusOK)
+	token := extractToken(t, registerBody)
+	body := []byte(`{"workspace_id":"ws1","agent_id":"agent1","agent_role":"slave","type":"slave_task_started","task_id":"t1"}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code)
+}
+
+func TestPostEventAcceptsValidTelemetryKey(t *testing.T) {
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-default", "ak_secret")
+	require.NoError(t, st.ReplaceTelemetryAPIKeys([]observerstore.TelemetryAPIKeySpec{
+		{ID: "ops", Key: "ops-secret", WorkspaceID: "*", Enabled: true},
+	}))
+	registerBody := postRegister(t, h, "ak_secret",
+		`{"agent_id":"agent1","role":"slave","display_name":"Agent 1","workspace_id":"ws1"}`,
+		http.StatusOK)
+	token := extractToken(t, registerBody)
+	body := []byte(`{"workspace_id":"ws1","agent_id":"agent1","agent_role":"slave","type":"slave_task_started","task_id":"t1"}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Loom-Telemetry-Key", "ops-secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusAccepted, rr.Code, rr.Body.String())
+}
+
+func TestPostEventRateLimit(t *testing.T) {
+	_, st := newTestHandler(t)
+	require.NoError(t, st.ReplaceTelemetryAPIKeys([]observerstore.TelemetryAPIKeySpec{
+		{ID: "ops", Key: "ops-secret", WorkspaceID: "*", Enabled: true},
+	}))
+	h := NewWithOptions(st, nil, Options{
+		TelemetryRateLimit: RateLimitConfig{PerMinute: 1, Burst: 1},
+	})
+	seedAPIKey(t, st, "ak-default", "ak_secret")
+	registerBody := postRegister(t, h, "ak_secret",
+		`{"agent_id":"agent1","role":"slave","display_name":"Agent 1","workspace_id":"ws1"}`,
+		http.StatusOK)
+	token := extractToken(t, registerBody)
+	body := []byte(`{"workspace_id":"ws1","agent_id":"agent1","agent_role":"slave","type":"slave_task_started","task_id":"t1"}`)
+
+	for i, want := range []int{http.StatusAccepted, http.StatusTooManyRequests} {
+		req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-Loom-Telemetry-Key", "ops-secret")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		require.Equal(t, want, rr.Code, "attempt %d body=%s", i+1, rr.Body.String())
+	}
+}
+
 func TestPostEventRejectsWrongAgent(t *testing.T) {
 	h, st := newTestHandler(t)
 	seedWorkspaceAndAgents(t, st)
+	seedTelemetryKey(t, st, "ops", "ops-secret", "*")
 
 	body, _ := json.Marshal(observer.Event{
 		WorkspaceID: "ws1", AgentID: "other", AgentRole: observer.RoleDriver,
@@ -121,6 +192,7 @@ func TestPostEventRejectsWrongAgent(t *testing.T) {
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer driver-token")
+	req.Header.Set("X-Loom-Telemetry-Key", "ops-secret")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusForbidden, rr.Code)
@@ -129,10 +201,13 @@ func TestPostEventRejectsWrongAgent(t *testing.T) {
 func TestPostEventRejectsOversizedBody(t *testing.T) {
 	h, st := newTestHandler(t)
 	seedWorkspaceAndAgents(t, st)
+	seedTelemetryKey(t, st, "ops", "ops-secret", "*")
 
-	body := io.LimitReader(bytes.NewReader(append([]byte(`{"summary":"`), bytes.Repeat([]byte("x"), maxEventBodyBytes)...)), maxEventBodyBytes+1)
+	const defaultMaxEventBodyBytes = 256 << 10
+	body := io.LimitReader(bytes.NewReader(append([]byte(`{"summary":"`), bytes.Repeat([]byte("x"), defaultMaxEventBodyBytes)...)), defaultMaxEventBodyBytes+1)
 	req := httptest.NewRequest(http.MethodPost, "/api/events", body)
 	req.Header.Set("Authorization", "Bearer driver-token")
+	req.Header.Set("X-Loom-Telemetry-Key", "ops-secret")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusRequestEntityTooLarge, rr.Code)
@@ -141,6 +216,7 @@ func TestPostEventRejectsOversizedBody(t *testing.T) {
 func TestPostEventRejectsTrailingJSONValue(t *testing.T) {
 	h, st := newTestHandler(t)
 	seedWorkspaceAndAgents(t, st)
+	seedTelemetryKey(t, st, "ops", "ops-secret", "*")
 
 	body, _ := json.Marshal(observer.Event{
 		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
@@ -148,6 +224,7 @@ func TestPostEventRejectsTrailingJSONValue(t *testing.T) {
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(append(body, []byte(` {}`)...)))
 	req.Header.Set("Authorization", "Bearer driver-token")
+	req.Header.Set("X-Loom-Telemetry-Key", "ops-secret")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusBadRequest, rr.Code)
@@ -363,6 +440,7 @@ func TestResourceSnapshotAPIRestrictsRoles(t *testing.T) {
 func TestRegisterSuccessAndIssuedTokenIngests(t *testing.T) {
 	h, st := newTestHandler(t)
 	seedAPIKey(t, st, "ak-default", "ak_secret")
+	seedTelemetryKey(t, st, "ops", "ops-secret", "*")
 
 	body := postRegister(t, h, "ak_secret",
 		`{"agent_id":"slave-a","role":"slave","display_name":"Slave A","workspace_id":"ws1"}`,
@@ -389,6 +467,7 @@ func TestRegisterSuccessAndIssuedTokenIngests(t *testing.T) {
 	})
 	ev := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(evBody))
 	ev.Header.Set("Authorization", "Bearer "+resp.Token)
+	ev.Header.Set("X-Loom-Telemetry-Key", "ops-secret")
 	ev2 := httptest.NewRecorder()
 	h.ServeHTTP(ev2, ev)
 	require.Equal(t, http.StatusAccepted, ev2.Code, ev2.Body.String())
@@ -476,6 +555,7 @@ func TestRegisterRejectsWrongMethod(t *testing.T) {
 func TestRegisterReissueInvalidatesOldToken(t *testing.T) {
 	h, st := newTestHandler(t)
 	seedAPIKey(t, st, "ak-default", "ak_real")
+	seedTelemetryKey(t, st, "ops", "ops-secret", "*")
 
 	register := func() string {
 		body := postRegister(t, h, "ak_real",
@@ -502,6 +582,7 @@ func TestRegisterReissueInvalidatesOldToken(t *testing.T) {
 	// New token still works.
 	req = httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(evBody))
 	req.Header.Set("Authorization", "Bearer "+second)
+	req.Header.Set("X-Loom-Telemetry-Key", "ops-secret")
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusAccepted, rr.Code, rr.Body.String())
@@ -611,6 +692,7 @@ func ingestEvent(t *testing.T, h http.Handler, token, wsID, agentID, role, event
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Loom-Telemetry-Key", "ops-secret")
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -620,6 +702,7 @@ func ingestEvent(t *testing.T, h http.Handler, token, wsID, agentID, role, event
 func TestE2E_MultiWorkspaceIsolation(t *testing.T) {
 	h, st := newTestHandler(t)
 	seedAPIKey(t, st, "ak-1", "key1")
+	seedTelemetryKey(t, st, "ops", "ops-secret", "*")
 
 	// Register 3 agents across 2 workspaces.
 	bodyA := postRegister(t, h, "key1",

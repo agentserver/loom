@@ -22,22 +22,25 @@ const (
 )
 
 type Config struct {
-	Enabled        bool
-	URL            string
-	WorkspaceID    string
-	WorkspaceName  string // optional; first-writer-wins at observer
-	AgentID        string
-	AgentRole      string
-	APIKey         string
-	TokenStatePath string
+	Enabled          bool
+	TelemetryEnabled bool
+	TelemetryAPIKey  string
+	URL              string
+	WorkspaceID      string
+	WorkspaceName    string // optional; first-writer-wins at observer
+	AgentID          string
+	AgentRole        string
+	APIKey           string
+	TokenStatePath   string
 }
 
 type Client struct {
-	cfg     Config
-	url     string // /api/events
-	enabled bool
-	queue   chan observer.Event
-	http    *http.Client
+	cfg              Config
+	url              string // /api/events
+	enabled          bool
+	telemetryEnabled bool
+	queue            chan observer.Event
+	http             *http.Client
 
 	tokenMu        sync.Mutex
 	token          string
@@ -54,10 +57,11 @@ type Client struct {
 // should log.Fatal and let systemd Restart=on-failure retry.
 func New(cfg Config) (*Client, error) {
 	c := &Client{
-		cfg:     cfg,
-		url:     strings.TrimRight(cfg.URL, "/") + "/api/events",
-		enabled: cfg.Enabled && cfg.URL != "",
-		http:    &http.Client{Timeout: 2 * time.Second},
+		cfg:              cfg,
+		url:              strings.TrimRight(cfg.URL, "/") + "/api/events",
+		enabled:          cfg.Enabled && cfg.URL != "",
+		telemetryEnabled: cfg.Enabled && cfg.TelemetryEnabled && cfg.URL != "",
+		http:             &http.Client{Timeout: 2 * time.Second},
 	}
 	if !c.enabled {
 		return c, nil
@@ -69,9 +73,11 @@ func New(cfg Config) (*Client, error) {
 	}
 	c.token = tok
 
-	c.queue = make(chan observer.Event, queueSize)
-	c.wg.Add(1)
-	go c.run()
+	if c.telemetryEnabled {
+		c.queue = make(chan observer.Event, queueSize)
+		c.wg.Add(1)
+		go c.run()
+	}
 	return c, nil
 }
 
@@ -91,7 +97,7 @@ func (c *Client) Token() string {
 }
 
 func (c *Client) Emit(ev observer.Event) {
-	if !c.Enabled() {
+	if c == nil || !c.enabled || !c.telemetryEnabled {
 		return
 	}
 	if ev.TS == "" {
@@ -114,7 +120,7 @@ func (c *Client) Emit(ev observer.Event) {
 }
 
 func (c *Client) Close() {
-	if !c.Enabled() {
+	if c == nil || !c.enabled || !c.telemetryEnabled {
 		return
 	}
 	c.mu.Lock()
@@ -156,6 +162,9 @@ func (c *Client) post(ev observer.Event) {
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token())
 	req.Header.Set("Content-Type", "application/json")
+	if c.cfg.TelemetryAPIKey != "" {
+		req.Header.Set("X-Loom-Telemetry-Key", c.cfg.TelemetryAPIKey)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "observerclient: post event: %v\n", err)

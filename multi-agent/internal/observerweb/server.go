@@ -13,21 +13,57 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/observerstore"
 	"github.com/yourorg/multi-agent/internal/userspace"
 )
 
-const maxEventBodyBytes = 1 << 20
+const defaultMaxEventBodyBytes = 256 << 10
 
 type Store = observerstore.Store
+
+type RateLimitConfig struct {
+	PerMinute int
+	Burst     int
+}
+
+type Options struct {
+	TelemetryRateLimit RateLimitConfig
+	MaxEventBodyBytes  int64
+}
 
 // New constructs the observerweb HTTP handler. If usHandler is non-nil,
 // /api/userspace/* routes are mounted on the same mux.
 func New(s Store, usHandler *userspace.Handler) http.Handler {
-	h := &handler{s: s}
+	return NewWithOptions(s, usHandler, Options{
+		TelemetryRateLimit: RateLimitConfig{PerMinute: 60, Burst: 120},
+		MaxEventBodyBytes:  defaultMaxEventBodyBytes,
+	})
+}
+
+func NewWithOptions(s Store, usHandler *userspace.Handler, opts Options) http.Handler {
+	if opts.TelemetryRateLimit.PerMinute == 0 {
+		opts.TelemetryRateLimit.PerMinute = 60
+	}
+	if opts.TelemetryRateLimit.Burst == 0 {
+		opts.TelemetryRateLimit.Burst = 120
+	}
+	if opts.MaxEventBodyBytes == 0 {
+		opts.MaxEventBodyBytes = defaultMaxEventBodyBytes
+	}
+	h := &handler{
+		s:                 s,
+		telemetryLimiter:  newTelemetryLimiter(opts.TelemetryRateLimit.PerMinute, opts.TelemetryRateLimit.Burst),
+		maxEventBodyBytes: opts.MaxEventBodyBytes,
+	}
 	mux := http.NewServeMux()
+	mountRoutes(mux, h, usHandler)
+	return mux
+}
+
+func mountRoutes(mux *http.ServeMux, h *handler, usHandler *userspace.Handler) {
 	// Ingest only. The legacy GET /api/events read endpoint was removed when
 	// the unauthenticated dashboard came down; agents that need to replay
 	// events must use a tokened endpoint we haven't built yet.
@@ -48,11 +84,12 @@ func New(s Store, usHandler *userspace.Handler) http.Handler {
 	if usHandler != nil {
 		userspace.MountRoutes(mux, usHandler)
 	}
-	return mux
 }
 
 type handler struct {
-	s Store
+	s                 Store
+	telemetryLimiter  *telemetryLimiter
+	maxEventBodyBytes int64
 }
 
 func (h *handler) postEvent(w http.ResponseWriter, r *http.Request) {
@@ -76,8 +113,14 @@ func (h *handler) postEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	telemetryKey := strings.TrimSpace(r.Header.Get("X-Loom-Telemetry-Key"))
+	if telemetryKey == "" {
+		http.Error(w, "missing telemetry api key", http.StatusForbidden)
+		return
+	}
+
 	var ev observer.Event
-	r.Body = http.MaxBytesReader(w, r.Body, maxEventBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, h.maxEventBodyBytes)
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(&ev); err != nil {
 		var maxBytesErr *http.MaxBytesError
@@ -100,6 +143,20 @@ func (h *handler) postEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	if ev.WorkspaceID != agent.WorkspaceID || ev.AgentID != agent.ID || ev.AgentRole != agent.Role {
 		http.Error(w, "workspace or agent mismatch", http.StatusForbidden)
+		return
+	}
+	telemetryKeyID, ok, err := h.s.LookupTelemetryAPIKey(telemetryKey, agent.WorkspaceID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.Error(w, "invalid telemetry api key", http.StatusForbidden)
+		return
+	}
+	rateKey := agent.WorkspaceID + "\x00" + agent.ID + "\x00" + telemetryKeyID
+	if h.telemetryLimiter != nil && !h.telemetryLimiter.allow(rateKey, time.Now()) {
+		http.Error(w, "telemetry rate limit exceeded", http.StatusTooManyRequests)
 		return
 	}
 	if err := h.s.Ingest(ev); err != nil {

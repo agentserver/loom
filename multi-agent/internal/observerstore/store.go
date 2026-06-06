@@ -68,6 +68,16 @@ func sqliteDSNWithPragmas(path string) string {
 }
 
 func ensureColumns(db *sql.DB) error {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS telemetry_api_keys (
+		id TEXT PRIMARY KEY,
+		key_hash TEXT NOT NULL UNIQUE,
+		note TEXT NOT NULL DEFAULT '',
+		workspace_id TEXT NOT NULL DEFAULT '*',
+		enabled INTEGER NOT NULL DEFAULT 1,
+		created_at TEXT NOT NULL
+	)`); err != nil {
+		return err
+	}
 	if _, err := db.Exec(`ALTER TABLE tasks ADD COLUMN mcp_status TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
 		return err
 	}
@@ -296,6 +306,78 @@ func (s *SQLiteStore) LookupAPIKey(key string) (keyID string, ok bool, err error
 	err = s.db.QueryRow(
 		`SELECT id FROM api_keys WHERE key_hash=?`,
 		TokenHash(key),
+	).Scan(&keyID)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return keyID, true, nil
+}
+
+func (s *SQLiteStore) ReplaceTelemetryAPIKeys(keys []TelemetryAPIKeySpec) error {
+	seenID := map[string]bool{}
+	seenHash := map[string]bool{}
+	for i, k := range keys {
+		if k.ID == "" {
+			return fmt.Errorf("observerstore: telemetry api key[%d] id must not be empty", i)
+		}
+		if k.Key == "" {
+			return fmt.Errorf("observerstore: telemetry api key[%s] value must not be empty", k.ID)
+		}
+		if seenID[k.ID] {
+			return fmt.Errorf("observerstore: duplicate telemetry api key id %q", k.ID)
+		}
+		h := TokenHash(k.Key)
+		if seenHash[h] {
+			return fmt.Errorf("observerstore: duplicate telemetry api key value (id=%q)", k.ID)
+		}
+		seenID[k.ID] = true
+		seenHash[h] = true
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.Exec(`DELETE FROM telemetry_api_keys`); err != nil {
+		return err
+	}
+	now := NowUTC()
+	for _, k := range keys {
+		workspaceID := k.WorkspaceID
+		if workspaceID == "" {
+			workspaceID = "*"
+		}
+		enabled := 0
+		if k.Enabled {
+			enabled = 1
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO telemetry_api_keys(id, key_hash, note, workspace_id, enabled, created_at)
+			 VALUES(?, ?, ?, ?, ?, ?)`,
+			k.ID, TokenHash(k.Key), k.Note, workspaceID, enabled, now,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *SQLiteStore) LookupTelemetryAPIKey(key, workspaceID string) (keyID string, ok bool, err error) {
+	if key == "" {
+		return "", false, nil
+	}
+	err = s.db.QueryRow(
+		`SELECT id
+		   FROM telemetry_api_keys
+		  WHERE key_hash=?
+		    AND enabled=1
+		    AND (workspace_id='*' OR workspace_id=?)
+		  LIMIT 1`,
+		TokenHash(key), workspaceID,
 	).Scan(&keyID)
 	if err == sql.ErrNoRows {
 		return "", false, nil

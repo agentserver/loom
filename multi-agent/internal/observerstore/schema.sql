@@ -5,6 +5,15 @@ CREATE TABLE IF NOT EXISTS api_keys (
     created_at  TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS telemetry_api_keys (
+    id           TEXT PRIMARY KEY,
+    key_hash     TEXT NOT NULL UNIQUE,
+    note         TEXT NOT NULL DEFAULT '',
+    workspace_id TEXT NOT NULL DEFAULT '*',
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    created_at   TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS workspaces (
     id                     TEXT PRIMARY KEY,
     name                   TEXT NOT NULL DEFAULT '',
@@ -173,4 +182,3 @@ CREATE TABLE IF NOT EXISTS resource_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_resource_snapshots_latest
 ON resource_snapshots(workspace_id, created_at);
-

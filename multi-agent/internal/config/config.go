@@ -87,13 +87,15 @@ type Fanout struct {
 }
 
 type Observer struct {
-	Enabled        bool   `yaml:"enabled"`
-	URL            string `yaml:"url"`
-	WorkspaceID    string `yaml:"workspace_id"`
-	WorkspaceName  string `yaml:"workspace_name,omitempty"`
-	AgentID        string `yaml:"agent_id"`
-	APIKey         string `yaml:"api_key"`
-	TokenStatePath string `yaml:"token_state_path"`
+	Enabled          bool   `yaml:"enabled"`
+	TelemetryEnabled bool   `yaml:"telemetry_enabled,omitempty"`
+	TelemetryAPIKey  string `yaml:"telemetry_api_key,omitempty"`
+	URL              string `yaml:"url"`
+	WorkspaceID      string `yaml:"workspace_id"`
+	WorkspaceName    string `yaml:"workspace_name,omitempty"`
+	AgentID          string `yaml:"agent_id"`
+	APIKey           string `yaml:"api_key"`
+	TokenStatePath   string `yaml:"token_state_path"`
 }
 
 type SubTaskDefaults struct {
@@ -157,6 +159,9 @@ func Load(path string) (*Config, error) {
 		if c.Observer.AgentID == "" {
 			c.Observer.AgentID = c.Discovery.DisplayName
 		}
+	}
+	if c.Observer.TelemetryEnabled && c.Observer.TelemetryAPIKey == "" {
+		return nil, fmt.Errorf("observer.telemetry_api_key is required when observer.telemetry_enabled is true")
 	}
 	if c.Observer.Enabled {
 		if c.Observer.URL == "" {

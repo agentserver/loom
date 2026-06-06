@@ -142,14 +142,16 @@ func runServe(args []string) {
 	}
 
 	obs, errObs := observerclient.New(observerclient.Config{
-		Enabled:        cfg.Observer.Enabled,
-		URL:            cfg.Observer.URL,
-		WorkspaceID:    cfg.Observer.WorkspaceID,
-		WorkspaceName:  cfg.Observer.WorkspaceName,
-		AgentID:        cfg.Observer.AgentID,
-		AgentRole:      observer.RoleDriver,
-		APIKey:         cfg.Observer.APIKey,
-		TokenStatePath: cfg.Observer.TokenStatePath,
+		Enabled:          cfg.Observer.Enabled,
+		TelemetryEnabled: cfg.Observer.TelemetryEnabled,
+		TelemetryAPIKey:  cfg.Observer.TelemetryAPIKey,
+		URL:              cfg.Observer.URL,
+		WorkspaceID:      cfg.Observer.WorkspaceID,
+		WorkspaceName:    cfg.Observer.WorkspaceName,
+		AgentID:          cfg.Observer.AgentID,
+		AgentRole:        observer.RoleDriver,
+		APIKey:           cfg.Observer.APIKey,
+		TokenStatePath:   cfg.Observer.TokenStatePath,
 	})
 	if errObs != nil {
 		log.Fatalf("observerclient: %v", errObs)

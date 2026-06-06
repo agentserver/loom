@@ -136,6 +136,33 @@ observer:
 	}
 }
 
+func TestLoadConfig_ObserverTelemetryEnabledRequiresAPIKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "driver.yaml")
+	tokenPath := filepath.Join(dir, "observer.token")
+	if err := os.WriteFile(path, []byte(`
+server: {url: https://x, name: drv}
+discovery: {display_name: driver-display}
+observer:
+  enabled: true
+  url: https://observer.example
+  workspace_id: ws
+  agent_id: a
+  api_key: ak
+  token_state_path: `+tokenPath+`
+  telemetry_enabled: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected observer telemetry config error")
+	}
+	if !strings.Contains(err.Error(), "observer.telemetry_api_key is required when observer.telemetry_enabled is true") {
+		t.Fatalf("error: %v", err)
+	}
+}
+
 func TestLoadConfig_RejectsMissingRequired(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bad.yaml")

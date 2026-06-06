@@ -926,6 +926,73 @@ func TestReplaceAPIKeysRejectsDuplicates(t *testing.T) {
 	require.ErrorContains(t, err, "duplicate api key value")
 }
 
+func TestReplaceTelemetryAPIKeysLookupScopeAndClear(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer s.Close()
+
+	require.NoError(t, s.ReplaceTelemetryAPIKeys([]TelemetryAPIKeySpec{
+		{ID: "ops-global", Key: "global-secret", WorkspaceID: "*", Note: "global", Enabled: true},
+		{ID: "ops-ws2", Key: "ws2-secret", WorkspaceID: "ws2", Enabled: true},
+		{ID: "ops-disabled", Key: "disabled-secret", WorkspaceID: "*", Enabled: false},
+	}))
+
+	keyID, ok, err := s.LookupTelemetryAPIKey("global-secret", "ws1")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "ops-global", keyID)
+
+	keyID, ok, err = s.LookupTelemetryAPIKey("ws2-secret", "ws2")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "ops-ws2", keyID)
+
+	_, ok, err = s.LookupTelemetryAPIKey("ws2-secret", "ws1")
+	require.NoError(t, err)
+	require.False(t, ok)
+
+	_, ok, err = s.LookupTelemetryAPIKey("disabled-secret", "ws1")
+	require.NoError(t, err)
+	require.False(t, ok)
+
+	require.NoError(t, s.ReplaceTelemetryAPIKeys(nil))
+	_, ok, err = s.LookupTelemetryAPIKey("global-secret", "ws1")
+	require.NoError(t, err)
+	require.False(t, ok)
+}
+
+func TestReplaceTelemetryAPIKeysRejectsInvalidInput(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer s.Close()
+
+	err = s.ReplaceTelemetryAPIKeys([]TelemetryAPIKeySpec{
+		{ID: "", Key: "secret", WorkspaceID: "*", Enabled: true},
+	})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "telemetry api key[0] id must not be empty")
+
+	err = s.ReplaceTelemetryAPIKeys([]TelemetryAPIKeySpec{
+		{ID: "ops", Key: "", WorkspaceID: "*", Enabled: true},
+	})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "telemetry api key[ops] value must not be empty")
+
+	err = s.ReplaceTelemetryAPIKeys([]TelemetryAPIKeySpec{
+		{ID: "ops", Key: "secret-1", WorkspaceID: "*", Enabled: true},
+		{ID: "ops", Key: "secret-2", WorkspaceID: "*", Enabled: true},
+	})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "duplicate telemetry api key id")
+
+	err = s.ReplaceTelemetryAPIKeys([]TelemetryAPIKeySpec{
+		{ID: "ops-a", Key: "same-secret", WorkspaceID: "*", Enabled: true},
+		{ID: "ops-b", Key: "same-secret", WorkspaceID: "*", Enabled: true},
+	})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "duplicate telemetry api key value")
+}
+
 func TestUpsertAPIKeyRejectsEmptyID(t *testing.T) {
 	st := testStore(t)
 	err := st.UpsertAPIKey(APIKeySpec{ID: "", Key: "k"})

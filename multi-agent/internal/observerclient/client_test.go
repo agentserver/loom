@@ -38,10 +38,40 @@ func TestNewDisabledSkipsRegisterAndDropsEvents(t *testing.T) {
 	require.Equal(t, int32(0), calls.Load())
 }
 
+func TestNewRegistersButTelemetryDefaultsDisabled(t *testing.T) {
+	var eventCalls atomic.Int32
+	var registerCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/agents/register":
+			registerCalls.Add(1)
+			_, _ = w.Write([]byte(`{"workspace_id":"ws1","token":"tk"}`))
+		case "/api/events":
+			eventCalls.Add(1)
+			w.WriteHeader(http.StatusAccepted)
+		}
+	}))
+	defer srv.Close()
+
+	path := filepath.Join(t.TempDir(), "observer.token")
+	c, err := New(Config{
+		Enabled: true, URL: srv.URL, WorkspaceID: "ws1", AgentID: "agent1",
+		AgentRole: observer.RoleSlave, APIKey: "ak", TokenStatePath: path,
+	})
+	require.NoError(t, err)
+	require.True(t, c.Enabled())
+	c.Emit(observer.Event{TaskID: "t"})
+	c.Close()
+	require.Equal(t, int32(1), registerCalls.Load())
+	require.Equal(t, int32(0), eventCalls.Load())
+}
+
 func TestNewColdStartRegistersAndEmits(t *testing.T) {
 	received := make(chan observer.Event, 1)
 	var lastAuth atomic.Value
 	lastAuth.Store("")
+	var lastTelemetryKey atomic.Value
+	lastTelemetryKey.Store("")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -49,6 +79,7 @@ func TestNewColdStartRegistersAndEmits(t *testing.T) {
 			_, _ = w.Write([]byte(`{"workspace_id":"ws-1","agent_id":"agent-1","role":"slave","token":"tk_issued"}`))
 		case "/api/events":
 			lastAuth.Store(r.Header.Get("Authorization"))
+			lastTelemetryKey.Store(r.Header.Get("X-Loom-Telemetry-Key"))
 			var ev observer.Event
 			_ = json.NewDecoder(r.Body).Decode(&ev)
 			received <- ev
@@ -65,6 +96,7 @@ func TestNewColdStartRegistersAndEmits(t *testing.T) {
 		Enabled: true, URL: srv.URL, WorkspaceID: "ws-1",
 		AgentID: "agent-1", AgentRole: observer.RoleSlave,
 		APIKey: "ak_secret", TokenStatePath: path,
+		TelemetryEnabled: true, TelemetryAPIKey: "ops-secret",
 	})
 	require.NoError(t, err)
 	require.True(t, c.Enabled())
@@ -79,6 +111,7 @@ func TestNewColdStartRegistersAndEmits(t *testing.T) {
 		require.Equal(t, "ws-1", ev.WorkspaceID)
 		require.Equal(t, observer.RoleSlave, ev.AgentRole)
 		require.Equal(t, "Bearer tk_issued", lastAuth.Load())
+		require.Equal(t, "ops-secret", lastTelemetryKey.Load())
 	case <-time.After(2 * time.Second):
 		t.Fatal("did not receive event before timeout")
 	}
@@ -162,7 +195,7 @@ func TestCloseReturnsWhenPostStalls(t *testing.T) {
 	c, err := New(Config{
 		Enabled: true, URL: "http://observer.example", WorkspaceID: "ws-1",
 		AgentID: "agent-1", AgentRole: observer.RoleSlave,
-		APIKey: "ak", TokenStatePath: path,
+		APIKey: "ak", TokenStatePath: path, TelemetryEnabled: true,
 	})
 	require.NoError(t, err)
 
@@ -219,7 +252,7 @@ func TestPost401TriggersReRegisterAndUpdatesToken(t *testing.T) {
 	c, err := New(Config{
 		Enabled: true, URL: srv.URL, WorkspaceID: "ws-1",
 		AgentID: "agent-1", AgentRole: observer.RoleSlave,
-		APIKey: "ak", TokenStatePath: path,
+		APIKey: "ak", TokenStatePath: path, TelemetryEnabled: true,
 	})
 	require.NoError(t, err)
 	require.Equal(t, "tk_v1", c.Token())
@@ -256,7 +289,7 @@ func TestPost401WithinCooldownSkipsReRegister(t *testing.T) {
 	c, err := New(Config{
 		Enabled: true, URL: srv.URL, WorkspaceID: "ws-1",
 		AgentID: "agent-1", AgentRole: observer.RoleSlave,
-		APIKey: "ak", TokenStatePath: path,
+		APIKey: "ak", TokenStatePath: path, TelemetryEnabled: true,
 	})
 	require.NoError(t, err)
 
@@ -290,7 +323,7 @@ func TestPost403DoesNotTriggerReRegister(t *testing.T) {
 	c, err := New(Config{
 		Enabled: true, URL: srv.URL, WorkspaceID: "ws-1",
 		AgentID: "agent-1", AgentRole: observer.RoleSlave,
-		APIKey: "ak", TokenStatePath: path,
+		APIKey: "ak", TokenStatePath: path, TelemetryEnabled: true,
 	})
 	require.NoError(t, err)
 	c.Emit(observer.Event{TaskID: "t"})

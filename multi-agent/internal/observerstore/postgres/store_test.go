@@ -188,3 +188,39 @@ func TestPostgresStoreRegistrationAndEventProjection(t *testing.T) {
 	require.True(t, found)
 	require.False(t, progress.IsFinal)
 }
+
+func TestPostgresStoreTelemetryAPIKeys(t *testing.T) {
+	st, err := Open(Config{DSN: testDSN(t)})
+	require.NoError(t, err)
+	defer st.Close()
+
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 10)
+	require.NoError(t, st.ReplaceTelemetryAPIKeys([]observerstore.TelemetryAPIKeySpec{
+		{ID: "ops-global-" + suffix, Key: "global-secret-" + suffix, WorkspaceID: "*", Enabled: true},
+		{ID: "ops-ws2-" + suffix, Key: "ws2-secret-" + suffix, WorkspaceID: "ws2-" + suffix, Enabled: true},
+		{ID: "ops-disabled-" + suffix, Key: "disabled-secret-" + suffix, WorkspaceID: "*", Enabled: false},
+	}))
+
+	keyID, ok, err := st.LookupTelemetryAPIKey("global-secret-"+suffix, "ws1-"+suffix)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "ops-global-"+suffix, keyID)
+
+	keyID, ok, err = st.LookupTelemetryAPIKey("ws2-secret-"+suffix, "ws2-"+suffix)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "ops-ws2-"+suffix, keyID)
+
+	_, ok, err = st.LookupTelemetryAPIKey("ws2-secret-"+suffix, "ws1-"+suffix)
+	require.NoError(t, err)
+	require.False(t, ok)
+
+	_, ok, err = st.LookupTelemetryAPIKey("disabled-secret-"+suffix, "ws1-"+suffix)
+	require.NoError(t, err)
+	require.False(t, ok)
+
+	require.NoError(t, st.ReplaceTelemetryAPIKeys(nil))
+	_, ok, err = st.LookupTelemetryAPIKey("global-secret-"+suffix, "ws1-"+suffix)
+	require.NoError(t, err)
+	require.False(t, ok)
+}

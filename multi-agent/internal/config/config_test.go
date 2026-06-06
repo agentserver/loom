@@ -178,6 +178,31 @@ observer:
 	require.Contains(t, err.Error(), "observer.workspace_id")
 }
 
+func TestLoad_ObserverTelemetryEnabledRequiresAPIKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	tokenPath := filepath.Join(dir, "observer.token")
+	require.NoError(t, os.WriteFile(path, []byte(`
+server:
+  url: https://example.com
+  name: m
+discovery:
+  display_name: master-display
+observer:
+  enabled: true
+  url: https://observer.example
+  workspace_id: ws
+  agent_id: a
+  api_key: ak
+  token_state_path: `+tokenPath+`
+  telemetry_enabled: true
+`), 0o600))
+
+	_, err := Load(path)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "observer.telemetry_api_key is required when observer.telemetry_enabled is true")
+}
+
 func TestLoad_ResourcesRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "c.yaml")

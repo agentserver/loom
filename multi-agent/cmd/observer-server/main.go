@@ -118,6 +118,23 @@ func main() {
 	}
 	log.Printf("observer-server loaded %d api_keys", len(specs))
 
+	if cfg.Telemetry.Enabled {
+		keys := make([]observerstore.TelemetryAPIKeySpec, 0, len(cfg.Telemetry.APIKeys))
+		for _, k := range cfg.Telemetry.APIKeys {
+			value := os.Getenv(k.KeyEnv)
+			if value == "" {
+				log.Fatalf("%s is required", k.KeyEnv)
+			}
+			keys = append(keys, observerstore.TelemetryAPIKeySpec{
+				ID: k.ID, Key: value, WorkspaceID: k.WorkspaceID, Note: k.Note, Enabled: true,
+			})
+		}
+		if err := st.ReplaceTelemetryAPIKeys(keys); err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("observer-server loaded %d telemetry api_keys", len(keys))
+	}
+
 	if err := userspace.Migrate(st.DB()); err != nil {
 		log.Fatalf("userspace migrate: %v", err)
 	}
@@ -135,7 +152,13 @@ func main() {
 	}
 
 	log.Printf("observer-server listening on %s", cfg.ListenAddr)
-	app := observerweb.New(st, usHandler)
+	app := observerweb.NewWithOptions(st, usHandler, observerweb.Options{
+		TelemetryRateLimit: observerweb.RateLimitConfig{
+			PerMinute: cfg.Telemetry.RateLimit.PerMinute,
+			Burst:     cfg.Telemetry.RateLimit.Burst,
+		},
+		MaxEventBodyBytes: cfg.Telemetry.MaxBodyBytes,
+	})
 	srv := newHTTPServer(cfg.ListenAddr, withHealth(app, func(ctx context.Context) error {
 		return st.DB().PingContext(ctx)
 	}))

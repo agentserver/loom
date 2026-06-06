@@ -186,6 +186,8 @@ type TaskProgress struct {
 
 type Store interface {
 	LookupAPIKey(key string) (keyID string, ok bool, err error)
+	ReplaceTelemetryAPIKeys(keys []TelemetryAPIKeySpec) error
+	LookupTelemetryAPIKey(key, workspaceID string) (keyID string, ok bool, err error)
 	UpsertWorkspaceLazy(id, name, apiKeyID string) error
 	AgentBoundWorkspace(agentID string) (workspaceID string, found bool, err error)
 	UpsertAgent(a Agent, token, apiKeyID string) error
