@@ -49,6 +49,7 @@ type Store interface {
 	UpsertWorkspaceLazy(id, name, apiKeyID string) error
 	AgentBoundWorkspace(agentID string) (workspaceID string, found bool, err error)
 	UpsertAgent(a observerstore.Agent, token, apiKeyID string) error
+	RecordExternalIdentity(a observerstore.Agent, workspaceName string) error
 }
 
 // New constructs the observerweb HTTP handler. If usHandler is non-nil,
@@ -57,11 +58,19 @@ func New(s Store, usHandler *userspace.Handler) http.Handler {
 	return NewWithResolver(s, usHandler, static.New(s))
 }
 
+type Options struct {
+	RegisterDisabled bool
+}
+
 func NewWithResolver(s Store, usHandler *userspace.Handler, resolver identity.Resolver) http.Handler {
+	return NewWithResolverOptions(s, usHandler, resolver, Options{})
+}
+
+func NewWithResolverOptions(s Store, usHandler *userspace.Handler, resolver identity.Resolver, opts Options) http.Handler {
 	if resolver == nil {
 		resolver = static.New(s)
 	}
-	h := &handler{s: s, resolver: resolver}
+	h := &handler{s: s, resolver: resolver, registerEnabled: !opts.RegisterDisabled}
 	mux := http.NewServeMux()
 	// Ingest only. The legacy GET /api/events read endpoint was removed when
 	// the unauthenticated dashboard came down; agents that need to replay
@@ -87,8 +96,9 @@ func NewWithResolver(s Store, usHandler *userspace.Handler, resolver identity.Re
 }
 
 type handler struct {
-	s        Store
-	resolver identity.Resolver
+	s               Store
+	resolver        identity.Resolver
+	registerEnabled bool
 }
 
 func (h *handler) postEvent(w http.ResponseWriter, r *http.Request) {
@@ -132,6 +142,11 @@ func (h *handler) postEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	if ev.WorkspaceID != agent.WorkspaceID || ev.AgentID != agent.AgentID || ev.AgentRole != agent.Role {
 		http.Error(w, "workspace or agent mismatch", http.StatusForbidden)
+		return
+	}
+	if err := h.recordExternalIdentity(agent); err != nil {
+		log.Printf("observer: RecordExternalIdentity error ws=%s id=%s: %v", agent.WorkspaceID, agent.AgentID, err)
+		http.Error(w, "internal", http.StatusInternalServerError)
 		return
 	}
 	if err := h.s.Ingest(ev); err != nil {
@@ -193,7 +208,26 @@ func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) (identity
 		writeIdentityError(w, err)
 		return identity.Identity{}, false
 	}
+	if err := h.recordExternalIdentity(agent); err != nil {
+		log.Printf("observer: RecordExternalIdentity error ws=%s id=%s: %v", agent.WorkspaceID, agent.AgentID, err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return identity.Identity{}, false
+	}
 	return agent, true
+}
+
+func (h *handler) recordExternalIdentity(ident identity.Identity) error {
+	if ident.Source != identity.SourceAgentserver {
+		return nil
+	}
+	return h.s.RecordExternalIdentity(observerstore.Agent{
+		WorkspaceID:       ident.WorkspaceID,
+		ID:                ident.AgentID,
+		Role:              ident.Role,
+		DisplayName:       ident.AgentID,
+		ExternalSandboxID: ident.SandboxID,
+		ExternalUserID:    ident.UserID,
+	}, ident.WorkspaceName)
 }
 
 func writeIdentityError(w http.ResponseWriter, err error) {
@@ -645,6 +679,10 @@ var agentIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 var workspaceIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 func (h *handler) register(w http.ResponseWriter, r *http.Request) {
+	if !h.registerEnabled {
+		http.NotFound(w, r)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return

@@ -40,6 +40,8 @@ type APIKeySpec struct {
 	Note string
 }
 
+const externalIdentityAPIKeyID = "__agentserver_identity__"
+
 type Agent struct {
 	WorkspaceID       string
 	ID                string
@@ -402,6 +404,70 @@ func (s *Store) UpsertAgentWithExternalIdentity(a Agent, token, apiKeyID string)
 		a.WorkspaceID, a.ID, a.Role, a.DisplayName, tokenHash(token), apiKeyID, a.ExternalSandboxID, a.ExternalUserID,
 	)
 	return err
+}
+
+// RecordExternalIdentity records agentserver-sourced identity for audit without
+// making the agentserver proxy token valid through local static auth.
+func (s *Store) RecordExternalIdentity(a Agent, workspaceName string) error {
+	if a.WorkspaceID == "" {
+		return errors.New("observerstore: workspace id must not be empty")
+	}
+	if a.ID == "" {
+		return errors.New("observerstore: agent id must not be empty")
+	}
+	if a.Role == "" {
+		return errors.New("observerstore: agent role must not be empty")
+	}
+	if a.DisplayName == "" {
+		a.DisplayName = a.ID
+	}
+	keyToken, err := prefixedID("agentserver_audit_key")
+	if err != nil {
+		return err
+	}
+	agentToken, err := prefixedID("agentserver_audit_token")
+	if err != nil {
+		return err
+	}
+	now := nowUTC()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.Exec(
+		`INSERT OR IGNORE INTO api_keys(id, key_hash, note, created_at)
+         VALUES(?, ?, ?, ?)`,
+		externalIdentityAPIKeyID, tokenHash(keyToken), "agentserver identity audit sentinel", now,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO workspaces(id, name, created_by_api_key_id, external_user_id, created_at, last_seen_at)
+         VALUES(?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+            last_seen_at = excluded.last_seen_at,
+            external_user_id = CASE
+                WHEN workspaces.external_user_id = '' THEN excluded.external_user_id
+                ELSE workspaces.external_user_id
+            END`,
+		a.WorkspaceID, workspaceName, externalIdentityAPIKeyID, a.ExternalUserID, now, now,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO agents(workspace_id, id, role, display_name, token_hash, created_by_api_key_id, external_sandbox_id, external_user_id)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(workspace_id, id) DO UPDATE SET
+            role = excluded.role,
+            display_name = excluded.display_name,
+            external_sandbox_id = excluded.external_sandbox_id,
+            external_user_id = excluded.external_user_id`,
+		a.WorkspaceID, a.ID, a.Role, a.DisplayName, tokenHash(agentToken), externalIdentityAPIKeyID, a.ExternalSandboxID, a.ExternalUserID,
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // AgentBoundWorkspace returns the workspace_id this agent_id is currently

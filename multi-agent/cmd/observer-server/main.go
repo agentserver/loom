@@ -128,7 +128,9 @@ func main() {
 	}
 
 	log.Printf("observer-server listening on %s", cfg.ListenAddr)
-	log.Fatal(http.ListenAndServe(cfg.ListenAddr, observerweb.NewWithResolver(st, usHandler, resolver)))
+	log.Fatal(http.ListenAndServe(cfg.ListenAddr, observerweb.NewWithResolverOptions(st, usHandler, resolver, observerweb.Options{
+		RegisterDisabled: !cfg.Identity.LegacyAPIKeys.Enabled,
+	})))
 }
 
 func loadConfig(path string) (*Config, error) {

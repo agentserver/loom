@@ -157,6 +157,50 @@ func TestPostEventAgentserverIdentity(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 
+func TestPostEventAgentserverIdentityRecordsAuditWithoutTrustingProxyTokenLocally(t *testing.T) {
+	_, st := newTestHandler(t)
+	h := NewWithResolver(st, nil, fakeIdentityResolver{byToken: map[string]identity.Identity{
+		"proxy-token": {
+			UserID:        "user-1",
+			WorkspaceID:   "ws-agentserver",
+			WorkspaceName: "Agentserver Workspace",
+			AgentID:       "agentserver-driver",
+			Role:          observer.RoleDriver,
+			SandboxID:     "sandbox-1",
+			Source:        identity.SourceAgentserver,
+		},
+	}})
+
+	body, _ := json.Marshal(observer.Event{
+		WorkspaceID: "ws-agentserver", AgentID: "agentserver-driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "t-agentserver", Summary: "build thing", Status: "assigned",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer proxy-token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusAccepted, rr.Code, rr.Body.String())
+
+	var workspaceUser string
+	require.NoError(t, st.DB().QueryRow(
+		`SELECT external_user_id FROM workspaces WHERE id=?`,
+		"ws-agentserver",
+	).Scan(&workspaceUser))
+	require.Equal(t, "user-1", workspaceUser)
+
+	var sandboxID, agentUser string
+	require.NoError(t, st.DB().QueryRow(
+		`SELECT external_sandbox_id, external_user_id FROM agents WHERE workspace_id=? AND id=?`,
+		"ws-agentserver", "agentserver-driver",
+	).Scan(&sandboxID, &agentUser))
+	require.Equal(t, "sandbox-1", sandboxID)
+	require.Equal(t, "user-1", agentUser)
+
+	_, ok, err := st.ValidateToken("proxy-token")
+	require.NoError(t, err)
+	require.False(t, ok, "agentserver proxy tokens must keep resolving through agentserver, not local static auth")
+}
+
 func TestPostEventIdentityErrors(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -494,6 +538,16 @@ func TestRegisterRejectsBadAPIKey(t *testing.T) {
 		http.StatusUnauthorized)
 }
 
+func TestRegisterDisabledRejectsExistingAPIKeys(t *testing.T) {
+	_, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-default", "ak_real")
+	h := NewWithResolverOptions(st, nil, nil, Options{RegisterDisabled: true})
+
+	postRegister(t, h, "ak_real",
+		`{"agent_id":"slave-a","role":"slave","workspace_id":"ws1"}`,
+		http.StatusNotFound)
+}
+
 func TestRegisterRejectsMissingBearer(t *testing.T) {
 	h, st := newTestHandler(t)
 	seedAPIKey(t, st, "ak-default", "ak_real")
@@ -520,10 +574,10 @@ func TestRegisterRejectsBadAgentID(t *testing.T) {
 	seedAPIKey(t, st, "ak-default", "ak_real")
 
 	cases := []string{
-		`{"agent_id":"","role":"slave","workspace_id":"ws1"}`,                                     // empty
-		`{"agent_id":"has space","role":"slave","workspace_id":"ws1"}`,                            // space
-		`{"agent_id":"weird/slash","role":"slave","workspace_id":"ws1"}`,                          // slash
-		`{"agent_id":"` + strings.Repeat("a", 65) + `","role":"slave","workspace_id":"ws1"}`,     // too long
+		`{"agent_id":"","role":"slave","workspace_id":"ws1"}`,                                // empty
+		`{"agent_id":"has space","role":"slave","workspace_id":"ws1"}`,                       // space
+		`{"agent_id":"weird/slash","role":"slave","workspace_id":"ws1"}`,                     // slash
+		`{"agent_id":"` + strings.Repeat("a", 65) + `","role":"slave","workspace_id":"ws1"}`, // too long
 	}
 	for _, body := range cases {
 		postRegister(t, h, "ak_real", body, http.StatusBadRequest)
