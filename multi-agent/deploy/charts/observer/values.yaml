@@ -88,9 +88,13 @@ config:
 
 migration:
   enabled: true
-  # false renders a revisioned Job for GitOps/CI systems to run explicitly
-  # before rollout. true renders a pre-install/pre-upgrade Helm hook Job.
+  # false renders a named Job for CI/GitOps systems to run explicitly before
+  # rollout. true renders a pre-install/pre-upgrade Helm hook Job.
   useHelmHook: false
+  # Used only when useHelmHook=false. Defaults to image.tag, or chart
+  # appVersion when the tag is "latest"; set it explicitly for CI/GitOps
+  # renders that need one migration Job per release.
+  jobNameSuffix: ""
   backoffLimit: 3
   ttlSecondsAfterFinished: 86400
 

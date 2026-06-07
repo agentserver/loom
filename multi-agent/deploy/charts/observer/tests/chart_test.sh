@@ -16,11 +16,15 @@ grep -q 'kind: Job' <<<"$rendered"
 grep -q 'kind: CronJob' <<<"$rendered"
 grep -q 'name: observer-test-observer-config' <<<"$rendered"
 grep -q 'configMap:' <<<"$rendered"
-grep -q 'name: observer-test-observer-migrate-1' <<<"$rendered"
+grep -q 'name: observer-test-observer-migrate-0-1-0' <<<"$rendered"
 if grep -q 'helm.sh/hook' <<<"$rendered"; then
   echo "default migration job must not render helm hook annotations" >&2
   exit 1
 fi
+
+named="$(helm template observer-test "$CHART_DIR" \
+  --set migration.jobNameSuffix=schema-20260607)"
+grep -q 'name: observer-test-observer-migrate-schema-20260607' <<<"$named"
 
 hooked="$(helm template observer-test "$CHART_DIR" \
   --set migration.useHelmHook=true)"

@@ -33,6 +33,14 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if .Values.migration.useHelmHook -}}
 {{- printf "%s-migrate" (include "observer.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- else -}}
-{{- printf "%s-migrate-%d" (include "observer.fullname" .) (.Release.Revision | int) | trunc 63 | trimSuffix "-" -}}
+{{- printf "%s-migrate-%s" (include "observer.fullname" .) (include "observer.migrationJobSuffix" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
+{{- end -}}
+
+{{- define "observer.migrationJobSuffix" -}}
+{{- $suffix := default .Values.image.tag .Values.migration.jobNameSuffix -}}
+{{- if or (not $suffix) (eq $suffix "latest") -}}
+{{- $suffix = .Chart.AppVersion -}}
+{{- end -}}
+{{- $suffix | lower | replace "/" "-" | replace ":" "-" | replace "_" "-" | replace "." "-" | trunc 24 | trimSuffix "-" -}}
 {{- end -}}

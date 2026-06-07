@@ -18,5 +18,6 @@
 {{- if and .Values.migration.enabled (not .Values.migration.useHelmHook) }}
 #
 # Migration Job: {{ include "observer.migrationJobName" . }}
-# Run this Job to completion before rolling observer pods in production CI/CD.
+# Set migration.jobNameSuffix for each migratable release, then run this Job
+# to completion before rolling observer pods in production CI/CD.
 {{- end }}

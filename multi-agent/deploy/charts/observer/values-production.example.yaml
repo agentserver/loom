@@ -61,3 +61,4 @@ resources:
 migration:
   enabled: true
   useHelmHook: true
+  jobNameSuffix: ""
