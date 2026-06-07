@@ -26,10 +26,10 @@ func newTestHandler(t *testing.T) (*Handler, *httptest.Server) {
 	store := NewStore(db)
 	blobs, err := NewBlobStore(db, t.TempDir())
 	require.NoError(t, err)
-	resolver := func(r *http.Request) (string, string, bool) {
+	resolver := func(r *http.Request) (Identity, bool) {
 		ws := r.Header.Get("X-Test-WS")
 		ag := r.Header.Get("X-Test-Agent")
-		return ws, ag, ws != "" && ag != ""
+		return Identity{WorkspaceID: ws, AgentID: ag, UserID: r.Header.Get("X-Test-User")}, ws != "" && ag != ""
 	}
 	h := &Handler{Store: store, Blobs: blobs, Resolver: resolver}
 	mux := http.NewServeMux()
@@ -107,6 +107,7 @@ func TestAPI_PushHappyPath(t *testing.T) {
 	req.Header.Set("Content-Type", ct)
 	req.Header.Set("X-Test-WS", "ws-a")
 	req.Header.Set("X-Test-Agent", "agent-1")
+	req.Header.Set("X-Test-User", "user-agent-1")
 	resp, err := srv.Client().Do(req)
 	require.NoError(t, err)
 	bodyBytes, _ := io.ReadAll(resp.Body)
@@ -117,6 +118,26 @@ func TestAPI_PushHappyPath(t *testing.T) {
 	require.Equal(t, "foo", pr.Slug)
 	require.Equal(t, "1.0.0", pr.Version)
 	require.False(t, pr.Dedup)
+}
+
+func TestAPI_PushRecordsCreatedByUserID(t *testing.T) {
+	h, srv := newTestHandler(t)
+	defer srv.Close()
+	body, ct := buildPushBody(t, manifest.KindMCP, "foo", "1.0.0")
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		srv.URL+"/api/userspace/packages", body)
+	req.Header.Set("Content-Type", ct)
+	req.Header.Set("X-Test-WS", "ws-a")
+	req.Header.Set("X-Test-Agent", "agent-1")
+	req.Header.Set("X-Test-User", "user-1")
+	resp, err := srv.Client().Do(req)
+	require.NoError(t, err)
+	require.Equal(t, 200, resp.StatusCode, "body=%s", readBody(resp))
+
+	v, err := h.Store.GetVersion("foo", "1.0.0")
+	require.NoError(t, err)
+	require.Equal(t, "workspace", v.Visibility)
+	require.Equal(t, "user-1", v.CreatedByUserID)
 }
 
 func TestAPI_PushRejectsKindMismatch(t *testing.T) {
@@ -178,6 +199,7 @@ func postMultipart(t *testing.T, srv *httptest.Server, path string, body io.Read
 	req.Header.Set("Content-Type", ct)
 	req.Header.Set("X-Test-WS", ws)
 	req.Header.Set("X-Test-Agent", ag)
+	req.Header.Set("X-Test-User", "user-"+ag)
 	resp, err := srv.Client().Do(req)
 	require.NoError(t, err)
 	return resp

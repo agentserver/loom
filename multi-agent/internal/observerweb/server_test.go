@@ -2,6 +2,7 @@ package observerweb
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/yourorg/multi-agent/internal/identity"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/observerstore"
 )
@@ -92,6 +94,22 @@ func seedSecondWorkspaceAgent(t *testing.T, st *observerstore.Store) {
 	))
 }
 
+type fakeIdentityResolver struct {
+	byToken map[string]identity.Identity
+	err     error
+}
+
+func (f fakeIdentityResolver) Resolve(_ context.Context, token string) (identity.Identity, error) {
+	if f.err != nil {
+		return identity.Identity{}, f.err
+	}
+	ident, ok := f.byToken[token]
+	if !ok {
+		return identity.Identity{}, identity.ErrInvalid
+	}
+	return ident, nil
+}
+
 // ---------------------------------------------------------------------------
 // Event / view tests (non-register)
 // ---------------------------------------------------------------------------
@@ -109,6 +127,107 @@ func TestPostEventAuth(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusAccepted, rr.Code)
+}
+
+func TestPostEventAgentserverIdentity(t *testing.T) {
+	_, st := newTestHandler(t)
+	h := NewWithResolver(st, nil, fakeIdentityResolver{byToken: map[string]identity.Identity{
+		"proxy-token": {
+			UserID:      "user-1",
+			WorkspaceID: "ws1",
+			AgentID:     "agentserver-driver",
+			Role:        observer.RoleDriver,
+			SandboxID:   "sandbox-1",
+			Source:      identity.SourceAgentserver,
+		},
+	}})
+
+	body, _ := json.Marshal(observer.Event{
+		WorkspaceID: "ws1", AgentID: "agentserver-driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "t-agentserver", Summary: "build thing", Status: "assigned",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer proxy-token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusAccepted, rr.Code, rr.Body.String())
+
+	count, err := st.EventCount()
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+}
+
+func TestPostEventAgentserverIdentityRecordsAuditWithoutTrustingProxyTokenLocally(t *testing.T) {
+	_, st := newTestHandler(t)
+	h := NewWithResolver(st, nil, fakeIdentityResolver{byToken: map[string]identity.Identity{
+		"proxy-token": {
+			UserID:        "user-1",
+			WorkspaceID:   "ws-agentserver",
+			WorkspaceName: "Agentserver Workspace",
+			AgentID:       "agentserver-driver",
+			Role:          observer.RoleDriver,
+			SandboxID:     "sandbox-1",
+			Source:        identity.SourceAgentserver,
+		},
+	}})
+
+	body, _ := json.Marshal(observer.Event{
+		WorkspaceID: "ws-agentserver", AgentID: "agentserver-driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "t-agentserver", Summary: "build thing", Status: "assigned",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer proxy-token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusAccepted, rr.Code, rr.Body.String())
+
+	var workspaceUser string
+	require.NoError(t, st.DB().QueryRow(
+		`SELECT external_user_id FROM workspaces WHERE id=?`,
+		"ws-agentserver",
+	).Scan(&workspaceUser))
+	require.Equal(t, "user-1", workspaceUser)
+
+	var sandboxID, agentUser string
+	require.NoError(t, st.DB().QueryRow(
+		`SELECT external_sandbox_id, external_user_id FROM agents WHERE workspace_id=? AND id=?`,
+		"ws-agentserver", "agentserver-driver",
+	).Scan(&sandboxID, &agentUser))
+	require.Equal(t, "sandbox-1", sandboxID)
+	require.Equal(t, "user-1", agentUser)
+
+	_, ok, err := st.ValidateToken("proxy-token")
+	require.NoError(t, err)
+	require.False(t, ok, "agentserver proxy tokens must keep resolving through agentserver, not local static auth")
+}
+
+func TestPostEventIdentityErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantRetry  string
+	}{
+		{name: "invalid", err: identity.ErrInvalid, wantStatus: http.StatusUnauthorized},
+		{name: "revoked", err: identity.ErrRevoked, wantStatus: http.StatusForbidden},
+		{name: "upstream", err: identity.ErrUpstream, wantStatus: http.StatusServiceUnavailable, wantRetry: "5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, st := newTestHandler(t)
+			h := NewWithResolver(st, nil, fakeIdentityResolver{err: tc.err})
+			body, _ := json.Marshal(observer.Event{
+				WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+				Type: observer.EventDriverTaskSubmitted, TaskID: "t1",
+			})
+			req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer token")
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+
+			require.Equal(t, tc.wantStatus, rr.Code, rr.Body.String())
+			require.Equal(t, tc.wantRetry, rr.Header().Get("Retry-After"))
+		})
+	}
 }
 
 func TestPostEventRejectsWrongAgent(t *testing.T) {
@@ -419,6 +538,16 @@ func TestRegisterRejectsBadAPIKey(t *testing.T) {
 		http.StatusUnauthorized)
 }
 
+func TestRegisterDisabledRejectsExistingAPIKeys(t *testing.T) {
+	_, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-default", "ak_real")
+	h := NewWithResolverOptions(st, nil, nil, Options{RegisterDisabled: true})
+
+	postRegister(t, h, "ak_real",
+		`{"agent_id":"slave-a","role":"slave","workspace_id":"ws1"}`,
+		http.StatusNotFound)
+}
+
 func TestRegisterRejectsMissingBearer(t *testing.T) {
 	h, st := newTestHandler(t)
 	seedAPIKey(t, st, "ak-default", "ak_real")
@@ -445,10 +574,10 @@ func TestRegisterRejectsBadAgentID(t *testing.T) {
 	seedAPIKey(t, st, "ak-default", "ak_real")
 
 	cases := []string{
-		`{"agent_id":"","role":"slave","workspace_id":"ws1"}`,                                     // empty
-		`{"agent_id":"has space","role":"slave","workspace_id":"ws1"}`,                            // space
-		`{"agent_id":"weird/slash","role":"slave","workspace_id":"ws1"}`,                          // slash
-		`{"agent_id":"` + strings.Repeat("a", 65) + `","role":"slave","workspace_id":"ws1"}`,     // too long
+		`{"agent_id":"","role":"slave","workspace_id":"ws1"}`,                                // empty
+		`{"agent_id":"has space","role":"slave","workspace_id":"ws1"}`,                       // space
+		`{"agent_id":"weird/slash","role":"slave","workspace_id":"ws1"}`,                     // slash
+		`{"agent_id":"` + strings.Repeat("a", 65) + `","role":"slave","workspace_id":"ws1"}`, // too long
 	}
 	for _, body := range cases {
 		postRegister(t, h, "ak_real", body, http.StatusBadRequest)
@@ -583,17 +712,27 @@ func TestRegister_TokenRotation(t *testing.T) {
 func TestListWorkspaces_HappyPath(t *testing.T) {
 	h, st := newTestHandler(t)
 	seedAPIKey(t, st, "ak-1", "key1")
-	postRegister(t, h, "key1", `{"agent_id":"a","role":"slave","workspace_id":"ws-1","workspace_name":"One"}`, http.StatusOK)
+	bodyA := postRegister(t, h, "key1", `{"agent_id":"a","role":"slave","workspace_id":"ws-1","workspace_name":"One"}`, http.StatusOK)
 	postRegister(t, h, "key1", `{"agent_id":"b","role":"slave","workspace_id":"ws-2","workspace_name":"Two"}`, http.StatusOK)
 
+	req := httptest.NewRequest(http.MethodGet, "/api/workspaces", nil)
+	req.Header.Set("Authorization", "Bearer "+extractToken(t, bodyA))
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/workspaces", nil))
+	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code)
 
 	var got []observerstore.WorkspaceSummary
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
-	require.Len(t, got, 2)
-	require.Equal(t, "ws-2", got[0].ID, "ordered by last_seen DESC")
+	require.Len(t, got, 1)
+	require.Equal(t, "ws-1", got[0].ID)
+}
+
+func TestListWorkspaces_RequiresBearerIdentity(t *testing.T) {
+	h, _ := newTestHandler(t)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/workspaces", nil))
+	require.Equal(t, http.StatusUnauthorized, rr.Code)
 }
 
 // ---------------------------------------------------------------------------
@@ -638,13 +777,16 @@ func TestE2E_MultiWorkspaceIsolation(t *testing.T) {
 	ingestEvent(t, h, tokB, "ws-personal", "slave-A", "slave", observer.EventSlaveTaskStarted, "personal-task-1")
 	ingestEvent(t, h, tokC, "ws-work", "slave-W", "slave", observer.EventSlaveTaskStarted, "work-task-1")
 
-	// GET /api/workspaces returns both, ordered by last_seen DESC.
+	// GET /api/workspaces returns only the authenticated agent's workspace.
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/workspaces", nil))
+	req := httptest.NewRequest(http.MethodGet, "/api/workspaces", nil)
+	req.Header.Set("Authorization", "Bearer "+tokA)
+	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code)
 	var sums []observerstore.WorkspaceSummary
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &sums))
-	require.Len(t, sums, 2)
+	require.Len(t, sums, 1)
+	require.Equal(t, "ws-personal", sums[0].ID)
 
 	// Verify cross-workspace isolation via Store's public read.
 	personalEvents, err := st.ListEventsForWorkspace("ws-personal")
@@ -655,27 +797,14 @@ func TestE2E_MultiWorkspaceIsolation(t *testing.T) {
 	require.Len(t, workEvents, 1, "ws-work must have exactly 1 event")
 }
 
-func TestListWorkspaces_WebTokenGuard(t *testing.T) {
-	t.Setenv("OBSERVER_WEB_TOKEN", "secret")
+func TestListWorkspacesRejectsInvalidBearer(t *testing.T) {
 	h, _ := newTestHandler(t)
 
-	// missing token → 401
-	rr1 := httptest.NewRecorder()
-	h.ServeHTTP(rr1, httptest.NewRequest(http.MethodGet, "/api/workspaces", nil))
-	require.Equal(t, http.StatusUnauthorized, rr1.Code)
-
-	// wrong header value → 401
 	req2 := httptest.NewRequest(http.MethodGet, "/api/workspaces", nil)
-	req2.Header.Set("X-Observer-Web-Token", "nope")
+	req2.Header.Set("Authorization", "Bearer nope")
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, req2)
 	require.Equal(t, http.StatusUnauthorized, rr2.Code)
-
-	// correct query param → 200
-	req3 := httptest.NewRequest(http.MethodGet, "/api/workspaces?web_token=secret", nil)
-	rr3 := httptest.NewRecorder()
-	h.ServeHTTP(rr3, req3)
-	require.Equal(t, http.StatusOK, rr3.Code)
 }
 
 func TestRegister_RejectsBadWorkspaceID(t *testing.T) {

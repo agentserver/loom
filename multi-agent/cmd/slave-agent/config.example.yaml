@@ -39,6 +39,7 @@ discovery:
 
 observer:
   enabled: false
+  telemetry_enabled: false
   url: https://observer.example.com
   workspace_id: ws-replace-me
   workspace_name: ""  # optional; recorded only when this workspace is first created

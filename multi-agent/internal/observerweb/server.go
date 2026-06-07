@@ -10,10 +10,11 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"os"
 	"regexp"
 	"strings"
 
+	"github.com/yourorg/multi-agent/internal/identity"
+	"github.com/yourorg/multi-agent/internal/identity/static"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/observerstore"
 	"github.com/yourorg/multi-agent/internal/userspace"
@@ -47,12 +48,28 @@ type Store interface {
 	UpsertWorkspaceLazy(id, name, apiKeyID string) error
 	AgentBoundWorkspace(agentID string) (workspaceID string, found bool, err error)
 	UpsertAgent(a observerstore.Agent, token, apiKeyID string) error
+	RecordExternalIdentity(a observerstore.Agent, workspaceName string) error
 }
 
 // New constructs the observerweb HTTP handler. If usHandler is non-nil,
 // /api/userspace/* routes are mounted on the same mux.
 func New(s Store, usHandler *userspace.Handler) http.Handler {
-	h := &handler{s: s}
+	return NewWithResolver(s, usHandler, static.New(s))
+}
+
+type Options struct {
+	RegisterDisabled bool
+}
+
+func NewWithResolver(s Store, usHandler *userspace.Handler, resolver identity.Resolver) http.Handler {
+	return NewWithResolverOptions(s, usHandler, resolver, Options{})
+}
+
+func NewWithResolverOptions(s Store, usHandler *userspace.Handler, resolver identity.Resolver, opts Options) http.Handler {
+	if resolver == nil {
+		resolver = static.New(s)
+	}
+	h := &handler{s: s, resolver: resolver, registerEnabled: !opts.RegisterDisabled}
 	mux := http.NewServeMux()
 	// Ingest only. The legacy GET /api/events read endpoint was removed when
 	// the unauthenticated dashboard came down; agents that need to replay
@@ -70,7 +87,7 @@ func New(s Store, usHandler *userspace.Handler) http.Handler {
 	mux.HandleFunc("/api/task-contracts/", h.taskContractByID)
 	mux.HandleFunc("/api/resource-snapshots", h.resourceSnapshots)
 	mux.HandleFunc("/api/resource-snapshots/latest", h.latestResourceSnapshot)
-	mux.HandleFunc("/api/workspaces", h.guardWebToken(h.listWorkspaces))
+	mux.HandleFunc("/api/workspaces", h.listWorkspaces)
 	if usHandler != nil {
 		userspace.MountRoutes(mux, usHandler)
 	}
@@ -78,7 +95,9 @@ func New(s Store, usHandler *userspace.Handler) http.Handler {
 }
 
 type handler struct {
-	s Store
+	s               Store
+	resolver        identity.Resolver
+	registerEnabled bool
 }
 
 func (h *handler) postEvent(w http.ResponseWriter, r *http.Request) {
@@ -92,13 +111,9 @@ func (h *handler) postEvent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing or invalid bearer token", http.StatusUnauthorized)
 		return
 	}
-	agent, ok, err := h.s.ValidateToken(token)
+	agent, err := h.resolver.Resolve(r.Context(), token)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if !ok {
-		http.Error(w, "missing or invalid bearer token", http.StatusUnauthorized)
+		writeIdentityError(w, err)
 		return
 	}
 
@@ -124,8 +139,13 @@ func (h *handler) postEvent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}
-	if ev.WorkspaceID != agent.WorkspaceID || ev.AgentID != agent.ID || ev.AgentRole != agent.Role {
+	if ev.WorkspaceID != agent.WorkspaceID || ev.AgentID != agent.AgentID || ev.AgentRole != agent.Role {
 		http.Error(w, "workspace or agent mismatch", http.StatusForbidden)
+		return
+	}
+	if err := h.recordExternalIdentity(agent); err != nil {
+		log.Printf("observer: RecordExternalIdentity error ws=%s id=%s: %v", agent.WorkspaceID, agent.AgentID, err)
+		http.Error(w, "internal", http.StatusInternalServerError)
 		return
 	}
 	if err := h.s.Ingest(ev); err != nil {
@@ -149,37 +169,78 @@ func bearerToken(auth string) (string, bool) {
 // Sibling packages (internal/userspace) call this when mounting routes on
 // the same mux so token validation lives in one place.
 func AgentFromRequest(s Store, r *http.Request) (string, string, bool) {
-	tok, ok := bearerToken(r.Header.Get("Authorization"))
+	return AgentFromRequestWithResolver(static.New(s), r)
+}
+
+func AgentFromRequestWithResolver(resolver identity.Resolver, r *http.Request) (string, string, bool) {
+	ident, ok := IdentityFromRequest(resolver, r)
 	if !ok {
 		return "", "", false
 	}
-	agent, ok, err := s.ValidateToken(tok)
-	if err != nil || !ok {
-		return "", "", false
-	}
-	return agent.WorkspaceID, agent.ID, true
+	return ident.WorkspaceID, ident.AgentID, true
 }
 
-func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) (observerstore.Agent, bool) {
+func IdentityFromRequest(resolver identity.Resolver, r *http.Request) (identity.Identity, bool) {
+	tok, ok := bearerToken(r.Header.Get("Authorization"))
+	if !ok {
+		return identity.Identity{}, false
+	}
+	ident, err := resolver.Resolve(r.Context(), tok)
+	if err != nil {
+		return identity.Identity{}, false
+	}
+	return ident, true
+}
+
+func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) (identity.Identity, bool) {
 	token, ok := bearerToken(r.Header.Get("Authorization"))
 	if !ok {
 		token = strings.TrimSpace(r.URL.Query().Get("token"))
 		ok = token != ""
 		if !ok {
 			http.Error(w, "missing or invalid bearer token", http.StatusUnauthorized)
-			return observerstore.Agent{}, false
+			return identity.Identity{}, false
 		}
 	}
-	agent, ok, err := h.s.ValidateToken(token)
+	agent, err := h.resolver.Resolve(r.Context(), token)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return observerstore.Agent{}, false
+		writeIdentityError(w, err)
+		return identity.Identity{}, false
 	}
-	if !ok {
-		http.Error(w, "missing or invalid bearer token", http.StatusUnauthorized)
-		return observerstore.Agent{}, false
+	if err := h.recordExternalIdentity(agent); err != nil {
+		log.Printf("observer: RecordExternalIdentity error ws=%s id=%s: %v", agent.WorkspaceID, agent.AgentID, err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return identity.Identity{}, false
 	}
 	return agent, true
+}
+
+func (h *handler) recordExternalIdentity(ident identity.Identity) error {
+	if ident.Source != identity.SourceAgentserver {
+		return nil
+	}
+	return h.s.RecordExternalIdentity(observerstore.Agent{
+		WorkspaceID:       ident.WorkspaceID,
+		ID:                ident.AgentID,
+		Role:              ident.Role,
+		DisplayName:       ident.AgentID,
+		ExternalSandboxID: ident.SandboxID,
+		ExternalUserID:    ident.UserID,
+	}, ident.WorkspaceName)
+}
+
+func writeIdentityError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, identity.ErrInvalid):
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	case errors.Is(err, identity.ErrRevoked):
+		http.Error(w, "token revoked", http.StatusForbidden)
+	case errors.Is(err, identity.ErrUpstream):
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "identity upstream unavailable", http.StatusServiceUnavailable)
+	default:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func absoluteURL(r *http.Request, path string) string {
@@ -218,7 +279,7 @@ func (h *handler) artifacts(w http.ResponseWriter, r *http.Request) {
 		req.Kind = "file"
 	}
 	art, err := h.s.CreateArtifact(observerstore.ArtifactCreate{
-		WorkspaceID: agent.WorkspaceID, OwnerAgentID: agent.ID,
+		WorkspaceID: agent.WorkspaceID, OwnerAgentID: agent.AgentID,
 		Path: req.Path, Kind: req.Kind, MIME: req.MIME, Bytes: req.Bytes, SHA256: req.SHA256,
 		State: observerstore.ArtifactStateRegistered,
 	})
@@ -270,7 +331,7 @@ func (h *handler) getArtifact(w http.ResponseWriter, r *http.Request, id string)
 		io.Copy(w, content.Body) //nolint:errcheck
 		return
 	}
-	req, err := h.s.RequestArtifact(agent.WorkspaceID, agent.ID, id)
+	req, err := h.s.RequestArtifact(agent.WorkspaceID, agent.AgentID, id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -294,7 +355,7 @@ func (h *handler) putArtifactContent(w http.ResponseWriter, r *http.Request, id 
 	if !ok {
 		return
 	}
-	if err := h.s.StoreArtifactContent(agent.WorkspaceID, agent.ID, id, r.Header.Get("Content-Type"), r.Body); err != nil {
+	if err := h.s.StoreArtifactContent(agent.WorkspaceID, agent.AgentID, id, r.Header.Get("Content-Type"), r.Body); err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
@@ -310,7 +371,7 @@ func (h *handler) artifactRequests(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	reqs, err := h.s.ListArtifactRequests(agent.WorkspaceID, agent.ID)
+	reqs, err := h.s.ListArtifactRequests(agent.WorkspaceID, agent.AgentID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -341,7 +402,7 @@ func (h *handler) writeTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	wr, err := h.s.CreateWrite(observerstore.WriteCreate{
-		WorkspaceID: agent.WorkspaceID, OwnerAgentID: agent.ID,
+		WorkspaceID: agent.WorkspaceID, OwnerAgentID: agent.AgentID,
 		TaskID: req.TaskID, Path: req.Path, Overwrite: req.Overwrite,
 	})
 	if err != nil {
@@ -370,7 +431,7 @@ func (h *handler) writeRouter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/writes/")
-	if err := h.s.StoreWriteContent(agent.WorkspaceID, agent.ID, id, r.Header.Get("Content-Type"), r.Body); err != nil {
+	if err := h.s.StoreWriteContent(agent.WorkspaceID, agent.AgentID, id, r.Header.Get("Content-Type"), r.Body); err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
@@ -390,7 +451,7 @@ func (h *handler) patchWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/writes/")
-	if err := h.s.UpdateWriteTaskID(agent.WorkspaceID, agent.ID, id, req.TaskID); err != nil {
+	if err := h.s.UpdateWriteTaskID(agent.WorkspaceID, agent.AgentID, id, req.TaskID); err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
@@ -407,7 +468,7 @@ func (h *handler) writes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskID := r.URL.Query().Get("task_id")
-	rows, err := h.s.ListCompletedWrites(agent.WorkspaceID, agent.ID, taskID)
+	rows, err := h.s.ListCompletedWrites(agent.WorkspaceID, agent.AgentID, taskID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -461,7 +522,7 @@ func (h *handler) taskContracts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	record := observerstore.TaskContractRecord{
-		WorkspaceID: agent.WorkspaceID, OwnerAgentID: agent.ID,
+		WorkspaceID: agent.WorkspaceID, OwnerAgentID: agent.AgentID,
 		TaskID: req.TaskID, ConversationID: req.ConversationID, Body: req.Body,
 	}
 	if err := h.s.SaveTaskContract(record); err != nil {
@@ -493,7 +554,7 @@ func (h *handler) taskContractByID(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	if got.OwnerAgentID != agent.ID && agent.Role != observer.RoleMaster {
+	if got.OwnerAgentID != agent.AgentID && agent.Role != observer.RoleMaster {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -523,7 +584,7 @@ func (h *handler) resourceSnapshots(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	record := observerstore.ResourceSnapshotRecord{
-		WorkspaceID: agent.WorkspaceID, OwnerAgentID: agent.ID,
+		WorkspaceID: agent.WorkspaceID, OwnerAgentID: agent.AgentID,
 		SnapshotID: req.SnapshotID, Body: req.Body,
 	}
 	if err := h.s.SaveResourceSnapshot(record); err != nil {
@@ -617,6 +678,10 @@ var agentIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 var workspaceIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 func (h *handler) register(w http.ResponseWriter, r *http.Request) {
+	if !h.registerEnabled {
+		http.NotFound(w, r)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -724,31 +789,13 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// guardWebToken activates only when OBSERVER_WEB_TOKEN env var is non-empty.
-// When active, the request must carry the token via X-Observer-Web-Token
-// header or ?web_token= query param. When the env var is empty (default
-// local single-user case), requests pass through unchecked.
-func (h *handler) guardWebToken(next http.HandlerFunc) http.HandlerFunc {
-	want := os.Getenv("OBSERVER_WEB_TOKEN")
-	if want == "" {
-		return next
-	}
-	return func(w http.ResponseWriter, r *http.Request) {
-		got := r.Header.Get("X-Observer-Web-Token")
-		if got == "" {
-			got = r.URL.Query().Get("web_token")
-		}
-		if got != want {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		next(w, r)
-	}
-}
-
 func (h *handler) listWorkspaces(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	agent, ok := h.authenticate(w, r)
+	if !ok {
 		return
 	}
 	sums, err := h.s.ListWorkspaceSummaries()
@@ -757,11 +804,17 @@ func (h *handler) listWorkspaces(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal", http.StatusInternalServerError)
 		return
 	}
-	if sums == nil {
-		sums = []observerstore.WorkspaceSummary{}
+	filtered := sums[:0]
+	for _, sum := range sums {
+		if sum.ID == agent.WorkspaceID {
+			filtered = append(filtered, sum)
+		}
+	}
+	if filtered == nil {
+		filtered = []observerstore.WorkspaceSummary{}
 	}
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(sums); err != nil {
+	if err := json.NewEncoder(w).Encode(filtered); err != nil {
 		log.Printf("observer: encode listWorkspaces error: %v", err)
 	}
 }

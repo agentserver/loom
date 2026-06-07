@@ -90,6 +90,7 @@ Each slave / driver `config.yaml` references the observer through:
 ```yaml
 observer:
   enabled: true
+  telemetry_enabled: false
   url: http://<observer-host>:8090
   workspace_id: <YOUR WORKSPACE>
   agent_id: <UNIQUE PER AGENT>
@@ -99,8 +100,8 @@ observer:
 
 On first start the agent POSTs `/api/agents/register` with the bootstrap
 `api_key` as Bearer; the server mints a per-agent token and the slave writes
-it to `token_state_path` (mode 0600). Subsequent `/api/events` calls use
-that per-agent token automatically.
+it to `token_state_path` (mode 0600). Task telemetry is opt-in: set
+`telemetry_enabled: true` to send `/api/events` calls with that per-agent token.
 
 ## Multiple workspaces / multiple keys
 

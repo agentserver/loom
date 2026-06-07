@@ -79,13 +79,14 @@ const (
 )
 
 type Observer struct {
-	Enabled        bool   `yaml:"enabled"`
-	URL            string `yaml:"url"`
-	WorkspaceID    string `yaml:"workspace_id"`
-	WorkspaceName  string `yaml:"workspace_name,omitempty"`
-	AgentID        string `yaml:"agent_id"`
-	APIKey         string `yaml:"api_key"`
-	TokenStatePath string `yaml:"token_state_path"`
+	Enabled          bool   `yaml:"enabled"`
+	TelemetryEnabled bool   `yaml:"telemetry_enabled,omitempty"`
+	URL              string `yaml:"url"`
+	WorkspaceID      string `yaml:"workspace_id"`
+	WorkspaceName    string `yaml:"workspace_name,omitempty"`
+	AgentID          string `yaml:"agent_id"`
+	APIKey           string `yaml:"api_key"`
+	TokenStatePath   string `yaml:"token_state_path"`
 }
 
 // LoadConfig reads + validates the yaml at path and applies DriverDefaults defaults.
@@ -147,42 +148,55 @@ func LoadConfig(path string) (*Config, error) {
 	if c.Fanout.SubTaskDefaults.TimeoutSec == 0 {
 		c.Fanout.SubTaskDefaults.TimeoutSec = c.DriverDefaults.TaskTimeoutSec
 	}
+	observerLegacyConfigured := c.Observer.APIKey != "" || c.Observer.TokenStatePath != ""
+	observerProxyReady := c.Credentials.ProxyToken != ""
 	if c.Observer.URL != "" {
+		if c.Observer.WorkspaceID == "" && c.Credentials.WorkspaceID != "" {
+			c.Observer.WorkspaceID = c.Credentials.WorkspaceID
+		}
 		if c.Observer.AgentID == "" {
-			c.Observer.AgentID = c.Discovery.DisplayName
+			if c.Credentials.ShortID != "" {
+				c.Observer.AgentID = c.Credentials.ShortID
+			} else if !c.Observer.Enabled || observerLegacyConfigured {
+				c.Observer.AgentID = c.Discovery.DisplayName
+			}
 		}
 	}
 	if c.Observer.Enabled {
 		if c.Observer.URL == "" {
 			return nil, fmt.Errorf("observer.url is required when observer.enabled is true")
 		}
-		if c.Observer.WorkspaceID == "" {
-			return nil, fmt.Errorf("observer.workspace_id is required when observer.enabled is true")
+		if observerProxyReady || observerLegacyConfigured {
+			if c.Observer.WorkspaceID == "" {
+				return nil, fmt.Errorf("observer.workspace_id is required when observer.enabled is true")
+			}
+			if c.Observer.AgentID == "" {
+				return nil, fmt.Errorf("observer.agent_id is required when observer.enabled is true")
+			}
 		}
-		if c.Observer.AgentID == "" {
-			return nil, fmt.Errorf("observer.agent_id is required when observer.enabled is true")
+		if observerLegacyConfigured {
+			if c.Observer.APIKey == "" {
+				return nil, fmt.Errorf("observer.api_key is required when observer legacy registration is configured")
+			}
+			if c.Observer.TokenStatePath == "" {
+				return nil, fmt.Errorf("observer.token_state_path is required when observer legacy registration is configured")
+			}
+			if !filepath.IsAbs(c.Observer.TokenStatePath) {
+				return nil, fmt.Errorf("observer.token_state_path must be an absolute path (got %q)", c.Observer.TokenStatePath)
+			}
+			parent := filepath.Dir(c.Observer.TokenStatePath)
+			info, err := os.Stat(parent)
+			if err != nil || !info.IsDir() {
+				return nil, fmt.Errorf("observer.token_state_path parent directory %q must exist", parent)
+			}
+			probe := filepath.Join(parent, ".observer-write-probe")
+			f, err := os.OpenFile(probe, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+			if err != nil {
+				return nil, fmt.Errorf("observer.token_state_path parent directory %q must be writable: %w", parent, err)
+			}
+			_ = f.Close()
+			_ = os.Remove(probe)
 		}
-		if c.Observer.APIKey == "" {
-			return nil, fmt.Errorf("observer.api_key is required when observer.enabled is true")
-		}
-		if c.Observer.TokenStatePath == "" {
-			return nil, fmt.Errorf("observer.token_state_path is required when observer.enabled is true")
-		}
-		if !filepath.IsAbs(c.Observer.TokenStatePath) {
-			return nil, fmt.Errorf("observer.token_state_path must be an absolute path (got %q)", c.Observer.TokenStatePath)
-		}
-		parent := filepath.Dir(c.Observer.TokenStatePath)
-		info, err := os.Stat(parent)
-		if err != nil || !info.IsDir() {
-			return nil, fmt.Errorf("observer.token_state_path parent directory %q must exist", parent)
-		}
-		probe := filepath.Join(parent, ".observer-write-probe")
-		f, err := os.OpenFile(probe, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-		if err != nil {
-			return nil, fmt.Errorf("observer.token_state_path parent directory %q must be writable: %w", parent, err)
-		}
-		_ = f.Close()
-		_ = os.Remove(probe)
 	}
 	if c.DriverDefaults.ArtifactTransport == ArtifactTransportObserverLazy && !c.Observer.Enabled {
 		return nil, fmt.Errorf("observer must be enabled when driver_defaults.artifact_transport is observer_lazy")

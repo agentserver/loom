@@ -58,6 +58,12 @@ func run(cfgPath string) error {
 	if err := tn.EnsureRegistered(ctx); err != nil {
 		return err
 	}
+	if cfg.Observer.WorkspaceID == "" {
+		cfg.Observer.WorkspaceID = cfg.Credentials.WorkspaceID
+	}
+	if cfg.Observer.AgentID == "" {
+		cfg.Observer.AgentID = cfg.Credentials.ShortID
+	}
 	if err := tn.PublishCard(ctx); err != nil {
 		log.Printf("publish card: %v (continuing)", err)
 	}
@@ -76,14 +82,16 @@ func run(cfgPath string) error {
 	}
 	p := planner.New(cfg.Planner, backend.LLM())
 	obs, errObs := observerclient.New(observerclient.Config{
-		Enabled:        cfg.Observer.Enabled,
-		URL:            cfg.Observer.URL,
-		WorkspaceID:    cfg.Observer.WorkspaceID,
-		WorkspaceName:  cfg.Observer.WorkspaceName,
-		AgentID:        cfg.Observer.AgentID,
-		AgentRole:      observer.RoleMaster,
-		APIKey:         cfg.Observer.APIKey,
-		TokenStatePath: cfg.Observer.TokenStatePath,
+		Enabled:               cfg.Observer.Enabled,
+		TelemetryEnabled:      cfg.Observer.TelemetryEnabled,
+		URL:                   cfg.Observer.URL,
+		WorkspaceID:           cfg.Observer.WorkspaceID,
+		WorkspaceName:         cfg.Observer.WorkspaceName,
+		AgentID:               cfg.Observer.AgentID,
+		AgentRole:             observer.RoleMaster,
+		APIKey:                cfg.Observer.APIKey,
+		AgentserverProxyToken: cfg.Credentials.ProxyToken,
+		TokenStatePath:        cfg.Observer.TokenStatePath,
 	})
 	if errObs != nil {
 		log.Fatalf("observerclient: %v", errObs)

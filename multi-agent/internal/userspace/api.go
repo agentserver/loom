@@ -14,9 +14,15 @@ import (
 	"github.com/yourorg/multi-agent/internal/mcpmarket/pack"
 )
 
-// AgentResolver returns the workspace_id and agent_id authenticated by the
-// observer agent-token middleware. observerweb provides the concrete impl.
-type AgentResolver func(r *http.Request) (workspaceID, agentID string, ok bool)
+type Identity struct {
+	UserID      string
+	WorkspaceID string
+	AgentID     string
+}
+
+// AgentResolver returns the identity authenticated by the observer agent-token
+// middleware. observerweb provides the concrete impl.
+type AgentResolver func(r *http.Request) (Identity, bool)
 
 // Handler holds wired-up dependencies for all /api/userspace/* routes.
 type Handler struct {
@@ -38,7 +44,7 @@ func (h *Handler) push(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	wsID, agentID, ok := h.Resolver(r)
+	ident, ok := h.Resolver(r)
 	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -117,7 +123,7 @@ func (h *Handler) push(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.Store.InsertVersion(VersionRow{
 		Slug: mfp.Slug, Version: mfp.Version,
-		CreatedInWorkspace: wsID, CreatedByAgentID: agentID,
+		CreatedInWorkspace: ident.WorkspaceID, CreatedByAgentID: ident.AgentID, CreatedByUserID: ident.UserID,
 		ManifestJSON:  []byte(manifestRaw),
 		SpecJSON:      specJSON,
 		CardMD:        cardMD,
@@ -131,14 +137,14 @@ func (h *Handler) push(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.Store.UpsertInstallation(InstallationRow{
-		WorkspaceID: wsID, Slug: mfp.Slug,
-		InstalledVersion: mfp.Version, InstalledByAgent: agentID,
+		WorkspaceID: ident.WorkspaceID, Slug: mfp.Slug,
+		InstalledVersion: mfp.Version, InstalledByAgent: ident.AgentID,
 	}); err != nil {
 		http.Error(w, "upsert installation: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	log.Printf("userspace: push slug=%s version=%s ws=%s agent=%s dedup=%v",
-		mfp.Slug, mfp.Version, wsID, agentID, dedup)
+		mfp.Slug, mfp.Version, ident.WorkspaceID, ident.AgentID, dedup)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(PushResponse{
 		Slug: mfp.Slug, Version: mfp.Version, BlobSHA256: actual, Dedup: dedup,
@@ -176,7 +182,7 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	wsID, _, ok := h.Resolver(r)
+	ident, ok := h.Resolver(r)
 	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -187,7 +193,7 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 	if l := r.URL.Query().Get("limit"); l != "" {
 		fmt.Sscanf(l, "%d", &limit)
 	}
-	results, err := h.Store.SearchPackages(q, wsID, kind, limit)
+	results, err := h.Store.SearchPackagesForIdentity(q, ident.WorkspaceID, ident.UserID, kind, limit)
 	if err != nil {
 		log.Printf("userspace: search error: %v", err)
 		http.Error(w, "internal", http.StatusInternalServerError)
@@ -208,6 +214,11 @@ func (h *Handler) getPackage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	ident, ok := h.Resolver(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	rest := strings.TrimPrefix(r.URL.Path, "/api/userspace/packages/")
 	if !strings.Contains(rest, "/") {
 		pkg, err := h.Store.GetPackage(rest)
@@ -219,9 +230,13 @@ func (h *Handler) getPackage(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		versions, err := h.Store.ListVersions(rest)
+		versions, err := h.Store.ListVersionsForIdentity(rest, ident.WorkspaceID, ident.UserID)
 		if err != nil {
 			http.Error(w, "internal", http.StatusInternalServerError)
+			return
+		}
+		if len(versions) == 0 {
+			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -231,10 +246,10 @@ func (h *Handler) getPackage(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	h.getVersionOrSource(w, r)
+	h.getVersionOrSource(w, r, ident)
 }
 
-func (h *Handler) getVersionOrSource(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) getVersionOrSource(w http.ResponseWriter, r *http.Request, ident Identity) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/userspace/packages/")
 	parts := strings.SplitN(rest, "/", 4)
 	if len(parts) < 3 || parts[1] != "versions" {
@@ -242,7 +257,7 @@ func (h *Handler) getVersionOrSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slug, ver := parts[0], parts[2]
-	v, err := h.Store.GetVersion(slug, ver)
+	v, err := h.Store.GetVisibleVersion(slug, ver, ident.WorkspaceID, ident.UserID)
 	if err != nil {
 		http.Error(w, "internal", http.StatusInternalServerError)
 		return
@@ -286,7 +301,7 @@ func (h *Handler) installVersion(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	wsID, agentID, ok := h.Resolver(r)
+	ident, ok := h.Resolver(r)
 	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -298,12 +313,12 @@ func (h *Handler) installVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pathWS, slug := parts[0], parts[2]
-	if pathWS != wsID {
+	if pathWS != ident.WorkspaceID {
 		http.Error(w, "cross-workspace write not allowed", http.StatusForbidden)
 		return
 	}
 	if r.Method == http.MethodDelete {
-		if err := h.Store.DeleteInstallation(wsID, slug); err != nil {
+		if err := h.Store.DeleteInstallation(ident.WorkspaceID, slug); err != nil {
 			http.Error(w, "internal", http.StatusInternalServerError)
 			return
 		}
@@ -317,7 +332,7 @@ func (h *Handler) installVersion(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return
 	}
-	v, err := h.Store.GetVersion(slug, body.Version)
+	v, err := h.Store.GetVisibleVersion(slug, body.Version, ident.WorkspaceID, ident.UserID)
 	if err != nil || v == nil {
 		http.Error(w, "version not found", http.StatusNotFound)
 		return
@@ -327,8 +342,8 @@ func (h *Handler) installVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.Store.UpsertInstallation(InstallationRow{
-		WorkspaceID: wsID, Slug: slug,
-		InstalledVersion: body.Version, InstalledByAgent: agentID,
+		WorkspaceID: ident.WorkspaceID, Slug: slug,
+		InstalledVersion: body.Version, InstalledByAgent: ident.AgentID,
 	}); err != nil {
 		http.Error(w, "internal", http.StatusInternalServerError)
 		return
@@ -341,7 +356,7 @@ func (h *Handler) yankVersion(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if _, _, ok := h.Resolver(r); !ok {
+	if _, ok := h.Resolver(r); !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -368,7 +383,7 @@ func (h *Handler) listPackages(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	wsID, _, ok := h.Resolver(r)
+	ident, ok := h.Resolver(r)
 	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -378,7 +393,7 @@ func (h *Handler) listPackages(w http.ResponseWriter, r *http.Request) {
 		scope = "mine"
 	}
 	kind := r.URL.Query().Get("kind")
-	results, err := h.Store.SearchPackages("", wsID, kind, 100)
+	results, err := h.Store.SearchPackagesForIdentity("", ident.WorkspaceID, ident.UserID, kind, 100)
 	if err != nil {
 		http.Error(w, "internal", http.StatusInternalServerError)
 		return
