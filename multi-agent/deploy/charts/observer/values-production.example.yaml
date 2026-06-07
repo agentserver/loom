@@ -1,0 +1,59 @@
+replicaCount: 3
+
+image:
+  repository: ghcr.io/yourorg/multi-agent/observer-server
+  tag: latest
+  pullPolicy: IfNotPresent
+
+existingSecret: observer-production-secret
+
+gateway:
+  enabled: true
+  parentRefs:
+    - name: cilium-gateway
+      namespace: cilium-gateway
+  host: observer.example.com
+
+config:
+  production: true
+  store:
+    driver: postgres
+    postgres:
+      dsnEnv: OBSERVER_DATABASE_URL
+      dsnSecretKey: database-url
+      maxOpenConns: 40
+      maxIdleConns: 20
+      connMaxLifetime: 30m
+  objectStore:
+    driver: s3
+    s3:
+      endpoint: s3.internal.example.com
+      region: us-east-1
+      bucket: observer-artifacts
+      useSSL: true
+      accessKeyEnv: OBSERVER_S3_ACCESS_KEY
+      accessKeySecretKey: s3-access-key
+      secretKeyEnv: OBSERVER_S3_SECRET_KEY
+      secretKeySecretKey: s3-secret-key
+      presignTTL: 15m
+  telemetry:
+    enabled: true
+    apiKeys:
+      - id: ops-global
+        keyEnv: OBSERVER_TELEMETRY_KEY_GLOBAL
+        secretKey: telemetry-global-key
+        workspaceID: "*"
+        note: production operations telemetry key
+    rateLimit:
+      perMinute: 60
+      burst: 120
+    maxBodyBytes: 262144
+    retentionDays: 30
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi

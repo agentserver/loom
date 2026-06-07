@@ -1,0 +1,17 @@
+# Observer chart notes
+#
+# Config Secret: {{ include "observer.configSecretName" . }}
+#
+# The Secret must contain:
+# - observer.yaml
+# - {{ default "database-url" .Values.config.store.postgres.dsnSecretKey }} when store.driver=postgres
+# - {{ default "s3-access-key" .Values.config.objectStore.s3.accessKeySecretKey }} and {{ default "s3-secret-key" .Values.config.objectStore.s3.secretKeySecretKey }} when objectStore.driver=s3
+{{- if .Values.config.telemetry.enabled }}
+{{- range .Values.config.telemetry.apiKeys }}
+# - {{ default "telemetry-global-key" .secretKey }} for {{ .keyEnv }}
+{{- end }}
+{{- end }}
+{{- if .Values.gateway.enabled }}
+#
+# HTTPRoute host: {{ .Values.gateway.host }}
+{{- end }}

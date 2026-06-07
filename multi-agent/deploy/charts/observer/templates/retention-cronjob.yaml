@@ -1,0 +1,46 @@
+{{- if .Values.retention.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "observer.fullname" . }}-retention
+  labels:
+    {{- include "observer.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.retention.schedule | quote }}
+  successfulJobsHistoryLimit: {{ .Values.retention.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.retention.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            {{- include "observer.selectorLabels" . | nindent 12 }}
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: {{ include "observer.serviceAccountName" . }}
+          containers:
+            - name: retention
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              args:
+                - --config
+                - /etc/observer/observer.yaml
+                - --retention-cleanup
+              env:
+                {{- if eq .Values.config.store.driver "postgres" }}
+                - name: {{ .Values.config.store.postgres.dsnEnv }}
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "observer.configSecretName" . }}
+                      key: {{ default "database-url" .Values.config.store.postgres.dsnSecretKey }}
+                {{- end }}
+              volumeMounts:
+                - name: observer-config
+                  mountPath: /etc/observer/observer.yaml
+                  subPath: observer.yaml
+                  readOnly: true
+          volumes:
+            - name: observer-config
+              secret:
+                secretName: {{ include "observer.configSecretName" . }}
+{{- end }}

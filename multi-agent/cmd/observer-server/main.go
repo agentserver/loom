@@ -98,11 +98,28 @@ type TelemetryRateLimitConfig struct {
 
 func main() {
 	cfgPath := flag.String("config", "observer.yaml", "path to observer config")
+	migrateOnly := flag.Bool("migrate-only", false, "run database migrations and exit")
+	retentionCleanup := flag.Bool("retention-cleanup", false, "delete expired telemetry events and exit")
 	flag.Parse()
 
 	cfg, err := loadConfig(*cfgPath)
 	if err != nil {
 		log.Fatal(err)
+	}
+	if *migrateOnly {
+		if err := runMigrationsOnly(cfg); err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("observer-server migrations complete")
+		return
+	}
+	if *retentionCleanup {
+		deleted, err := runRetentionCleanup(cfg)
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("observer-server retention cleanup deleted %d events", deleted)
+		return
 	}
 
 	st, err := openObserverStore(cfg)
@@ -158,6 +175,49 @@ func main() {
 		return st.DB().PingContext(ctx)
 	}))
 	log.Fatal(srv.ListenAndServe())
+}
+
+func runMigrationsOnly(cfg *Config) error {
+	st, err := openObserverStore(cfg)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	if err := userspace.MigrateForDriver(st.DB(), cfg.Store.Driver); err != nil {
+		return fmt.Errorf("userspace migrate: %w", err)
+	}
+	return nil
+}
+
+func runRetentionCleanup(cfg *Config) (int64, error) {
+	return runRetentionCleanupAt(cfg, time.Now().UTC())
+}
+
+func runRetentionCleanupAt(cfg *Config, now time.Time) (int64, error) {
+	if cfg.Telemetry.RetentionDays <= 0 {
+		return 0, fmt.Errorf("telemetry.retention_days must be positive")
+	}
+	st, err := openObserverStore(cfg)
+	if err != nil {
+		return 0, err
+	}
+	defer st.Close()
+
+	cutoff := now.UTC().Add(-time.Duration(cfg.Telemetry.RetentionDays) * 24 * time.Hour)
+	var result sql.Result
+	switch cfg.Store.Driver {
+	case "sqlite":
+		result, err = st.DB().Exec(`DELETE FROM events WHERE ts < ?`, cutoff.Format(time.RFC3339Nano))
+	case "postgres":
+		result, err = st.DB().Exec(`DELETE FROM events WHERE ts < $1`, cutoff)
+	default:
+		return 0, fmt.Errorf("unsupported store driver %q", cfg.Store.Driver)
+	}
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 func openUserspaceStore(db *sql.DB, cfg *Config) (*userspace.Store, error) {

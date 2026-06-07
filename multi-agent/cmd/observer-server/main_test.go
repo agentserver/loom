@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -9,9 +10,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/yourorg/multi-agent/internal/objectstore"
+	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/observerstore"
 	"github.com/yourorg/multi-agent/internal/userspace"
 )
@@ -290,6 +293,82 @@ func TestWithHealthReturnsUnavailableWhenReadyFails(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, ready.Code)
 	require.Equal(t, "not ready\n", ready.Body.String())
 	require.NotContains(t, ready.Body.String(), "database unavailable")
+}
+
+func TestRunMigrationsOnlyCreatesUserspaceTables(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "observer.db")
+	cfg := &Config{
+		DBPath: path,
+		APIKeys: []APIKeyConfig{
+			{ID: "ak-default", Key: "ak_secret"},
+		},
+		Store: StoreConfig{
+			Driver: "sqlite",
+			SQLite: SQLiteConfig{Path: path},
+		},
+		ObjectStore: ObjectStoreConfig{Driver: "filesystem"},
+	}
+
+	require.NoError(t, runMigrationsOnly(cfg))
+
+	db, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	defer db.Close()
+
+	var table string
+	err = db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='userspace_packages'`).Scan(&table)
+	require.NoError(t, err)
+	require.Equal(t, "userspace_packages", table)
+}
+
+func TestRunRetentionCleanupDeletesOnlyExpiredEvents(t *testing.T) {
+	now := time.Date(2026, 6, 7, 10, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "observer.db")
+	st, err := observerstore.Open(path)
+	require.NoError(t, err)
+
+	require.NoError(t, st.Ingest(observer.Event{
+		EventID:     "old-event",
+		TS:          now.Add(-31 * 24 * time.Hour).Format(time.RFC3339Nano),
+		WorkspaceID: "ws1",
+		AgentID:     "driver",
+		AgentRole:   observer.RoleDriver,
+		Type:        observer.EventDriverTaskSubmitted,
+		TaskID:      "old-task",
+		Summary:     "old",
+		Status:      "assigned",
+	}))
+	require.NoError(t, st.Ingest(observer.Event{
+		EventID:     "new-event",
+		TS:          now.Add(-24 * time.Hour).Format(time.RFC3339Nano),
+		WorkspaceID: "ws1",
+		AgentID:     "driver",
+		AgentRole:   observer.RoleDriver,
+		Type:        observer.EventDriverTaskSubmitted,
+		TaskID:      "new-task",
+		Summary:     "new",
+		Status:      "assigned",
+	}))
+	require.NoError(t, st.Close())
+
+	cfg := &Config{
+		DBPath: path,
+		Store: StoreConfig{
+			Driver: "sqlite",
+			SQLite: SQLiteConfig{Path: path},
+		},
+		Telemetry: TelemetryConfig{RetentionDays: 30},
+	}
+	deleted, err := runRetentionCleanupAt(cfg, now)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), deleted)
+
+	st, err = observerstore.Open(path)
+	require.NoError(t, err)
+	defer st.Close()
+	count, err := st.EventCount()
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
 }
 
 func TestLoadConfigRejectsObsoleteWorkspacesField(t *testing.T) {

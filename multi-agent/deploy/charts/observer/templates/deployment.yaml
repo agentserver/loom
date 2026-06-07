@@ -1,0 +1,101 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "observer.fullname" . }}
+  labels:
+    {{- include "observer.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "observer.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "observer.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "observer.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: observer
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --config
+            - /etc/observer/observer.yaml
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            {{- if eq .Values.config.store.driver "postgres" }}
+            - name: {{ .Values.config.store.postgres.dsnEnv }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "observer.configSecretName" . }}
+                  key: {{ default "database-url" .Values.config.store.postgres.dsnSecretKey }}
+            {{- end }}
+            {{- if eq .Values.config.objectStore.driver "s3" }}
+            - name: {{ .Values.config.objectStore.s3.accessKeyEnv }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "observer.configSecretName" . }}
+                  key: {{ default "s3-access-key" .Values.config.objectStore.s3.accessKeySecretKey }}
+            - name: {{ .Values.config.objectStore.s3.secretKeyEnv }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "observer.configSecretName" . }}
+                  key: {{ default "s3-secret-key" .Values.config.objectStore.s3.secretKeySecretKey }}
+            {{- end }}
+            {{- if .Values.config.telemetry.enabled }}
+            {{- range .Values.config.telemetry.apiKeys }}
+            - name: {{ .keyEnv }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "observer.configSecretName" $ }}
+                  key: {{ default "telemetry-global-key" .secretKey }}
+            {{- end }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          volumeMounts:
+            - name: observer-config
+              mountPath: /etc/observer/observer.yaml
+              subPath: observer.yaml
+              readOnly: true
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: observer-config
+          secret:
+            secretName: {{ include "observer.configSecretName" . }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,0 +1,48 @@
+{{- if .Values.migration.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "observer.fullname" . }}-migrate
+  labels:
+    {{- include "observer.labels" . | nindent 4 }}
+  {{- if .Values.migration.useHelmHook }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+  {{- end }}
+spec:
+  backoffLimit: {{ .Values.migration.backoffLimit }}
+  ttlSecondsAfterFinished: {{ .Values.migration.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        {{- include "observer.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ include "observer.serviceAccountName" . }}
+      containers:
+        - name: migrate
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --config
+            - /etc/observer/observer.yaml
+            - --migrate-only
+          env:
+            {{- if eq .Values.config.store.driver "postgres" }}
+            - name: {{ .Values.config.store.postgres.dsnEnv }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "observer.configSecretName" . }}
+                  key: {{ default "database-url" .Values.config.store.postgres.dsnSecretKey }}
+            {{- end }}
+          volumeMounts:
+            - name: observer-config
+              mountPath: /etc/observer/observer.yaml
+              subPath: observer.yaml
+              readOnly: true
+      volumes:
+        - name: observer-config
+          secret:
+            secretName: {{ include "observer.configSecretName" . }}
+{{- end }}

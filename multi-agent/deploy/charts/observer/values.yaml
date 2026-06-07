@@ -1,0 +1,108 @@
+replicaCount: 2
+
+image:
+  repository: ghcr.io/yourorg/multi-agent/observer-server
+  tag: latest
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+service:
+  type: ClusterIP
+  port: 8090
+
+gateway:
+  enabled: false
+  parentRefs:
+    - name: cilium-gateway
+      namespace: cilium-gateway
+  host: observer.example.com
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: observer.example.com
+  tls: false
+  tlsSecretName: ""
+
+existingSecret: ""
+
+secret:
+  create: false
+  annotations: {}
+  databaseUrl: ""
+  s3AccessKey: ""
+  s3SecretKey: ""
+  telemetryKeys: {}
+
+config:
+  production: true
+  listenAddr: ":8090"
+  apiKeys: []
+  store:
+    driver: postgres
+    sqlite:
+      path: observer.db
+    postgres:
+      dsnEnv: OBSERVER_DATABASE_URL
+      dsnSecretKey: database-url
+      maxOpenConns: 20
+      maxIdleConns: 10
+      connMaxLifetime: 30m
+  objectStore:
+    driver: s3
+    s3:
+      endpoint: ""
+      region: us-east-1
+      bucket: observer-artifacts
+      useSSL: true
+      accessKeyEnv: OBSERVER_S3_ACCESS_KEY
+      accessKeySecretKey: s3-access-key
+      secretKeyEnv: OBSERVER_S3_SECRET_KEY
+      secretKeySecretKey: s3-secret-key
+      presignTTL: 15m
+    proxy:
+      enabled: false
+      maxBytes: 8388608
+  telemetry:
+    enabled: true
+    apiKeys:
+      - id: ops-global
+        keyEnv: OBSERVER_TELEMETRY_KEY_GLOBAL
+        secretKey: telemetry-global-key
+        workspaceID: "*"
+        note: global operations telemetry key
+    rateLimit:
+      perMinute: 60
+      burst: 120
+    maxBodyBytes: 262144
+    retentionDays: 30
+
+migration:
+  enabled: true
+  useHelmHook: false
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 86400
+
+retention:
+  enabled: true
+  schedule: "17 3 * * *"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+
+podAnnotations: {}
+podLabels: {}
+
+resources: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

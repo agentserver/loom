@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "observer.fullname" . }}-config
+  labels:
+    {{- include "observer.labels" . | nindent 4 }}
+data:
+  README: |
+    Non-secret observer deployment settings. The runnable observer.yaml is mounted
+    from the Secret named {{ include "observer.configSecretName" . }}.
+  observer.nonsecret.yaml: |
+    listen_addr: {{ .Values.config.listenAddr | quote }}
+    production: {{ .Values.config.production }}
+    store:
+      driver: {{ .Values.config.store.driver | quote }}
+    object_store:
+      driver: {{ .Values.config.objectStore.driver | quote }}
+    telemetry:
+      enabled: {{ .Values.config.telemetry.enabled }}
+      retention_days: {{ .Values.config.telemetry.retentionDays }}
