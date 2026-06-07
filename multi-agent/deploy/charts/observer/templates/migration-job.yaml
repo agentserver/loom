@@ -2,7 +2,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "observer.fullname" . }}-migrate
+  name: {{ include "observer.migrationJobName" . }}
   labels:
     {{- include "observer.labels" . | nindent 4 }}
   {{- if .Values.migration.useHelmHook }}

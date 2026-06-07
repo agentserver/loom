@@ -28,3 +28,11 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- default "default" .Values.serviceAccount.name -}}
 {{- end -}}
 {{- end -}}
+
+{{- define "observer.migrationJobName" -}}
+{{- if .Values.migration.useHelmHook -}}
+{{- printf "%s-migrate" (include "observer.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- printf "%s-migrate-%d" (include "observer.fullname" .) (.Release.Revision | int) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}

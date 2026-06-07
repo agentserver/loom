@@ -15,3 +15,8 @@
 #
 # HTTPRoute host: {{ .Values.gateway.host }}
 {{- end }}
+{{- if and .Values.migration.enabled (not .Values.migration.useHelmHook) }}
+#
+# Migration Job: {{ include "observer.migrationJobName" . }}
+# Run this Job to completion before rolling observer pods in production CI/CD.
+{{- end }}
