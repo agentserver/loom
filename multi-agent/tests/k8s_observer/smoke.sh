@@ -3,7 +3,7 @@ set -euo pipefail
 
 CTX="${KUBE_CONTEXT:-k8s-nj-prod}"
 RELEASE="${OBSERVER_RELEASE:-observer}"
-NAMESPACE="${OBSERVER_NAMESPACE:-observer}"
+NAMESPACE="${OBSERVER_NAMESPACE:-dev-yuzishu}"
 CHART="${OBSERVER_CHART:-multi-agent/deploy/charts/observer}"
 VALUES="${OBSERVER_VALUES:-multi-agent/deploy/charts/observer/values-production.example.yaml}"
 
