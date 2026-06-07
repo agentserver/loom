@@ -1,9 +1,12 @@
 package userspace
 
 import (
+	"context"
+	"database/sql"
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -98,4 +101,49 @@ func TestObjectBlobStoreStoresObjectKeyAndOpensContent(t *testing.T) {
 	body, err := io.ReadAll(rc)
 	require.NoError(t, err)
 	require.Equal(t, "hello", string(body))
+}
+
+func TestObjectBlobStoreDuplicateInsertRaceKeepsSharedObject(t *testing.T) {
+	db := newTestDB(t)
+	base := objectstore.NewMemory()
+	objects := &insertBlobRowAfterPutStore{Store: base, db: db}
+	b, err := NewObjectBlobStore(db, objects)
+	require.NoError(t, err)
+
+	sha, err := b.Put([]byte("race"))
+	require.NoError(t, err)
+	require.Equal(t, ComputeSHA256Hex([]byte("race")), sha)
+
+	var refcount int
+	require.NoError(t, db.QueryRow(`SELECT refcount FROM userspace_blobs WHERE sha256=?`, sha).Scan(&refcount))
+	require.Equal(t, 2, refcount)
+
+	key := "workspaces/userspace/blobs/" + sha
+	rc, err := base.Open(context.Background(), key)
+	require.NoError(t, err)
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, "race", string(body))
+}
+
+type insertBlobRowAfterPutStore struct {
+	objectstore.Store
+	db   *sql.DB
+	once sync.Once
+	err  error
+}
+
+func (s *insertBlobRowAfterPutStore) Put(ctx context.Context, key, mime string, body io.Reader) (objectstore.ObjectInfo, error) {
+	info, err := s.Store.Put(ctx, key, mime, body)
+	if err != nil {
+		return info, err
+	}
+	s.once.Do(func() {
+		_, s.err = s.db.Exec(`
+			INSERT INTO userspace_blobs(sha256, size_bytes, object_key, blob_path, refcount, created_at)
+			VALUES(?, ?, ?, ?, 1, ?)`,
+			info.SHA256, info.Bytes, key, key, nowUTC())
+	})
+	return info, s.err
 }

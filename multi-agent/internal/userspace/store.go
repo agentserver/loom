@@ -465,7 +465,10 @@ func (s *Store) searchPackagesPostgres(q, workspaceID, kindFilter string, limit 
 	if q != "" {
 		args = append(args, q)
 		where = append(where,
-			`to_tsvector('simple', p.slug || ' ' || p.description || ' ' || CAST(p.tags_json AS text)) @@ plainto_tsquery('simple', `+postgresPlaceholder(len(args))+`)`)
+			`to_tsvector('simple', p.slug || ' ' || p.description || ' ' || CAST(p.tags_json AS text) || ' ' ||
+			 COALESCE((SELECT string_agg(vs.card_md, ' ')
+			             FROM userspace_package_versions vs
+			            WHERE vs.slug=p.slug AND vs.status='ready'), '')) @@ plainto_tsquery('simple', `+postgresPlaceholder(len(args))+`)`)
 	}
 	if kindFilter != "" && kindFilter != "all" {
 		args = append(args, kindFilter)

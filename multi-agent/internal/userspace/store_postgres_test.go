@@ -144,6 +144,20 @@ func TestPostgresStoreSearchUsesTsvectorQuery(t *testing.T) {
 	require.NotContains(t, strings.ToUpper(sqlText), " MATCH ")
 }
 
+func TestPostgresStoreSearchIncludesReadyVersionCardMD(t *testing.T) {
+	db, rec := newRecordingSQLDB(t)
+	s := NewPostgresStore(db)
+
+	_, err := s.SearchPackages("cardonlyneedle", "ws-a", "mcp", 10)
+	require.NoError(t, err)
+
+	sqlText := rec.JoinedQueries()
+	require.Contains(t, sqlText, "card_md")
+	require.Contains(t, sqlText, "status='ready'")
+	require.Contains(t, sqlText, "to_tsvector('simple'")
+	require.Contains(t, sqlText, "plainto_tsquery('simple'")
+}
+
 func TestNewStoreForDriverSelectsPostgresDialect(t *testing.T) {
 	db, rec := newRecordingSQLDB(t)
 	s, err := NewStoreForDriver(db, "postgres")
@@ -181,7 +195,7 @@ func TestPostgresStoreLiveRoundTrip(t *testing.T) {
 	version := VersionRow{
 		Slug: "invoice_extract", Version: "1.0.0", CreatedInWorkspace: "ws-a", CreatedByAgentID: "agent-a",
 		ManifestJSON: []byte(`{"slug":"invoice_extract"}`), SpecJSON: []byte(`{"name":"tool"}`),
-		CardMD: "extracts invoice tables from pdf", TarballSHA256: "sha-live", BlobSHA256: "sha-live",
+		CardMD: "extracts cardonlyneedle tables from pdf", TarballSHA256: "sha-live", BlobSHA256: "sha-live",
 	}
 	require.NoError(t, s.InsertVersion(version))
 	require.ErrorIs(t, s.InsertVersion(version), ErrVersionExists)
@@ -194,7 +208,7 @@ func TestPostgresStoreLiveRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, versions, 1)
 
-	results, err := s.SearchPackages("invoice", "ws-b", "mcp", 10)
+	results, err := s.SearchPackages("cardonlyneedle", "ws-b", "mcp", 10)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	require.Equal(t, "1.0.0", results[0].LatestVersion)

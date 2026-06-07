@@ -160,33 +160,16 @@ func (b *ObjectBlobStore) Put(content []byte) (string, error) {
 	hexsum := ComputeSHA256Hex(content)
 	key := objectBlobKey(hexsum)
 
-	var existing int
-	err := b.db.QueryRow(`SELECT refcount FROM userspace_blobs WHERE sha256=$1`, hexsum).Scan(&existing)
-	switch {
-	case err == sql.ErrNoRows:
-		if err := b.putObject(key, content, hexsum); err != nil {
-			return "", err
-		}
-		if err := b.insertObjectBlob(hexsum, len(content), key); err != nil {
-			_ = b.objects.Delete(context.Background(), key)
-			return "", err
-		}
-		return hexsum, nil
-	case err != nil:
-		return "", err
-	case existing == 0:
-		if err := b.putObject(key, content, hexsum); err != nil {
-			return "", err
-		}
-		if err := b.resetObjectBlob(hexsum, len(content), key); err != nil {
-			_ = b.objects.Delete(context.Background(), key)
-			return "", err
-		}
-		return hexsum, nil
-	default:
-		_, err = b.db.Exec(`UPDATE userspace_blobs SET refcount = refcount + 1 WHERE sha256=$1`, hexsum)
-		return hexsum, err
+	if !b.hasBlobPath {
+		return b.putPostgres(content, hexsum, key)
 	}
+	if err := b.putObject(key, content, hexsum); err != nil {
+		return "", err
+	}
+	if err := b.upsertObjectBlob(hexsum, len(content), key); err != nil {
+		return "", err
+	}
+	return hexsum, nil
 }
 
 // Open returns a ReadCloser for the blob; not found → (nil, ErrBlobNotFound).
@@ -213,6 +196,9 @@ func (b *ObjectBlobStore) Open(sha256hex string) (io.ReadCloser, int64, error) {
 // Release decrements refcount. On zero, the object is removed while retaining
 // the SQL metadata row for audit history.
 func (b *ObjectBlobStore) Release(sha256hex string) error {
+	if !b.hasBlobPath {
+		return b.releasePostgres(sha256hex)
+	}
 	_, err := b.db.Exec(
 		`UPDATE userspace_blobs SET refcount = refcount - 1
 		   WHERE sha256=$1 AND refcount > 0`, sha256hex)
@@ -231,6 +217,78 @@ func (b *ObjectBlobStore) Release(sha256hex string) error {
 	return nil
 }
 
+func (b *ObjectBlobStore) putPostgres(content []byte, hexsum, key string) (string, error) {
+	tx, err := b.db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	_, err = tx.Exec(`
+		INSERT INTO userspace_blobs(sha256, size_bytes, object_key, refcount, created_at)
+		VALUES($1, $2, $3, 0, $4)
+		ON CONFLICT(sha256) DO NOTHING`,
+		hexsum, len(content), key, nowUTC())
+	if err != nil {
+		return "", err
+	}
+
+	var refcount int
+	err = tx.QueryRow(`SELECT refcount FROM userspace_blobs WHERE sha256=$1 FOR UPDATE`, hexsum).Scan(&refcount)
+	if err != nil {
+		return "", err
+	}
+	if refcount == 0 {
+		if err := b.putObject(key, content, hexsum); err != nil {
+			return "", err
+		}
+		_, err = tx.Exec(`
+			UPDATE userspace_blobs
+			   SET size_bytes=$2, object_key=$3, refcount=1
+			 WHERE sha256=$1`,
+			hexsum, len(content), key)
+	} else {
+		_, err = tx.Exec(`UPDATE userspace_blobs SET refcount = refcount + 1 WHERE sha256=$1`, hexsum)
+	}
+	if err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return hexsum, nil
+}
+
+func (b *ObjectBlobStore) releasePostgres(sha256hex string) error {
+	tx, err := b.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var refcount int
+	var key string
+	err = tx.QueryRow(`SELECT refcount, object_key FROM userspace_blobs WHERE sha256=$1 FOR UPDATE`, sha256hex).Scan(&refcount, &key)
+	if err != nil {
+		return err
+	}
+	if refcount <= 0 {
+		return tx.Commit()
+	}
+
+	next := refcount - 1
+	_, err = tx.Exec(`UPDATE userspace_blobs SET refcount=$2 WHERE sha256=$1`, sha256hex, next)
+	if err != nil {
+		return err
+	}
+	if next == 0 && key != "" {
+		if err := b.objects.Delete(context.Background(), key); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (b *ObjectBlobStore) putObject(key string, content []byte, hexsum string) error {
 	info, err := b.objects.Put(context.Background(), key, userspaceBlobObjectMIME, bytes.NewReader(content))
 	if err != nil {
@@ -243,35 +301,33 @@ func (b *ObjectBlobStore) putObject(key string, content []byte, hexsum string) e
 	return nil
 }
 
-func (b *ObjectBlobStore) insertObjectBlob(hexsum string, sizeBytes int, key string) error {
+func (b *ObjectBlobStore) upsertObjectBlob(hexsum string, sizeBytes int, key string) error {
 	if b.hasBlobPath {
 		_, err := b.db.Exec(`
 			INSERT INTO userspace_blobs(sha256, size_bytes, object_key, blob_path, refcount, created_at)
-			VALUES($1, $2, $3, $3, 1, $4)`,
+			VALUES($1, $2, $3, $3, 1, $4)
+			ON CONFLICT(sha256) DO UPDATE SET
+			    size_bytes = excluded.size_bytes,
+			    object_key = excluded.object_key,
+			    blob_path = excluded.blob_path,
+			    refcount = CASE
+			        WHEN userspace_blobs.refcount > 0 THEN userspace_blobs.refcount + 1
+			        ELSE 1
+			    END`,
 			hexsum, sizeBytes, key, nowUTC())
 		return err
 	}
 	_, err := b.db.Exec(`
 		INSERT INTO userspace_blobs(sha256, size_bytes, object_key, refcount, created_at)
-		VALUES($1, $2, $3, 1, $4)`,
+		VALUES($1, $2, $3, 1, $4)
+		ON CONFLICT(sha256) DO UPDATE SET
+		    size_bytes = excluded.size_bytes,
+		    object_key = excluded.object_key,
+		    refcount = CASE
+		        WHEN userspace_blobs.refcount > 0 THEN userspace_blobs.refcount + 1
+		        ELSE 1
+		    END`,
 		hexsum, sizeBytes, key, nowUTC())
-	return err
-}
-
-func (b *ObjectBlobStore) resetObjectBlob(hexsum string, sizeBytes int, key string) error {
-	if b.hasBlobPath {
-		_, err := b.db.Exec(`
-			UPDATE userspace_blobs
-			   SET size_bytes=$2, object_key=$3, blob_path=$3, refcount=1
-			 WHERE sha256=$1`,
-			hexsum, sizeBytes, key)
-		return err
-	}
-	_, err := b.db.Exec(`
-		UPDATE userspace_blobs
-		   SET size_bytes=$2, object_key=$3, refcount=1
-		 WHERE sha256=$1`,
-		hexsum, sizeBytes, key)
 	return err
 }
 
