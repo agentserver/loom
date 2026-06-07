@@ -21,6 +21,7 @@ type Config struct {
 	MaxOpenConns    int
 	MaxIdleConns    int
 	ConnMaxLifetime time.Duration
+	SkipMigrate     bool
 }
 
 type Store struct {
@@ -47,9 +48,11 @@ func Open(cfg Config) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	if err := migrate(db); err != nil {
-		_ = db.Close()
-		return nil, err
+	if !cfg.SkipMigrate {
+		if err := migrate(db); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
 	}
 	return &Store{db: db}, nil
 }

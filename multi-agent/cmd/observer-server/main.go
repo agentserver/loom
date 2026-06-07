@@ -150,8 +150,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if err := userspace.MigrateForDriver(st.DB(), cfg.Store.Driver); err != nil {
-		log.Fatalf("userspace migrate: %v", err)
+	if shouldMigrateUserspaceOnStartup(cfg.Store.Driver) {
+		if err := userspace.MigrateForDriver(st.DB(), cfg.Store.Driver); err != nil {
+			log.Fatalf("userspace migrate: %v", err)
+		}
 	}
 	blobs, err := openUserspaceBlobStore(st.DB(), cfg, objects)
 	if err != nil {
@@ -178,7 +180,7 @@ func main() {
 }
 
 func runMigrationsOnly(cfg *Config) error {
-	st, err := openObserverStore(cfg)
+	st, err := openObserverStoreForMigration(cfg)
 	if err != nil {
 		return err
 	}
@@ -188,6 +190,10 @@ func runMigrationsOnly(cfg *Config) error {
 		return fmt.Errorf("userspace migrate: %w", err)
 	}
 	return nil
+}
+
+func shouldMigrateUserspaceOnStartup(driver string) bool {
+	return driver != "postgres" && driver != "pgx"
 }
 
 func runRetentionCleanup(cfg *Config) (int64, error) {
@@ -265,27 +271,44 @@ func configureTelemetryAPIKeys(st observerstore.ManagedStore, cfg *Config) error
 }
 
 func openObserverStore(cfg *Config) (observerstore.ManagedStore, error) {
+	return openObserverStoreWithOptions(cfg, true)
+}
+
+func openObserverStoreForMigration(cfg *Config) (observerstore.ManagedStore, error) {
+	return openObserverStoreWithOptions(cfg, false)
+}
+
+func openObserverStoreWithOptions(cfg *Config, skipPostgresMigrate bool) (observerstore.ManagedStore, error) {
 	switch cfg.Store.Driver {
 	case "sqlite":
 		return observerstore.Open(cfg.Store.SQLite.Path)
 	case "postgres":
-		dsn := os.Getenv(cfg.Store.Postgres.DSNEnv)
-		if dsn == "" {
-			return nil, fmt.Errorf("%s is required", cfg.Store.Postgres.DSNEnv)
-		}
-		lifetime, err := time.ParseDuration(cfg.Store.Postgres.ConnMaxLifetime)
+		pgCfg, err := postgresStoreConfig(cfg, skipPostgresMigrate)
 		if err != nil {
-			return nil, fmt.Errorf("store.postgres.conn_max_lifetime: %w", err)
+			return nil, err
 		}
-		return pgobs.Open(pgobs.Config{
-			DSN:             dsn,
-			MaxOpenConns:    cfg.Store.Postgres.MaxOpenConns,
-			MaxIdleConns:    cfg.Store.Postgres.MaxIdleConns,
-			ConnMaxLifetime: lifetime,
-		})
+		return pgobs.Open(pgCfg)
 	default:
 		return nil, fmt.Errorf("unsupported store driver %q", cfg.Store.Driver)
 	}
+}
+
+func postgresStoreConfig(cfg *Config, skipMigrate bool) (pgobs.Config, error) {
+	dsn := os.Getenv(cfg.Store.Postgres.DSNEnv)
+	if dsn == "" {
+		return pgobs.Config{}, fmt.Errorf("%s is required", cfg.Store.Postgres.DSNEnv)
+	}
+	lifetime, err := time.ParseDuration(cfg.Store.Postgres.ConnMaxLifetime)
+	if err != nil {
+		return pgobs.Config{}, fmt.Errorf("store.postgres.conn_max_lifetime: %w", err)
+	}
+	return pgobs.Config{
+		DSN:             dsn,
+		MaxOpenConns:    cfg.Store.Postgres.MaxOpenConns,
+		MaxIdleConns:    cfg.Store.Postgres.MaxIdleConns,
+		ConnMaxLifetime: lifetime,
+		SkipMigrate:     skipMigrate,
+	}, nil
 }
 
 func openObjectStore(cfg *Config) (objectstore.Store, error) {

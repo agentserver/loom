@@ -321,6 +321,35 @@ func TestRunMigrationsOnlyCreatesUserspaceTables(t *testing.T) {
 	require.Equal(t, "userspace_packages", table)
 }
 
+func TestPostgresStoreConfigSkipsMigrationsForServerStartupOnly(t *testing.T) {
+	t.Setenv("OBSERVER_DATABASE_URL", "postgres://observer:test@example.com/observer")
+	cfg := &Config{
+		Store: StoreConfig{
+			Postgres: PostgresConfig{
+				DSNEnv:          "OBSERVER_DATABASE_URL",
+				MaxOpenConns:    20,
+				MaxIdleConns:    10,
+				ConnMaxLifetime: "30m",
+			},
+		},
+	}
+
+	startupCfg, err := postgresStoreConfig(cfg, true)
+	require.NoError(t, err)
+	require.True(t, startupCfg.SkipMigrate)
+
+	migrationCfg, err := postgresStoreConfig(cfg, false)
+	require.NoError(t, err)
+	require.False(t, migrationCfg.SkipMigrate)
+}
+
+func TestShouldMigrateUserspaceOnStartupSkipsPostgres(t *testing.T) {
+	require.True(t, shouldMigrateUserspaceOnStartup("sqlite"))
+	require.True(t, shouldMigrateUserspaceOnStartup(""))
+	require.False(t, shouldMigrateUserspaceOnStartup("postgres"))
+	require.False(t, shouldMigrateUserspaceOnStartup("pgx"))
+}
+
 func TestRunRetentionCleanupDeletesOnlyExpiredEvents(t *testing.T) {
 	now := time.Date(2026, 6, 7, 10, 0, 0, 0, time.UTC)
 	path := filepath.Join(t.TempDir(), "observer.db")
