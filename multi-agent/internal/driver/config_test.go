@@ -170,7 +170,43 @@ observer:
 	}
 }
 
-func TestLoadConfig_ObserverEnabledRequiresDeliveryFields(t *testing.T) {
+func TestLoadConfig_ObserverCanUseAgentserverProxyToken(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "driver.yaml")
+	if err := os.WriteFile(path, []byte(`
+server: {url: https://x, name: drv}
+credentials:
+  proxy_token: proxy-token
+  workspace_id: ws-agentserver
+  short_id: driver-short
+discovery: {display_name: driver-display}
+observer:
+  enabled: true
+  telemetry_enabled: true
+  url: https://observer.example
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if c.Observer.WorkspaceID != "ws-agentserver" {
+		t.Fatalf("observer workspace_id: want ws-agentserver, got %q", c.Observer.WorkspaceID)
+	}
+	if c.Observer.AgentID != "driver-short" {
+		t.Fatalf("observer agent_id: want driver-short, got %q", c.Observer.AgentID)
+	}
+	if c.Observer.APIKey != "" {
+		t.Fatalf("observer api_key should be empty in proxy-token mode, got %q", c.Observer.APIKey)
+	}
+	if c.Observer.TokenStatePath != "" {
+		t.Fatalf("observer token_state_path should be empty in proxy-token mode, got %q", c.Observer.TokenStatePath)
+	}
+}
+
+func TestLoadConfig_ObserverAllowsPendingAgentserverRegistration(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "driver.yaml")
 	if err := os.WriteFile(path, []byte(`
@@ -182,12 +218,15 @@ observer:
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := LoadConfig(path)
-	if err == nil {
-		t.Fatal("expected observer config error")
+	c, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
 	}
-	if !strings.Contains(err.Error(), "observer.workspace_id") {
-		t.Fatalf("error: %v", err)
+	if c.Observer.WorkspaceID != "" {
+		t.Fatalf("observer workspace_id should stay empty before agentserver registration, got %q", c.Observer.WorkspaceID)
+	}
+	if c.Observer.AgentID != "" {
+		t.Fatalf("observer agent_id should stay empty before agentserver registration, got %q", c.Observer.AgentID)
 	}
 }
 

@@ -22,15 +22,16 @@ const (
 )
 
 type Config struct {
-	Enabled          bool
-	TelemetryEnabled bool
-	URL              string
-	WorkspaceID      string
-	WorkspaceName    string // optional; first-writer-wins at observer
-	AgentID          string
-	AgentRole        string
-	APIKey           string
-	TokenStatePath   string
+	Enabled               bool
+	TelemetryEnabled      bool
+	URL                   string
+	WorkspaceID           string
+	WorkspaceName         string // optional; first-writer-wins at observer
+	AgentID               string
+	AgentRole             string
+	APIKey                string
+	AgentserverProxyToken string
+	TokenStatePath        string
 }
 
 type Client struct {
@@ -43,6 +44,7 @@ type Client struct {
 
 	tokenMu        sync.Mutex
 	token          string
+	proxyTokenMode bool
 	lastReRegister time.Time
 
 	mu     sync.Mutex
@@ -61,9 +63,13 @@ func New(cfg Config) (*Client, error) {
 		enabled:          cfg.Enabled && cfg.URL != "",
 		telemetryEnabled: cfg.Enabled && cfg.TelemetryEnabled && cfg.URL != "",
 		http:             &http.Client{Timeout: 2 * time.Second},
+		proxyTokenMode:   cfg.AgentserverProxyToken != "",
 	}
 	if !c.enabled {
 		return c, nil
+	}
+	if err := validateEnabledConfig(cfg); err != nil {
+		return nil, err
 	}
 
 	tok, err := c.loadOrRegister(context.Background())
@@ -78,6 +84,22 @@ func New(cfg Config) (*Client, error) {
 		go c.run()
 	}
 	return c, nil
+}
+
+func validateEnabledConfig(cfg Config) error {
+	if cfg.WorkspaceID == "" {
+		return fmt.Errorf("observerclient: workspace_id is required when enabled")
+	}
+	if cfg.AgentID == "" {
+		return fmt.Errorf("observerclient: agent_id is required when enabled")
+	}
+	if cfg.AgentRole == "" {
+		return fmt.Errorf("observerclient: agent_role is required when enabled")
+	}
+	if cfg.AgentserverProxyToken == "" && (cfg.APIKey == "" || cfg.TokenStatePath == "") {
+		return fmt.Errorf("observerclient: agentserver proxy token or observer api_key/token_state_path is required when enabled")
+	}
+	return nil
 }
 
 func (c *Client) Enabled() bool {

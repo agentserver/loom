@@ -128,6 +128,63 @@ func TestNewColdStartRegistersButTelemetryDefaultsDisabled(t *testing.T) {
 	require.Equal(t, int32(0), eventCalls.Load(), "telemetry must be opt-in")
 }
 
+func TestNewWithAgentserverProxyTokenSkipsObserverRegistration(t *testing.T) {
+	var registerCalls atomic.Int32
+	var lastAuth atomic.Value
+	lastAuth.Store("")
+	received := make(chan observer.Event, 1)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/agents/register":
+			registerCalls.Add(1)
+			http.Error(w, "register disabled", http.StatusNotFound)
+		case "/api/events":
+			lastAuth.Store(r.Header.Get("Authorization"))
+			var ev observer.Event
+			_ = json.NewDecoder(r.Body).Decode(&ev)
+			received <- ev
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := New(Config{
+		Enabled: true, TelemetryEnabled: true, URL: srv.URL, WorkspaceID: "ws-1",
+		AgentID: "agentserver-agent", AgentRole: observer.RoleSlave,
+		AgentserverProxyToken: "proxy-token",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "proxy-token", c.Token())
+
+	c.Emit(observer.Event{TaskID: "task-1"})
+	c.Close()
+
+	require.Equal(t, int32(0), registerCalls.Load(), "proxy-token mode must not call observer registration")
+	require.Equal(t, "Bearer proxy-token", lastAuth.Load())
+	select {
+	case ev := <-received:
+		require.Equal(t, "ws-1", ev.WorkspaceID)
+		require.Equal(t, "agentserver-agent", ev.AgentID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not receive proxy-token event before timeout")
+	}
+}
+
+func TestNewEnabledRequiresProxyTokenOrLegacyRegistrationConfig(t *testing.T) {
+	_, err := New(Config{
+		Enabled:     true,
+		URL:         "https://observer.example",
+		WorkspaceID: "ws-1",
+		AgentID:     "agent-1",
+		AgentRole:   observer.RoleSlave,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "agentserver proxy token or observer api_key")
+}
+
 func TestNewWorkspaceMismatchReturnsError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"workspace_id":"OTHER-WS","token":"tk_x"}`))

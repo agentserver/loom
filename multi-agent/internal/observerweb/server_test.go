@@ -712,17 +712,27 @@ func TestRegister_TokenRotation(t *testing.T) {
 func TestListWorkspaces_HappyPath(t *testing.T) {
 	h, st := newTestHandler(t)
 	seedAPIKey(t, st, "ak-1", "key1")
-	postRegister(t, h, "key1", `{"agent_id":"a","role":"slave","workspace_id":"ws-1","workspace_name":"One"}`, http.StatusOK)
+	bodyA := postRegister(t, h, "key1", `{"agent_id":"a","role":"slave","workspace_id":"ws-1","workspace_name":"One"}`, http.StatusOK)
 	postRegister(t, h, "key1", `{"agent_id":"b","role":"slave","workspace_id":"ws-2","workspace_name":"Two"}`, http.StatusOK)
 
+	req := httptest.NewRequest(http.MethodGet, "/api/workspaces", nil)
+	req.Header.Set("Authorization", "Bearer "+extractToken(t, bodyA))
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/workspaces", nil))
+	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code)
 
 	var got []observerstore.WorkspaceSummary
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
-	require.Len(t, got, 2)
-	require.Equal(t, "ws-2", got[0].ID, "ordered by last_seen DESC")
+	require.Len(t, got, 1)
+	require.Equal(t, "ws-1", got[0].ID)
+}
+
+func TestListWorkspaces_RequiresBearerIdentity(t *testing.T) {
+	h, _ := newTestHandler(t)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/workspaces", nil))
+	require.Equal(t, http.StatusUnauthorized, rr.Code)
 }
 
 // ---------------------------------------------------------------------------
@@ -767,13 +777,16 @@ func TestE2E_MultiWorkspaceIsolation(t *testing.T) {
 	ingestEvent(t, h, tokB, "ws-personal", "slave-A", "slave", observer.EventSlaveTaskStarted, "personal-task-1")
 	ingestEvent(t, h, tokC, "ws-work", "slave-W", "slave", observer.EventSlaveTaskStarted, "work-task-1")
 
-	// GET /api/workspaces returns both, ordered by last_seen DESC.
+	// GET /api/workspaces returns only the authenticated agent's workspace.
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/workspaces", nil))
+	req := httptest.NewRequest(http.MethodGet, "/api/workspaces", nil)
+	req.Header.Set("Authorization", "Bearer "+tokA)
+	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code)
 	var sums []observerstore.WorkspaceSummary
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &sums))
-	require.Len(t, sums, 2)
+	require.Len(t, sums, 1)
+	require.Equal(t, "ws-personal", sums[0].ID)
 
 	// Verify cross-workspace isolation via Store's public read.
 	personalEvents, err := st.ListEventsForWorkspace("ws-personal")
@@ -784,27 +797,14 @@ func TestE2E_MultiWorkspaceIsolation(t *testing.T) {
 	require.Len(t, workEvents, 1, "ws-work must have exactly 1 event")
 }
 
-func TestListWorkspaces_WebTokenGuard(t *testing.T) {
-	t.Setenv("OBSERVER_WEB_TOKEN", "secret")
+func TestListWorkspacesRejectsInvalidBearer(t *testing.T) {
 	h, _ := newTestHandler(t)
 
-	// missing token → 401
-	rr1 := httptest.NewRecorder()
-	h.ServeHTTP(rr1, httptest.NewRequest(http.MethodGet, "/api/workspaces", nil))
-	require.Equal(t, http.StatusUnauthorized, rr1.Code)
-
-	// wrong header value → 401
 	req2 := httptest.NewRequest(http.MethodGet, "/api/workspaces", nil)
-	req2.Header.Set("X-Observer-Web-Token", "nope")
+	req2.Header.Set("Authorization", "Bearer nope")
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, req2)
 	require.Equal(t, http.StatusUnauthorized, rr2.Code)
-
-	// correct query param → 200
-	req3 := httptest.NewRequest(http.MethodGet, "/api/workspaces?web_token=secret", nil)
-	rr3 := httptest.NewRecorder()
-	h.ServeHTTP(rr3, req3)
-	require.Equal(t, http.StatusOK, rr3.Code)
 }
 
 func TestRegister_RejectsBadWorkspaceID(t *testing.T) {
