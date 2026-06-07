@@ -62,7 +62,7 @@ func TestNewColdStartRegistersAndEmits(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "observer.token")
 	c, err := New(Config{
-		Enabled: true, URL: srv.URL, WorkspaceID: "ws-1",
+		Enabled: true, TelemetryEnabled: true, URL: srv.URL, WorkspaceID: "ws-1",
 		AgentID: "agent-1", AgentRole: observer.RoleSlave,
 		APIKey: "ak_secret", TokenStatePath: path,
 	})
@@ -90,6 +90,42 @@ func TestNewColdStartRegistersAndEmits(t *testing.T) {
 	persisted, err := os.ReadFile(path)
 	require.NoError(t, err)
 	require.Equal(t, "tk_issued", string(persisted))
+}
+
+func TestNewColdStartRegistersButTelemetryDefaultsDisabled(t *testing.T) {
+	var eventCalls atomic.Int32
+	var registerCalls atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/agents/register":
+			registerCalls.Add(1)
+			_, _ = w.Write([]byte(`{"workspace_id":"ws-1","agent_id":"agent-1","role":"slave","token":"tk_issued"}`))
+		case "/api/events":
+			eventCalls.Add(1)
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "observer.token")
+	c, err := New(Config{
+		Enabled: true, URL: srv.URL, WorkspaceID: "ws-1",
+		AgentID: "agent-1", AgentRole: observer.RoleSlave,
+		APIKey: "ak_secret", TokenStatePath: path,
+	})
+	require.NoError(t, err)
+	require.True(t, c.Enabled())
+	require.Equal(t, "tk_issued", c.Token())
+
+	c.Emit(observer.Event{TaskID: "task-1"})
+	c.Close()
+
+	require.Equal(t, int32(1), registerCalls.Load(), "observer registration must remain enabled")
+	require.Equal(t, int32(0), eventCalls.Load(), "telemetry must be opt-in")
 }
 
 func TestNewWorkspaceMismatchReturnsError(t *testing.T) {
@@ -160,7 +196,7 @@ func TestCloseReturnsWhenPostStalls(t *testing.T) {
 	require.NoError(t, writeTokenFile(path, "tk_cached"))
 
 	c, err := New(Config{
-		Enabled: true, URL: "http://observer.example", WorkspaceID: "ws-1",
+		Enabled: true, TelemetryEnabled: true, URL: "http://observer.example", WorkspaceID: "ws-1",
 		AgentID: "agent-1", AgentRole: observer.RoleSlave,
 		APIKey: "ak", TokenStatePath: path,
 	})
@@ -217,7 +253,7 @@ func TestPost401TriggersReRegisterAndUpdatesToken(t *testing.T) {
 	require.NoError(t, writeTokenFile(path, "tk_v1"))
 
 	c, err := New(Config{
-		Enabled: true, URL: srv.URL, WorkspaceID: "ws-1",
+		Enabled: true, TelemetryEnabled: true, URL: srv.URL, WorkspaceID: "ws-1",
 		AgentID: "agent-1", AgentRole: observer.RoleSlave,
 		APIKey: "ak", TokenStatePath: path,
 	})
@@ -254,7 +290,7 @@ func TestPost401WithinCooldownSkipsReRegister(t *testing.T) {
 	require.NoError(t, writeTokenFile(path, "tk_v1"))
 
 	c, err := New(Config{
-		Enabled: true, URL: srv.URL, WorkspaceID: "ws-1",
+		Enabled: true, TelemetryEnabled: true, URL: srv.URL, WorkspaceID: "ws-1",
 		AgentID: "agent-1", AgentRole: observer.RoleSlave,
 		APIKey: "ak", TokenStatePath: path,
 	})
@@ -288,7 +324,7 @@ func TestPost403DoesNotTriggerReRegister(t *testing.T) {
 	require.NoError(t, writeTokenFile(path, "tk_v1"))
 
 	c, err := New(Config{
-		Enabled: true, URL: srv.URL, WorkspaceID: "ws-1",
+		Enabled: true, TelemetryEnabled: true, URL: srv.URL, WorkspaceID: "ws-1",
 		AgentID: "agent-1", AgentRole: observer.RoleSlave,
 		APIKey: "ak", TokenStatePath: path,
 	})

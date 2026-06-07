@@ -159,6 +159,55 @@ observer:
 	require.Equal(t, "master-display", c.Observer.AgentID)
 }
 
+func TestLoad_ObserverTelemetryDefaultsDisabled(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "observer.token")
+	path := filepath.Join(dir, "c.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+server:
+  url: https://example.com
+  name: m
+discovery:
+  display_name: slave-display
+observer:
+  enabled: true
+  url: https://observer.example
+  workspace_id: ws
+  agent_id: slave-display
+  api_key: ak_x
+  token_state_path: `+tokenPath+`
+`), 0o600))
+
+	c, err := Load(path)
+	require.NoError(t, err)
+	require.False(t, c.Observer.TelemetryEnabled)
+}
+
+func TestLoad_ObserverTelemetryCanBeEnabled(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "observer.token")
+	path := filepath.Join(dir, "c.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+server:
+  url: https://example.com
+  name: m
+discovery:
+  display_name: slave-display
+observer:
+  enabled: true
+  telemetry_enabled: true
+  url: https://observer.example
+  workspace_id: ws
+  agent_id: slave-display
+  api_key: ak_x
+  token_state_path: `+tokenPath+`
+`), 0o600))
+
+	c, err := Load(path)
+	require.NoError(t, err)
+	require.True(t, c.Observer.TelemetryEnabled)
+}
+
 func TestLoad_ObserverEnabledRequiresDeliveryFields(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "c.yaml")

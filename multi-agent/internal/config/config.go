@@ -87,13 +87,14 @@ type Fanout struct {
 }
 
 type Observer struct {
-	Enabled        bool   `yaml:"enabled"`
-	URL            string `yaml:"url"`
-	WorkspaceID    string `yaml:"workspace_id"`
-	WorkspaceName  string `yaml:"workspace_name,omitempty"`
-	AgentID        string `yaml:"agent_id"`
-	APIKey         string `yaml:"api_key"`
-	TokenStatePath string `yaml:"token_state_path"`
+	Enabled          bool   `yaml:"enabled"`
+	TelemetryEnabled bool   `yaml:"telemetry_enabled,omitempty"`
+	URL              string `yaml:"url"`
+	WorkspaceID      string `yaml:"workspace_id"`
+	WorkspaceName    string `yaml:"workspace_name,omitempty"`
+	AgentID          string `yaml:"agent_id"`
+	APIKey           string `yaml:"api_key"`
+	TokenStatePath   string `yaml:"token_state_path"`
 }
 
 type SubTaskDefaults struct {

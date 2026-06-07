@@ -217,6 +217,7 @@ ${tag_lines%$'\n'}
 
 observer:
   enabled: true
+  telemetry_enabled: false
   url: $OBSERVER_URL
   workspace_id: $WORKSPACE_ID
   agent_id: $NAME

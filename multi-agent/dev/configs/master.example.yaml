@@ -26,6 +26,7 @@ fanout:
 
 observer:
   enabled: true
+  telemetry_enabled: false
   url: http://observer:8080
   workspace_id: dev
   agent_id: master-dev

@@ -22,22 +22,24 @@ const (
 )
 
 type Config struct {
-	Enabled        bool
-	URL            string
-	WorkspaceID    string
-	WorkspaceName  string // optional; first-writer-wins at observer
-	AgentID        string
-	AgentRole      string
-	APIKey         string
-	TokenStatePath string
+	Enabled          bool
+	TelemetryEnabled bool
+	URL              string
+	WorkspaceID      string
+	WorkspaceName    string // optional; first-writer-wins at observer
+	AgentID          string
+	AgentRole        string
+	APIKey           string
+	TokenStatePath   string
 }
 
 type Client struct {
-	cfg     Config
-	url     string // /api/events
-	enabled bool
-	queue   chan observer.Event
-	http    *http.Client
+	cfg              Config
+	url              string // /api/events
+	enabled          bool
+	telemetryEnabled bool
+	queue            chan observer.Event
+	http             *http.Client
 
 	tokenMu        sync.Mutex
 	token          string
@@ -54,10 +56,11 @@ type Client struct {
 // should log.Fatal and let systemd Restart=on-failure retry.
 func New(cfg Config) (*Client, error) {
 	c := &Client{
-		cfg:     cfg,
-		url:     strings.TrimRight(cfg.URL, "/") + "/api/events",
-		enabled: cfg.Enabled && cfg.URL != "",
-		http:    &http.Client{Timeout: 2 * time.Second},
+		cfg:              cfg,
+		url:              strings.TrimRight(cfg.URL, "/") + "/api/events",
+		enabled:          cfg.Enabled && cfg.URL != "",
+		telemetryEnabled: cfg.Enabled && cfg.TelemetryEnabled && cfg.URL != "",
+		http:             &http.Client{Timeout: 2 * time.Second},
 	}
 	if !c.enabled {
 		return c, nil
@@ -69,14 +72,20 @@ func New(cfg Config) (*Client, error) {
 	}
 	c.token = tok
 
-	c.queue = make(chan observer.Event, queueSize)
-	c.wg.Add(1)
-	go c.run()
+	if c.telemetryEnabled {
+		c.queue = make(chan observer.Event, queueSize)
+		c.wg.Add(1)
+		go c.run()
+	}
 	return c, nil
 }
 
 func (c *Client) Enabled() bool {
 	return c != nil && c.enabled
+}
+
+func (c *Client) TelemetryEnabled() bool {
+	return c != nil && c.telemetryEnabled
 }
 
 // Token returns the live per-agent token. Other consumers (e.g. driver's
@@ -91,7 +100,7 @@ func (c *Client) Token() string {
 }
 
 func (c *Client) Emit(ev observer.Event) {
-	if !c.Enabled() {
+	if !c.TelemetryEnabled() {
 		return
 	}
 	if ev.TS == "" {
@@ -114,7 +123,7 @@ func (c *Client) Emit(ev observer.Event) {
 }
 
 func (c *Client) Close() {
-	if !c.Enabled() {
+	if !c.TelemetryEnabled() {
 		return
 	}
 	c.mu.Lock()

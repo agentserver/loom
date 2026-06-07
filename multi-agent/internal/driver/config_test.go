@@ -115,6 +115,61 @@ observer:
 	}
 }
 
+func TestLoadConfig_ObserverTelemetryDefaultsDisabled(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "observer.token")
+	path := filepath.Join(dir, "driver.yaml")
+	if err := os.WriteFile(path, []byte(`
+server: {url: https://x, name: drv}
+discovery: {display_name: driver-display}
+observer:
+  enabled: true
+  url: https://observer.example
+  workspace_id: ws
+  agent_id: driver-display
+  api_key: ak_x
+  token_state_path: `+tokenPath+`
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if c.Observer.TelemetryEnabled {
+		t.Fatal("observer telemetry should default disabled")
+	}
+}
+
+func TestLoadConfig_ObserverTelemetryCanBeEnabled(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "observer.token")
+	path := filepath.Join(dir, "driver.yaml")
+	if err := os.WriteFile(path, []byte(`
+server: {url: https://x, name: drv}
+discovery: {display_name: driver-display}
+observer:
+  enabled: true
+  telemetry_enabled: true
+  url: https://observer.example
+  workspace_id: ws
+  agent_id: driver-display
+  api_key: ak_x
+  token_state_path: `+tokenPath+`
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !c.Observer.TelemetryEnabled {
+		t.Fatal("observer telemetry should be enabled when explicitly configured")
+	}
+}
+
 func TestLoadConfig_ObserverEnabledRequiresDeliveryFields(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "driver.yaml")
