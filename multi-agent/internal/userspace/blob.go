@@ -1,14 +1,32 @@
 package userspace
 
 import (
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
+
+	"github.com/yourorg/multi-agent/internal/objectstore"
 )
+
+const (
+	userspaceBlobObjectPrefix = "workspaces/userspace/blobs/"
+	userspaceBlobObjectMIME   = "application/octet-stream"
+)
+
+// BlobStorage is the storage surface used by userspace package APIs.
+type BlobStorage interface {
+	Put(content []byte) (string, error)
+	Open(sha256hex string) (io.ReadCloser, int64, error)
+	Release(sha256hex string) error
+}
 
 // BlobStore is sha256-addressed file storage with refcount in SQLite.
 // Two callers writing the same bytes increment the same refcount.
@@ -18,6 +36,8 @@ type BlobStore struct {
 	db   *sql.DB
 	root string
 }
+
+var _ BlobStorage = (*BlobStore)(nil)
 
 func NewBlobStore(db *sql.DB, root string) (*BlobStore, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
@@ -104,6 +124,180 @@ func (b *BlobStore) Release(sha256hex string) error {
 
 func (b *BlobStore) pathFor(hexsum string) string {
 	return filepath.Join(b.root, blobShard(hexsum), hexsum)
+}
+
+// ObjectBlobStore is sha256-addressed storage backed by object storage, with
+// SQL retaining only metadata and refcounts.
+type ObjectBlobStore struct {
+	db          *sql.DB
+	objects     objectstore.Store
+	hasBlobPath bool
+}
+
+var _ BlobStorage = (*ObjectBlobStore)(nil)
+
+func NewObjectBlobStore(db *sql.DB, objects objectstore.Store) (*ObjectBlobStore, error) {
+	if objects == nil {
+		return nil, errors.New("userspace: object store required")
+	}
+	hasObjectKey, err := userspaceBlobColumnExists(db, "object_key")
+	if err != nil {
+		return nil, err
+	}
+	if !hasObjectKey {
+		return nil, errors.New("userspace: userspace_blobs.object_key column missing")
+	}
+	hasBlobPath, err := userspaceBlobColumnExists(db, "blob_path")
+	if err != nil {
+		return nil, err
+	}
+	return &ObjectBlobStore{db: db, objects: objects, hasBlobPath: hasBlobPath}, nil
+}
+
+// Put writes content to object storage when needed and increments refcount.
+// Returns the sha256 hex digest.
+func (b *ObjectBlobStore) Put(content []byte) (string, error) {
+	hexsum := ComputeSHA256Hex(content)
+	key := objectBlobKey(hexsum)
+
+	var existing int
+	err := b.db.QueryRow(`SELECT refcount FROM userspace_blobs WHERE sha256=$1`, hexsum).Scan(&existing)
+	switch {
+	case err == sql.ErrNoRows:
+		if err := b.putObject(key, content, hexsum); err != nil {
+			return "", err
+		}
+		if err := b.insertObjectBlob(hexsum, len(content), key); err != nil {
+			_ = b.objects.Delete(context.Background(), key)
+			return "", err
+		}
+		return hexsum, nil
+	case err != nil:
+		return "", err
+	case existing == 0:
+		if err := b.putObject(key, content, hexsum); err != nil {
+			return "", err
+		}
+		if err := b.resetObjectBlob(hexsum, len(content), key); err != nil {
+			_ = b.objects.Delete(context.Background(), key)
+			return "", err
+		}
+		return hexsum, nil
+	default:
+		_, err = b.db.Exec(`UPDATE userspace_blobs SET refcount = refcount + 1 WHERE sha256=$1`, hexsum)
+		return hexsum, err
+	}
+}
+
+// Open returns a ReadCloser for the blob; not found → (nil, ErrBlobNotFound).
+func (b *ObjectBlobStore) Open(sha256hex string) (io.ReadCloser, int64, error) {
+	var sz int64
+	var key string
+	err := b.db.QueryRow(
+		`SELECT size_bytes, object_key FROM userspace_blobs WHERE sha256=$1 AND refcount > 0`,
+		sha256hex,
+	).Scan(&sz, &key)
+	if err == sql.ErrNoRows {
+		return nil, 0, ErrBlobNotFound
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	rc, err := b.objects.Open(context.Background(), key)
+	if err != nil {
+		return nil, 0, err
+	}
+	return rc, sz, nil
+}
+
+// Release decrements refcount. On zero, the object is removed while retaining
+// the SQL metadata row for audit history.
+func (b *ObjectBlobStore) Release(sha256hex string) error {
+	_, err := b.db.Exec(
+		`UPDATE userspace_blobs SET refcount = refcount - 1
+		   WHERE sha256=$1 AND refcount > 0`, sha256hex)
+	if err != nil {
+		return err
+	}
+	var cnt int
+	var key string
+	err = b.db.QueryRow(`SELECT refcount, object_key FROM userspace_blobs WHERE sha256=$1`, sha256hex).Scan(&cnt, &key)
+	if err != nil {
+		return err
+	}
+	if cnt == 0 && key != "" {
+		return b.objects.Delete(context.Background(), key)
+	}
+	return nil
+}
+
+func (b *ObjectBlobStore) putObject(key string, content []byte, hexsum string) error {
+	info, err := b.objects.Put(context.Background(), key, userspaceBlobObjectMIME, bytes.NewReader(content))
+	if err != nil {
+		return err
+	}
+	if info.SHA256 != "" && info.SHA256 != hexsum {
+		_ = b.objects.Delete(context.Background(), key)
+		return fmt.Errorf("userspace: object store sha256 mismatch for %s", key)
+	}
+	return nil
+}
+
+func (b *ObjectBlobStore) insertObjectBlob(hexsum string, sizeBytes int, key string) error {
+	if b.hasBlobPath {
+		_, err := b.db.Exec(`
+			INSERT INTO userspace_blobs(sha256, size_bytes, object_key, blob_path, refcount, created_at)
+			VALUES($1, $2, $3, $3, 1, $4)`,
+			hexsum, sizeBytes, key, nowUTC())
+		return err
+	}
+	_, err := b.db.Exec(`
+		INSERT INTO userspace_blobs(sha256, size_bytes, object_key, refcount, created_at)
+		VALUES($1, $2, $3, 1, $4)`,
+		hexsum, sizeBytes, key, nowUTC())
+	return err
+}
+
+func (b *ObjectBlobStore) resetObjectBlob(hexsum string, sizeBytes int, key string) error {
+	if b.hasBlobPath {
+		_, err := b.db.Exec(`
+			UPDATE userspace_blobs
+			   SET size_bytes=$2, object_key=$3, blob_path=$3, refcount=1
+			 WHERE sha256=$1`,
+			hexsum, sizeBytes, key)
+		return err
+	}
+	_, err := b.db.Exec(`
+		UPDATE userspace_blobs
+		   SET size_bytes=$2, object_key=$3, refcount=1
+		 WHERE sha256=$1`,
+		hexsum, sizeBytes, key)
+	return err
+}
+
+func objectBlobKey(hexsum string) string {
+	return userspaceBlobObjectPrefix + hexsum
+}
+
+func userspaceBlobColumnExists(db *sql.DB, column string) (bool, error) {
+	rows, err := db.Query(fmt.Sprintf(`SELECT %s FROM userspace_blobs WHERE 1=0`, column))
+	if err == nil {
+		defer rows.Close()
+		return true, nil
+	}
+	if isMissingColumnError(err) {
+		return false, nil
+	}
+	return false, err
+}
+
+func isMissingColumnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no such column") ||
+		(strings.Contains(msg, "column") && strings.Contains(msg, "does not exist"))
 }
 
 func blobShard(hexsum string) string {

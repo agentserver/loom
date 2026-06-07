@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"flag"
 	"fmt"
 	"log"
@@ -132,11 +133,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if err := userspace.Migrate(st.DB()); err != nil {
+	if err := userspace.MigrateForDriver(st.DB(), cfg.Store.Driver); err != nil {
 		log.Fatalf("userspace migrate: %v", err)
 	}
-	blobRoot := userspaceBlobRoot(effectiveSQLitePath(cfg))
-	blobs, err := userspace.NewBlobStore(st.DB(), blobRoot)
+	blobs, err := openUserspaceBlobStore(st.DB(), cfg, objects)
 	if err != nil {
 		log.Fatalf("userspace blob store: %v", err)
 	}
@@ -154,6 +154,17 @@ func main() {
 		return st.DB().PingContext(ctx)
 	}))
 	log.Fatal(srv.ListenAndServe())
+}
+
+func openUserspaceBlobStore(db *sql.DB, cfg *Config, objects objectstore.Store) (userspace.BlobStorage, error) {
+	if cfg.Store.Driver == "postgres" {
+		if objects == nil {
+			return nil, fmt.Errorf("userspace object store is required when store.driver is postgres")
+		}
+		return userspace.NewObjectBlobStore(db, objects)
+	}
+	blobRoot := userspaceBlobRoot(effectiveSQLitePath(cfg))
+	return userspace.NewBlobStore(db, blobRoot)
 }
 
 func observerWebOptions(cfg *Config, objects objectstore.Store) observerweb.Options {

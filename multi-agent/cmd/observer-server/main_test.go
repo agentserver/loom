@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/yourorg/multi-agent/internal/objectstore"
 	"github.com/yourorg/multi-agent/internal/observerstore"
+	"github.com/yourorg/multi-agent/internal/userspace"
 )
 
 func TestLoadConfigDefaultsAndValidates(t *testing.T) {
@@ -141,6 +142,42 @@ func TestObserverWebOptionsIncludesObjectProxyLimit(t *testing.T) {
 	require.Equal(t, int64(4567), opts.MaxEventBodyBytes)
 	require.Equal(t, 8, opts.TelemetryRateLimit.PerMinute)
 	require.Equal(t, 9, opts.TelemetryRateLimit.Burst)
+}
+
+func TestOpenUserspaceBlobStoreUsesFilesystemForSQLite(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, userspace.Migrate(st.DB()))
+
+	blobs, err := openUserspaceBlobStore(st.DB(), &Config{
+		DBPath: "observer.db",
+		Store:  StoreConfig{Driver: "sqlite"},
+	}, objectstore.NewMemory())
+	require.NoError(t, err)
+	require.IsType(t, &userspace.BlobStore{}, blobs)
+}
+
+func TestOpenUserspaceBlobStoreUsesObjectStoreForPostgres(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, userspace.Migrate(st.DB()))
+
+	objects := objectstore.NewMemory()
+	blobs, err := openUserspaceBlobStore(st.DB(), &Config{
+		Store: StoreConfig{Driver: "postgres"},
+	}, objects)
+	require.NoError(t, err)
+	require.IsType(t, &userspace.ObjectBlobStore{}, blobs)
+}
+
+func TestOpenUserspaceBlobStoreRequiresObjectsForPostgres(t *testing.T) {
+	blobs, err := openUserspaceBlobStore(nil, &Config{
+		Store: StoreConfig{Driver: "postgres"},
+	}, nil)
+	require.Nil(t, blobs)
+	require.ErrorContains(t, err, "object store is required")
 }
 
 func TestOpenObjectStoreS3RequiresCredentialEnvValues(t *testing.T) {

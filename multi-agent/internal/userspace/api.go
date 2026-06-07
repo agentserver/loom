@@ -21,7 +21,7 @@ type AgentResolver func(r *http.Request) (workspaceID, agentID string, ok bool)
 // Handler holds wired-up dependencies for all /api/userspace/* routes.
 type Handler struct {
 	Store    *Store
-	Blobs    *BlobStore
+	Blobs    BlobStorage
 	Resolver AgentResolver
 }
 

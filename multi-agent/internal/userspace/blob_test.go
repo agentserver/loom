@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/yourorg/multi-agent/internal/objectstore"
 )
 
 func TestBlobStore_PutOpenRoundTrip(t *testing.T) {
@@ -56,4 +57,45 @@ func TestBlobStore_OpenZeroRefcountFails(t *testing.T) {
 	_ = b.Release(sum)
 	_, _, err := b.Open(sum)
 	require.ErrorIs(t, err, ErrBlobNotFound)
+}
+
+func TestBlobStoreUsesObjectKeyWhenConfigured(t *testing.T) {
+	db := newTestDB(t)
+	require.NoError(t, Migrate(db))
+	objects := objectstore.NewMemory()
+	b, err := NewObjectBlobStore(db, objects)
+	require.NoError(t, err)
+	sha, err := b.Put([]byte("hello"))
+	require.NoError(t, err)
+	require.Equal(t, ComputeSHA256Hex([]byte("hello")), sha)
+}
+
+func TestNewObjectBlobStoreRequiresObjectStore(t *testing.T) {
+	db := newTestDB(t)
+	b, err := NewObjectBlobStore(db, nil)
+	require.Nil(t, b)
+	require.ErrorContains(t, err, "object store required")
+}
+
+func TestObjectBlobStoreStoresObjectKeyAndOpensContent(t *testing.T) {
+	db := newTestDB(t)
+	objects := objectstore.NewMemory()
+	b, err := NewObjectBlobStore(db, objects)
+	require.NoError(t, err)
+
+	sha, err := b.Put([]byte("hello"))
+	require.NoError(t, err)
+
+	wantKey := "workspaces/userspace/blobs/" + sha
+	var objectKey string
+	require.NoError(t, db.QueryRow(`SELECT object_key FROM userspace_blobs WHERE sha256=?`, sha).Scan(&objectKey))
+	require.Equal(t, wantKey, objectKey)
+
+	rc, sz, err := b.Open(sha)
+	require.NoError(t, err)
+	defer rc.Close()
+	require.Equal(t, int64(5), sz)
+	body, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, "hello", string(body))
 }

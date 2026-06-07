@@ -40,3 +40,24 @@ func TestMigrate_CreatesAllTables(t *testing.T) {
 		require.NoError(t, err, "table %s missing", table)
 	}
 }
+
+func TestMigrateSQLiteAddsObjectKeyColumn(t *testing.T) {
+	db := newTestDB(t)
+	rows, err := db.Query(`PRAGMA table_info(userspace_blobs)`)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		require.NoError(t, rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk))
+		columns[name] = true
+	}
+	require.NoError(t, rows.Err())
+	require.True(t, columns["blob_path"])
+	require.True(t, columns["object_key"])
+}
