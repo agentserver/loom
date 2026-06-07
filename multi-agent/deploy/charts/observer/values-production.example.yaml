@@ -1,7 +1,9 @@
 replicaCount: 3
 
 image:
-  repository: ghcr.io/yourorg/multi-agent/observer-server
+  # k8s-nj-prod should pull through the Nanjing registry mirror.
+  # Replace "yourorg" with the published project image owner/path.
+  repository: registry.nj.cs.ac.cn/ghcr/yourorg/multi-agent/observer-server
   tag: latest
   pullPolicy: IfNotPresent
 

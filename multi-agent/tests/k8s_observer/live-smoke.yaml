@@ -1,0 +1,360 @@
+#
+# Test-only live observer stack for k8s-nj-prod/dev-yuzishu.
+#
+# This manifest deploys disposable PostgreSQL and MinIO dependencies plus an
+# Alpine runner for a locally built observer-server binary copied with
+# kubectl cp. It is intentionally not the production Helm release path.
+# Public images must use the Nanjing registry mirror:
+#   docker.io/library/postgres:16-alpine -> registry.nj.cs.ac.cn/dockerhub/postgres:16-alpine
+#   ghcr.io/example/image:tag -> registry.nj.cs.ac.cn/ghcr/example/image:tag
+#
+apiVersion: v1
+kind: Service
+metadata:
+  name: observer-postgres
+  labels:
+    app.kubernetes.io/name: observer-postgres
+    app.kubernetes.io/instance: observer
+spec:
+  type: ClusterIP
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+  selector:
+    app.kubernetes.io/name: observer-postgres
+    app.kubernetes.io/instance: observer
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: observer-postgres
+  labels:
+    app.kubernetes.io/name: observer-postgres
+    app.kubernetes.io/instance: observer
+spec:
+  serviceName: observer-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: observer-postgres
+      app.kubernetes.io/instance: observer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: observer-postgres
+        app.kubernetes.io/instance: observer
+    spec:
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: registry.nj.cs.ac.cn/dockerhub/postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: observer
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: observer-live-smoke
+                  key: postgres-user
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: observer-live-smoke
+                  key: postgres-password
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - observer
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+              ephemeral-storage: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+              ephemeral-storage: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: observer-minio
+  labels:
+    app.kubernetes.io/name: observer-minio
+    app.kubernetes.io/instance: observer
+spec:
+  type: ClusterIP
+  ports:
+    - name: s3
+      port: 9000
+      targetPort: s3
+  selector:
+    app.kubernetes.io/name: observer-minio
+    app.kubernetes.io/instance: observer
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: observer-minio
+  labels:
+    app.kubernetes.io/name: observer-minio
+    app.kubernetes.io/instance: observer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: observer-minio
+      app.kubernetes.io/instance: observer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: observer-minio
+        app.kubernetes.io/instance: observer
+    spec:
+      securityContext:
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: minio
+          image: registry.nj.cs.ac.cn/dockerhub/minio/minio:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+          args:
+            - server
+            - /data
+          ports:
+            - name: s3
+              containerPort: 9000
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: observer-live-smoke
+                  key: minio-access-key
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: observer-live-smoke
+                  key: minio-secret-key
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: s3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+              ephemeral-storage: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+              ephemeral-storage: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 2Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: observer-minio-create-bucket
+  labels:
+    app.kubernetes.io/name: observer-minio
+    app.kubernetes.io/instance: observer
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: observer-minio
+        app.kubernetes.io/instance: observer
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mc
+          image: registry.nj.cs.ac.cn/dockerhub/minio/mc:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+          command:
+            - /bin/sh
+            - -ec
+          args:
+            - |
+              until mc alias set local http://observer-minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"; do
+                sleep 2
+              done
+              mc mb --ignore-existing local/observer-artifacts
+          env:
+            - name: HOME
+              value: /tmp
+            - name: MC_CONFIG_DIR
+              value: /tmp/.mc
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: observer-live-smoke
+                  key: minio-access-key
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: observer-live-smoke
+                  key: minio-secret-key
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+              ephemeral-storage: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+              ephemeral-storage: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: observer-observer
+  labels:
+    app.kubernetes.io/name: observer
+    app.kubernetes.io/instance: observer
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8090
+      targetPort: http
+  selector:
+    app.kubernetes.io/name: observer
+    app.kubernetes.io/instance: observer
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: observer-observer
+  labels:
+    app.kubernetes.io/name: observer
+    app.kubernetes.io/instance: observer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: observer
+      app.kubernetes.io/instance: observer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: observer
+        app.kubernetes.io/instance: observer
+    spec:
+      securityContext:
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: observer
+          image: registry.nj.cs.ac.cn/dockerhub/alpine:3.20
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+          command:
+            - /bin/sh
+            - -ec
+          args:
+            - sleep infinity
+          ports:
+            - name: http
+              containerPort: 8090
+          env:
+            - name: OBSERVER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: observer-live-smoke
+                  key: database-url
+            - name: OBSERVER_S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: observer-live-smoke
+                  key: minio-access-key
+            - name: OBSERVER_S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: observer-live-smoke
+                  key: minio-secret-key
+            - name: OBSERVER_TELEMETRY_KEY_GLOBAL
+              valueFrom:
+                secretKeyRef:
+                  name: observer-live-smoke
+                  key: telemetry-key
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+              ephemeral-storage: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+              ephemeral-storage: 1Gi
+          volumeMounts:
+            - name: work
+              mountPath: /work
+            - name: config
+              mountPath: /etc/observer/observer.yaml
+              subPath: observer.yaml
+              readOnly: true
+      volumes:
+        - name: work
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: config
+          secret:
+            secretName: observer-live-smoke

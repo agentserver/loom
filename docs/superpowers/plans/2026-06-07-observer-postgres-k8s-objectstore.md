@@ -31,6 +31,14 @@ kubectl --context k8s-nj-prod ...
 helm --kube-context k8s-nj-prod ...
 ```
 
+All images deployed to the Nanjing cluster should use the platform registry
+mirror for fast and reliable pulls:
+
+```text
+docker.io/<image> -> registry.nj.cs.ac.cn/dockerhub/<image>
+ghcr.io/<image>   -> registry.nj.cs.ac.cn/ghcr/<image>
+```
+
 Local `kind`, `minikube`, and `tests/prod_test` may be used only for chart rendering or developer smoke checks. They do not satisfy acceptance testing.
 
 ## Scope Check
@@ -2036,7 +2044,7 @@ Create `values.yaml` with safe defaults:
 ```yaml
 replicaCount: 2
 image:
-  repository: ghcr.io/yourorg/multi-agent/observer-server
+  repository: registry.nj.cs.ac.cn/ghcr/yourorg/multi-agent/observer-server
   tag: latest
   pullPolicy: IfNotPresent
 service:
@@ -2167,7 +2175,7 @@ set -euo pipefail
 
 CTX="${KUBE_CONTEXT:-k8s-nj-prod}"
 RELEASE="${OBSERVER_RELEASE:-observer}"
-NAMESPACE="${OBSERVER_NAMESPACE:-observer}"
+NAMESPACE="${OBSERVER_NAMESPACE:-dev-yuzishu}"
 CHART="${OBSERVER_CHART:-multi-agent/deploy/charts/observer}"
 VALUES="${OBSERVER_VALUES:-multi-agent/deploy/charts/observer/values-production.example.yaml}"
 
@@ -2221,7 +2229,7 @@ multi-agent/tests/k8s_observer/smoke.sh
 cd /root/multi-agent/.worktrees/observer-postgres-k8s-design
 kubectl --context k8s-nj-prod config current-context
 helm --kube-context k8s-nj-prod lint multi-agent/deploy/charts/observer
-helm --kube-context k8s-nj-prod template observer multi-agent/deploy/charts/observer -n observer -f multi-agent/deploy/charts/observer/values-production.example.yaml >/tmp/observer-rendered.yaml
+helm --kube-context k8s-nj-prod template observer multi-agent/deploy/charts/observer -n dev-yuzishu -f multi-agent/deploy/charts/observer/values-production.example.yaml >/tmp/observer-rendered.yaml
 grep -q 'kind: HTTPRoute' /tmp/observer-rendered.yaml
 ```
 
@@ -2329,7 +2337,19 @@ Updated: 2026-06-07.
   - Review gate: Task 7 spec review approved after `9b1d12d`; Task 7 quality review approved after `cdb46e9`.
   - Verification: `go test ./internal/userspace -count=1`; `go test ./cmd/observer-server ./internal/userspace -count=1`; `go test -race ./internal/userspace -count=1`; `go test ./internal/userspace -run TestPostgresStoreLiveRoundTrip -count=1 -v`; `go mod tidy -diff`; `git diff --check`; `go test ./... -count=1`.
   - Residual risk: live PostgreSQL userspace round trip skipped because `OBSERVER_POSTGRES_TEST_DSN` is not set; live S3/object-store integration was not run.
-- Next task: Task 8, add the observer Helm chart with Gateway API `HTTPRoute`.
+- Task 8 completed: observer Helm chart with Gateway API `HTTPRoute`.
+  - Commits: `0bdddc2`, `d75968c`.
+  - Verification: `helm lint ./deploy/charts/observer`; `./deploy/charts/observer/tests/chart_test.sh`; `helm --kube-context k8s-nj-prod template observer multi-agent/deploy/charts/observer -n dev-yuzishu -f multi-agent/deploy/charts/observer/values-production.example.yaml`.
+  - HTTPRoute note: use `gateway.networking.k8s.io/v1`, `parentRefs`, `hostnames`, a `PathPrefix /` match, and a direct `backendRefs` service target. Do not add URLRewrite to the main observer route.
+- Task 9 completed: k8s-nj-prod runbook and dev namespace target.
+  - Commits: `925bcb3`, `9fa0046`.
+  - Namespace decision: acceptance tests run in `dev-yuzishu` because this kube user cannot read the shared `observer` namespace.
+  - Registry decision: live cluster manifests and production examples use the Nanjing registry mirror, for example `registry.nj.cs.ac.cn/dockerhub/postgres:16-alpine` and `registry.nj.cs.ac.cn/ghcr/...`.
+- Task 10 completed for live smoke and Codex e2e on 2026-06-07.
+  - Live stack: disposable PostgreSQL, MinIO, MinIO bucket Job, and an Alpine observer runner were deployed in `dev-yuzishu` using `multi-agent/tests/k8s_observer/live-smoke.yaml`.
+  - Migrations: the locally built `observer-server` linux/amd64 binary was copied into the runner pod and `--migrate-only` completed against in-cluster PostgreSQL.
+  - Verification: `PATH=/tmp/observer-helm-bin:$PATH multi-agent/tests/k8s_observer/smoke.sh`; `/readyz`; telemetry gate `403/403/202`; artifact direct PUT/complete/GET; write direct PUT/complete/list/GET; Codex driver to Codex slave e2e with output `K8SOK`.
+  - Residual risk: the live smoke stack injects a local binary with `kubectl cp` because the project observer image has not been published to the Nanjing registry yet. Replace this with the Helm chart once the image exists.
 
 ## Self-Review Checklist
 
