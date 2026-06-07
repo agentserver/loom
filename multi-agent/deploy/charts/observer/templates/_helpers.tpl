@@ -30,10 +30,15 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
 {{- define "observer.migrationJobName" -}}
+{{- $base := include "observer.fullname" . -}}
 {{- if .Values.migration.useHelmHook -}}
-{{- printf "%s-migrate" (include "observer.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- $suffix := "migrate" -}}
+{{- $baseMax := sub 62 (len $suffix) | int -}}
+{{- printf "%s-%s" ($base | trunc $baseMax | trimSuffix "-") $suffix | trunc 63 | trimSuffix "-" -}}
 {{- else -}}
-{{- printf "%s-migrate-%s" (include "observer.fullname" .) (include "observer.migrationJobSuffix" .) | trunc 63 | trimSuffix "-" -}}
+{{- $suffix := printf "migrate-%s" (include "observer.migrationJobSuffix" .) -}}
+{{- $baseMax := sub 62 (len $suffix) | int -}}
+{{- printf "%s-%s" ($base | trunc $baseMax | trimSuffix "-") $suffix | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 {{- end -}}
 

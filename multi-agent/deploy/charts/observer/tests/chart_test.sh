@@ -26,6 +26,14 @@ named="$(helm template observer-test "$CHART_DIR" \
   --set migration.jobNameSuffix=schema-20260607)"
 grep -q 'name: observer-test-observer-migrate-schema-20260607' <<<"$named"
 
+long_release="observer-release-name-123456789012345678901234567890"
+long_a="$(helm template "$long_release" "$CHART_DIR" \
+  --set migration.jobNameSuffix=alpha20260607)"
+long_b="$(helm template "$long_release" "$CHART_DIR" \
+  --set migration.jobNameSuffix=beta20260607)"
+grep -q 'migrate-alpha20260607' <<<"$long_a"
+grep -q 'migrate-beta20260607' <<<"$long_b"
+
 hooked="$(helm template observer-test "$CHART_DIR" \
   --set migration.useHelmHook=true)"
 grep -q 'name: observer-test-observer-migrate' <<<"$hooked"
