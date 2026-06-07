@@ -33,6 +33,19 @@ long_b="$(helm template "$long_release" "$CHART_DIR" \
   --set migration.jobNameSuffix=beta20260607)"
 grep -q 'migrate-alpha20260607' <<<"$long_a"
 grep -q 'migrate-beta20260607' <<<"$long_b"
+retention_name="$(awk '
+  $0 == "kind: CronJob" { in_cronjob = 1; next }
+  in_cronjob && $0 == "metadata:" { in_metadata = 1; next }
+  in_cronjob && in_metadata && /^  name: / { print $2; exit }
+' <<<"$long_a")"
+if [[ "$retention_name" != *-retention ]]; then
+  echo "retention CronJob name must keep -retention suffix: $retention_name" >&2
+  exit 1
+fi
+if (( ${#retention_name} > 52 )); then
+  echo "retention CronJob name exceeds 52 chars: $retention_name" >&2
+  exit 1
+fi
 
 hooked="$(helm template observer-test "$CHART_DIR" \
   --set migration.useHelmHook=true)"

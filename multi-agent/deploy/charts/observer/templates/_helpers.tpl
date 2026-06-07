@@ -49,3 +49,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- $suffix | lower | replace "/" "-" | replace ":" "-" | replace "_" "-" | replace "." "-" | trunc 24 | trimSuffix "-" -}}
 {{- end -}}
+
+{{- define "observer.retentionCronJobName" -}}
+{{- $base := include "observer.fullname" . -}}
+{{- $suffix := "retention" -}}
+{{- $baseMax := sub 51 (len $suffix) | int -}}
+{{- printf "%s-%s" ($base | trunc $baseMax | trimSuffix "-") $suffix | trunc 52 | trimSuffix "-" -}}
+{{- end -}}

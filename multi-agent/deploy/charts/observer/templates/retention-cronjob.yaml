@@ -2,7 +2,7 @@
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: {{ include "observer.fullname" . }}-retention
+  name: {{ include "observer.retentionCronJobName" . }}
   labels:
     {{- include "observer.labels" . | nindent 4 }}
 spec:
