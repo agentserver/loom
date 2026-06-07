@@ -285,9 +285,31 @@ func (b *ObjectBlobStore) releasePostgres(sha256hex string) error {
 		return err
 	}
 	if next == 0 && key != "" {
-		return b.objects.Delete(context.Background(), key)
+		return b.deleteReleasedObjectPostgres(sha256hex, key)
 	}
 	return nil
+}
+
+func (b *ObjectBlobStore) deleteReleasedObjectPostgres(sha256hex, key string) error {
+	tx, err := b.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var refcount int
+	var currentKey string
+	err = tx.QueryRow(`SELECT refcount, object_key FROM userspace_blobs WHERE sha256=$1 FOR UPDATE`, sha256hex).Scan(&refcount, &currentKey)
+	if err != nil {
+		return err
+	}
+	if refcount != 0 || currentKey != key {
+		return tx.Commit()
+	}
+	if err := b.objects.Delete(context.Background(), key); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (b *ObjectBlobStore) putObject(key string, content []byte, hexsum string) error {

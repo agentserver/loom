@@ -141,7 +141,7 @@ func TestObjectBlobStoreReleasePostgresDeletesOnlyAfterCommit(t *testing.T) {
 
 	require.NoError(t, b.releasePostgres("sha-release"))
 
-	require.Equal(t, []string{"begin", "select", "update", "commit", "delete"}, rec.Events())
+	require.Equal(t, []string{"begin", "select", "update", "commit", "begin", "select", "delete", "commit"}, rec.Events())
 }
 
 func TestObjectBlobStoreReleasePostgresDoesNotDeleteWhenCommitFails(t *testing.T) {
@@ -157,6 +157,21 @@ func TestObjectBlobStoreReleasePostgresDoesNotDeleteWhenCommitFails(t *testing.T
 	require.ErrorContains(t, err, "commit failed")
 	require.NotContains(t, rec.Events(), "delete")
 	require.Equal(t, []string{"begin", "select", "update", "commit"}, rec.Events())
+}
+
+func TestObjectBlobStoreReleasePostgresSkipsDeleteWhenBlobRecreatedAfterDecrement(t *testing.T) {
+	db, rec := newReleaseOrderDB(t, releaseOrderConfig{
+		refcount:                 1,
+		key:                      "workspaces/userspace/blobs/sha-release",
+		recreateAfterFirstCommit: true,
+	})
+	objects := &releaseOrderObjectStore{Memory: objectstore.NewMemory(), rec: rec}
+	b := &ObjectBlobStore{db: db, objects: objects}
+
+	require.NoError(t, b.releasePostgres("sha-release"))
+
+	require.NotContains(t, rec.Events(), "delete")
+	require.Equal(t, []string{"begin", "select", "update", "commit", "recreate", "begin", "select", "commit"}, rec.Events())
 }
 
 type insertBlobRowAfterPutStore struct {
@@ -181,17 +196,20 @@ func (s *insertBlobRowAfterPutStore) Put(ctx context.Context, key, mime string, 
 }
 
 type releaseOrderConfig struct {
-	refcount  int
-	key       string
-	commitErr error
+	refcount                 int
+	key                      string
+	commitErr                error
+	recreateAfterFirstCommit bool
 }
 
 type releaseOrderRecorder struct {
-	mu        sync.Mutex
-	events    []string
-	refcount  int
-	key       string
-	commitErr error
+	mu                       sync.Mutex
+	events                   []string
+	refcount                 int
+	key                      string
+	commitErr                error
+	recreateAfterFirstCommit bool
+	commits                  int
 }
 
 func (r *releaseOrderRecorder) Add(event string) {
@@ -230,7 +248,12 @@ func newReleaseOrderDB(t *testing.T, cfg releaseOrderConfig) (*sql.DB, *releaseO
 		sql.Register("userspace_release_order_sql", releaseOrderDriver{})
 	})
 	name := t.Name() + "_" + strconv.FormatInt(time.Now().UnixNano(), 36)
-	rec := &releaseOrderRecorder{refcount: cfg.refcount, key: cfg.key, commitErr: cfg.commitErr}
+	rec := &releaseOrderRecorder{
+		refcount:                 cfg.refcount,
+		key:                      cfg.key,
+		commitErr:                cfg.commitErr,
+		recreateAfterFirstCommit: cfg.recreateAfterFirstCommit,
+	}
 	releaseOrderSQLRecorders.Store(name, rec)
 	t.Cleanup(func() {
 		releaseOrderSQLRecorders.Delete(name)
@@ -271,7 +294,17 @@ func (c *releaseOrderConn) ExecContext(ctx context.Context, query string, args [
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	c.rec.Add("update")
+	c.rec.mu.Lock()
+	defer c.rec.mu.Unlock()
+	c.rec.events = append(c.rec.events, "update")
+	if len(args) >= 2 {
+		switch v := args[1].Value.(type) {
+		case int:
+			c.rec.refcount = v
+		case int64:
+			c.rec.refcount = int(v)
+		}
+	}
 	return driver.RowsAffected(1), nil
 }
 
@@ -288,7 +321,14 @@ type releaseOrderTx struct {
 }
 
 func (tx *releaseOrderTx) Commit() error {
-	tx.rec.Add("commit")
+	tx.rec.mu.Lock()
+	defer tx.rec.mu.Unlock()
+	tx.rec.events = append(tx.rec.events, "commit")
+	tx.rec.commits++
+	if tx.rec.recreateAfterFirstCommit && tx.rec.commits == 1 {
+		tx.rec.refcount = 1
+		tx.rec.events = append(tx.rec.events, "recreate")
+	}
 	return tx.rec.commitErr
 }
 
