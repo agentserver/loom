@@ -140,8 +140,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("userspace blob store: %v", err)
 	}
+	store, err := openUserspaceStore(st.DB(), cfg)
+	if err != nil {
+		log.Fatalf("userspace store: %v", err)
+	}
 	usHandler := &userspace.Handler{
-		Store: userspace.NewStore(st.DB()),
+		Store: store,
 		Blobs: blobs,
 		Resolver: func(r *http.Request) (string, string, bool) {
 			return observerweb.AgentFromRequest(st, r)
@@ -154,6 +158,10 @@ func main() {
 		return st.DB().PingContext(ctx)
 	}))
 	log.Fatal(srv.ListenAndServe())
+}
+
+func openUserspaceStore(db *sql.DB, cfg *Config) (*userspace.Store, error) {
+	return userspace.NewStoreForDriver(db, cfg.Store.Driver)
 }
 
 func openUserspaceBlobStore(db *sql.DB, cfg *Config, objects objectstore.Store) (userspace.BlobStorage, error) {

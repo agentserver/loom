@@ -180,6 +180,19 @@ func TestOpenUserspaceBlobStoreRequiresObjectsForPostgres(t *testing.T) {
 	require.ErrorContains(t, err, "object store is required")
 }
 
+func TestOpenUserspaceStoreUsesPostgresDialect(t *testing.T) {
+	st, err := observerstore.Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer st.Close()
+	require.NoError(t, userspace.Migrate(st.DB()))
+
+	store, err := openUserspaceStore(st.DB(), &Config{
+		Store: StoreConfig{Driver: "postgres"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "postgres", store.Dialect())
+}
+
 func TestOpenObjectStoreS3RequiresCredentialEnvValues(t *testing.T) {
 	const accessEnv = "OBSERVER_TEST_S3_ACCESS_KEY"
 	const secretEnv = "OBSERVER_TEST_S3_SECRET_KEY"
