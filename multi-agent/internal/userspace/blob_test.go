@@ -3,11 +3,15 @@ package userspace
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/yourorg/multi-agent/internal/objectstore"
@@ -127,6 +131,34 @@ func TestObjectBlobStoreDuplicateInsertRaceKeepsSharedObject(t *testing.T) {
 	require.Equal(t, "race", string(body))
 }
 
+func TestObjectBlobStoreReleasePostgresDeletesOnlyAfterCommit(t *testing.T) {
+	db, rec := newReleaseOrderDB(t, releaseOrderConfig{
+		refcount: 1,
+		key:      "workspaces/userspace/blobs/sha-release",
+	})
+	objects := &releaseOrderObjectStore{Memory: objectstore.NewMemory(), rec: rec}
+	b := &ObjectBlobStore{db: db, objects: objects}
+
+	require.NoError(t, b.releasePostgres("sha-release"))
+
+	require.Equal(t, []string{"begin", "select", "update", "commit", "delete"}, rec.Events())
+}
+
+func TestObjectBlobStoreReleasePostgresDoesNotDeleteWhenCommitFails(t *testing.T) {
+	db, rec := newReleaseOrderDB(t, releaseOrderConfig{
+		refcount:  1,
+		key:       "workspaces/userspace/blobs/sha-release",
+		commitErr: errors.New("commit failed"),
+	})
+	objects := &releaseOrderObjectStore{Memory: objectstore.NewMemory(), rec: rec}
+	b := &ObjectBlobStore{db: db, objects: objects}
+
+	err := b.releasePostgres("sha-release")
+	require.ErrorContains(t, err, "commit failed")
+	require.NotContains(t, rec.Events(), "delete")
+	require.Equal(t, []string{"begin", "select", "update", "commit"}, rec.Events())
+}
+
 type insertBlobRowAfterPutStore struct {
 	objectstore.Store
 	db   *sql.DB
@@ -146,4 +178,142 @@ func (s *insertBlobRowAfterPutStore) Put(ctx context.Context, key, mime string, 
 			info.SHA256, info.Bytes, key, key, nowUTC())
 	})
 	return info, s.err
+}
+
+type releaseOrderConfig struct {
+	refcount  int
+	key       string
+	commitErr error
+}
+
+type releaseOrderRecorder struct {
+	mu        sync.Mutex
+	events    []string
+	refcount  int
+	key       string
+	commitErr error
+}
+
+func (r *releaseOrderRecorder) Add(event string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, event)
+}
+
+func (r *releaseOrderRecorder) Events() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.events...)
+}
+
+type releaseOrderObjectStore struct {
+	*objectstore.Memory
+	rec *releaseOrderRecorder
+}
+
+func (s *releaseOrderObjectStore) Delete(ctx context.Context, key string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.rec.Add("delete")
+	return nil
+}
+
+var (
+	releaseOrderSQLOnce      sync.Once
+	releaseOrderSQLRecorders sync.Map
+)
+
+func newReleaseOrderDB(t *testing.T, cfg releaseOrderConfig) (*sql.DB, *releaseOrderRecorder) {
+	t.Helper()
+	releaseOrderSQLOnce.Do(func() {
+		sql.Register("userspace_release_order_sql", releaseOrderDriver{})
+	})
+	name := t.Name() + "_" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	rec := &releaseOrderRecorder{refcount: cfg.refcount, key: cfg.key, commitErr: cfg.commitErr}
+	releaseOrderSQLRecorders.Store(name, rec)
+	t.Cleanup(func() {
+		releaseOrderSQLRecorders.Delete(name)
+	})
+
+	db, err := sql.Open("userspace_release_order_sql", name)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	return db, rec
+}
+
+type releaseOrderDriver struct{}
+
+func (releaseOrderDriver) Open(name string) (driver.Conn, error) {
+	value, ok := releaseOrderSQLRecorders.Load(name)
+	if !ok {
+		return nil, errors.New("release order recorder not found")
+	}
+	return &releaseOrderConn{rec: value.(*releaseOrderRecorder)}, nil
+}
+
+type releaseOrderConn struct {
+	rec *releaseOrderRecorder
+}
+
+func (c *releaseOrderConn) Prepare(query string) (driver.Stmt, error) {
+	return nil, errors.New("release order prepare is not implemented")
+}
+
+func (c *releaseOrderConn) Close() error { return nil }
+
+func (c *releaseOrderConn) Begin() (driver.Tx, error) {
+	c.rec.Add("begin")
+	return &releaseOrderTx{rec: c.rec}, nil
+}
+
+func (c *releaseOrderConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	c.rec.Add("update")
+	return driver.RowsAffected(1), nil
+}
+
+func (c *releaseOrderConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	c.rec.Add("select")
+	return &releaseOrderRows{rec: c.rec}, nil
+}
+
+type releaseOrderTx struct {
+	rec *releaseOrderRecorder
+}
+
+func (tx *releaseOrderTx) Commit() error {
+	tx.rec.Add("commit")
+	return tx.rec.commitErr
+}
+
+func (tx *releaseOrderTx) Rollback() error {
+	tx.rec.Add("rollback")
+	return nil
+}
+
+type releaseOrderRows struct {
+	rec  *releaseOrderRecorder
+	read bool
+}
+
+func (r *releaseOrderRows) Columns() []string {
+	return []string{"refcount", "object_key"}
+}
+
+func (r *releaseOrderRows) Close() error { return nil }
+
+func (r *releaseOrderRows) Next(dest []driver.Value) error {
+	if r.read {
+		return io.EOF
+	}
+	r.read = true
+	dest[0] = int64(r.rec.refcount)
+	dest[1] = r.rec.key
+	return nil
 }

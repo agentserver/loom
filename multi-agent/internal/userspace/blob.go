@@ -281,12 +281,13 @@ func (b *ObjectBlobStore) releasePostgres(sha256hex string) error {
 	if err != nil {
 		return err
 	}
-	if next == 0 && key != "" {
-		if err := b.objects.Delete(context.Background(), key); err != nil {
-			return err
-		}
+	if err := tx.Commit(); err != nil {
+		return err
 	}
-	return tx.Commit()
+	if next == 0 && key != "" {
+		return b.objects.Delete(context.Background(), key)
+	}
+	return nil
 }
 
 func (b *ObjectBlobStore) putObject(key string, content []byte, hexsum string) error {
