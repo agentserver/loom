@@ -2324,7 +2324,12 @@ Updated: 2026-06-07.
   - Review gate: Task 6 quality review approved after `b08d677`.
   - Verification: `go test ./internal/observerweb -run 'Test.*ObjectStore|TestArtifactLazyHTTPFlow|TestWriteHTTPFlow' -count=1`; `go test ./cmd/observer-server ./internal/observerweb ./internal/driver ./internal/orchestrator ./internal/objectstore -count=1`; `go test ./internal/objectstore ./internal/observerweb ./internal/observerstore ./internal/observerstore/postgres -count=1`; `go mod tidy -diff`; `git diff --check`; `go test ./... -count=1`.
   - Residual risk: no live MinIO/PostgreSQL integration run yet because `OBSERVER_POSTGRES_TEST_DSN` and live object-store credentials were not provided.
-- Next task: Task 7, make userspace blob storage object-store compatible. Known risk: `cmd/observer-server` still runs SQLite-oriented userspace migration when the observer store is PostgreSQL until Task 7 resolves userspace metadata/blob storage.
+- Task 7 completed: userspace blob storage is object-store compatible and userspace metadata has PostgreSQL dialect support.
+  - Commits: `45d119f`, `9b1d12d`, `7678ec1`, `2e082b7`, `cdb46e9`.
+  - Review gate: Task 7 spec review approved after `9b1d12d`; Task 7 quality review approved after `cdb46e9`.
+  - Verification: `go test ./internal/userspace -count=1`; `go test ./cmd/observer-server ./internal/userspace -count=1`; `go test -race ./internal/userspace -count=1`; `go test ./internal/userspace -run TestPostgresStoreLiveRoundTrip -count=1 -v`; `go mod tidy -diff`; `git diff --check`; `go test ./... -count=1`.
+  - Residual risk: live PostgreSQL userspace round trip skipped because `OBSERVER_POSTGRES_TEST_DSN` is not set; live S3/object-store integration was not run.
+- Next task: Task 8, add the observer Helm chart with Gateway API `HTTPRoute`.
 
 ## Self-Review Checklist
 
