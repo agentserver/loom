@@ -38,6 +38,7 @@ type Options struct {
 	TelemetryRateLimit  RateLimitConfig
 	MaxEventBodyBytes   int64
 	Objects             objectstore.Store
+	DisableObjectProxy  bool
 	MaxObjectProxyBytes int64
 }
 
@@ -66,6 +67,7 @@ func NewWithOptions(s Store, usHandler *userspace.Handler, opts Options) http.Ha
 	h := &handler{
 		s:                   s,
 		objects:             opts.Objects,
+		objectProxyEnabled:  !opts.DisableObjectProxy,
 		telemetryLimiter:    newTelemetryLimiter(opts.TelemetryRateLimit.PerMinute, opts.TelemetryRateLimit.Burst),
 		maxEventBodyBytes:   opts.MaxEventBodyBytes,
 		maxObjectProxyBytes: opts.MaxObjectProxyBytes,
@@ -101,6 +103,7 @@ func mountRoutes(mux *http.ServeMux, h *handler, usHandler *userspace.Handler) {
 type handler struct {
 	s                   Store
 	objects             objectstore.Store
+	objectProxyEnabled  bool
 	telemetryLimiter    *telemetryLimiter
 	maxEventBodyBytes   int64
 	maxObjectProxyBytes int64
@@ -293,6 +296,11 @@ func (h *handler) artifacts(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) artifactRouter(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/artifacts/")
+	if strings.HasSuffix(rest, "/complete") {
+		id := strings.TrimSuffix(rest, "/complete")
+		h.completeArtifact(w, r, id)
+		return
+	}
 	if strings.HasSuffix(rest, "/content") {
 		id := strings.TrimSuffix(rest, "/content")
 		h.putArtifactContent(w, r, id)
@@ -323,6 +331,10 @@ func (h *handler) getArtifact(w http.ResponseWriter, r *http.Request, id string)
 			defer content.Body.Close()
 			if h.objects == nil {
 				http.Error(w, "object store not configured", http.StatusInternalServerError)
+				return
+			}
+			if !h.objectProxyEnabled {
+				h.writeArtifactObjectHandle(w, r, content)
 				return
 			}
 			body, err := h.objects.Open(r.Context(), content.ObjectKey)
@@ -378,6 +390,10 @@ func (h *handler) putArtifactContent(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 	if h.objects != nil {
+		if !h.objectProxyEnabled {
+			http.Error(w, "object proxy disabled", http.StatusForbidden)
+			return
+		}
 		objectKey := objectstore.ArtifactKey(agent.WorkspaceID, id)
 		body := http.MaxBytesReader(w, r.Body, h.maxObjectProxyBytes)
 		info, err := h.objects.Put(r.Context(), objectKey, r.Header.Get("Content-Type"), body)
@@ -399,6 +415,71 @@ func (h *handler) putArtifactContent(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+func (h *handler) completeArtifact(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	agent, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	if h.objects == nil {
+		http.Error(w, "object store not configured", http.StatusInternalServerError)
+		return
+	}
+	var req struct {
+		MIME      string `json:"mime"`
+		Bytes     int64  `json:"bytes"`
+		SHA256    string `json:"sha256"`
+		ObjectKey string `json:"object_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if req.Bytes < 0 {
+		http.Error(w, "bytes must be non-negative", http.StatusBadRequest)
+		return
+	}
+	objectKey := objectstore.ArtifactKey(agent.WorkspaceID, id)
+	if req.ObjectKey != "" && req.ObjectKey != objectKey {
+		http.Error(w, "object_key does not match artifact", http.StatusBadRequest)
+		return
+	}
+	if err := h.s.MarkArtifactAvailable(agent.WorkspaceID, agent.ID, id, req.MIME, req.SHA256, objectKey, req.Bytes); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	h.writeArtifactObjectHandle(w, r, observerstore.ArtifactContent{
+		Artifact: observerstore.Artifact{
+			ID: id, WorkspaceID: agent.WorkspaceID, OwnerAgentID: agent.ID,
+			MIME: req.MIME, State: observerstore.ArtifactStateAvailable,
+			Bytes: req.Bytes, SHA256: req.SHA256, ObjectKey: objectKey,
+		},
+	})
+}
+
+func (h *handler) writeArtifactObjectHandle(w http.ResponseWriter, r *http.Request, content observerstore.ArtifactContent) {
+	getURL, err := h.objects.GetPresignedURL(r.Context(), content.ObjectKey, defaultObjectPresignTTL)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"artifact_id": content.ID,
+		"path":        content.Path,
+		"kind":        content.Kind,
+		"state":       content.State,
+		"mime":        content.MIME,
+		"bytes":       content.Bytes,
+		"sha256":      content.SHA256,
+		"object_key":  content.ObjectKey,
+		"get_url":     getURL,
+	})
 }
 
 func (h *handler) artifactRequests(w http.ResponseWriter, r *http.Request) {
@@ -468,6 +549,12 @@ func (h *handler) writeTokens(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) writeRouter(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/writes/")
+	if strings.HasSuffix(rest, "/complete") {
+		id := strings.TrimSuffix(rest, "/complete")
+		h.completeWrite(w, r, id)
+		return
+	}
 	if r.Method == http.MethodPatch {
 		h.patchWrite(w, r)
 		return
@@ -480,8 +567,12 @@ func (h *handler) writeRouter(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	id := strings.TrimPrefix(r.URL.Path, "/api/writes/")
+	id := rest
 	if h.objects != nil {
+		if !h.objectProxyEnabled {
+			http.Error(w, "object proxy disabled", http.StatusForbidden)
+			return
+		}
 		objectKey := objectstore.WriteKey(agent.WorkspaceID, id)
 		body := http.MaxBytesReader(w, r.Body, h.maxObjectProxyBytes)
 		info, err := h.objects.Put(r.Context(), objectKey, r.Header.Get("Content-Type"), body)
@@ -503,6 +594,59 @@ func (h *handler) writeRouter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+func (h *handler) completeWrite(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	agent, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	if h.objects == nil {
+		http.Error(w, "object store not configured", http.StatusInternalServerError)
+		return
+	}
+	var req struct {
+		MIME      string `json:"mime"`
+		Bytes     int64  `json:"bytes"`
+		SHA256    string `json:"sha256"`
+		ObjectKey string `json:"object_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if req.Bytes < 0 {
+		http.Error(w, "bytes must be non-negative", http.StatusBadRequest)
+		return
+	}
+	objectKey := objectstore.WriteKey(agent.WorkspaceID, id)
+	if req.ObjectKey != "" && req.ObjectKey != objectKey {
+		http.Error(w, "object_key does not match write", http.StatusBadRequest)
+		return
+	}
+	if err := h.s.MarkWriteCompleted(agent.WorkspaceID, agent.ID, id, req.MIME, req.SHA256, objectKey, req.Bytes); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	getURL, err := h.objects.GetPresignedURL(r.Context(), objectKey, defaultObjectPresignTTL)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"write_id":       id,
+		"state":          observerstore.WriteStateCompleted,
+		"mime":           req.MIME,
+		"bytes":          req.Bytes,
+		"sha256":         req.SHA256,
+		"object_key":     objectKey,
+		"object_get_url": getURL,
+	})
 }
 
 func (h *handler) patchWrite(w http.ResponseWriter, r *http.Request) {
@@ -552,16 +696,32 @@ func (h *handler) writes(w http.ResponseWriter, r *http.Request) {
 		Bytes         int64  `json:"bytes,omitempty"`
 		SHA256        string `json:"sha256,omitempty"`
 		ObjectKey     string `json:"object_key,omitempty"`
+		ObjectGetURL  string `json:"object_get_url,omitempty"`
 		Content       []byte `json:"content"`
 		WriterAgentID string `json:"writer_agent_id,omitempty"`
 	}
 	resp := make([]writeResponse, len(rows))
 	for i, row := range rows {
 		content := row.Content
+		var objectGetURL string
 		if row.ObjectKey != "" {
 			if h.objects == nil {
 				http.Error(w, "object store not configured", http.StatusInternalServerError)
 				return
+			}
+			objectGetURL, err = h.objects.GetPresignedURL(r.Context(), row.ObjectKey, defaultObjectPresignTTL)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if !h.objectProxyEnabled {
+				content = nil
+				resp[i] = writeResponse{
+					WriteID: row.ID, Path: row.Path, Overwrite: row.Overwrite,
+					State: row.State, MIME: row.MIME, Bytes: row.Bytes, SHA256: row.SHA256,
+					ObjectKey: row.ObjectKey, ObjectGetURL: objectGetURL, Content: content, WriterAgentID: row.WriterAgentID,
+				}
+				continue
 			}
 			body, err := h.objects.Open(r.Context(), row.ObjectKey)
 			if err != nil {
@@ -582,7 +742,7 @@ func (h *handler) writes(w http.ResponseWriter, r *http.Request) {
 		resp[i] = writeResponse{
 			WriteID: row.ID, Path: row.Path, Overwrite: row.Overwrite,
 			State: row.State, MIME: row.MIME, Bytes: row.Bytes, SHA256: row.SHA256,
-			ObjectKey: row.ObjectKey, Content: content, WriterAgentID: row.WriterAgentID,
+			ObjectKey: row.ObjectKey, ObjectGetURL: objectGetURL, Content: content, WriterAgentID: row.WriterAgentID,
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")

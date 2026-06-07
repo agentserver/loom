@@ -129,10 +129,10 @@ func TestOpenObjectStoreMemoryReturnsStore(t *testing.T) {
 	require.IsType(t, &objectstore.Memory{}, objects)
 }
 
-func TestObserverWebOptionsIncludesObjectProxyLimit(t *testing.T) {
+func TestObserverWebOptionsIncludesObjectProxyConfig(t *testing.T) {
 	objects := objectstore.NewMemory()
 	cfg := &Config{
-		ObjectStore: ObjectStoreConfig{Proxy: ProxyConfig{MaxBytes: 1234}},
+		ObjectStore: ObjectStoreConfig{Proxy: ProxyConfig{Enabled: true, MaxBytes: 1234}},
 		Telemetry: TelemetryConfig{
 			MaxBodyBytes: 4567,
 			RateLimit:    TelemetryRateLimitConfig{PerMinute: 8, Burst: 9},
@@ -141,10 +141,15 @@ func TestObserverWebOptionsIncludesObjectProxyLimit(t *testing.T) {
 
 	opts := observerWebOptions(cfg, objects)
 	require.Same(t, objects, opts.Objects)
+	require.False(t, opts.DisableObjectProxy)
 	require.Equal(t, int64(1234), opts.MaxObjectProxyBytes)
 	require.Equal(t, int64(4567), opts.MaxEventBodyBytes)
 	require.Equal(t, 8, opts.TelemetryRateLimit.PerMinute)
 	require.Equal(t, 9, opts.TelemetryRateLimit.Burst)
+
+	cfg.ObjectStore.Proxy.Enabled = false
+	opts = observerWebOptions(cfg, objects)
+	require.True(t, opts.DisableObjectProxy)
 }
 
 func TestOpenUserspaceBlobStoreUsesFilesystemForSQLite(t *testing.T) {
@@ -515,6 +520,16 @@ telemetry:
   enabled: true
 `,
 			wantErr: "telemetry.api_keys must contain at least one key when telemetry.enabled is true",
+		},
+		{
+			name: "telemetry max body bytes above hard cap",
+			yaml: `
+api_keys:
+  - { id: ak-default, key: ak_secret }
+telemetry:
+  max_body_bytes: 1048577
+`,
+			wantErr: "telemetry.max_body_bytes must be <= 1048576",
 		},
 	}
 

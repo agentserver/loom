@@ -249,6 +249,7 @@ func observerWebOptions(cfg *Config, objects objectstore.Store) observerweb.Opti
 		},
 		MaxEventBodyBytes:   cfg.Telemetry.MaxBodyBytes,
 		Objects:             objects,
+		DisableObjectProxy:  !cfg.ObjectStore.Proxy.Enabled,
 		MaxObjectProxyBytes: cfg.ObjectStore.Proxy.MaxBytes,
 	}
 }
@@ -459,6 +460,9 @@ func validateConfig(cfg *Config) error {
 	}
 	if cfg.Telemetry.Enabled && len(cfg.Telemetry.APIKeys) == 0 {
 		return fmt.Errorf("telemetry.api_keys must contain at least one key when telemetry.enabled is true")
+	}
+	if cfg.Telemetry.MaxBodyBytes > 1<<20 {
+		return fmt.Errorf("telemetry.max_body_bytes must be <= 1048576")
 	}
 
 	return nil

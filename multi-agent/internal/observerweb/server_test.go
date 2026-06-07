@@ -382,6 +382,92 @@ func TestCreateArtifactReturnsPresignedPutURL(t *testing.T) {
 	require.NotEmpty(t, created.PutURL)
 }
 
+func TestArtifactDirectUploadCompleteReturnsPresignedGetURLWhenProxyDisabled(t *testing.T) {
+	_, st := newTestHandler(t)
+	objects := objectstore.NewMemory()
+	h := NewWithOptions(st, nil, Options{Objects: objects, DisableObjectProxy: true, MaxObjectProxyBytes: 4})
+	seedWorkspaceAndAgents(t, st)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/artifacts", strings.NewReader(`{"path":"/tmp/input.txt","kind":"file","mime":"text/plain"}`))
+	req.Header.Set("Authorization", "Bearer driver-token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+	var created struct {
+		ArtifactID string `json:"artifact_id"`
+		ObjectKey  string `json:"object_key"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &created))
+	require.Equal(t, objectstore.ArtifactKey("ws1", created.ArtifactID), created.ObjectKey)
+
+	req = httptest.NewRequest(http.MethodPut, "/api/artifacts/"+created.ArtifactID+"/content", strings.NewReader("12345"))
+	req.Header.Set("Authorization", "Bearer driver-token")
+	req.Header.Set("Content-Type", "text/plain")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code, rr.Body.String())
+
+	info, err := objects.Put(context.Background(), created.ObjectKey, "text/plain", strings.NewReader("12345"))
+	require.NoError(t, err)
+	badBody, err := json.Marshal(map[string]interface{}{
+		"mime": "text/plain", "sha256": info.SHA256, "bytes": info.Bytes, "object_key": "workspaces/ws1/artifacts/wrong",
+	})
+	require.NoError(t, err)
+	req = httptest.NewRequest(http.MethodPost, "/api/artifacts/"+created.ArtifactID+"/complete", bytes.NewReader(badBody))
+	req.Header.Set("Authorization", "Bearer driver-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+
+	completeBody, err := json.Marshal(map[string]interface{}{
+		"mime": "text/plain", "sha256": info.SHA256, "bytes": info.Bytes, "object_key": created.ObjectKey,
+	})
+	require.NoError(t, err)
+	req = httptest.NewRequest(http.MethodPost, "/api/artifacts/"+created.ArtifactID+"/complete", bytes.NewReader(completeBody))
+	req.Header.Set("Authorization", "Bearer driver-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var completed struct {
+		ArtifactID string `json:"artifact_id"`
+		State      string `json:"state"`
+		MIME       string `json:"mime"`
+		Bytes      int64  `json:"bytes"`
+		SHA256     string `json:"sha256"`
+		ObjectKey  string `json:"object_key"`
+		GetURL     string `json:"get_url"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &completed))
+	require.Equal(t, created.ArtifactID, completed.ArtifactID)
+	require.Equal(t, "available", completed.State)
+	require.Equal(t, "text/plain", completed.MIME)
+	require.Equal(t, int64(5), completed.Bytes)
+	require.Equal(t, info.SHA256, completed.SHA256)
+	require.Equal(t, created.ObjectKey, completed.ObjectKey)
+	require.Contains(t, completed.GetURL, "memory://get/")
+
+	req = httptest.NewRequest(http.MethodGet, "/api/artifacts/"+created.ArtifactID, nil)
+	req.Header.Set("Authorization", "Bearer slave-token")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+	require.NotContains(t, rr.Body.String(), "12345")
+	var got struct {
+		ArtifactID string `json:"artifact_id"`
+		State      string `json:"state"`
+		ObjectKey  string `json:"object_key"`
+		GetURL     string `json:"get_url"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
+	require.Equal(t, created.ArtifactID, got.ArtifactID)
+	require.Equal(t, "available", got.State)
+	require.Equal(t, created.ObjectKey, got.ObjectKey)
+	require.Contains(t, got.GetURL, "memory://get/")
+}
+
 func TestArtifactLegacyProxyRoundTripUsesObjectStore(t *testing.T) {
 	_, st := newTestHandler(t)
 	objects := objectstore.NewMemory()
@@ -560,6 +646,96 @@ func TestCreateWriteTokenReturnsObjectStorePutURL(t *testing.T) {
 	require.True(t, strings.HasPrefix(parsedPutURL.Path, "/api/writes/"), "put_url path=%q", parsedPutURL.Path)
 	require.Contains(t, created.ObjectPutURL, "memory://put/")
 	require.Equal(t, objectstore.WriteKey("ws1", created.WriteID), created.ObjectKey)
+}
+
+func TestWriteDirectUploadCompleteReturnsPresignedGetURLWhenProxyDisabled(t *testing.T) {
+	_, st := newTestHandler(t)
+	objects := objectstore.NewMemory()
+	h := NewWithOptions(st, nil, Options{Objects: objects, DisableObjectProxy: true, MaxObjectProxyBytes: 4})
+	seedWorkspaceAndAgents(t, st)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/write-tokens", bytes.NewBufferString(`{"task_id":"task-1","path":"/tmp/out.txt","overwrite":true}`))
+	req.Header.Set("Authorization", "Bearer driver-token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+	var created struct {
+		WriteID   string `json:"write_id"`
+		ObjectKey string `json:"object_key"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &created))
+	require.Equal(t, objectstore.WriteKey("ws1", created.WriteID), created.ObjectKey)
+
+	req = httptest.NewRequest(http.MethodPut, "/api/writes/"+created.WriteID, strings.NewReader("12345"))
+	req.Header.Set("Authorization", "Bearer slave-token")
+	req.Header.Set("Content-Type", "text/plain")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code, rr.Body.String())
+
+	info, err := objects.Put(context.Background(), created.ObjectKey, "text/plain", strings.NewReader("12345"))
+	require.NoError(t, err)
+	badBody, err := json.Marshal(map[string]interface{}{
+		"mime": "text/plain", "sha256": info.SHA256, "bytes": info.Bytes, "object_key": "workspaces/ws1/writes/wrong",
+	})
+	require.NoError(t, err)
+	req = httptest.NewRequest(http.MethodPost, "/api/writes/"+created.WriteID+"/complete", bytes.NewReader(badBody))
+	req.Header.Set("Authorization", "Bearer slave-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+
+	completeBody, err := json.Marshal(map[string]interface{}{
+		"mime": "text/plain", "sha256": info.SHA256, "bytes": info.Bytes, "object_key": created.ObjectKey,
+	})
+	require.NoError(t, err)
+	req = httptest.NewRequest(http.MethodPost, "/api/writes/"+created.WriteID+"/complete", bytes.NewReader(completeBody))
+	req.Header.Set("Authorization", "Bearer slave-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var completed struct {
+		WriteID      string `json:"write_id"`
+		State        string `json:"state"`
+		MIME         string `json:"mime"`
+		Bytes        int64  `json:"bytes"`
+		SHA256       string `json:"sha256"`
+		ObjectKey    string `json:"object_key"`
+		ObjectGetURL string `json:"object_get_url"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &completed))
+	require.Equal(t, created.WriteID, completed.WriteID)
+	require.Equal(t, "completed", completed.State)
+	require.Equal(t, "text/plain", completed.MIME)
+	require.Equal(t, int64(5), completed.Bytes)
+	require.Equal(t, info.SHA256, completed.SHA256)
+	require.Equal(t, created.ObjectKey, completed.ObjectKey)
+	require.Contains(t, completed.ObjectGetURL, "memory://get/")
+
+	req = httptest.NewRequest(http.MethodGet, "/api/writes?task_id=task-1", nil)
+	req.Header.Set("Authorization", "Bearer driver-token")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.NotContains(t, rr.Body.String(), "MTIzNDU=")
+	var listed struct {
+		Writes []struct {
+			WriteID      string          `json:"write_id"`
+			State        string          `json:"state"`
+			ObjectKey    string          `json:"object_key"`
+			ObjectGetURL string          `json:"object_get_url"`
+			Content      json.RawMessage `json:"content"`
+		} `json:"writes"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &listed))
+	require.Len(t, listed.Writes, 1)
+	require.Equal(t, created.WriteID, listed.Writes[0].WriteID)
+	require.Equal(t, "completed", listed.Writes[0].State)
+	require.Equal(t, created.ObjectKey, listed.Writes[0].ObjectKey)
+	require.Contains(t, listed.Writes[0].ObjectGetURL, "memory://get/")
+	require.True(t, len(listed.Writes[0].Content) == 0 || string(listed.Writes[0].Content) == "null")
 }
 
 func TestWriteLegacyProxyRoundTripUsesObjectStore(t *testing.T) {
