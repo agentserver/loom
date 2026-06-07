@@ -93,10 +93,10 @@ func TestNewColdStartRegistersAndEmits(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "observer.token")
 	c, err := New(Config{
-		Enabled: true, URL: srv.URL, WorkspaceID: "ws-1",
+		Enabled: true, TelemetryEnabled: true, URL: srv.URL, WorkspaceID: "ws-1",
 		AgentID: "agent-1", AgentRole: observer.RoleSlave,
 		APIKey: "ak_secret", TokenStatePath: path,
-		TelemetryEnabled: true, TelemetryAPIKey: "ops-secret",
+		TelemetryAPIKey: "ops-secret",
 	})
 	require.NoError(t, err)
 	require.True(t, c.Enabled())
@@ -123,6 +123,99 @@ func TestNewColdStartRegistersAndEmits(t *testing.T) {
 	persisted, err := os.ReadFile(path)
 	require.NoError(t, err)
 	require.Equal(t, "tk_issued", string(persisted))
+}
+
+func TestNewColdStartRegistersButTelemetryDefaultsDisabled(t *testing.T) {
+	var eventCalls atomic.Int32
+	var registerCalls atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/agents/register":
+			registerCalls.Add(1)
+			_, _ = w.Write([]byte(`{"workspace_id":"ws-1","agent_id":"agent-1","role":"slave","token":"tk_issued"}`))
+		case "/api/events":
+			eventCalls.Add(1)
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "observer.token")
+	c, err := New(Config{
+		Enabled: true, URL: srv.URL, WorkspaceID: "ws-1",
+		AgentID: "agent-1", AgentRole: observer.RoleSlave,
+		APIKey: "ak_secret", TokenStatePath: path,
+	})
+	require.NoError(t, err)
+	require.True(t, c.Enabled())
+	require.Equal(t, "tk_issued", c.Token())
+
+	c.Emit(observer.Event{TaskID: "task-1"})
+	c.Close()
+
+	require.Equal(t, int32(1), registerCalls.Load(), "observer registration must remain enabled")
+	require.Equal(t, int32(0), eventCalls.Load(), "telemetry must be opt-in")
+}
+
+func TestNewWithAgentserverProxyTokenSkipsObserverRegistration(t *testing.T) {
+	var registerCalls atomic.Int32
+	var lastAuth atomic.Value
+	lastAuth.Store("")
+	received := make(chan observer.Event, 1)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/agents/register":
+			registerCalls.Add(1)
+			http.Error(w, "register disabled", http.StatusNotFound)
+		case "/api/events":
+			lastAuth.Store(r.Header.Get("Authorization"))
+			var ev observer.Event
+			_ = json.NewDecoder(r.Body).Decode(&ev)
+			received <- ev
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := New(Config{
+		Enabled: true, TelemetryEnabled: true, URL: srv.URL, WorkspaceID: "ws-1",
+		AgentID: "agentserver-agent", AgentRole: observer.RoleSlave,
+		AgentserverProxyToken: "proxy-token",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "proxy-token", c.Token())
+
+	c.Emit(observer.Event{TaskID: "task-1"})
+	c.Close()
+
+	require.Equal(t, int32(0), registerCalls.Load(), "proxy-token mode must not call observer registration")
+	require.Equal(t, "Bearer proxy-token", lastAuth.Load())
+	select {
+	case ev := <-received:
+		require.Equal(t, "ws-1", ev.WorkspaceID)
+		require.Equal(t, "agentserver-agent", ev.AgentID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not receive proxy-token event before timeout")
+	}
+}
+
+func TestNewEnabledRequiresProxyTokenOrLegacyRegistrationConfig(t *testing.T) {
+	_, err := New(Config{
+		Enabled:     true,
+		URL:         "https://observer.example",
+		WorkspaceID: "ws-1",
+		AgentID:     "agent-1",
+		AgentRole:   observer.RoleSlave,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "agentserver proxy token or observer api_key")
 }
 
 func TestNewWorkspaceMismatchReturnsError(t *testing.T) {
@@ -193,9 +286,9 @@ func TestCloseReturnsWhenPostStalls(t *testing.T) {
 	require.NoError(t, writeTokenFile(path, "tk_cached"))
 
 	c, err := New(Config{
-		Enabled: true, URL: "http://observer.example", WorkspaceID: "ws-1",
+		Enabled: true, TelemetryEnabled: true, URL: "http://observer.example", WorkspaceID: "ws-1",
 		AgentID: "agent-1", AgentRole: observer.RoleSlave,
-		APIKey: "ak", TokenStatePath: path, TelemetryEnabled: true,
+		APIKey: "ak", TokenStatePath: path,
 	})
 	require.NoError(t, err)
 
@@ -250,9 +343,9 @@ func TestPost401TriggersReRegisterAndUpdatesToken(t *testing.T) {
 	require.NoError(t, writeTokenFile(path, "tk_v1"))
 
 	c, err := New(Config{
-		Enabled: true, URL: srv.URL, WorkspaceID: "ws-1",
+		Enabled: true, TelemetryEnabled: true, URL: srv.URL, WorkspaceID: "ws-1",
 		AgentID: "agent-1", AgentRole: observer.RoleSlave,
-		APIKey: "ak", TokenStatePath: path, TelemetryEnabled: true,
+		APIKey: "ak", TokenStatePath: path,
 	})
 	require.NoError(t, err)
 	require.Equal(t, "tk_v1", c.Token())
@@ -287,9 +380,9 @@ func TestPost401WithinCooldownSkipsReRegister(t *testing.T) {
 	require.NoError(t, writeTokenFile(path, "tk_v1"))
 
 	c, err := New(Config{
-		Enabled: true, URL: srv.URL, WorkspaceID: "ws-1",
+		Enabled: true, TelemetryEnabled: true, URL: srv.URL, WorkspaceID: "ws-1",
 		AgentID: "agent-1", AgentRole: observer.RoleSlave,
-		APIKey: "ak", TokenStatePath: path, TelemetryEnabled: true,
+		APIKey: "ak", TokenStatePath: path,
 	})
 	require.NoError(t, err)
 
@@ -321,9 +414,9 @@ func TestPost403DoesNotTriggerReRegister(t *testing.T) {
 	require.NoError(t, writeTokenFile(path, "tk_v1"))
 
 	c, err := New(Config{
-		Enabled: true, URL: srv.URL, WorkspaceID: "ws-1",
+		Enabled: true, TelemetryEnabled: true, URL: srv.URL, WorkspaceID: "ws-1",
 		AgentID: "agent-1", AgentRole: observer.RoleSlave,
-		APIKey: "ak", TokenStatePath: path, TelemetryEnabled: true,
+		APIKey: "ak", TokenStatePath: path,
 	})
 	require.NoError(t, err)
 	c.Emit(observer.Event{TaskID: "t"})

@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/yourorg/multi-agent/internal/identity"
 	"github.com/yourorg/multi-agent/internal/objectstore"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/observerstore"
@@ -122,6 +123,22 @@ func seedSecondWorkspaceAgent(t *testing.T, st *observerstore.SQLiteStore) {
 		observerstore.Agent{WorkspaceID: "ws2", ID: "other-driver", Role: observer.RoleDriver, DisplayName: "Other"},
 		"other-token", "ak-seed-2",
 	))
+}
+
+type fakeIdentityResolver struct {
+	byToken map[string]identity.Identity
+	err     error
+}
+
+func (f fakeIdentityResolver) Resolve(_ context.Context, token string) (identity.Identity, error) {
+	if f.err != nil {
+		return identity.Identity{}, f.err
+	}
+	ident, ok := f.byToken[token]
+	if !ok {
+		return identity.Identity{}, identity.ErrInvalid
+	}
+	return ident, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +257,111 @@ func TestPostEventRateLimit(t *testing.T) {
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
 		require.Equal(t, want, rr.Code, "attempt %d body=%s", i+1, rr.Body.String())
+	}
+}
+
+func TestPostEventAgentserverIdentity(t *testing.T) {
+	_, st := newTestHandler(t)
+	seedTelemetryKey(t, st, "ops", "ops-secret", "*")
+	h := NewWithResolver(st, nil, fakeIdentityResolver{byToken: map[string]identity.Identity{
+		"proxy-token": {
+			UserID:      "user-1",
+			WorkspaceID: "ws1",
+			AgentID:     "agentserver-driver",
+			Role:        observer.RoleDriver,
+			SandboxID:   "sandbox-1",
+			Source:      identity.SourceAgentserver,
+		},
+	}})
+
+	body, _ := json.Marshal(observer.Event{
+		WorkspaceID: "ws1", AgentID: "agentserver-driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "t-agentserver", Summary: "build thing", Status: "assigned",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer proxy-token")
+	req.Header.Set("X-Loom-Telemetry-Key", "ops-secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusAccepted, rr.Code, rr.Body.String())
+
+	count, err := st.EventCount()
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+}
+
+func TestPostEventAgentserverIdentityRecordsAuditWithoutTrustingProxyTokenLocally(t *testing.T) {
+	_, st := newTestHandler(t)
+	seedTelemetryKey(t, st, "ops", "ops-secret", "*")
+	h := NewWithResolver(st, nil, fakeIdentityResolver{byToken: map[string]identity.Identity{
+		"proxy-token": {
+			UserID:        "user-1",
+			WorkspaceID:   "ws-agentserver",
+			WorkspaceName: "Agentserver Workspace",
+			AgentID:       "agentserver-driver",
+			Role:          observer.RoleDriver,
+			SandboxID:     "sandbox-1",
+			Source:        identity.SourceAgentserver,
+		},
+	}})
+
+	body, _ := json.Marshal(observer.Event{
+		WorkspaceID: "ws-agentserver", AgentID: "agentserver-driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "t-agentserver", Summary: "build thing", Status: "assigned",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer proxy-token")
+	req.Header.Set("X-Loom-Telemetry-Key", "ops-secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusAccepted, rr.Code, rr.Body.String())
+
+	var workspaceUser string
+	require.NoError(t, st.DB().QueryRow(
+		`SELECT external_user_id FROM workspaces WHERE id=?`,
+		"ws-agentserver",
+	).Scan(&workspaceUser))
+	require.Equal(t, "user-1", workspaceUser)
+
+	var sandboxID, agentUser string
+	require.NoError(t, st.DB().QueryRow(
+		`SELECT external_sandbox_id, external_user_id FROM agents WHERE workspace_id=? AND id=?`,
+		"ws-agentserver", "agentserver-driver",
+	).Scan(&sandboxID, &agentUser))
+	require.Equal(t, "sandbox-1", sandboxID)
+	require.Equal(t, "user-1", agentUser)
+
+	_, ok, err := st.ValidateToken("proxy-token")
+	require.NoError(t, err)
+	require.False(t, ok, "agentserver proxy tokens must keep resolving through agentserver, not local static auth")
+}
+
+func TestPostEventIdentityErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantRetry  string
+	}{
+		{name: "invalid", err: identity.ErrInvalid, wantStatus: http.StatusUnauthorized},
+		{name: "revoked", err: identity.ErrRevoked, wantStatus: http.StatusForbidden},
+		{name: "upstream", err: identity.ErrUpstream, wantStatus: http.StatusServiceUnavailable, wantRetry: "5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, st := newTestHandler(t)
+			h := NewWithResolver(st, nil, fakeIdentityResolver{err: tc.err})
+			body, _ := json.Marshal(observer.Event{
+				WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+				Type: observer.EventDriverTaskSubmitted, TaskID: "t1",
+			})
+			req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer token")
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+
+			require.Equal(t, tc.wantStatus, rr.Code, rr.Body.String())
+			require.Equal(t, tc.wantRetry, rr.Header().Get("Retry-After"))
+		})
 	}
 }
 

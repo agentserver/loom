@@ -9,6 +9,17 @@ import (
 var schemaSQL string
 
 func migrate(db *sql.DB) error {
-	_, err := db.Exec(schemaSQL)
-	return err
+	if _, err := db.Exec(schemaSQL); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS external_user_id text NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS external_sandbox_id text NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE agents ADD COLUMN IF NOT EXISTS external_user_id text NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	return nil
 }

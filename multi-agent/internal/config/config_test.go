@@ -159,7 +159,85 @@ observer:
 	require.Equal(t, "master-display", c.Observer.AgentID)
 }
 
-func TestLoad_ObserverEnabledRequiresDeliveryFields(t *testing.T) {
+func TestLoad_ObserverTelemetryDefaultsDisabled(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "observer.token")
+	path := filepath.Join(dir, "c.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+server:
+  url: https://example.com
+  name: m
+discovery:
+  display_name: slave-display
+observer:
+  enabled: true
+  url: https://observer.example
+  workspace_id: ws
+  agent_id: slave-display
+  api_key: ak_x
+  token_state_path: `+tokenPath+`
+`), 0o600))
+
+	c, err := Load(path)
+	require.NoError(t, err)
+	require.False(t, c.Observer.TelemetryEnabled)
+}
+
+func TestLoad_ObserverTelemetryCanBeEnabled(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "observer.token")
+	path := filepath.Join(dir, "c.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+server:
+  url: https://example.com
+  name: m
+discovery:
+  display_name: slave-display
+observer:
+  enabled: true
+  telemetry_enabled: true
+  telemetry_api_key: ops-secret
+  url: https://observer.example
+  workspace_id: ws
+  agent_id: slave-display
+  api_key: ak_x
+  token_state_path: `+tokenPath+`
+`), 0o600))
+
+	c, err := Load(path)
+	require.NoError(t, err)
+	require.True(t, c.Observer.TelemetryEnabled)
+}
+
+func TestLoad_ObserverCanUseAgentserverProxyToken(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+server:
+  url: https://example.com
+  name: m
+credentials:
+  proxy_token: proxy-token
+  workspace_id: ws-agentserver
+  short_id: master-short
+discovery:
+  display_name: master-display
+observer:
+  enabled: true
+  telemetry_enabled: true
+  telemetry_api_key: ops-secret
+  url: https://observer.example
+`), 0o600))
+
+	c, err := Load(path)
+	require.NoError(t, err)
+	require.Equal(t, "ws-agentserver", c.Observer.WorkspaceID)
+	require.Equal(t, "master-short", c.Observer.AgentID)
+	require.Empty(t, c.Observer.APIKey)
+	require.Empty(t, c.Observer.TokenStatePath)
+}
+
+func TestLoad_ObserverAllowsPendingAgentserverRegistration(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "c.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(`
@@ -173,9 +251,12 @@ observer:
   url: https://observer.example
 `), 0o600))
 
-	_, err := Load(path)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "observer.workspace_id")
+	c, err := Load(path)
+	require.NoError(t, err)
+	require.Empty(t, c.Observer.WorkspaceID)
+	require.Empty(t, c.Observer.AgentID)
+	require.Empty(t, c.Observer.APIKey)
+	require.Empty(t, c.Observer.TokenStatePath)
 }
 
 func TestLoad_ObserverTelemetryEnabledRequiresAPIKey(t *testing.T) {

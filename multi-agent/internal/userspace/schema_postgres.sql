@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS userspace_package_versions (
   tarball_sha256 text NOT NULL,
   blob_sha256 text NOT NULL REFERENCES userspace_blobs(sha256),
   status text NOT NULL DEFAULT 'ready',
+  visibility text NOT NULL DEFAULT 'workspace',
+  created_by_user_id text NOT NULL DEFAULT '',
   created_at timestamptz NOT NULL,
   PRIMARY KEY (slug, version)
 );

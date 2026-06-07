@@ -2322,6 +2322,33 @@ git commit -m "docs(observer): record production smoke results"
 
 Updated: 2026-06-07.
 
+### Master Merge Review - 2026-06-07
+
+`master` was merged after it absorbed `observer-agentserver-identity`
+(`eb0575f`). Conflict resolution keeps the PostgreSQL/K8s/object-store branch
+as the production deployment path and layers the identity resolver work on top.
+
+Post-merge decisions:
+
+- Keep the legacy `api_keys` observer identity path as the default production
+  behavior; agentserver identity is opt-in only through
+  `identity.agentserver.enabled: true`.
+- Keep telemetry default-off for driver/master/slave. Even with agentserver
+  identity, `/api/events` requires `X-Loom-Telemetry-Key`.
+- Preserve the PostgreSQL/object-store implementation. External identity audit
+  fields are present in both SQLite and PostgreSQL observer schemas, and
+  userspace visibility fields are present in both SQLite and PostgreSQL
+  userspace schemas.
+- Real deployment and smoke/e2e acceptance remain fixed to
+  `kubectl --context k8s-nj-prod -n dev-yuzishu` and
+  `helm --kube-context k8s-nj-prod -n dev-yuzishu`.
+- Nanjing cluster manifests must keep using the Nanjing registry mirror for
+  Docker Hub and GHCR images.
+
+The live smoke result recorded below predates this merge. Before using this
+branch as a release candidate, rerun focused Go tests, `go test ./...`,
+Helm checks, and the real `k8s-nj-prod` smoke/e2e path.
+
 - Task 1 completed: observer production config shape and health endpoints.
 - Task 2 completed: shared observer store interface with SQLite compatibility.
 - Task 3 completed: PostgreSQL schema, migration, and constructor skeleton.

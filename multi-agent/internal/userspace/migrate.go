@@ -24,12 +24,23 @@ func MigrateSQLite(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	return ensureSQLiteObjectKeyColumn(db)
+	if err := ensureSQLiteObjectKeyColumn(db); err != nil {
+		return err
+	}
+	return ensureSQLiteVisibilityColumns(db)
 }
 
 func MigratePostgres(db *sql.DB) error {
-	_, err := db.Exec(schemaPostgresSQL)
-	return err
+	if _, err := db.Exec(schemaPostgresSQL); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE userspace_package_versions ADD COLUMN IF NOT EXISTS visibility text NOT NULL DEFAULT 'workspace'`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE userspace_package_versions ADD COLUMN IF NOT EXISTS created_by_user_id text NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	return nil
 }
 
 func MigrateForDriver(db *sql.DB, driver string) error {
@@ -46,6 +57,16 @@ func MigrateForDriver(db *sql.DB, driver string) error {
 func ensureSQLiteObjectKeyColumn(db *sql.DB) error {
 	_, err := db.Exec(`ALTER TABLE userspace_blobs ADD COLUMN object_key TEXT NOT NULL DEFAULT ''`)
 	if err != nil && !isDuplicateColumnError(err) {
+		return err
+	}
+	return nil
+}
+
+func ensureSQLiteVisibilityColumns(db *sql.DB) error {
+	if _, err := db.Exec(`ALTER TABLE userspace_package_versions ADD COLUMN visibility TEXT NOT NULL DEFAULT 'workspace'`); err != nil && !isDuplicateColumnError(err) {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE userspace_package_versions ADD COLUMN created_by_user_id TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumnError(err) {
 		return err
 	}
 	return nil

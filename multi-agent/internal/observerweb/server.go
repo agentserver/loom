@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yourorg/multi-agent/internal/identity"
+	"github.com/yourorg/multi-agent/internal/identity/static"
 	"github.com/yourorg/multi-agent/internal/objectstore"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/observerstore"
@@ -40,18 +42,30 @@ type Options struct {
 	Objects             objectstore.Store
 	DisableObjectProxy  bool
 	MaxObjectProxyBytes int64
+	RegisterDisabled    bool
 }
 
 // New constructs the observerweb HTTP handler. If usHandler is non-nil,
 // /api/userspace/* routes are mounted on the same mux.
 func New(s Store, usHandler *userspace.Handler) http.Handler {
-	return NewWithOptions(s, usHandler, Options{
+	return NewWithResolverOptions(s, usHandler, static.New(s), Options{
 		TelemetryRateLimit: RateLimitConfig{PerMinute: 60, Burst: 120},
 		MaxEventBodyBytes:  defaultMaxEventBodyBytes,
 	})
 }
 
 func NewWithOptions(s Store, usHandler *userspace.Handler, opts Options) http.Handler {
+	return NewWithResolverOptions(s, usHandler, static.New(s), opts)
+}
+
+func NewWithResolver(s Store, usHandler *userspace.Handler, resolver identity.Resolver) http.Handler {
+	return NewWithResolverOptions(s, usHandler, resolver, Options{})
+}
+
+func NewWithResolverOptions(s Store, usHandler *userspace.Handler, resolver identity.Resolver, opts Options) http.Handler {
+	if resolver == nil {
+		resolver = static.New(s)
+	}
 	if opts.TelemetryRateLimit.PerMinute == 0 {
 		opts.TelemetryRateLimit.PerMinute = 60
 	}
@@ -66,6 +80,8 @@ func NewWithOptions(s Store, usHandler *userspace.Handler, opts Options) http.Ha
 	}
 	h := &handler{
 		s:                   s,
+		resolver:            resolver,
+		registerEnabled:     !opts.RegisterDisabled,
 		objects:             opts.Objects,
 		objectProxyEnabled:  !opts.DisableObjectProxy,
 		telemetryLimiter:    newTelemetryLimiter(opts.TelemetryRateLimit.PerMinute, opts.TelemetryRateLimit.Burst),
@@ -102,6 +118,8 @@ func mountRoutes(mux *http.ServeMux, h *handler, usHandler *userspace.Handler) {
 
 type handler struct {
 	s                   Store
+	resolver            identity.Resolver
+	registerEnabled     bool
 	objects             objectstore.Store
 	objectProxyEnabled  bool
 	telemetryLimiter    *telemetryLimiter
@@ -115,20 +133,11 @@ func (h *handler) postEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, ok := bearerToken(r.Header.Get("Authorization"))
+	ident, ok := h.identityFromRequest(w, r)
 	if !ok {
-		http.Error(w, "missing or invalid bearer token", http.StatusUnauthorized)
 		return
 	}
-	agent, ok, err := h.s.ValidateToken(token)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if !ok {
-		http.Error(w, "missing or invalid bearer token", http.StatusUnauthorized)
-		return
-	}
+	agent := agentFromIdentity(ident)
 
 	telemetryKey := strings.TrimSpace(r.Header.Get("X-Loom-Telemetry-Key"))
 	if telemetryKey == "" {
@@ -176,6 +185,11 @@ func (h *handler) postEvent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "telemetry rate limit exceeded", http.StatusTooManyRequests)
 		return
 	}
+	if err := h.recordExternalIdentity(ident); err != nil {
+		log.Printf("observer: RecordExternalIdentity error ws=%s id=%s: %v", ident.WorkspaceID, ident.AgentID, err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
 	if err := h.s.Ingest(ev); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -197,15 +211,27 @@ func bearerToken(auth string) (string, bool) {
 // Sibling packages (internal/userspace) call this when mounting routes on
 // the same mux so token validation lives in one place.
 func AgentFromRequest(s Store, r *http.Request) (string, string, bool) {
-	tok, ok := bearerToken(r.Header.Get("Authorization"))
+	return AgentFromRequestWithResolver(static.New(s), r)
+}
+
+func AgentFromRequestWithResolver(resolver identity.Resolver, r *http.Request) (string, string, bool) {
+	ident, ok := IdentityFromRequest(resolver, r)
 	if !ok {
 		return "", "", false
 	}
-	agent, ok, err := s.ValidateToken(tok)
-	if err != nil || !ok {
-		return "", "", false
+	return ident.WorkspaceID, ident.AgentID, true
+}
+
+func IdentityFromRequest(resolver identity.Resolver, r *http.Request) (identity.Identity, bool) {
+	tok, ok := bearerToken(r.Header.Get("Authorization"))
+	if !ok {
+		return identity.Identity{}, false
 	}
-	return agent.WorkspaceID, agent.ID, true
+	ident, err := resolver.Resolve(r.Context(), tok)
+	if err != nil {
+		return identity.Identity{}, false
+	}
+	return ident, true
 }
 
 func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) (observerstore.Agent, bool) {
@@ -218,16 +244,73 @@ func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) (observer
 			return observerstore.Agent{}, false
 		}
 	}
-	agent, ok, err := h.s.ValidateToken(token)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	ident, ok := h.identityFromToken(w, r, token)
+	if !ok {
 		return observerstore.Agent{}, false
 	}
+	if err := h.recordExternalIdentity(ident); err != nil {
+		log.Printf("observer: RecordExternalIdentity error ws=%s id=%s: %v", ident.WorkspaceID, ident.AgentID, err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return observerstore.Agent{}, false
+	}
+	return agentFromIdentity(ident), true
+}
+
+func (h *handler) identityFromRequest(w http.ResponseWriter, r *http.Request) (identity.Identity, bool) {
+	token, ok := bearerToken(r.Header.Get("Authorization"))
 	if !ok {
 		http.Error(w, "missing or invalid bearer token", http.StatusUnauthorized)
-		return observerstore.Agent{}, false
+		return identity.Identity{}, false
 	}
-	return agent, true
+	return h.identityFromToken(w, r, token)
+}
+
+func (h *handler) identityFromToken(w http.ResponseWriter, r *http.Request, token string) (identity.Identity, bool) {
+	ident, err := h.resolver.Resolve(r.Context(), token)
+	if err != nil {
+		writeIdentityError(w, err)
+		return identity.Identity{}, false
+	}
+	return ident, true
+}
+
+func (h *handler) recordExternalIdentity(ident identity.Identity) error {
+	if ident.Source != identity.SourceAgentserver {
+		return nil
+	}
+	return h.s.RecordExternalIdentity(observerstore.Agent{
+		WorkspaceID:       ident.WorkspaceID,
+		ID:                ident.AgentID,
+		Role:              ident.Role,
+		DisplayName:       ident.AgentID,
+		ExternalSandboxID: ident.SandboxID,
+		ExternalUserID:    ident.UserID,
+	}, ident.WorkspaceName)
+}
+
+func agentFromIdentity(ident identity.Identity) observerstore.Agent {
+	return observerstore.Agent{
+		WorkspaceID:       ident.WorkspaceID,
+		ID:                ident.AgentID,
+		Role:              ident.Role,
+		DisplayName:       ident.AgentID,
+		ExternalSandboxID: ident.SandboxID,
+		ExternalUserID:    ident.UserID,
+	}
+}
+
+func writeIdentityError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, identity.ErrInvalid):
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	case errors.Is(err, identity.ErrRevoked):
+		http.Error(w, "token revoked", http.StatusForbidden)
+	case errors.Is(err, identity.ErrUpstream):
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "identity upstream unavailable", http.StatusServiceUnavailable)
+	default:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func absoluteURL(r *http.Request, path string) string {
@@ -948,6 +1031,10 @@ var agentIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 var workspaceIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 func (h *handler) register(w http.ResponseWriter, r *http.Request) {
+	if !h.registerEnabled {
+		http.NotFound(w, r)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return

@@ -110,6 +110,9 @@ func register(
 // register call. On a register success the response is cross-checked against
 // cfg.WorkspaceID and persisted to disk before returning.
 func (c *Client) loadOrRegister(ctx context.Context) (string, error) {
+	if c.cfg.AgentserverProxyToken != "" {
+		return c.cfg.AgentserverProxyToken, nil
+	}
 	if tok, ok, err := readTokenFile(c.cfg.TokenStatePath); err != nil {
 		return "", fmt.Errorf("observerclient: read token state: %w", err)
 	} else if ok {
@@ -141,6 +144,10 @@ func (c *Client) loadOrRegister(ctx context.Context) (string, error) {
 // per process prevents an unbounded re-register storm if the api-key itself
 // has been revoked server-side.
 func (c *Client) handle401(ctx context.Context) {
+	if c.proxyTokenMode {
+		fmt.Fprintln(os.Stderr, "observerclient: ingest 401 with agentserver proxy token; not re-registering")
+		return
+	}
 	c.tokenMu.Lock()
 	now := time.Now()
 	if now.Sub(c.lastReRegister) < reRegisterCoolDur {

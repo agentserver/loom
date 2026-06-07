@@ -69,12 +69,14 @@ type VersionRow struct {
 	Version            string
 	CreatedInWorkspace string
 	CreatedByAgentID   string
+	CreatedByUserID    string
 	ManifestJSON       []byte
 	SpecJSON           []byte // may be nil for kind=skill
 	CardMD             string
 	TarballSHA256      string
 	BlobSHA256         string
 	Status             string
+	Visibility         string
 	CreatedAt          string
 }
 
@@ -171,18 +173,21 @@ func (s *Store) InsertVersion(v VersionRow) error {
 	if v.Status == "" {
 		v.Status = "ready"
 	}
+	if v.Visibility == "" {
+		v.Visibility = "workspace"
+	}
 	v.CreatedAt = nowUTC()
 	if s.isPostgres() {
 		res, err := s.db.Exec(`
 			INSERT INTO userspace_package_versions
 			  (slug, version, created_in_workspace, created_by_agent_id,
 			   manifest_json, spec_json, card_md, tarball_sha256, blob_sha256,
-			   status, created_at)
-			VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11)
+			   status, visibility, created_by_user_id, created_at)
+			VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11,$12,$13)
 			ON CONFLICT(slug, version) DO NOTHING`,
 			v.Slug, v.Version, v.CreatedInWorkspace, v.CreatedByAgentID,
 			string(v.ManifestJSON), nullIfEmpty(v.SpecJSON), v.CardMD,
-			v.TarballSHA256, v.BlobSHA256, v.Status, v.CreatedAt)
+			v.TarballSHA256, v.BlobSHA256, v.Status, v.Visibility, v.CreatedByUserID, v.CreatedAt)
 		if err != nil {
 			return err
 		}
@@ -196,11 +201,11 @@ func (s *Store) InsertVersion(v VersionRow) error {
 		INSERT OR IGNORE INTO userspace_package_versions
 		  (slug, version, created_in_workspace, created_by_agent_id,
 		   manifest_json, spec_json, card_md, tarball_sha256, blob_sha256,
-		   status, created_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		   status, visibility, created_by_user_id, created_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		v.Slug, v.Version, v.CreatedInWorkspace, v.CreatedByAgentID,
 		string(v.ManifestJSON), nullIfEmpty(v.SpecJSON), v.CardMD,
-		v.TarballSHA256, v.BlobSHA256, v.Status, v.CreatedAt)
+		v.TarballSHA256, v.BlobSHA256, v.Status, v.Visibility, v.CreatedByUserID, v.CreatedAt)
 	if err != nil {
 		return err
 	}
@@ -225,12 +230,12 @@ func (s *Store) GetVersion(slug, version string) (*VersionRow, error) {
 	err := s.db.QueryRow(`
 		SELECT slug, version, created_in_workspace, created_by_agent_id,
 		       manifest_json, spec_json, card_md, tarball_sha256, blob_sha256,
-		       status, created_at
+		       status, visibility, created_by_user_id, created_at
 		  FROM userspace_package_versions WHERE slug=`+slugPlaceholder+` AND version=`+versionPlaceholder,
 		slug, version,
 	).Scan(&v.Slug, &v.Version, &v.CreatedInWorkspace, &v.CreatedByAgentID,
 		&v.ManifestJSON, &specJSON, &v.CardMD, &v.TarballSHA256, &v.BlobSHA256,
-		&v.Status, &v.CreatedAt)
+		&v.Status, &v.Visibility, &v.CreatedByUserID, &v.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -243,15 +248,30 @@ func (s *Store) GetVersion(slug, version string) (*VersionRow, error) {
 	return &v, nil
 }
 
+func (s *Store) GetVisibleVersion(slug, version, workspaceID, userID string) (*VersionRow, error) {
+	v, err := s.GetVersion(slug, version)
+	if err != nil || v == nil {
+		return v, err
+	}
+	if !versionVisibleTo(v, workspaceID, userID) {
+		return nil, nil
+	}
+	return v, nil
+}
+
 // ListVersions returns all versions for a slug, newest first by created_at.
 func (s *Store) ListVersions(slug string) ([]VersionRow, error) {
+	return s.ListVersionsForIdentity(slug, "", "")
+}
+
+func (s *Store) ListVersionsForIdentity(slug, workspaceID, userID string) ([]VersionRow, error) {
 	placeholder := "?"
 	if s.isPostgres() {
 		placeholder = "$1"
 	}
 	rows, err := s.db.Query(`
 		SELECT slug, version, created_in_workspace, created_by_agent_id,
-		       tarball_sha256, blob_sha256, status, created_at
+		       tarball_sha256, blob_sha256, status, visibility, created_by_user_id, created_at
 		  FROM userspace_package_versions WHERE slug=`+placeholder+`
 		 ORDER BY created_at DESC`, slug)
 	if err != nil {
@@ -263,10 +283,12 @@ func (s *Store) ListVersions(slug string) ([]VersionRow, error) {
 		var v VersionRow
 		if err := rows.Scan(&v.Slug, &v.Version, &v.CreatedInWorkspace,
 			&v.CreatedByAgentID, &v.TarballSHA256, &v.BlobSHA256,
-			&v.Status, &v.CreatedAt); err != nil {
+			&v.Status, &v.Visibility, &v.CreatedByUserID, &v.CreatedAt); err != nil {
 			return nil, err
 		}
-		out = append(out, v)
+		if workspaceID == "" || versionVisibleTo(&v, workspaceID, userID) {
+			out = append(out, v)
+		}
 	}
 	return out, rows.Err()
 }
@@ -390,8 +412,12 @@ func (s *Store) DeleteInstallation(workspaceID, slug string) error {
 // joined with the latest version + caller's installed_version (if any).
 // q="" lists all packages.
 func (s *Store) SearchPackages(q, workspaceID, kindFilter string, limit int) ([]PackageView, error) {
+	return s.SearchPackagesForIdentity(q, workspaceID, "", kindFilter, limit)
+}
+
+func (s *Store) SearchPackagesForIdentity(q, workspaceID, userID, kindFilter string, limit int) ([]PackageView, error) {
 	if s.isPostgres() {
-		return s.searchPackagesPostgres(q, workspaceID, kindFilter, limit)
+		return s.searchPackagesPostgres(q, workspaceID, userID, kindFilter, limit)
 	}
 	if limit <= 0 || limit > 100 {
 		limit = 20
@@ -416,13 +442,14 @@ func (s *Store) SearchPackages(q, workspaceID, kindFilter string, limit int) ([]
 		SELECT p.slug, p.kind, p.description, p.tags_json,
 		       COALESCE((SELECT version FROM userspace_package_versions v
 		                  WHERE v.slug=p.slug AND v.status='ready'
+		                    AND `+visibleVersionSQL("v")+`
 		                  ORDER BY v.created_at DESC LIMIT 1), '') AS latest_version,
 		       COALESCE((SELECT installed_version FROM userspace_workspace_installations i
 		                  WHERE i.workspace_id=? AND i.slug=p.slug), '') AS installed_version
 		  FROM %s %s
 		 ORDER BY p.updated_at DESC
 		 LIMIT ?`, from, whereSQL)
-	finalArgs := append([]any{workspaceID}, args...)
+	finalArgs := append([]any{workspaceID, userID, workspaceID}, args...)
 	finalArgs = append(finalArgs, limit)
 	rows, err := s.db.Query(query, finalArgs...)
 	if err != nil {
@@ -455,12 +482,12 @@ func (s *Store) SearchPackages(q, workspaceID, kindFilter string, limit int) ([]
 	return out, nil
 }
 
-func (s *Store) searchPackagesPostgres(q, workspaceID, kindFilter string, limit int) ([]PackageView, error) {
+func (s *Store) searchPackagesPostgres(q, workspaceID, userID, kindFilter string, limit int) ([]PackageView, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
 
-	args := []any{workspaceID}
+	args := []any{workspaceID, userID}
 	where := []string{}
 	if q != "" {
 		args = append(args, q)
@@ -483,6 +510,7 @@ func (s *Store) searchPackagesPostgres(q, workspaceID, kindFilter string, limit 
 		SELECT p.slug, p.kind, p.description, p.tags_json,
 		       COALESCE((SELECT version FROM userspace_package_versions v
 		                  WHERE v.slug=p.slug AND v.status='ready'
+		                    AND `+visibleVersionSQLPostgres("v", "$1", "$2")+`
 		                  ORDER BY v.created_at DESC LIMIT 1), '') AS latest_version,
 		       COALESCE((SELECT installed_version FROM userspace_workspace_installations i
 		                  WHERE i.workspace_id=$1 AND i.slug=p.slug), '') AS installed_version
@@ -516,6 +544,33 @@ func (s *Store) searchPackagesPostgres(q, workspaceID, kindFilter string, limit 
 	}
 	out = filtered
 	return out, nil
+}
+
+func visibleVersionSQL(alias string) string {
+	return fmt.Sprintf(`(%s.visibility='public'
+		OR (%s.visibility='workspace' AND %s.created_in_workspace=?)
+		OR (%s.visibility='user' AND %s.created_by_user_id<>'' AND %s.created_by_user_id=?))`,
+		alias, alias, alias, alias, alias, alias)
+}
+
+func visibleVersionSQLPostgres(alias, workspacePlaceholder, userPlaceholder string) string {
+	return fmt.Sprintf(`(%s.visibility='public'
+		OR (%s.visibility='workspace' AND %s.created_in_workspace=%s)
+		OR (%s.visibility='user' AND %s.created_by_user_id<>'' AND %s.created_by_user_id=%s))`,
+		alias, alias, alias, workspacePlaceholder, alias, alias, alias, userPlaceholder)
+}
+
+func versionVisibleTo(v *VersionRow, workspaceID, userID string) bool {
+	switch v.Visibility {
+	case "", "workspace":
+		return v.CreatedInWorkspace == workspaceID
+	case "user":
+		return v.CreatedByUserID != "" && v.CreatedByUserID == userID
+	case "public":
+		return true
+	default:
+		return false
+	}
 }
 
 // BlobRefcount returns the current refcount for a blob sha; 0 if no row.

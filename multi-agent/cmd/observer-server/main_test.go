@@ -41,6 +41,13 @@ api_keys:
 	require.Equal(t, 120, cfg.Telemetry.RateLimit.Burst)
 	require.Equal(t, int64(256<<10), cfg.Telemetry.MaxBodyBytes)
 	require.Equal(t, 30, cfg.Telemetry.RetentionDays)
+	require.True(t, cfg.Identity.LegacyAPIKeys.Enabled)
+	require.False(t, cfg.Identity.Agentserver.Enabled)
+	require.Equal(t, durationConfig(180*time.Second), cfg.Identity.Agentserver.FreshTTL)
+	require.Equal(t, durationConfig(15*time.Minute), cfg.Identity.Agentserver.StaleGrace)
+	require.Equal(t, durationConfig(2*time.Second), cfg.Identity.Agentserver.RequestTimeout)
+	require.Equal(t, 65536, cfg.Identity.Agentserver.CacheCapacity)
+	require.True(t, cfg.Identity.Agentserver.StartupProbe)
 }
 
 func TestLoadDistributedObserverExampleConfig(t *testing.T) {
@@ -150,6 +157,10 @@ func TestObserverWebOptionsIncludesObjectProxyConfig(t *testing.T) {
 	cfg.ObjectStore.Proxy.Enabled = false
 	opts = observerWebOptions(cfg, objects)
 	require.True(t, opts.DisableObjectProxy)
+
+	cfg.Identity.LegacyAPIKeys.Enabled = false
+	opts = observerWebOptions(cfg, objects)
+	require.True(t, opts.RegisterDisabled)
 }
 
 func TestOpenUserspaceBlobStoreUsesFilesystemForSQLite(t *testing.T) {
@@ -435,6 +446,34 @@ api_keys: []
 			wantErr: "must define at least one api_keys entry",
 		},
 		{
+			name: "both identity sources disabled",
+			yaml: `
+listen_addr: ":8090"
+db_path: ":memory:"
+identity:
+  legacy_api_keys:
+    enabled: false
+  agentserver:
+    enabled: false
+api_keys: []
+`,
+			wantErr: "at least one identity source must be enabled",
+		},
+		{
+			name: "agentserver enabled without url",
+			yaml: `
+listen_addr: ":8090"
+db_path: ":memory:"
+identity:
+  legacy_api_keys:
+    enabled: false
+  agentserver:
+    enabled: true
+api_keys: []
+`,
+			wantErr: "identity.agentserver.url is required",
+		},
+		{
 			name: "duplicate api_keys id",
 			yaml: `
 listen_addr: ":8090"
@@ -541,6 +580,34 @@ telemetry:
 			require.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
+}
+
+func TestLoadConfigAllowsAgentserverOnlyWithoutAPIKeys(t *testing.T) {
+	cfg := loadConfigFromString(t, `
+listen_addr: ":8090"
+db_path: ":memory:"
+identity:
+  legacy_api_keys:
+    enabled: false
+  agentserver:
+    enabled: true
+    url: https://agentserver.test
+    fresh_ttl: 2m
+    stale_grace: 10m
+    request_timeout: 3s
+    cache_capacity: 123
+    startup_probe: false
+api_keys: []
+`)
+
+	require.False(t, cfg.Identity.LegacyAPIKeys.Enabled)
+	require.True(t, cfg.Identity.Agentserver.Enabled)
+	require.Equal(t, "https://agentserver.test", cfg.Identity.Agentserver.URL)
+	require.Equal(t, durationConfig(2*time.Minute), cfg.Identity.Agentserver.FreshTTL)
+	require.Equal(t, durationConfig(10*time.Minute), cfg.Identity.Agentserver.StaleGrace)
+	require.Equal(t, durationConfig(3*time.Second), cfg.Identity.Agentserver.RequestTimeout)
+	require.Equal(t, 123, cfg.Identity.Agentserver.CacheCapacity)
+	require.False(t, cfg.Identity.Agentserver.StartupProbe)
 }
 
 func loadConfigFromString(t *testing.T, yaml string) *Config {

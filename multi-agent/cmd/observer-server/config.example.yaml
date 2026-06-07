@@ -5,6 +5,18 @@
 listen_addr: ":8090"
 db_path: observer.db
 
+identity:
+  legacy_api_keys:
+    enabled: true
+  agentserver:
+    enabled: false
+    url: ""
+    fresh_ttl: 180s
+    stale_grace: 15m
+    request_timeout: 2s
+    cache_capacity: 65536
+    startup_probe: true
+
 api_keys:
   - id: ak-personal
     key: REPLACE_ME_OPENSSL_RAND_HEX_32

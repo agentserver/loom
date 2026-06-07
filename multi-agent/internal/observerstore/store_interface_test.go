@@ -12,8 +12,11 @@ type portableWebStore interface {
 	ReplaceTelemetryAPIKeys(keys []TelemetryAPIKeySpec) error
 	LookupTelemetryAPIKey(key, workspaceID string) (keyID string, ok bool, err error)
 	UpsertWorkspaceLazy(id, name, apiKeyID string) error
+	UpsertWorkspaceLazyWithExternalUser(id, name, apiKeyID, externalUserID string) error
 	AgentBoundWorkspace(agentID string) (workspaceID string, found bool, err error)
 	UpsertAgent(a Agent, token, apiKeyID string) error
+	UpsertAgentWithExternalIdentity(a Agent, token, apiKeyID string) error
+	RecordExternalIdentity(a Agent, workspaceName string) error
 	ValidateToken(token string) (Agent, bool, error)
 	Ingest(ev observer.Event) error
 	GetTaskProgress(workspaceID, taskID string) (TaskProgress, bool, error)
