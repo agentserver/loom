@@ -13,6 +13,11 @@ secret:
 
 config:
   production: false
+  identity:
+    legacyAPIKeys:
+      enabled: true
+    agentserver:
+      enabled: false
   apiKeys:
     - id: ak-local
       key: local-observer-api-key

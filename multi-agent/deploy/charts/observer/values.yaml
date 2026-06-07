@@ -47,6 +47,17 @@ config:
   production: true
   listenAddr: ":8090"
   apiKeys: []
+  identity:
+    legacyAPIKeys:
+      enabled: false
+    agentserver:
+      enabled: false
+      url: ""
+      freshTTL: 180s
+      staleGrace: 15m
+      requestTimeout: 2s
+      cacheCapacity: 65536
+      startupProbe: true
   store:
     driver: postgres
     sqlite:

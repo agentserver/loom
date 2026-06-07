@@ -244,10 +244,53 @@ store:
   sqlite:
     path: observer.db
 production: true
+identity:
+  legacy_api_keys:
+    enabled: true
 `)
 	_, err := loadConfig(path)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "sqlite store is not allowed in production")
+}
+
+func TestLoadConfig_ProductionDefaultsLegacyAPIKeysDisabled(t *testing.T) {
+	cfg := loadConfigFromString(t, `
+listen_addr: ":8090"
+db_path: ":memory:"
+production: true
+store:
+  driver: sqlite
+  allow_sqlite_in_production: true
+identity:
+  agentserver:
+    enabled: true
+    url: https://agentserver.test
+    startup_probe: false
+api_keys: []
+`)
+
+	require.False(t, cfg.Identity.LegacyAPIKeys.Enabled)
+	require.True(t, cfg.Identity.Agentserver.Enabled)
+}
+
+func TestLoadConfig_ProductionAllowsExplicitLegacyAPIKeys(t *testing.T) {
+	cfg := loadConfigFromString(t, `
+listen_addr: ":8090"
+db_path: ":memory:"
+production: true
+store:
+  driver: sqlite
+  allow_sqlite_in_production: true
+identity:
+  legacy_api_keys:
+    enabled: true
+api_keys:
+  - id: ak-default
+    key: ak_secret
+`)
+
+	require.True(t, cfg.Identity.LegacyAPIKeys.Enabled)
+	require.False(t, cfg.Identity.Agentserver.Enabled)
 }
 
 func TestEffectiveSQLitePathUsesStorePathForDatabaseAndBlobRoot(t *testing.T) {

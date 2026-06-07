@@ -20,12 +20,20 @@ baseline for later observer work.
 Integration decisions after merging into the PostgreSQL/K8s/object-store
 worktree:
 
-- Production default remains legacy observer `api_keys`: `identity.legacy_api_keys.enabled` defaults to `true`, and `identity.agentserver.enabled` defaults to `false`.
+- Production default disables legacy observer `api_keys` unless
+  `identity.legacy_api_keys.enabled: true` is explicitly configured. Local and
+  developer configs continue to allow the legacy path by default.
 - Do not enable agentserver identity in production unless `identity.agentserver.enabled: true` and `identity.agentserver.url` are explicitly configured.
 - When legacy API keys are disabled, observer self-registration is disabled and `/api/agents/register` returns 404.
 - The PostgreSQL/K8s/object-store branch must keep the external identity audit columns in both SQLite and PostgreSQL schemas.
 - `/api/events` must require both a resolved agent identity and `X-Loom-Telemetry-Key`; agentserver identity alone is not authorization to submit telemetry.
 - Driver, master, and slave clients may use `credentials.proxy_token` as the observer bearer credential, but task telemetry remains opt-in through `observer.telemetry_enabled: true` plus `observer.telemetry_api_key`.
+
+Follow-up decision on 2026-06-07:
+
+- `production: true` with no explicit `identity.legacy_api_keys.enabled` now
+  defaults legacy API keys to disabled. Operators that still need bootstrap
+  API keys in production must opt in explicitly.
 
 Post-merge verification target:
 

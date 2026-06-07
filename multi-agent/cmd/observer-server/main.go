@@ -419,6 +419,9 @@ func loadConfig(path string) (*Config, error) {
 	if err := dec.Decode(&cfg); err != nil {
 		return nil, err
 	}
+	if cfg.Production && !yamlPathExists(data, "identity", "legacy_api_keys", "enabled") {
+		cfg.Identity.LegacyAPIKeys.Enabled = false
+	}
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = ":8090"
 	}
@@ -462,6 +465,34 @@ func loadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+func yamlPathExists(data []byte, path ...string) bool {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return false
+	}
+	node := &doc
+	if node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
+		node = node.Content[0]
+	}
+	for _, key := range path {
+		if node.Kind != yaml.MappingNode {
+			return false
+		}
+		var next *yaml.Node
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			if node.Content[i].Value == key {
+				next = node.Content[i+1]
+				break
+			}
+		}
+		if next == nil {
+			return false
+		}
+		node = next
+	}
+	return true
 }
 
 func effectiveSQLitePath(cfg *Config) string {

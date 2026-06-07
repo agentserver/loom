@@ -16,6 +16,17 @@ kubectl --context k8s-nj-prod
 helm --kube-context k8s-nj-prod
 ```
 
+Production observer is exposed publicly at:
+
+```text
+https://loom.nj.cs.ac.cn:10062/
+```
+
+Use this URL for production smoke/e2e API traffic. Do not require a local
+`kubectl port-forward` for driver/slave or manual API checks once this public
+route is available. Port-forwarding remains only a fallback for disposable
+local-runner debugging before the production route exists.
+
 The cluster should pull public images through the Nanjing registry mirror:
 
 ```text
@@ -132,8 +143,8 @@ PATH=/tmp/observer-helm-bin:$PATH multi-agent/tests/k8s_observer/smoke.sh
 Result: Helm lint passed, HTTPRoute rendered, the namespace pod listing
 returned the live stack, and `deploy/observer-observer` reached ready state.
 
-Manual API smoke used local port-forwards to `svc/observer-observer` and
-`svc/observer-minio`:
+Manual API smoke initially used local port-forwards to `svc/observer-observer`
+and `svc/observer-minio`:
 
 ```text
 /readyz -> ready
@@ -148,6 +159,13 @@ Codex prod e2e was also run against the k8s observer using the rebuilt
 delegated to `slave-codex-local`, the slave returned exactly `K8SOK`, and the
 observer PostgreSQL database recorded driver/slave registrations in
 `ws-local-codex`.
+
+After production mode exposed `https://loom.nj.cs.ac.cn:10062/`, future
+driver/slave e2e should point `observer.url` at that public URL and skip local
+port-forward setup. The agentserver-only identity e2e was rerun with legacy
+observer API-key registration disabled; the driver and slave were freshly
+registered through agentserver, observer accepted only agentserver identity, and
+the final slave output was exactly `K8SOK`.
 
 Cleanup:
 

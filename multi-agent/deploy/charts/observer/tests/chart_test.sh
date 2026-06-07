@@ -51,3 +51,17 @@ hooked="$(helm template observer-test "$CHART_DIR" \
   --set migration.useHelmHook=true)"
 grep -q 'name: observer-test-observer-migrate' <<<"$hooked"
 grep -q 'helm.sh/hook' <<<"$hooked"
+
+agentserver_only="$(helm template observer-test "$CHART_DIR" \
+  --set secret.create=true \
+  --set secret.databaseUrl='postgres://observer:observer@postgres:5432/observer?sslmode=disable' \
+  --set secret.s3AccessKey=minioadmin \
+  --set secret.s3SecretKey=minioadmin \
+  --set secret.telemetryKeys.telemetry-global-key=ops-secret \
+  --set config.apiKeys=null \
+  --set config.identity.legacyAPIKeys.enabled=false \
+  --set config.identity.agentserver.enabled=true \
+  --set config.identity.agentserver.url=https://agentserver.example.com)"
+grep -q 'legacy_api_keys:' <<<"$agentserver_only"
+grep -q 'enabled: false' <<<"$agentserver_only"
+grep -q 'url: "https://agentserver.example.com"' <<<"$agentserver_only"

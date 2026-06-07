@@ -14,10 +14,15 @@ gateway:
   parentRefs:
     - name: cilium-gateway
       namespace: cilium-gateway
-  host: observer.example.com
+  host: loom.nj.cs.ac.cn
 
 config:
   production: true
+  identity:
+    legacyAPIKeys:
+      enabled: false
+    agentserver:
+      enabled: false
   store:
     driver: postgres
     postgres:

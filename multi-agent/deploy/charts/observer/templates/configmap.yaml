@@ -11,6 +11,11 @@ data:
   observer.nonsecret.yaml: |
     listen_addr: {{ .Values.config.listenAddr | quote }}
     production: {{ .Values.config.production }}
+    identity:
+      legacy_api_keys:
+        enabled: {{ default false .Values.config.identity.legacyAPIKeys.enabled }}
+      agentserver:
+        enabled: {{ default false .Values.config.identity.agentserver.enabled }}
     store:
       driver: {{ .Values.config.store.driver | quote }}
     object_store:

@@ -2330,8 +2330,9 @@ as the production deployment path and layers the identity resolver work on top.
 
 Post-merge decisions:
 
-- Keep the legacy `api_keys` observer identity path as the default production
-  behavior; agentserver identity is opt-in only through
+- Production defaults close the legacy `api_keys` observer identity path.
+  `identity.legacy_api_keys.enabled: true` is now required to use bootstrap API
+  keys in production. Agentserver identity remains opt-in only through
   `identity.agentserver.enabled: true`.
 - Keep telemetry default-off for driver/master/slave. Even with agentserver
   identity, `/api/events` requires `X-Loom-Telemetry-Key`.
@@ -2377,6 +2378,13 @@ Helm checks, and the real `k8s-nj-prod` smoke/e2e path.
   - Migrations: the locally built `observer-server` linux/amd64 binary was copied into the runner pod and `--migrate-only` completed against in-cluster PostgreSQL.
   - Verification: `PATH=/tmp/observer-helm-bin:$PATH multi-agent/tests/k8s_observer/smoke.sh`; `/readyz`; telemetry gate `403/403/202`; artifact direct PUT/complete/GET; write direct PUT/complete/list/GET; Codex driver to Codex slave e2e with output `K8SOK`.
   - Residual risk: the live smoke stack injects a local binary with `kubectl cp` because the project observer image has not been published to the Nanjing registry yet. Replace this with the Helm chart once the image exists.
+- Production public route recorded on 2026-06-07:
+  - Observer production mode is exposed at `https://loom.nj.cs.ac.cn:10062/`.
+  - Future production smoke/e2e API traffic should use the public URL and no
+    longer requires local `kubectl port-forward`.
+  - Agentserver-only identity e2e was rerun after disabling legacy `api_keys`:
+    driver short id `07mgrkw5`, slave short id `3aiqzmxg`, `/api/agents/register`
+    returned 404, and the final slave output was exactly `K8SOK`.
 
 ## Self-Review Checklist
 
