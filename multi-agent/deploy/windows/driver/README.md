@@ -32,7 +32,8 @@ The installer stages:
 | `config.yaml` | Driver config with escaped Windows paths |
 | `.codex\config.toml` | Codex MCP registration when `-Agent codex` |
 | `.mcp.json` | Claude MCP registration when `-Agent claude` |
-| `AGENTS.md` or `.claude\skills\` | Optional project bundle when available |
+| `AGENTS.md` | Optional Codex driver prompt when available |
+| `skills\multiagent\` | Project multi-agent skill bundle when available |
 | `logs\` | Driver audit logs |
 
 After install, run the one-time registration command printed by the script:

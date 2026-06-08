@@ -126,11 +126,12 @@ if ($Agent -eq "codex") {
     } elseif (Test-Path -LiteralPath (Join-Path $linuxCodexBundle "AGENTS.md") -PathType Leaf) {
         Copy-Item -LiteralPath (Join-Path $linuxCodexBundle "AGENTS.md") -Destination (Join-Path $projectDir "AGENTS.md") -Force
     }
-} else {
-    $claudeBundle = Join-Path $here "skills"
-    if (Test-Path -LiteralPath $claudeBundle -PathType Container) {
-        Copy-DirectoryContents -Source $claudeBundle -Destination (Join-Path $projectDir ".claude\skills")
-    }
+}
+
+$repoRoot = Resolve-FullPath (Join-Path $here "..\..\..\..")
+$multiagentSkill = Join-Path $repoRoot "skills\multiagent"
+if (Test-Path -LiteralPath $multiagentSkill -PathType Container) {
+    Copy-DirectoryContents -Source $multiagentSkill -Destination (Join-Path $projectDir "skills\multiagent")
 }
 
 Write-Host ""
