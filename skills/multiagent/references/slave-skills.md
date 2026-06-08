@@ -5,12 +5,14 @@ Slaves advertise skills through their discovery card. The driver and planner sho
 - `chat`: natural-language Claude Code task.
 - `chat_resume`: driver-only continuation of a paused `chat` task (see below).
 - `mcp`: direct call to a configured or generated MCP server.
-- `register_mcp`: register a pre-built MCP server file (paired with bash to generate and validate).
+- `register_mcp`: register a pre-built MCP server file after source generation
+  and validation through the target's advertised shell interface.
 - `bash`: run explicit Bash through native slave-agent code. On Windows this
   is advertised only when real Bash is detected, such as Git Bash or WSL.
 - `powershell`: run explicit PowerShell through native slave-agent code.
 - `file`: stateless file read/write/stat through a native slave-agent executor.
-- `claude_permissions`: read or patch Claude Code permissions through native slave-agent code.
+- `permissions`: read or patch Claude Code permissions through native
+  slave-agent code. `claude_permissions` is a legacy alias.
 
 ## `chat`
 
@@ -101,9 +103,12 @@ Validation:
 - Python source is syntax-checked, imports are checked against `spec.allowed_packages`, then smoke-launched once (`tools/list`).
 - On success the file is registered in the MCP runtime and persisted to `dynamic_mcp.yaml`; the slave's capability card is republished.
 
-## Bash → register_mcp workflow
+## Shell validation → register_mcp workflow
 
-The driver Claude should construct MCP servers using the two dedicated skills, plumbed via `run_slave_bash`:
+The driver Claude should construct MCP servers using the two dedicated skills,
+writing source with file tools when possible and validating with the target's
+advertised shell interface (`run_slave_shell`, `run_slave_powershell`, or
+`run_slave_bash`):
 
 1. **`scaffold-mcp-server`** — generate `generated_mcp/<name>/v1.py` from `spec.json`. The scaffolder owns the JSON-RPC protocol region; you only fill in handler bodies. `args_schema` from the spec is translated to `inputSchema` in the generated TOOLS list, so the two fields stay in sync by construction.
 2. Hand-edit handlers between `# @@scaffold:business:start <tool>` / `# @@scaffold:business:end` markers. Re-running scaffold (e.g. after `spec.json` changes) preserves these bodies.
@@ -205,9 +210,10 @@ The driver exposes `read_slave_file`, `write_slave_file`, and `stat_slave_file`.
 
 Full schemas, the cross-slave copy pattern, and when to prefer these over the PUT-manifest path live in `driver-tools.md` ("Slave File Tools") and `orchestration-patterns.md` ("File Transfer").
 
-## `claude_permissions`
+## `permissions`
 
 Implemented by slave-agent native Go code, not by slave Claude Code.
+`claude_permissions` remains available as a backward-compatible alias.
 
 Read prompt:
 
