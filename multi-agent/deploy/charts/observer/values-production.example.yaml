@@ -36,7 +36,7 @@ config:
   objectStore:
     driver: s3
     s3:
-      endpoint: http://observer-observer-minio:9000
+      endpoint: observer-observer-minio:9000
       region: us-east-1
       bucket: observer-artifacts
       useSSL: false
