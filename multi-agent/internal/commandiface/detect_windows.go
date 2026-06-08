@@ -4,7 +4,6 @@ package commandiface
 
 import (
 	"os/exec"
-	"strings"
 )
 
 func defaultWSLHasDistro() bool {
@@ -12,5 +11,5 @@ func defaultWSLHasDistro() bool {
 	if err != nil {
 		return false
 	}
-	return strings.TrimSpace(strings.ReplaceAll(string(out), "\x00", "")) != ""
+	return wslListOutputHasDistro(out)
 }

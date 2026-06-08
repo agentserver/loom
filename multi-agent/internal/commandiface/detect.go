@@ -3,6 +3,7 @@ package commandiface
 import (
 	"os/exec"
 	"runtime"
+	"strings"
 )
 
 type Detector struct {
@@ -93,9 +94,11 @@ func (d Detector) detectWindows(caps Capabilities) Capabilities {
 }
 
 func (d Detector) detectUnix(caps Capabilities) Capabilities {
+	filteredSkills := make([]string, 0, len(caps.Skills))
 	for _, skill := range caps.Skills {
 		switch skill {
 		case "bash":
+			filteredSkills = append(filteredSkills, skill)
 			command := "/bin/bash"
 			if path, err := d.LookPath("bash"); err == nil && path != "" {
 				command = path
@@ -108,6 +111,7 @@ func (d Detector) detectUnix(caps Capabilities) Capabilities {
 			})
 		case "powershell":
 			if path, ok := d.findPowerShellUnix(); ok {
+				filteredSkills = append(filteredSkills, skill)
 				caps.CommandInterfaces = append(caps.CommandInterfaces, CommandInterface{
 					Skill:   "powershell",
 					Kind:    "powershell",
@@ -115,8 +119,11 @@ func (d Detector) detectUnix(caps Capabilities) Capabilities {
 					Default: false,
 				})
 			}
+		default:
+			filteredSkills = append(filteredSkills, skill)
 		}
 	}
+	caps.Skills = filteredSkills
 	return caps
 }
 
@@ -158,4 +165,20 @@ func ensureSingleDefault(interfaces []CommandInterface) {
 		defaultIndex = 0
 	}
 	interfaces[defaultIndex].Default = true
+}
+
+func wslListOutputHasDistro(out []byte) bool {
+	text := strings.ReplaceAll(string(out), "\x00", "")
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "install") || strings.Contains(lower, "no installed") {
+			continue
+		}
+		return true
+	}
+	return false
 }
