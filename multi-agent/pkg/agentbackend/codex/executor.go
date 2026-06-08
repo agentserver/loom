@@ -117,17 +117,8 @@ func (e *executor) runWithArgv(ctx context.Context, argvHead []string, prompt st
 		go e.socketHookForTest(humanloop.EndpointArg(ep))
 	}
 
-	// Inline `-c` overrides for humanloop MCP. codex parses each value as TOML,
-	// falling back to literal string. Wrapping command in double-quotes makes
-	// it a TOML string; args is a TOML array of strings.
-	endpointArg := humanloop.EndpointArg(ep)
-	mcpArgs := []string{
-		"-c", fmt.Sprintf("mcp_servers.loom_humanloop.command=%s", tomlString(e.binSelf)),
-		"-c", fmt.Sprintf("mcp_servers.loom_humanloop.args=[%s,%s,%s]",
-			tomlString("humanloop-mcp"), tomlString(endpointArg), tomlString(strconv.Itoa(e.maxQuestions))),
-	}
 	args := append([]string{}, argvHead...)
-	args = append(args, mcpArgs...)
+	args = append(args, humanloopMCPArgs(e.binSelf, ep, e.maxQuestions)...)
 	args = append(args, "-") // PROMPT from stdin
 
 	cmd := exec.CommandContext(ctx, e.cfg.Bin, args...)
@@ -280,4 +271,13 @@ func (e *executor) runWithArgv(ctx context.Context, argvHead []string, prompt st
 func tomlString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+func humanloopMCPArgs(binSelf string, ep humanloop.Endpoint, max int) []string {
+	endpointArg := humanloop.EndpointArg(ep)
+	return []string{
+		"-c", fmt.Sprintf("mcp_servers.loom_humanloop.command=%s", tomlString(binSelf)),
+		"-c", fmt.Sprintf("mcp_servers.loom_humanloop.args=[%s,%s,%s]",
+			tomlString("humanloop-mcp"), tomlString(endpointArg), tomlString(strconv.Itoa(max))),
+	}
 }

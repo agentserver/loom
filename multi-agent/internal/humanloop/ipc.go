@@ -45,9 +45,40 @@ func ParseEndpointArg(arg string) (Endpoint, error) {
 		if err := json.Unmarshal([]byte(arg), &ep); err != nil {
 			return Endpoint{}, fmt.Errorf("parse humanloop endpoint: %w", err)
 		}
+		if err := validateEndpoint(ep); err != nil {
+			return Endpoint{}, err
+		}
 		return ep, nil
 	}
 	return Endpoint{Network: "unix", Address: arg}, nil
+}
+
+func validateEndpoint(ep Endpoint) error {
+	if ep.Network == "" {
+		return fmt.Errorf("humanloop endpoint network is empty")
+	}
+	if ep.Address == "" {
+		return fmt.Errorf("humanloop endpoint address is empty")
+	}
+	switch ep.Network {
+	case "unix":
+		return nil
+	case "tcp":
+		host, _, err := net.SplitHostPort(ep.Address)
+		if err != nil {
+			return fmt.Errorf("humanloop tcp endpoint address %q: %w", ep.Address, err)
+		}
+		if strings.EqualFold(host, "localhost") {
+			return nil
+		}
+		ip := net.ParseIP(host)
+		if ip == nil || !ip.IsLoopback() {
+			return fmt.Errorf("humanloop tcp endpoint host %q is not loopback", host)
+		}
+		return nil
+	default:
+		return fmt.Errorf("humanloop endpoint network %q is unsupported", ep.Network)
+	}
 }
 
 // IPCServer listens for a single Payload from the humanloop
