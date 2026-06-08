@@ -132,10 +132,6 @@ Write-Host "Foreground command:"
 Write-Host "  Set-Location `"$installDir`""
 Write-Host "  .\slave-agent.exe `"$configPath`""
 
-if ($ApiKey -eq "") {
-    Write-Warning "observer.api_key is empty in $configPath. Fill it locally before starting slave-agent."
-}
-
 if ($InstallService) {
     $resolvedServiceName = if ($ServiceName -ne "") {
         Get-SafeServiceName $ServiceName
