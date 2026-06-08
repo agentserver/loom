@@ -1549,12 +1549,11 @@ func TestTool_CancelTask_StubReturnsNotSupported(t *testing.T) {
 }
 
 // TestSubmitTask_JSONSkill_NoManifestPrefix verifies that submit_task with a
-// JSON-prompt skill (mcp/bash/register_mcp/claude_permissions) sends the
-// caller's prompt downstream verbatim. Slave executors for these skills
-// json.Unmarshal the prompt; the USER_FILES_MANIFEST prefix would break that
-// with `invalid character '<'`.
+// JSON-prompt skill sends the caller's prompt downstream verbatim. Slave
+// executors for these skills json.Unmarshal the prompt; the
+// USER_FILES_MANIFEST prefix would break that with `invalid character '<'`.
 func TestSubmitTask_JSONSkill_NoManifestPrefix(t *testing.T) {
-	for _, skill := range []string{"mcp", "bash", "register_mcp", "claude_permissions"} {
+	for _, skill := range []string{"mcp", "bash", "powershell", "register_mcp", "unregister_mcp", "claude_permissions", "permissions", "file", "chat_resume"} {
 		t.Run(skill, func(t *testing.T) {
 			var gotPrompt string
 			sdk := &fakeSDK{

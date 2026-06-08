@@ -398,11 +398,11 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		timeout = s.t.cfg.DriverDefaults.TaskTimeoutSec
 	}
 
-	// JSON-prompt skills (mcp, bash, register_mcp, claude_permissions) parse
-	// t.Prompt with json.Unmarshal in the slave executor; a USER_FILES_MANIFEST
-	// prefix breaks them with "invalid character '<'". For those skills send
-	// the caller's prompt verbatim; the early guard above already rejected any
-	// read/write paths that would have needed to live in the manifest.
+	// JSON-prompt skills parse t.Prompt with json.Unmarshal in the slave
+	// executor; a USER_FILES_MANIFEST prefix breaks them with
+	// "invalid character '<'". For those skills send the caller's prompt
+	// verbatim; the early guard above already rejected any read/write paths
+	// that would have needed to live in the manifest.
 	var finalPrompt string
 	if jsonPromptSkill(skill) {
 		finalPrompt = args.Prompt
