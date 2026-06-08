@@ -25,7 +25,7 @@ Pattern:
 
 ## Dynamic MCP
 
-Use when the task needs a reusable deterministic tool that is not currently advertised. Use `bash` to generate and validate the source, then `register_mcp` (or `register_slave_mcp`) to install it.
+Use when the task needs a reusable deterministic tool that is not currently advertised. Generate or upload source with file tools when possible, validate it with the target's advertised shell interface (`run_slave_shell`, `run_slave_powershell`, or `run_slave_bash`), then `register_mcp` (or `register_slave_mcp`) to install it.
 
 Rules:
 
@@ -87,12 +87,12 @@ tools with `run_slave_powershell`:
 }
 ```
 
-Shell-agnostic Windows inspection example with `run_slave_shell`:
+Shell-agnostic inspection example with `run_slave_shell`:
 
 ```json
 {
   "target_display_name": "win-slave",
-  "script": "Test-Path -Path .\\generated_mcp\\foo\\v1.py",
+  "script": "python --version",
   "timeout_sec": 30
 }
 ```
@@ -105,7 +105,7 @@ contents should still be uploaded with `write_slave_file` and downloaded with
 
 If a slave says a command is blocked by Claude Code permissions:
 
-1. Confirm the target advertises `claude_permissions`.
+1. Confirm the target advertises `permissions` (or the legacy alias `claude_permissions`).
 2. Call `get_slave_claude_permissions`.
 3. Patch only the required permissions with `update_slave_claude_permissions`.
 4. Retry the original task.

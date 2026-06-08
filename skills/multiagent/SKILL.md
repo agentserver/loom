@@ -91,7 +91,9 @@ Do not call `register_slave_mcp` directly from a one-shot Claude generation: `re
 - Calling `register_mcp` / `register_slave_mcp` without first running `mcp-acceptance` (structural smoke does NOT catch semantic bugs).
 - Hand-writing the stdio JSON-RPC skeleton instead of using `scaffold-mcp-server` (re-introduces the `args_schema` ↔ `inputSchema` desync and "forgot `notifications/initialized` returns None" class of bugs).
 - Calling `skill:"mcp"` with natural language instead of JSON `{server, tool, args}`.
-- Asking slave Claude Code to edit its own permissions; permission changes go through native `skill:"claude_permissions"` for now.
+- Asking slave Claude Code to edit its own permissions; permission changes go
+  through native `skill:"permissions"` (legacy alias: `claude_permissions`) for
+  now.
 - Using `127.0.0.1` or local file paths as if they were reachable from other machines.
 - Calling `run_slave_bash` on a Windows / PowerShell target. Bash means real
   Bash only; use `run_slave_powershell` or `run_slave_shell` when the target

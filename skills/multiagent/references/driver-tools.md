@@ -25,7 +25,7 @@ Returns visible agents excluding driver self:
       "command_interfaces": [
         {"skill": "powershell", "kind": "powershell", "command": "powershell.exe", "default": true}
       ],
-      "skills": ["chat", "mcp", "register_mcp", "powershell", "file", "claude_permissions"],
+      "skills": ["chat", "mcp", "register_mcp", "powershell", "file", "permissions"],
       "tools": ["legacy_tool_name"],
       "mcp_tools": [{"server": "srv", "name": "tool", "input_schema": {}}],
       "resources": {"tags": ["python3"]}
@@ -318,7 +318,7 @@ Input:
 }
 ```
 
-Requires target skill `register_mcp`. Delegates `skill:"register_mcp"` with the JSON above. Use after a bash task has written and validated the source.
+Requires target skill `register_mcp`. Delegates `skill:"register_mcp"` with the JSON above. Use after the source has been written with file tools and validated through the target's advertised shell interface.
 
 ### `get_slave_claude_permissions`
 
@@ -328,7 +328,7 @@ Input:
 {"target_agent_id": "optional", "target_display_name": "slave-a"}
 ```
 
-Requires target skill `claude_permissions`. Delegates prompt `{"op":"get"}`.
+Requires target skill `permissions` or the legacy alias `claude_permissions`. Delegates prompt `{"op":"get"}` through the current compatibility channel.
 
 ### `update_slave_claude_permissions`
 
@@ -345,7 +345,7 @@ Input:
 }
 ```
 
-Requires target skill `claude_permissions`. Uses the task channel today; future design should move this to a dedicated agentserver control channel.
+Requires target skill `permissions` or the legacy alias `claude_permissions`. Uses the task channel today; future design should move this to a dedicated agentserver control channel.
 
 ## Slave File Tools
 

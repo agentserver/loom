@@ -17,9 +17,11 @@ to a fleet of slave agents on a shared observer.
 - `mcp__driver__run_slave_bash(...)` — run explicit Bash commands only on
   targets that advertise a real Bash command interface. Bash does not mean
   PowerShell on Windows.
-- `mcp__driver__dispatch(target_id, prompt, skill="chat")` — send a single task.
-- `mcp__driver__plan(prompt)` — let the planner produce a multi-node plan, then
-  `mcp__driver__execute(plan_id)` to fan out.
+- `mcp__driver__submit_task(...)` — send a simple direct task.
+- `mcp__driver__submit_contract_task(...)` — submit a clarified contract or let
+  the driver run a fanout DAG when appropriate.
+- `mcp__driver__get_task(...)`, `mcp__driver__wait_task(...)`, and
+  `mcp__driver__resume_task(...)` — monitor and continue delegated tasks.
 
 ## When you start
 
@@ -34,12 +36,13 @@ to a fleet of slave agents on a shared observer.
 
 ## Permissions skill
 
-Slaves expose a `permissions` skill — use `mcp__driver__dispatch(target_id,
-JSON_string, skill="permissions")` where the JSON is:
+Slaves should advertise `permissions`; `claude_permissions` remains a legacy
+alias. Use `mcp__driver__get_slave_claude_permissions(...)` and
+`mcp__driver__update_slave_claude_permissions(...)` rather than asking a slave
+chat task to edit its own settings.
 
-  - `{"op":"get"}` to read
-  - `{"op":"patch","presets":["file_write"]}` to grant a preset
-  - `{"op":"patch","mode":"workspace-write"}` (codex slaves) to set sandbox mode
+Patch only the minimum needed preset or allow entry, then retry the original
+task.
 
 Codex slaves reject `allow_add`/`deny_add` arrays (claude-only); claude slaves
 reject `mode` (codex-only).
