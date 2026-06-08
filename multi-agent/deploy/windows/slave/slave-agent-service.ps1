@@ -34,6 +34,7 @@ public sealed class LoomSlaveService : ServiceBase
     private readonly string configPath;
     private readonly string logPath;
     private Process child;
+    private bool stopping;
 
     public LoomSlaveService(string serviceName, string exePath, string configPath, string logPath)
     {
@@ -62,6 +63,14 @@ public sealed class LoomSlaveService : ServiceBase
         child.EnableRaisingEvents = true;
         child.OutputDataReceived += delegate(object sender, DataReceivedEventArgs e) { AppendLine(e.Data); };
         child.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e) { AppendLine(e.Data); };
+        child.Exited += delegate(object sender, EventArgs e) {
+            AppendLine("slave-agent exited with code " + child.ExitCode);
+            if (!stopping)
+            {
+                ExitCode = child.ExitCode == 0 ? 1 : child.ExitCode;
+                Stop();
+            }
+        };
         child.Start();
         child.BeginOutputReadLine();
         child.BeginErrorReadLine();
@@ -69,6 +78,7 @@ public sealed class LoomSlaveService : ServiceBase
 
     protected override void OnStop()
     {
+        stopping = true;
         if (child == null || child.HasExited)
         {
             return;

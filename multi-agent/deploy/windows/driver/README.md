@@ -34,6 +34,7 @@ The installer stages:
 | `.mcp.json` | Claude MCP registration when `-Agent claude` |
 | `AGENTS.md` | Optional Codex driver prompt when available |
 | `skills\multiagent\` | Project multi-agent skill bundle when available |
+| `.claude\skills\multiagent\` | Claude skill copy when `-Agent claude` |
 | `logs\` | Driver audit logs |
 
 After install, run the one-time registration command printed by the script:
