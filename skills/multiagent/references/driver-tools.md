@@ -22,8 +22,10 @@ Returns visible agents excluding driver self:
       "display_name": "slave-a",
       "short_id": "abc123",
       "platform": {"os": "linux", "arch": "amd64"},
-      "command_interfaces": ["bash", "shell"],
-      "skills": ["chat", "mcp", "register_mcp", "bash", "shell", "claude_permissions"],
+      "command_interfaces": [
+        {"skill": "bash", "kind": "bash", "command": "/bin/bash", "default": true}
+      ],
+      "skills": ["chat", "mcp", "register_mcp", "bash", "claude_permissions"],
       "tools": ["legacy_tool_name"],
       "mcp_tools": [{"server": "srv", "name": "tool", "input_schema": {}}],
       "resources": {"tags": ["python3"]}
@@ -281,12 +283,13 @@ Input:
 }
 ```
 
-Requires target skill `shell`. Use this when the command is intentionally
-shell-agnostic or the target shell should be selected by the slave runtime.
-The slave routes according to its advertised `command_interfaces`; Windows
-targets default to PowerShell, while Linux / macOS targets typically default
-to Bash or POSIX shell. Prefer `run_slave_bash` or `run_slave_powershell`
-when the script depends on syntax specific to one shell.
+Use this when the command is intentionally shell-agnostic. The driver reads the
+target card's `command_interfaces`, chooses the entry marked `default:true`,
+and delegates to `skill:"powershell"` or `skill:"bash"` accordingly. Windows
+targets default to PowerShell, while Linux / macOS targets typically default to
+Bash. If a legacy card omits `command_interfaces` but advertises `bash`, the
+driver treats it as legacy Bash. Prefer `run_slave_bash` or
+`run_slave_powershell` when the script depends on syntax specific to one shell.
 
 ### `register_slave_mcp`
 
