@@ -44,8 +44,8 @@ jobs:
           go-version-file: multi-agent/go.mod
           cache-dependency-path: multi-agent/go.sum
       - run: go test ./cmd/driver-agent ./cmd/slave-agent ./internal/humanloop ./internal/executor ./pkg/agentbackend/claude ./pkg/agentbackend/codex -count=1
-      - run: go build -o driver-agent.windows-amd64.exe ./cmd/driver-agent
-      - run: go build -o slave-agent.windows-amd64.exe ./cmd/slave-agent
+      - run: go build -trimpath -ldflags="-s -w" -o driver-agent.windows-amd64.exe ./cmd/driver-agent
+      - run: go build -trimpath -ldflags="-s -w" -o slave-agent.windows-amd64.exe ./cmd/slave-agent
 
   helm:
     runs-on: ubuntu-latest
