@@ -27,7 +27,51 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- include "observer.postgresqlWaitInitContainers" . | nindent 6 }}
+      {{- if and (eq .Values.config.store.driver "postgres") .Values.postgresql.wait.enabled }}
+      initContainers:
+        - name: wait-for-postgresql
+          image: "{{ .Values.postgresql.image.repository }}:{{ .Values.postgresql.image.tag }}"
+          imagePullPolicy: {{ .Values.postgresql.image.pullPolicy }}
+          env:
+            - name: OBSERVER_POSTGRES_WAIT_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "observer.configSecretName" . }}
+                  key: {{ default "database-url" .Values.config.store.postgres.dsnSecretKey }}
+          command:
+            - /bin/sh
+            - -ec
+          args:
+            - |
+              until pg_isready -d "$OBSERVER_POSTGRES_WAIT_DSN"; do
+                sleep 2
+              done
+          {{- with .Values.postgresql.wait.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        - name: wait-for-observer-schema
+          image: "{{ .Values.postgresql.image.repository }}:{{ .Values.postgresql.image.tag }}"
+          imagePullPolicy: {{ .Values.postgresql.image.pullPolicy }}
+          env:
+            - name: OBSERVER_POSTGRES_WAIT_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "observer.configSecretName" . }}
+                  key: {{ default "database-url" .Values.config.store.postgres.dsnSecretKey }}
+          command:
+            - /bin/sh
+            - -ec
+          args:
+            - |
+              until psql "$OBSERVER_POSTGRES_WAIT_DSN" -v ON_ERROR_STOP=1 -Atc "SELECT 1 FROM telemetry_api_keys LIMIT 1" >/dev/null 2>&1; do
+                sleep 2
+              done
+          {{- with .Values.postgresql.wait.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- end }}
       containers:
         - name: observer
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
