@@ -9,8 +9,8 @@ manual tests. Files under `bin/` are generated artifacts and are ignored.
 tests/prod_test/
   README.md
   bin/
-    driver-agent
-    slave-agent
+    driver-agent.linux-amd64
+    slave-agent.linux-amd64
     driver-agent.windows-amd64.exe
     slave-agent.windows-amd64.exe
 ```
@@ -23,9 +23,9 @@ Run these commands from the `multi-agent` module root:
 mkdir -p tests/prod_test/bin
 
 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
-  -o tests/prod_test/bin/driver-agent ./cmd/driver-agent
+  -o tests/prod_test/bin/driver-agent.linux-amd64 ./cmd/driver-agent
 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
-  -o tests/prod_test/bin/slave-agent ./cmd/slave-agent
+  -o tests/prod_test/bin/slave-agent.linux-amd64 ./cmd/slave-agent
 
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags='-s -w' \
   -o tests/prod_test/bin/driver-agent.windows-amd64.exe ./cmd/driver-agent
