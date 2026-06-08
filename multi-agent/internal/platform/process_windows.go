@@ -25,6 +25,7 @@ func TerminatePID(pid int) error {
 	if err != nil {
 		return err
 	}
+	defer p.Release()
 	return p.Kill()
 }
 

@@ -268,7 +268,7 @@ func (e *executor) runWithArgv(ctx context.Context, argvHead []string, prompt st
 	}
 	if killed {
 		sink.Close()
-		return agentbackend.Result{}, fmt.Errorf("codex did not exit within %ds grace window after stdin close; SIGTERM/SIGKILL applied", e.shutdownGraceSec)
+		return agentbackend.Result{}, fmt.Errorf("codex did not exit within %ds grace window after stdin close; graceful termination/forced kill applied", e.shutdownGraceSec)
 	}
 	sink.Close()
 	return agentbackend.Result{

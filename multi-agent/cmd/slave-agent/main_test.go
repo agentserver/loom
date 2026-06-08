@@ -98,6 +98,33 @@ func TestAcquireInstanceLockManagedUnknownHolderReturnsHeldLockAndUpdatesPID(t *
 	}
 }
 
+func TestTakeOverLockReturnsNonLockTryLockErrorImmediately(t *testing.T) {
+	dir := t.TempDir()
+	notDir := filepath.Join(dir, "not-dir")
+	if err := os.WriteFile(notDir, []byte("file"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	start := time.Now()
+	lock, err := takeOverLock(filepath.Join(notDir, "slave-agent.lock"), 0)
+	if lock != nil {
+		lock.Unlock()
+		t.Fatal("takeOverLock returned lock, want error")
+	}
+	if err == nil {
+		t.Fatal("takeOverLock returned nil error, want non-lock error")
+	}
+	if errors.Is(err, platform.ErrLocked) {
+		t.Fatalf("takeOverLock error = %v, want non-lock error", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("takeOverLock took %s for non-lock error, want immediate return", elapsed)
+	}
+	if !strings.Contains(err.Error(), "try lock") {
+		t.Fatalf("takeOverLock error = %v, want try lock context", err)
+	}
+}
+
 func withTempWorkDir(t *testing.T) string {
 	t.Helper()
 	oldwd, err := os.Getwd()

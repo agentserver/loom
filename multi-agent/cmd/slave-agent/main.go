@@ -132,6 +132,9 @@ func takeOverLock(lockPath string, holderPid int) (*platform.FileLock, error) {
 		if err == nil {
 			return lock, nil
 		}
+		if !errors.Is(err, platform.ErrLocked) {
+			return nil, fmt.Errorf("try lock %s during takeover: %w", lockPath, err)
+		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	return nil, fmt.Errorf("could not acquire %s after terminating pid=%d", lockPath, holderPid)
