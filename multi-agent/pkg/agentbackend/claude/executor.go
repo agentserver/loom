@@ -11,11 +11,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	executorpkg "github.com/yourorg/multi-agent/internal/executor"
 	"github.com/yourorg/multi-agent/internal/humanloop"
+	"github.com/yourorg/multi-agent/internal/platform"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
@@ -25,7 +25,7 @@ type executor struct {
 
 	// Tunables; defaults set by newExecutor.
 	binSelf          string // slave-agent binary path; default os.Args[0]
-	maxQuestions    int    // default 5
+	maxQuestions     int    // default 5
 	shutdownGraceSec int    // default 10
 
 	// Test hook: when non-nil, invoked with the unix socket path right after
@@ -196,7 +196,7 @@ func (e *executor) Run(ctx context.Context, t agentbackend.Task, sink agentbacke
 		}
 	case <-time.After(time.Duration(e.shutdownGraceSec) * time.Second):
 		killed = true
-		_ = cmd.Process.Signal(syscall.SIGTERM)
+		_ = platform.TerminateProcess(cmd.Process)
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
