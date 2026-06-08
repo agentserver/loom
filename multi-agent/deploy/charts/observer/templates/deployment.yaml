@@ -13,6 +13,7 @@ spec:
     metadata:
       labels:
         {{- include "observer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: observer
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

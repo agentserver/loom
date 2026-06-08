@@ -16,6 +16,22 @@ grep -q 'kind: Job' <<<"$rendered"
 grep -q 'kind: CronJob' <<<"$rendered"
 grep -q 'name: observer-test-observer-config' <<<"$rendered"
 grep -q 'configMap:' <<<"$rendered"
+observer_service="$(awk '
+  $0 == "---" {
+    if (doc ~ /kind: Service/ && doc ~ /name: observer-test-observer/) {
+      print doc
+    }
+    doc = ""
+    next
+  }
+  { doc = doc $0 "\n" }
+  END {
+    if (doc ~ /kind: Service/ && doc ~ /name: observer-test-observer/) {
+      print doc
+    }
+  }
+' <<<"$rendered")"
+grep -q 'app.kubernetes.io/component: observer' <<<"$observer_service"
 grep -q 'name: observer-test-observer-migrate-0-1-0' <<<"$rendered"
 grep -q 'name: observer-test-observer-postgresql' <<<"$rendered"
 grep -q 'name: observer-test-observer-minio' <<<"$rendered"
