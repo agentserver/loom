@@ -3,6 +3,7 @@
 package platform
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,9 +20,16 @@ func TryLock(path string) (*FileLock, error) {
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = f.Close()
-		return nil, fmt.Errorf("%w: %s", ErrLocked, path)
+		return nil, lockError(path, err)
 	}
 	return &FileLock{Path: path, file: f}, nil
+}
+
+func lockError(path string, err error) error {
+	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+		return fmt.Errorf("%w: %s", ErrLocked, path)
+	}
+	return fmt.Errorf("flock %s: %w", path, err)
 }
 
 func unlockFile(f *os.File) error {
