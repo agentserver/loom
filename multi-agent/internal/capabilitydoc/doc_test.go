@@ -120,3 +120,32 @@ func TestStoreRefreshIncludesCodexPermissionsFromStore(t *testing.T) {
 	require.Contains(t, text, "- mode: full-access")
 	require.NotContains(t, text, "## Permissions (claude)")
 }
+
+func TestStoreRefreshIncludesPowerShellSkillWindowsWorkdirAndShellCommands(t *testing.T) {
+	dir := t.TempDir()
+	binDir := t.TempDir()
+	for _, name := range []string{"powershell.exe", "powershell", "pwsh", "bash"} {
+		require.NoError(t, os.WriteFile(filepath.Join(binDir, name), []byte("#!/bin/sh\n"), 0o755))
+	}
+	t.Setenv("PATH", binDir)
+
+	store := NewStore(dir)
+	err := store.Refresh(context.Background(), Input{
+		Config: &config.Config{
+			Discovery: config.Discovery{Skills: []string{"chat", "powershell"}},
+		},
+		WorkDir: `C:\loom\slave`,
+		Reason:  "startup",
+	})
+	require.NoError(t, err)
+
+	body, err := os.ReadFile(filepath.Join(dir, "CAPABILITIES.md"))
+	require.NoError(t, err)
+	text := string(body)
+	require.Contains(t, text, "- powershell")
+	require.Contains(t, text, "workdir: C:\\loom\\slave")
+	require.Contains(t, text, "- `powershell.exe`: `"+filepath.Join(binDir, "powershell.exe")+"`")
+	require.Contains(t, text, "- `powershell`: `"+filepath.Join(binDir, "powershell")+"`")
+	require.Contains(t, text, "- `pwsh`: `"+filepath.Join(binDir, "pwsh")+"`")
+	require.Contains(t, text, "- `bash`: `"+filepath.Join(binDir, "bash")+"`")
+}
