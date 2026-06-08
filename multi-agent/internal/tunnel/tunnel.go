@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"runtime"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/yourorg/multi-agent/internal/capability"
+	"github.com/yourorg/multi-agent/internal/commandiface"
 	"github.com/yourorg/multi-agent/internal/config"
 )
 
@@ -20,13 +22,15 @@ type Deps struct {
 }
 
 type Tunnel struct {
-	cfg      *config.Config
-	cfgPath  string
-	http     http.Handler
-	deps     Deps
-	sdk      *agentsdk.Client
-	tools    []string
-	mcpTools []capability.MCPToolDescriptor
+	cfg               *config.Config
+	cfgPath           string
+	http              http.Handler
+	deps              Deps
+	sdk               *agentsdk.Client
+	tools             []string
+	mcpTools          []capability.MCPToolDescriptor
+	platform          commandiface.Platform
+	commandInterfaces []commandiface.CommandInterface
 }
 
 func New(cfg *config.Config, cfgPath string, h http.Handler) *Tunnel {
@@ -63,6 +67,18 @@ func (t *Tunnel) SetMCPTools(tools []capability.MCPToolDescriptor) {
 		t.mcpTools[i] = tool
 		t.mcpTools[i].InputSchema = append([]byte(nil), tool.InputSchema...)
 	}
+}
+
+// SetPlatform sets the OS/architecture to include in the next PublishCard call.
+// When unset, PublishCard falls back to the current runtime platform.
+func (t *Tunnel) SetPlatform(platform commandiface.Platform) {
+	t.platform = platform
+}
+
+// SetCommandInterfaces sets the command interfaces to include in the next
+// PublishCard call. Safe to call before or after EnsureRegistered.
+func (t *Tunnel) SetCommandInterfaces(interfaces []commandiface.CommandInterface) {
+	t.commandInterfaces = append([]commandiface.CommandInterface{}, interfaces...)
 }
 
 func (t *Tunnel) EnsureRegistered(ctx context.Context) error {
@@ -106,10 +122,18 @@ func (t *Tunnel) EnsureRegistered(ctx context.Context) error {
 // PublishCard posts the discovery card via raw HTTP (SDK has no helper).
 // Best-effort: caller may log+ignore failure.
 func (t *Tunnel) PublishCard(ctx context.Context) error {
+	platform := t.platform
+	if platform.OS == "" {
+		platform.OS = runtime.GOOS
+	}
+	if platform.Arch == "" {
+		platform.Arch = runtime.GOARCH
+	}
 	cardBody := map[string]interface{}{
 		"skills":              t.cfg.Discovery.Skills,
 		"tools":               t.tools,
 		"mcp_tools":           t.mcpTools,
+		"platform":            platform,
 		"short_id":            t.cfg.Credentials.ShortID,
 		"accepts_tasks":       true,
 		"has_web_ui":          true,
@@ -119,6 +143,9 @@ func (t *Tunnel) PublishCard(ctx context.Context) error {
 	}
 	if t.cfg.Resources != nil {
 		cardBody["resources"] = t.cfg.Resources
+	}
+	if len(t.commandInterfaces) > 0 {
+		cardBody["command_interfaces"] = t.commandInterfaces
 	}
 	body, _ := json.Marshal(map[string]interface{}{
 		"display_name": t.cfg.Discovery.DisplayName,

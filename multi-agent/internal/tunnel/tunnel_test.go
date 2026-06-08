@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/yourorg/multi-agent/internal/capability"
+	"github.com/yourorg/multi-agent/internal/commandiface"
 	"github.com/yourorg/multi-agent/internal/config"
 )
 
@@ -157,6 +159,9 @@ func TestPublishCard_IncludesToolsAndResources(t *testing.T) {
 	if card["capability_doc_path"] != "/capabilities" {
 		t.Fatalf("capability_doc_path = %v", card["capability_doc_path"])
 	}
+	platform, _ := card["platform"].(map[string]interface{})
+	require.Equal(t, map[string]interface{}{"os": runtime.GOOS, "arch": runtime.GOARCH}, platform)
+	require.NotContains(t, card, "command_interfaces")
 	mcpTools, _ := card["mcp_tools"].([]interface{})
 	if len(mcpTools) != 1 {
 		t.Fatalf("mcp_tools = %v", mcpTools)
@@ -177,4 +182,43 @@ func TestPublishCard_IncludesToolsAndResources(t *testing.T) {
 	if len(devs) != 1 || devs[0] != "camera" {
 		t.Fatalf("devices = %v", devs)
 	}
+}
+
+func TestPublishCard_IncludesPlatformAndCommandInterfaces(t *testing.T) {
+	var got map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &got)
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Server:      config.Server{URL: srv.URL, Name: "n"},
+		Credentials: config.Credentials{ProxyToken: "ptoken"},
+		Discovery:   config.Discovery{DisplayName: "dn", Description: "d", Skills: []string{"bash"}},
+	}
+	tn := NewWithDeps(cfg, "/tmp/none", nil, Deps{})
+	tn.SetPlatform(commandiface.Platform{OS: "windows", Arch: "amd64"})
+	tn.SetCommandInterfaces([]commandiface.CommandInterface{{
+		Skill:   "powershell",
+		Kind:    "powershell",
+		Command: "powershell.exe",
+		Default: true,
+	}})
+
+	require.NoError(t, tn.PublishCard(context.Background()))
+
+	card, _ := got["card"].(map[string]interface{})
+	require.NotNil(t, card, "missing card: %v", got)
+	platform, _ := card["platform"].(map[string]interface{})
+	require.Equal(t, map[string]interface{}{"os": "windows", "arch": "amd64"}, platform)
+	interfaces, _ := card["command_interfaces"].([]interface{})
+	require.Len(t, interfaces, 1)
+	require.Equal(t, map[string]interface{}{
+		"skill":   "powershell",
+		"kind":    "powershell",
+		"command": "powershell.exe",
+		"default": true,
+	}, interfaces[0])
 }

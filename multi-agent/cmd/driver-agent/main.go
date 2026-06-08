@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -218,6 +219,7 @@ func publishCard(cfg *driver.Config) error {
 		"agent_type":   "driver",
 		"card": map[string]interface{}{
 			"skills":        cfg.Discovery.Skills,
+			"platform":      map[string]string{"os": runtime.GOOS, "arch": runtime.GOARCH},
 			"short_id":      cfg.Credentials.ShortID,
 			"accepts_tasks": false,
 			"has_web_ui":    false,
