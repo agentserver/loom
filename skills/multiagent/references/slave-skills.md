@@ -253,11 +253,12 @@ the slave-agent runtime supports it:
 ```json
 {
   "platform": {"os": "windows", "arch": "amd64"},
-  "command_interfaces": ["powershell", "shell"]
+  "command_interfaces": [
+    {"skill": "powershell", "kind": "powershell", "command": "powershell.exe", "default": true}
+  ]
 }
 ```
 
 Use `platform.os` and `command_interfaces` to choose shell helpers. If a
 legacy card omits these fields, fall back to the advertised skills: `bash`
-means a real Bash executor, `powershell` means a PowerShell executor, and
-`shell` means the slave runtime will pick its default shell.
+means a real Bash executor and `powershell` means a PowerShell executor.
