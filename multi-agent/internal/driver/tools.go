@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
+	"github.com/yourorg/multi-agent/internal/commandiface"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/orchestration"
 )
@@ -65,6 +66,8 @@ func (t *Tools) All() []Tool {
 		&listAgentsTool{t},
 		&inspectCapabilitiesTool{t},
 		&runSlaveBashTool{t},
+		&runSlavePowerShellTool{t},
+		&runSlaveShellTool{t},
 		&registerSlaveMCPTool{t},
 		&unregisterSlaveMCPTool{t},
 		// Permission tools use task delegation until agentserver exposes a dedicated control channel.
@@ -170,16 +173,7 @@ func jsonPromptSkill(skill string) bool {
 }
 
 func hasSkill(c agentsdk.AgentCard, want string) bool {
-	var card struct {
-		Skills []string `json:"skills"`
-	}
-	_ = json.Unmarshal(c.Card, &card)
-	for _, s := range card.Skills {
-		if s == want {
-			return true
-		}
-	}
-	return false
+	return parseAgentCard(c).HasSkill(want)
 }
 
 func observerRoleForCard(c agentsdk.AgentCard) string {
@@ -192,11 +186,7 @@ func observerRoleForCard(c agentsdk.AgentCard) string {
 func cardShortID(c agentsdk.AgentCard) string {
 	// agentserver v0.40.0 does not expose short_id as a top-level AgentCard
 	// field. Agents that need peer-proxy addressing publish it inside card.
-	var card struct {
-		ShortID string `json:"short_id"`
-	}
-	_ = json.Unmarshal(c.Card, &card)
-	return card.ShortID
+	return parseAgentCard(c).ShortID
 }
 
 // =========================================================================
@@ -218,32 +208,31 @@ func (l *listAgentsTool) Call(ctx context.Context, _ json.RawMessage) (json.RawM
 		return nil, &MCPToolError{Message: err.Error()}
 	}
 	type out struct {
-		AgentID     string          `json:"agent_id"`
-		DisplayName string          `json:"display_name"`
-		ShortID     string          `json:"short_id,omitempty"`
-		Skills      []string        `json:"skills"`
-		Tools       []string        `json:"tools"`
-		MCPTools    json.RawMessage `json:"mcp_tools,omitempty"`
-		Resources   json.RawMessage `json:"resources,omitempty"`
-		Description string          `json:"description,omitempty"`
+		AgentID           string                          `json:"agent_id"`
+		DisplayName       string                          `json:"display_name"`
+		ShortID           string                          `json:"short_id,omitempty"`
+		Skills            []string                        `json:"skills"`
+		Tools             []string                        `json:"tools"`
+		MCPTools          json.RawMessage                 `json:"mcp_tools,omitempty"`
+		Resources         json.RawMessage                 `json:"resources,omitempty"`
+		Platform          *commandiface.Platform          `json:"platform,omitempty"`
+		CommandInterfaces []commandiface.CommandInterface `json:"command_interfaces,omitempty"`
+		Description       string                          `json:"description,omitempty"`
 	}
 	results := []out{}
 	for _, c := range cards {
 		if c.AgentID == l.t.cfg.Credentials.SandboxID {
 			continue
 		}
-		var card struct {
-			Skills    []string        `json:"skills"`
-			Tools     []string        `json:"tools"`
-			MCPTools  json.RawMessage `json:"mcp_tools"`
-			Resources json.RawMessage `json:"resources"`
-			ShortID   string          `json:"short_id"`
+		card := parseAgentCard(c)
+		var platform *commandiface.Platform
+		if card.Platform != (commandiface.Platform{}) {
+			platform = &card.Platform
 		}
-		_ = json.Unmarshal(c.Card, &card)
 		results = append(results, out{
 			AgentID: c.AgentID, DisplayName: c.DisplayName, ShortID: card.ShortID,
 			Skills: card.Skills, Tools: card.Tools, MCPTools: card.MCPTools, Resources: card.Resources,
-			Description: c.Description,
+			Platform: platform, CommandInterfaces: card.CommandInterfaces, Description: c.Description,
 		})
 	}
 	return json.Marshal(map[string]interface{}{"agents": results})

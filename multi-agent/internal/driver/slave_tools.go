@@ -13,9 +13,110 @@ type runSlaveBashTool struct{ t *Tools }
 
 func (r *runSlaveBashTool) Name() string { return "run_slave_bash" }
 func (r *runSlaveBashTool) Description() string {
-	return "Run an explicit Bash script on a selected slave that advertises the bash skill."
+	return "Run an explicit Bash script on a selected slave that advertises a Bash command interface."
 }
 func (r *runSlaveBashTool) InputSchema() json.RawMessage {
+	return shellToolInputSchema()
+}
+func (r *runSlaveBashTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	args, err := parseShellToolArgs(raw)
+	if err != nil {
+		return nil, err
+	}
+	card, err := r.t.resolveAvailableAgent(ctx, args.TargetAgentID, args.TargetDisplayName)
+	if err != nil {
+		return nil, err
+	}
+	parsed := parseAgentCard(card)
+	if !parsed.SupportsExplicitShell("bash") {
+		if parsed.SupportsExplicitShell("powershell") {
+			return nil, &MCPToolError{Message: "target " + card.DisplayName + " has no Bash command interface; use run_slave_powershell"}
+		}
+		if parsed.HasSkill("bash") {
+			return nil, &MCPToolError{Message: "target " + card.DisplayName + " has no Bash command interface"}
+		}
+		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise bash"}
+	}
+	return r.t.delegateShellTask(ctx, card, "bash", args)
+}
+
+type runSlavePowerShellTool struct{ t *Tools }
+
+func (r *runSlavePowerShellTool) Name() string { return "run_slave_powershell" }
+func (r *runSlavePowerShellTool) Description() string {
+	return "Run an explicit PowerShell script on a selected slave that advertises a PowerShell command interface."
+}
+func (r *runSlavePowerShellTool) InputSchema() json.RawMessage {
+	return shellToolInputSchema()
+}
+func (r *runSlavePowerShellTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	args, err := parseShellToolArgs(raw)
+	if err != nil {
+		return nil, err
+	}
+	card, err := r.t.resolveAvailableAgent(ctx, args.TargetAgentID, args.TargetDisplayName)
+	if err != nil {
+		return nil, err
+	}
+	parsed := parseAgentCard(card)
+	if !parsed.SupportsExplicitShell("powershell") {
+		if parsed.HasSkill("powershell") {
+			return nil, &MCPToolError{Message: "target " + card.DisplayName + " has no PowerShell command interface"}
+		}
+		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise powershell"}
+	}
+	return r.t.delegateShellTask(ctx, card, "powershell", args)
+}
+
+type runSlaveShellTool struct{ t *Tools }
+
+func (r *runSlaveShellTool) Name() string { return "run_slave_shell" }
+func (r *runSlaveShellTool) Description() string {
+	return "Run a script on a selected slave using its default advertised shell command interface."
+}
+func (r *runSlaveShellTool) InputSchema() json.RawMessage {
+	return shellToolInputSchema()
+}
+func (r *runSlaveShellTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	args, err := parseShellToolArgs(raw)
+	if err != nil {
+		return nil, err
+	}
+	card, err := r.t.resolveAvailableAgent(ctx, args.TargetAgentID, args.TargetDisplayName)
+	if err != nil {
+		return nil, err
+	}
+	parsed := parseAgentCard(card)
+	if commandInterface := parsed.DefaultCommandInterface(); commandInterface.Kind != "" {
+		switch commandInterface.Kind {
+		case "bash", "powershell":
+			if !parsed.SupportsExplicitShell(commandInterface.Kind) {
+				return nil, &MCPToolError{Message: "target " + card.DisplayName + " default " + commandInterface.Kind + " command interface is not supported by advertised skills"}
+			}
+			return r.t.delegateShellTask(ctx, card, commandInterface.Kind, args)
+		default:
+			return nil, &MCPToolError{Message: "target " + card.DisplayName + " default command interface kind " + commandInterface.Kind + " is unsupported; expected bash or powershell"}
+		}
+	}
+	if len(parsed.CommandInterfaces) == 0 && parsed.HasSkill("bash") {
+		return r.t.delegateShellTask(ctx, card, "bash", args)
+	}
+	if parsed.SupportsExplicitShell("powershell") {
+		return nil, &MCPToolError{Message: "target " + card.DisplayName + " has no default shell command interface; use run_slave_powershell"}
+	}
+	return nil, &MCPToolError{Message: "target " + card.DisplayName + " has no supported shell command interface"}
+}
+
+type shellToolArgs struct {
+	TargetAgentID     string            `json:"target_agent_id"`
+	TargetDisplayName string            `json:"target_display_name"`
+	Script            string            `json:"script"`
+	Env               map[string]string `json:"env,omitempty"`
+	TimeoutSec        int               `json:"timeout_sec,omitempty"`
+	Wait              *bool             `json:"wait,omitempty"`
+}
+
+func shellToolInputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{
         "target_agent_id":{"type":"string"},
         "target_display_name":{"type":"string"},
@@ -25,28 +126,19 @@ func (r *runSlaveBashTool) InputSchema() json.RawMessage {
         "wait":{"type":"boolean"}
     },"required":["script"],"additionalProperties":false}`)
 }
-func (r *runSlaveBashTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
-	var args struct {
-		TargetAgentID     string            `json:"target_agent_id"`
-		TargetDisplayName string            `json:"target_display_name"`
-		Script            string            `json:"script"`
-		Env               map[string]string `json:"env,omitempty"`
-		TimeoutSec        int               `json:"timeout_sec,omitempty"`
-		Wait              *bool             `json:"wait,omitempty"`
-	}
+
+func parseShellToolArgs(raw json.RawMessage) (shellToolArgs, error) {
+	var args shellToolArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, &MCPToolError{Message: "invalid args: " + err.Error()}
+		return shellToolArgs{}, &MCPToolError{Message: "invalid args: " + err.Error()}
 	}
 	if args.Script == "" {
-		return nil, &MCPToolError{Message: "script is required"}
+		return shellToolArgs{}, &MCPToolError{Message: "script is required"}
 	}
-	card, err := r.t.resolveAvailableAgent(ctx, args.TargetAgentID, args.TargetDisplayName)
-	if err != nil {
-		return nil, err
-	}
-	if !hasSkill(card, "bash") {
-		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise bash"}
-	}
+	return args, nil
+}
+
+func (t *Tools) delegateShellTask(ctx context.Context, card agentsdk.AgentCard, skill string, args shellToolArgs) (json.RawMessage, error) {
 	prompt, err := json.Marshal(struct {
 		Script     string            `json:"script"`
 		TimeoutSec int               `json:"timeout_sec,omitempty"`
@@ -55,14 +147,14 @@ func (r *runSlaveBashTool) Call(ctx context.Context, raw json.RawMessage) (json.
 	if err != nil {
 		return nil, &MCPToolError{Message: err.Error()}
 	}
-	resp, err := r.t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
+	resp, err := t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
 		TargetID:       card.AgentID,
-		Skill:          "bash",
+		Skill:          skill,
 		Prompt:         string(prompt),
 		TimeoutSeconds: args.TimeoutSec,
 	})
 	if err != nil {
-		return nil, &MCPToolError{Message: "delegate bash task: " + err.Error()}
+		return nil, &MCPToolError{Message: "delegate " + skill + " task: " + err.Error()}
 	}
 	wait := true
 	if args.Wait != nil {
@@ -73,11 +165,11 @@ func (r *runSlaveBashTool) Call(ctx context.Context, raw json.RawMessage) (json.
 			"task_id":             resp.TaskID,
 			"target_id":           card.AgentID,
 			"target_display_name": card.DisplayName,
-			"skill":               "bash",
+			"skill":               skill,
 			"status":              resp.Status,
 		})
 	}
-	return r.t.waitDelegatedTask(ctx, resp.TaskID, args.TimeoutSec)
+	return t.waitDelegatedTask(ctx, resp.TaskID, args.TimeoutSec)
 }
 
 type getSlaveClaudePermissionsTool struct{ t *Tools }
