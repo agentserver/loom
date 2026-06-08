@@ -132,6 +132,9 @@ $repoRoot = Resolve-FullPath (Join-Path $here "..\..\..\..")
 $multiagentSkill = Join-Path $repoRoot "skills\multiagent"
 if (Test-Path -LiteralPath $multiagentSkill -PathType Container) {
     Copy-DirectoryContents -Source $multiagentSkill -Destination (Join-Path $projectDir "skills\multiagent")
+    if ($Agent -eq "claude") {
+        Copy-DirectoryContents -Source $multiagentSkill -Destination (Join-Path $projectDir ".claude\skills\multiagent")
+    }
 }
 
 Write-Host ""
