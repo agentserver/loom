@@ -21,7 +21,9 @@ Returns visible agents excluding driver self:
       "agent_id": "sandbox-id",
       "display_name": "slave-a",
       "short_id": "abc123",
-      "skills": ["chat", "mcp", "register_mcp", "bash", "claude_permissions"],
+      "platform": {"os": "linux", "arch": "amd64"},
+      "command_interfaces": ["bash", "shell"],
+      "skills": ["chat", "mcp", "register_mcp", "bash", "shell", "claude_permissions"],
       "tools": ["legacy_tool_name"],
       "mcp_tools": [{"server": "srv", "name": "tool", "input_schema": {}}],
       "resources": {"tags": ["python3"]}
@@ -239,7 +241,52 @@ Input:
 }
 ```
 
-Requires target skill `bash`. Delegates `skill:"bash"` with JSON prompt.
+Requires target skill `bash` and a Bash command interface in
+`command_interfaces`. Bash means real Bash only: this helper does not execute
+PowerShell on Windows and must not be used as a generic shell fallback.
+Delegates `skill:"bash"` with JSON prompt.
+
+### `run_slave_powershell`
+
+Input:
+
+```json
+{
+  "target_agent_id": "optional",
+  "target_display_name": "win-slave",
+  "script": "Get-ChildItem -Path . | Select-Object -First 5",
+  "env": {"KEY": "value"},
+  "timeout_sec": 60,
+  "wait": true
+}
+```
+
+Requires target skill `powershell` and a PowerShell command interface in
+`command_interfaces`. Use this for Windows-native command execution. The
+driver delegates `skill:"powershell"` with a JSON prompt and does not route
+through Bash.
+
+### `run_slave_shell`
+
+Input:
+
+```json
+{
+  "target_agent_id": "optional",
+  "target_display_name": "any-slave",
+  "script": "python --version",
+  "env": {"KEY": "value"},
+  "timeout_sec": 60,
+  "wait": true
+}
+```
+
+Requires target skill `shell`. Use this when the command is intentionally
+shell-agnostic or the target shell should be selected by the slave runtime.
+The slave routes according to its advertised `command_interfaces`; Windows
+targets default to PowerShell, while Linux / macOS targets typically default
+to Bash or POSIX shell. Prefer `run_slave_bash` or `run_slave_powershell`
+when the script depends on syntax specific to one shell.
 
 ### `register_slave_mcp`
 

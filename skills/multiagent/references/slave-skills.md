@@ -6,7 +6,10 @@ Slaves advertise skills through their discovery card. The driver and planner sho
 - `chat_resume`: driver-only continuation of a paused `chat` task (see below).
 - `mcp`: direct call to a configured or generated MCP server.
 - `register_mcp`: register a pre-built MCP server file (paired with bash to generate and validate).
-- `bash`: run explicit Bash through native slave-agent code.
+- `bash`: run explicit Bash through native slave-agent code. On Windows this
+  is advertised only when real Bash is detected, such as Git Bash or WSL.
+- `powershell`: run explicit PowerShell through native slave-agent code.
+- `shell`: run through the slave runtime's default command interface.
 - `file`: stateless file read/write/stat through a native slave-agent executor.
 - `claude_permissions`: read or patch Claude Code permissions through native slave-agent code.
 
@@ -124,6 +127,40 @@ Prompt is JSON:
 
 Use only for explicit commands the driver has decided are appropriate. If Claude Code permissions block a command, use permission tools first.
 
+## `powershell`
+
+Prompt is JSON:
+
+```json
+{
+  "script": "$PSVersionTable.PSVersion.ToString()\nGet-ChildItem -Path .",
+  "timeout_sec": 60,
+  "env": {"KEY": "value"}
+}
+```
+
+Use for Windows-native commands and scripts. Prefer PowerShell cmdlets and
+Windows paths when targeting Windows slaves. Do not wrap PowerShell in
+`run_slave_bash`; Bash is available on Windows only when the slave has
+detected a real Bash implementation such as Git Bash or WSL.
+
+## `shell`
+
+Prompt is JSON:
+
+```json
+{
+  "script": "python --version",
+  "timeout_sec": 60,
+  "env": {"KEY": "value"}
+}
+```
+
+Use when the command is intentionally shell-agnostic and the slave runtime can
+choose the default interface. Windows slaves default to PowerShell unless they
+explicitly route otherwise; Unix-like slaves usually default to Bash or POSIX
+shell.
+
 ## `file`
 
 Stateless file I/O through a native `slave-agent` Go executor. Advertised by adding `file` to `discovery.skills`. The prompt is JSON with an `op` discriminator. Same trust model as `bash`: a slave that advertises `file` is granting access to any path its OS user can reach.
@@ -207,3 +244,20 @@ This is a compatibility bridge over the task channel. Future work should use a d
 ## Capability Document
 
 On startup the slave scans runtime, skills, MCP servers, generated MCP, resources, and capability journal, then writes `journal/CAPABILITIES.md`. It is exposed at `/capabilities` through the tunneled web UI and advertised as `capability_doc_path`.
+
+## Discovery Card Metadata
+
+Slave discovery cards include platform and command interface metadata when
+the slave-agent runtime supports it:
+
+```json
+{
+  "platform": {"os": "windows", "arch": "amd64"},
+  "command_interfaces": ["powershell", "shell"]
+}
+```
+
+Use `platform.os` and `command_interfaces` to choose shell helpers. If a
+legacy card omits these fields, fall back to the advertised skills: `bash`
+means a real Bash executor, `powershell` means a PowerShell executor, and
+`shell` means the slave runtime will pick its default shell.
