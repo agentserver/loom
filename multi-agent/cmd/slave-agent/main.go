@@ -209,6 +209,7 @@ func run(cfgPath string) error {
 	if err := tn.EnsureRegistered(ctx); err != nil {
 		return err
 	}
+	applyRuntimeCapabilities(cfg, caps)
 	if cfg.Observer.WorkspaceID == "" {
 		cfg.Observer.WorkspaceID = cfg.Credentials.WorkspaceID
 	}
@@ -242,7 +243,7 @@ func run(cfgPath string) error {
 		Backend:  resumeAdapter{backend},
 		FlockDir: filepath.Join(workdir, "humanloop"),
 	})
-	registerRuntimeShellRoutes(routes, cfg)
+	registerRuntimeShellRoutes(routes, cfg, caps)
 	if hasSkill(cfg.Discovery.Skills, "file") {
 		routes["file"] = executor.NewFileExecutor(executor.FileConfig{WorkDir: cfg.Claude.WorkDir})
 	}
