@@ -54,7 +54,7 @@ resources:
     - "powershell"
 
 observer:
-  enabled: true
+  enabled: false
   telemetry_enabled: false
   url: __OBSERVER_URL__
   workspace_id: __WORKSPACE_ID__

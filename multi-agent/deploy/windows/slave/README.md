@@ -21,8 +21,7 @@ logs. Use placeholder examples until you are editing your local config.
   -Name "slave-windows" `
   -ObserverUrl "http://observer.example.com:8090" `
   -Workspace "ws-default" `
-  -Agent codex `
-  -ApiKey "<workspace-api-key>"
+  -Agent codex
 ```
 
 The default install directory is `%USERPROFILE%\.loom\<Name>`. The installer
@@ -34,11 +33,12 @@ Set-Location "$env:USERPROFILE\.loom\slave-windows"
 ```
 
 On first run, approve the registration URL printed by `slave-agent`. After that,
-the slave publishes its capability card to the observer and appears in
-`list_agents` from the driver.
+the slave publishes its capability card through agentserver identity and appears
+in `list_agents` from the driver.
 
-If you omit `-ApiKey`, edit `observer.api_key` in the local `config.yaml`
-before starting `slave-agent`.
+Legacy observer registration is disabled by default. If you explicitly enable
+`observer.enabled` in the local `config.yaml`, also set `observer.api_key`
+locally before starting `slave-agent`.
 
 ## Service Install
 
@@ -50,7 +50,6 @@ Run PowerShell as Administrator:
   -ObserverUrl "http://observer.example.com:8090" `
   -Workspace "ws-default" `
   -Agent codex `
-  -ApiKey "<workspace-api-key>" `
   -InstallService
 ```
 
@@ -74,7 +73,7 @@ Stop-Service loom-slave-slave-windows
 | `-ObserverUrl` | required | Observer URL written into `observer.url`. |
 | `-Workspace` | `ws-default` | Workspace ID written into the template. |
 | `-Agent` | `codex` | `codex` or `claude`. |
-| `-ApiKey` | empty | Optional local-only value for `observer.api_key`. |
+| `-ApiKey` | empty | Optional local-only value for `observer.api_key` when legacy observer registration is explicitly enabled. |
 | `-Bin` | `..\bin\slave-agent.windows-amd64.exe` | Override binary source path. |
 | `-LoomHome` | `%USERPROFILE%\.loom\<Name>` | Install directory. |
 | `-InstallService` | off | Create and start a Windows service. |
