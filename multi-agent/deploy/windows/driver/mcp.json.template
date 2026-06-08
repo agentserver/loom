@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "driver": {
+      "command": "__DRIVER_AGENT__",
+      "args": [
+        "serve-mcp",
+        "--config",
+        "__CONFIG__"
+      ]
+    }
+  }
+}

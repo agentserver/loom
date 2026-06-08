@@ -1,0 +1,60 @@
+server:
+  url: "https://agent.cs.ac.cn"
+  name: __AGENT_NAME__
+
+credentials:
+  sandbox_id: ""
+  tunnel_token: ""
+  proxy_token: ""
+  workspace_id: ""
+  short_id: ""
+
+discovery:
+  display_name: __AGENT_NAME__
+  description: __DESCRIPTION__
+  skills: []
+
+listen_addr: "127.0.0.1:0"
+
+agent:
+  kind: __AGENT_KIND__
+
+claude:
+  bin: "claude"
+  workdir: __PROJECT_DIR__
+  extra_args: []
+
+codex:
+  bin: "codex"
+  workdir: __PROJECT_DIR__
+  extra_args: []
+
+planner:
+  bin: ""
+  timeout_sec: 300
+  extra_args: []
+
+fanout:
+  max_concurrency: 2
+  default_policy: ""
+  policy_by_skill: {}
+  subtask_defaults:
+    timeout_sec: 600
+    max_budget_usd: 0
+
+driver_defaults:
+  target_display_name: ""
+  task_timeout_sec: 600
+  audit_log_dir: "./logs"
+  disable_uid_check: true
+  max_dir_cache_entries: 50000
+  artifact_transport: "peer_proxy"
+
+observer:
+  enabled: false
+  telemetry_enabled: false
+  url: __OBSERVER_URL__
+  workspace_id: __WORKSPACE_ID__
+  agent_id: __AGENT_NAME__
+  api_key: __API_KEY__
+  token_state_path: __TOKEN_STATE_PATH__
