@@ -19,13 +19,13 @@ Returns visible agents excluding driver self:
   "agents": [
     {
       "agent_id": "sandbox-id",
-      "display_name": "slave-a",
+      "display_name": "slave-windows",
       "short_id": "abc123",
-      "platform": {"os": "linux", "arch": "amd64"},
+      "platform": {"os": "windows", "arch": "amd64"},
       "command_interfaces": [
-        {"skill": "bash", "kind": "bash", "command": "/bin/bash", "default": true}
+        {"skill": "powershell", "kind": "powershell", "command": "powershell.exe", "default": true}
       ],
-      "skills": ["chat", "mcp", "register_mcp", "bash", "claude_permissions"],
+      "skills": ["chat", "mcp", "register_mcp", "powershell", "file", "claude_permissions"],
       "tools": ["legacy_tool_name"],
       "mcp_tools": [{"server": "srv", "name": "tool", "input_schema": {}}],
       "resources": {"tags": ["python3"]}
