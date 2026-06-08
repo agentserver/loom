@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -88,7 +89,7 @@ resources:
 	cmd := exec.Command(os.Args[0], "-test.run", "TestSlaveAgentE2EHelper")
 	cmd.Dir = work
 	cmd.Env = append(os.Environ(), "SLAVE_AGENT_E2E_HELPER=1", "SLAVE_AGENT_E2E_CONFIG="+cfgPath)
-	var logs strings.Builder
+	var logs lockedBuffer
 	cmd.Stdout = &logs
 	cmd.Stderr = &logs
 	require.NoError(t, cmd.Start())
@@ -132,6 +133,23 @@ resources:
 		}
 		return false
 	}, 10*time.Second, 100*time.Millisecond, "logs:\n%s", logs.String())
+}
+
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func TestSlaveAgentE2EHelper(t *testing.T) {

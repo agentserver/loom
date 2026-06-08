@@ -38,7 +38,7 @@ cat <<EOF
   Observer is up.  Wire other agents to this workspace with:
 
     observer.url:          http://observer:8090     (inside the compose net)
-                           http://127.0.0.1:18090   (from your host)
+                           http://127.0.0.1:18190   (from your host)
     observer.workspace_id: ws-test
     observer.api_key:      $API_KEY
 ================================================================

@@ -27,6 +27,11 @@ Use this URL for production smoke/e2e API traffic. Do not require a local
 route is available. Port-forwarding remains only a fallback for disposable
 local-runner debugging before the production route exists.
 
+CI smoke is intentionally separate from the public route. It deploys a temporary
+Helm release such as `observer-ci-1234`, then uses `kubectl port-forward` on
+runner-local port `18190` to test that release. The public URL is reserved for
+manual release validation of Helm release `observer`.
+
 The cluster should pull public images through the Nanjing registry mirror:
 
 ```text
@@ -42,15 +47,27 @@ minio/minio:latest -> registry.nj.cs.ac.cn/dockerhub/minio/minio:latest
 alpine:3.20        -> registry.nj.cs.ac.cn/dockerhub/alpine:3.20
 ```
 
+The production observer image is published as:
+
+```text
+GitHub Actions push endpoint: registry.nj.cs.ac.cn:10062/loom/observer:<tag>
+Kubernetes pull endpoint:    registry.nj.cs.ac.cn/loom/observer:<tag>
+```
+
 Render check:
 
 ```bash
-cd /root/multi-agent/.worktrees/observer-postgres-k8s-design
+cd /root/multi-agent
 multi-agent/tests/k8s_observer/smoke.sh
 ```
 
-The smoke script reads the `dev-yuzishu` namespace for pods and rollout status.
-Chart lint and template rendering are non-mutating checks.
+The smoke script reads the `dev-yuzishu` namespace for pods and rollout status,
+and checks that the production render includes observer, PostgreSQL, MinIO, and
+the MinIO bucket Job. Chart lint and template rendering are non-mutating checks.
+
+The production Helm values intentionally set `gateway.enabled=false`. The public
+HTTPRoute for `https://loom.nj.cs.ac.cn:10062/` is platform-managed because this
+namespace identity cannot manage Gateway API `HTTPRoute` resources.
 
 ## Live Test Stack
 
@@ -65,6 +82,9 @@ creates:
 
 This path is only for real smoke/e2e before a project observer image is
 published to the registry. The production deployment path is the Helm chart.
+The disposable live-smoke stack was removed after CI smoke moved to temporary
+Helm releases. Temporary CI smoke releases use their own names and do not
+require the public route.
 
 Required Secret:
 
@@ -105,11 +125,12 @@ Completed non-mutating checks on `k8s-nj-prod`:
 kubectl --context k8s-nj-prod config current-context
 helm --kube-context k8s-nj-prod lint multi-agent/deploy/charts/observer
 helm --kube-context k8s-nj-prod template observer multi-agent/deploy/charts/observer -n dev-yuzishu -f multi-agent/deploy/charts/observer/values-production.example.yaml >/tmp/observer-rendered.yaml
-grep -q 'kind: HTTPRoute' /tmp/observer-rendered.yaml
+grep -q 'name: observer-observer-postgresql' /tmp/observer-rendered.yaml
+grep -q 'name: observer-observer-minio' /tmp/observer-rendered.yaml
 ```
 
 Result: context printed `k8s-nj-prod`, Helm lint passed, render passed, and
-the rendered manifest included `HTTPRoute`.
+the rendered manifest included the observer stack resources.
 
 Full smoke in `observer` namespace was blocked for this kube user:
 
@@ -140,7 +161,7 @@ into the runner pod, and running migrations against in-cluster PostgreSQL:
 PATH=/tmp/observer-helm-bin:$PATH multi-agent/tests/k8s_observer/smoke.sh
 ```
 
-Result: Helm lint passed, HTTPRoute rendered, the namespace pod listing
+Result: Helm lint passed, the observer stack rendered, the namespace pod listing
 returned the live stack, and `deploy/observer-observer` reached ready state.
 
 Manual API smoke initially used local port-forwards to `svc/observer-observer`

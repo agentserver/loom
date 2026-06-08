@@ -1,0 +1,324 @@
+name: observer build and deploy
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - multi-agent/**
+      - .github/workflows/observer-deploy.yml
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Deployment target
+        required: true
+        default: smoke
+        type: choice
+        options:
+          - smoke
+          - release
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY_PUSH: registry.nj.cs.ac.cn:10062
+  REGISTRY_PULL: registry.nj.cs.ac.cn
+  IMAGE_PATH: loom/observer
+  KUBE_CONTEXT: k8s-nj-prod
+  OBSERVER_NAMESPACE: dev-yuzishu
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login to Nanjing registry
+        env:
+          REGISTRY_NJ_USERNAME: ${{ secrets.REGISTRY_NJ_USERNAME }}
+          REGISTRY_NJ_PASSWORD: ${{ secrets.REGISTRY_NJ_PASSWORD }}
+        run: |
+          test -n "$REGISTRY_NJ_USERNAME"
+          test -n "$REGISTRY_NJ_PASSWORD"
+          echo "$REGISTRY_NJ_PASSWORD" | docker login "$REGISTRY_PUSH" \
+            -u "$REGISTRY_NJ_USERNAME" \
+            --password-stdin
+      - name: Build observer image
+        working-directory: multi-agent
+        run: |
+          docker build --network=host \
+            -f cmd/observer-server/Dockerfile \
+            -t "$REGISTRY_PUSH/$IMAGE_PATH:${GITHUB_SHA}" \
+            .
+      - name: Push immutable SHA tag
+        run: docker push "$REGISTRY_PUSH/$IMAGE_PATH:${GITHUB_SHA}"
+      - name: Push moving master tag
+        if: github.ref == 'refs/heads/master'
+        run: |
+          docker tag "$REGISTRY_PUSH/$IMAGE_PATH:${GITHUB_SHA}" "$REGISTRY_PUSH/$IMAGE_PATH:master-latest"
+          docker push "$REGISTRY_PUSH/$IMAGE_PATH:master-latest"
+
+  smoke:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push' || inputs.target == 'smoke'
+    env:
+      SMOKE_RELEASE: observer-ci-${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-kubectl@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.15.4
+      - name: Configure kubeconfig
+        env:
+          KUBECONFIG_NJ_PROD: ${{ secrets.KUBECONFIG_NJ_PROD }}
+        run: |
+          test -n "$KUBECONFIG_NJ_PROD"
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBECONFIG_NJ_PROD" > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          kubectl --context "$KUBE_CONTEXT" config set-context "$KUBE_CONTEXT" --namespace="$OBSERVER_NAMESPACE"
+          kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" auth can-i create deployments
+          kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" auth can-i create pods/portforward
+      - name: Generate smoke values
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import secrets
+          import string
+
+          alphabet = string.ascii_letters + string.digits
+          postgres_password = "".join(secrets.choice(alphabet) for _ in range(32))
+          minio_user = "minio" + "".join(secrets.choice(alphabet) for _ in range(12))
+          minio_password = "".join(secrets.choice(alphabet) for _ in range(32))
+          telemetry_key = "".join(secrets.choice(alphabet) for _ in range(32))
+          release = os.environ["SMOKE_RELEASE"]
+
+          values = {
+              "replicaCount": 1,
+              "existingSecret": "",
+              "secret": {
+                  "create": True,
+                  "databaseUrl": f"postgres://observer:{postgres_password}@{release}-observer-postgresql:5432/observer?sslmode=disable",
+                  "s3AccessKey": minio_user,
+                  "s3SecretKey": minio_password,
+                  "telemetryKeys": {
+                      "telemetry-global-key": telemetry_key,
+                  },
+              },
+              "gateway": {"enabled": False},
+              "config": {
+                  "identity": {
+                      "legacyAPIKeys": {"enabled": False},
+                      "agentserver": {
+                          "enabled": True,
+                          "url": "https://agent.cs.ac.cn",
+                      },
+                  },
+                  "objectStore": {
+                      "s3": {
+                          "endpoint": f"http://{release}-observer-minio:9000",
+                          "useSSL": False,
+                      },
+                  },
+              },
+              "postgresql": {
+                  "enabled": True,
+                  "auth": {
+                      "username": "observer",
+                      "password": postgres_password,
+                      "database": "observer",
+                  },
+                  "persistence": {"enabled": True, "size": "1Gi"},
+              },
+              "minio": {
+                  "enabled": True,
+                  "auth": {
+                      "rootUser": minio_user,
+                      "rootPassword": minio_password,
+                  },
+                  "bucket": "observer-artifacts",
+                  "persistence": {"enabled": True, "size": "1Gi"},
+              },
+              "migration": {"useHelmHook": True},
+              "retention": {"enabled": False},
+          }
+          with open("/tmp/observer-smoke-values.json", "w", encoding="utf-8") as f:
+              json.dump(values, f)
+          PY
+      - name: Deploy smoke stack
+        run: |
+          helm --kube-context "$KUBE_CONTEXT" upgrade --install "$SMOKE_RELEASE" \
+            ./multi-agent/deploy/charts/observer \
+            -n "$OBSERVER_NAMESPACE" \
+            -f ./multi-agent/deploy/charts/observer/values-production.example.yaml \
+            -f /tmp/observer-smoke-values.json \
+            --set image.repository="$REGISTRY_PULL/$IMAGE_PATH" \
+            --set image.tag="${GITHUB_SHA}" \
+            --wait \
+            --wait-for-jobs \
+            --timeout 10m
+      - name: Smoke through local port-forward
+        run: |
+          set -euo pipefail
+          kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" port-forward "svc/$SMOKE_RELEASE-observer" 18190:8090 >/tmp/observer-port-forward.log 2>&1 &
+          pf_pid="$!"
+          trap 'kill "$pf_pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:18190/readyz >/tmp/observer-readyz.out 2>/tmp/observer-readyz.err; then
+              curl -fsS http://127.0.0.1:18190/healthz
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/observer-port-forward.log || true
+          cat /tmp/observer-readyz.err || true
+          exit 1
+      - name: Cleanup smoke stack
+        if: always()
+        run: |
+          helm --kube-context "$KUBE_CONTEXT" uninstall "$SMOKE_RELEASE" -n "$OBSERVER_NAMESPACE" --ignore-not-found || true
+          kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" delete pvc -l app.kubernetes.io/instance="$SMOKE_RELEASE" --ignore-not-found || true
+
+  release:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'release'
+    environment: k8s-nj-prod
+    env:
+      OBSERVER_RELEASE: observer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-kubectl@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.15.4
+      - name: Configure kubeconfig
+        env:
+          KUBECONFIG_NJ_PROD: ${{ secrets.KUBECONFIG_NJ_PROD }}
+        run: |
+          test -n "$KUBECONFIG_NJ_PROD"
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBECONFIG_NJ_PROD" > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          kubectl --context "$KUBE_CONTEXT" config set-context "$KUBE_CONTEXT" --namespace="$OBSERVER_NAMESPACE"
+          kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" auth can-i create deployments
+      - name: Fail clearly on non-Helm live-smoke conflicts
+        run: |
+          set -euo pipefail
+          conflicts=0
+          for resource in deployment/observer-observer service/observer-observer statefulset/observer-postgres service/observer-minio; do
+            if kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" get "$resource" >/tmp/observer-resource.json 2>/dev/null; then
+              owner="$(kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" get "$resource" -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}' 2>/dev/null || true)"
+              if [ "$owner" != "$OBSERVER_RELEASE" ]; then
+                echo "$resource exists but is not owned by Helm release $OBSERVER_RELEASE" >&2
+                conflicts=1
+              fi
+            fi
+          done
+          if [ "$conflicts" -ne 0 ]; then
+            echo "Delete or migrate the disposable live-smoke observer resources before release deploy." >&2
+            exit 1
+          fi
+      - name: Generate release secret values
+        env:
+          OBSERVER_POSTGRES_PASSWORD: ${{ secrets.OBSERVER_POSTGRES_PASSWORD }}
+          OBSERVER_DATABASE_URL: ${{ secrets.OBSERVER_DATABASE_URL }}
+          MINIO_ROOT_USER: ${{ secrets.MINIO_ROOT_USER }}
+          MINIO_ROOT_PASSWORD: ${{ secrets.MINIO_ROOT_PASSWORD }}
+          OBSERVER_TELEMETRY_KEY: ${{ secrets.OBSERVER_TELEMETRY_KEY }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          required = [
+              "OBSERVER_POSTGRES_PASSWORD",
+              "OBSERVER_DATABASE_URL",
+              "MINIO_ROOT_USER",
+              "MINIO_ROOT_PASSWORD",
+              "OBSERVER_TELEMETRY_KEY",
+          ]
+          missing = [name for name in required if not os.environ.get(name)]
+          if missing:
+              raise SystemExit("missing required secrets: " + ", ".join(missing))
+
+          values = {
+              "existingSecret": "",
+              "secret": {
+                  "create": True,
+                  "databaseUrl": os.environ["OBSERVER_DATABASE_URL"],
+                  "s3AccessKey": os.environ["MINIO_ROOT_USER"],
+                  "s3SecretKey": os.environ["MINIO_ROOT_PASSWORD"],
+                  "telemetryKeys": {
+                      "telemetry-global-key": os.environ["OBSERVER_TELEMETRY_KEY"],
+                  },
+              },
+              "config": {
+                  "identity": {
+                      "legacyAPIKeys": {"enabled": False},
+                      "agentserver": {
+                          "enabled": True,
+                          "url": "https://agent.cs.ac.cn",
+                      },
+                  },
+                  "objectStore": {
+                      "s3": {
+                          "endpoint": "http://observer-observer-minio:9000",
+                          "useSSL": False,
+                      },
+                  },
+              },
+              "postgresql": {
+                  "enabled": True,
+                  "auth": {
+                      "username": "observer",
+                      "password": os.environ["OBSERVER_POSTGRES_PASSWORD"],
+                      "database": "observer",
+                  },
+              },
+              "minio": {
+                  "enabled": True,
+                  "auth": {
+                      "rootUser": os.environ["MINIO_ROOT_USER"],
+                      "rootPassword": os.environ["MINIO_ROOT_PASSWORD"],
+                  },
+                  "bucket": "observer-artifacts",
+              },
+          }
+          with open("/tmp/observer-release-secret-values.json", "w", encoding="utf-8") as f:
+              json.dump(values, f)
+          PY
+      - name: Deploy release stack
+        run: |
+          helm --kube-context "$KUBE_CONTEXT" upgrade --install "$OBSERVER_RELEASE" \
+            ./multi-agent/deploy/charts/observer \
+            -n "$OBSERVER_NAMESPACE" \
+            -f ./multi-agent/deploy/charts/observer/values-production.example.yaml \
+            -f /tmp/observer-release-secret-values.json \
+            --set image.repository="$REGISTRY_PULL/$IMAGE_PATH" \
+            --set image.tag="${GITHUB_SHA}" \
+            --set migration.jobNameSuffix="${GITHUB_SHA::12}" \
+            --wait \
+            --wait-for-jobs \
+            --timeout 10m
+      - name: Verify release rollout
+        run: |
+          kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" rollout status statefulset/observer-observer-postgresql --timeout=300s
+          kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" rollout status statefulset/observer-observer-minio --timeout=300s
+          kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" rollout status deployment/observer-observer --timeout=300s
+          kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" get pods -l app.kubernetes.io/instance=observer
+      - name: Public release smoke
+        run: |
+          status="$(curl -k -sS -o /tmp/observer-public.out -w '%{http_code}' https://loom.nj.cs.ac.cn:10062/)"
+          case "$status" in
+            200|401|403|404|405)
+              echo "observer public route reachable with HTTP $status"
+              ;;
+            *)
+              cat /tmp/observer-public.out
+              echo "unexpected observer public route status: $status" >&2
+              exit 1
+              ;;
+          esac

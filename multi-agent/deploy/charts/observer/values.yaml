@@ -1,7 +1,7 @@
 replicaCount: 2
 
 image:
-  repository: ghcr.io/yourorg/multi-agent/observer-server
+  repository: registry.nj.cs.ac.cn/loom/observer
   tag: latest
   pullPolicy: IfNotPresent
 
@@ -96,6 +96,66 @@ config:
       burst: 120
     maxBodyBytes: 262144
     retentionDays: 30
+
+postgresql:
+  enabled: true
+  image:
+    repository: registry.nj.cs.ac.cn/dockerhub/postgres
+    tag: 16-alpine
+    pullPolicy: IfNotPresent
+  service:
+    port: 5432
+  auth:
+    username: observer
+    password: ""
+    database: observer
+  persistence:
+    enabled: true
+    storageClassName: csi-rbd-sc
+    accessModes:
+      - ReadWriteOnce
+    size: 20Gi
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+
+minio:
+  enabled: true
+  image:
+    repository: registry.nj.cs.ac.cn/dockerhub/minio/minio
+    tag: latest
+    pullPolicy: IfNotPresent
+  mcImage:
+    repository: registry.nj.cs.ac.cn/dockerhub/minio/mc
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    apiPort: 9000
+    consolePort: 9001
+  auth:
+    rootUser: ""
+    rootPassword: ""
+  bucket: observer-artifacts
+  persistence:
+    enabled: true
+    storageClassName: csi-rbd-sc
+    accessModes:
+      - ReadWriteOnce
+    size: 50Gi
+  bucketJob:
+    backoffLimit: 6
+    ttlSecondsAfterFinished: 86400
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
 
 migration:
   enabled: true

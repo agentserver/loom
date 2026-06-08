@@ -29,6 +29,18 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
+{{- define "observer.postgresql.fullname" -}}
+{{- printf "%s-postgresql" (include "observer.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "observer.minio.fullname" -}}
+{{- printf "%s-minio" (include "observer.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "observer.minioBucketJobName" -}}
+{{- printf "%s-create-bucket" (include "observer.minio.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
 {{- define "observer.migrationJobName" -}}
 {{- $base := include "observer.fullname" . -}}
 {{- if .Values.migration.useHelmHook -}}

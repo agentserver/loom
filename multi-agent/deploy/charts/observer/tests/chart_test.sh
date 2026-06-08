@@ -17,6 +17,10 @@ grep -q 'kind: CronJob' <<<"$rendered"
 grep -q 'name: observer-test-observer-config' <<<"$rendered"
 grep -q 'configMap:' <<<"$rendered"
 grep -q 'name: observer-test-observer-migrate-0-1-0' <<<"$rendered"
+grep -q 'name: observer-test-observer-postgresql' <<<"$rendered"
+grep -q 'name: observer-test-observer-minio' <<<"$rendered"
+grep -q 'storageClassName: csi-rbd-sc' <<<"$rendered"
+grep -q 'name: observer-test-observer-minio-create-bucket' <<<"$rendered"
 if grep -q 'helm.sh/hook' <<<"$rendered"; then
   echo "default migration job must not render helm hook annotations" >&2
   exit 1
@@ -61,7 +65,31 @@ agentserver_only="$(helm template observer-test "$CHART_DIR" \
   --set config.apiKeys=null \
   --set config.identity.legacyAPIKeys.enabled=false \
   --set config.identity.agentserver.enabled=true \
-  --set config.identity.agentserver.url=https://agentserver.example.com)"
+  --set config.identity.agentserver.url=https://agentserver.example.com \
+  --set postgresql.enabled=false \
+  --set minio.enabled=false)"
 grep -q 'legacy_api_keys:' <<<"$agentserver_only"
 grep -q 'enabled: false' <<<"$agentserver_only"
 grep -q 'url: "https://agentserver.example.com"' <<<"$agentserver_only"
+
+managed_stack="$(helm template observer-test "$CHART_DIR" \
+  --set secret.create=true \
+  --set secret.databaseUrl='postgres://observer:observer@observer-test-observer-postgresql:5432/observer?sslmode=disable' \
+  --set secret.s3AccessKey=minioadmin \
+  --set secret.s3SecretKey=minioadmin \
+  --set secret.telemetryKeys.telemetry-global-key=ops-secret \
+  --set config.identity.agentserver.enabled=true \
+  --set config.identity.agentserver.url=https://agentserver.example.com \
+  --set postgresql.enabled=true \
+  --set postgresql.auth.username=observer \
+  --set postgresql.auth.password=observer \
+  --set postgresql.auth.database=observer \
+  --set minio.enabled=true \
+  --set minio.auth.rootUser=minioadmin \
+  --set minio.auth.rootPassword=minioadmin)"
+grep -q 'kind: StatefulSet' <<<"$managed_stack"
+grep -q 'name: observer-test-observer-postgresql' <<<"$managed_stack"
+grep -q 'POSTGRES_PASSWORD' <<<"$managed_stack"
+grep -q 'name: observer-test-observer-minio' <<<"$managed_stack"
+grep -q 'MINIO_ROOT_PASSWORD' <<<"$managed_stack"
+grep -q 'name: observer-test-observer-minio-create-bucket' <<<"$managed_stack"

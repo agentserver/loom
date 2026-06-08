@@ -11,9 +11,18 @@
 # - {{ default "telemetry-global-key" .secretKey }} for {{ .keyEnv }}
 {{- end }}
 {{- end }}
+{{- if .Values.postgresql.enabled }}
+# - postgres-user, postgres-password, postgres-database for chart-managed PostgreSQL
+{{- end }}
+{{- if .Values.minio.enabled }}
+# - minio-root-user and minio-root-password for chart-managed MinIO
+{{- end }}
 {{- if .Values.gateway.enabled }}
 #
 # HTTPRoute host: {{ .Values.gateway.host }}
+{{- else }}
+#
+# HTTPRoute is disabled in this release. Use a platform-managed route or enable gateway.enabled explicitly.
 {{- end }}
 {{- if and .Values.migration.enabled (not .Values.migration.useHelmHook) }}
 #

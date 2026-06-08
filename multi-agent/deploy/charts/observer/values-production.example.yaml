@@ -1,16 +1,17 @@
 replicaCount: 3
 
 image:
-  # k8s-nj-prod should pull through the Nanjing registry mirror.
-  # Replace "yourorg" with the published project image owner/path.
-  repository: registry.nj.cs.ac.cn/ghcr/yourorg/multi-agent/observer-server
-  tag: latest
+  repository: registry.nj.cs.ac.cn/loom/observer
+  tag: master-latest
   pullPolicy: IfNotPresent
 
 existingSecret: observer-production-secret
 
 gateway:
-  enabled: true
+  # The public HTTPRoute for https://loom.nj.cs.ac.cn:10062/ is
+  # platform-managed. CI/CD updates the Service behind it but does not manage
+  # Gateway API resources because the deployment identity lacks HTTPRoute RBAC.
+  enabled: false
   parentRefs:
     - name: cilium-gateway
       namespace: cilium-gateway
@@ -22,7 +23,8 @@ config:
     legacyAPIKeys:
       enabled: false
     agentserver:
-      enabled: false
+      enabled: true
+      url: https://agent.cs.ac.cn
   store:
     driver: postgres
     postgres:
@@ -34,10 +36,10 @@ config:
   objectStore:
     driver: s3
     s3:
-      endpoint: s3.internal.example.com
+      endpoint: http://observer-observer-minio:9000
       region: us-east-1
       bucket: observer-artifacts
-      useSSL: true
+      useSSL: false
       accessKeyEnv: OBSERVER_S3_ACCESS_KEY
       accessKeySecretKey: s3-access-key
       secretKeyEnv: OBSERVER_S3_SECRET_KEY
@@ -69,3 +71,25 @@ migration:
   enabled: true
   useHelmHook: true
   jobNameSuffix: ""
+
+postgresql:
+  enabled: true
+  auth:
+    username: observer
+    database: observer
+  persistence:
+    enabled: true
+    storageClassName: csi-rbd-sc
+    accessModes:
+      - ReadWriteOnce
+    size: 20Gi
+
+minio:
+  enabled: true
+  bucket: observer-artifacts
+  persistence:
+    enabled: true
+    storageClassName: csi-rbd-sc
+    accessModes:
+      - ReadWriteOnce
+    size: 50Gi

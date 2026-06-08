@@ -30,7 +30,7 @@ services:
     image: loom-deploy-test:latest
     container_name: loom-observer
     ports:
-      - "127.0.0.1:18090:8090"
+      - "127.0.0.1:18190:8090"
     volumes:
       - ../:/opt/loom/deploy:ro
     command: ["bash", "/opt/loom/deploy/compose-test/entrypoint-observer.sh"]

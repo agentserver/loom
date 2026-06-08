@@ -86,7 +86,7 @@ Visit each URL in a browser, approve. After approval:
   publishes its capability card. You can verify with:
   ```bash
   curl -sS -H "Authorization: Bearer COMPOSE_TESTKEY_dont_use_in_prod" \
-    http://127.0.0.1:18090/api/agents | python3 -m json.tool
+    http://127.0.0.1:18190/api/agents | python3 -m json.tool
   ```
 
 ## Codex driver (optional)

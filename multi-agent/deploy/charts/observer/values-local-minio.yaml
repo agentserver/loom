@@ -5,7 +5,7 @@ gateway:
 
 secret:
   create: true
-  databaseUrl: postgres://observer:observer@postgres:5432/observer?sslmode=disable
+  databaseUrl: postgres://observer:observer@observer-observer-postgresql:5432/observer?sslmode=disable
   s3AccessKey: minioadmin
   s3SecretKey: minioadmin
   telemetryKeys:
@@ -33,7 +33,7 @@ config:
   objectStore:
     driver: s3
     s3:
-      endpoint: minio:9000
+      endpoint: http://observer-observer-minio:9000
       region: us-east-1
       bucket: observer-artifacts
       useSSL: false
@@ -50,3 +50,29 @@ config:
         secretKey: telemetry-global-key
         workspaceID: "*"
         note: local operations telemetry key
+
+postgresql:
+  enabled: true
+  auth:
+    username: observer
+    password: observer
+    database: observer
+  persistence:
+    enabled: true
+    storageClassName: csi-rbd-sc
+    accessModes:
+      - ReadWriteOnce
+    size: 1Gi
+
+minio:
+  enabled: true
+  auth:
+    rootUser: minioadmin
+    rootPassword: minioadmin
+  bucket: observer-artifacts
+  persistence:
+    enabled: true
+    storageClassName: csi-rbd-sc
+    accessModes:
+      - ReadWriteOnce
+    size: 1Gi
