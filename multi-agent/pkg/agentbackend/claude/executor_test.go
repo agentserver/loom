@@ -187,9 +187,14 @@ func TestExecutorCapturesSessionID(t *testing.T) {
 // stdin, wait for the fake claude to exit, and return Result.AwaitingUser set.
 func TestExecutorPausesOnHumanloopIPC(t *testing.T) {
 	bin := writeFakeClaudeReadsStdinThenExits(t, "sess-pause")
-	sockHook := func(path string) {
+	sockHook := func(arg string) {
 		time.Sleep(200 * time.Millisecond)
-		c, err := humanloop.DialIPC(path)
+		ep, err := humanloop.ParseEndpointArg(arg)
+		if err != nil {
+			t.Logf("ParseEndpointArg: %v", err)
+			return
+		}
+		c, err := humanloop.DialIPC(ep)
 		if err != nil {
 			t.Logf("DialIPC: %v", err)
 			return
@@ -224,9 +229,14 @@ echo '{"type":"assistant","message":{"content":[{"type":"text","text":"bye"}]}}'
 		t.Fatal(err)
 	}
 
-	sockHook := func(path string) {
+	sockHook := func(arg string) {
 		time.Sleep(200 * time.Millisecond)
-		c, err := humanloop.DialIPC(path)
+		ep, err := humanloop.ParseEndpointArg(arg)
+		if err != nil {
+			t.Logf("ParseEndpointArg: %v", err)
+			return
+		}
+		c, err := humanloop.DialIPC(ep)
 		if err != nil {
 			t.Logf("DialIPC: %v", err)
 			return
@@ -264,9 +274,14 @@ exec sleep 30 < /dev/null > /dev/null 2>&1
 		t.Fatal(err)
 	}
 
-	sockHook := func(path string) {
+	sockHook := func(arg string) {
 		time.Sleep(50 * time.Millisecond)
-		c, err := humanloop.DialIPC(path)
+		ep, err := humanloop.ParseEndpointArg(arg)
+		if err != nil {
+			t.Logf("ParseEndpointArg: %v", err)
+			return
+		}
+		c, err := humanloop.DialIPC(ep)
 		if err != nil {
 			t.Logf("DialIPC: %v", err)
 			return

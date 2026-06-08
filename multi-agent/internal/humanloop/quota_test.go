@@ -1,14 +1,12 @@
 package humanloop
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestServerQuotaRefusesAfterMax(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "hl.sock")
-	srv, err := ListenIPC(sock)
+	srv, ep, err := ListenIPC(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +29,7 @@ func TestServerQuotaRefusesAfterMax(t *testing.T) {
 		lines = append(lines, `{"jsonrpc":"2.0","id":99,"method":"tools/call","params":{"name":"ask_user","arguments":{"question":"q?"}}}`)
 	}
 
-	resps := drive(t, sock, 2 /* MAX */, lines...)
+	resps := drive(t, EndpointArg(ep), 2 /* MAX */, lines...)
 	if len(resps) < 4 {
 		t.Fatalf("expected ≥4 responses, got %d", len(resps))
 	}

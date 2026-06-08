@@ -2,19 +2,41 @@ package humanloop
 
 import (
 	"encoding/json"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
-func TestIPCRoundTrip(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "hl.sock")
+func TestEndpointArgRoundTrip(t *testing.T) {
+	in := Endpoint{Network: "tcp", Address: "127.0.0.1:49152"}
+	arg := EndpointArg(in)
+	got, err := ParseEndpointArg(arg)
+	if err != nil {
+		t.Fatalf("ParseEndpointArg: %v", err)
+	}
+	if got != in {
+		t.Fatalf("endpoint = %+v, want %+v", got, in)
+	}
+}
 
-	srv, err := ListenIPC(sock)
+func TestParseEndpointArgAcceptsLegacyUnixPath(t *testing.T) {
+	got, err := ParseEndpointArg("/tmp/hl.sock")
+	if err != nil {
+		t.Fatalf("ParseEndpointArg legacy path: %v", err)
+	}
+	if got.Network != "unix" || got.Address != "/tmp/hl.sock" {
+		t.Fatalf("legacy endpoint = %+v", got)
+	}
+}
+
+func TestIPCRoundTrip(t *testing.T) {
+	srv, ep, err := ListenIPC(t.TempDir())
 	if err != nil {
 		t.Fatalf("ListenIPC: %v", err)
 	}
 	defer srv.Close()
+	if ep.Network == "" || ep.Address == "" {
+		t.Fatalf("empty endpoint: %+v", ep)
+	}
 
 	received := make(chan Payload, 1)
 	go func() {
@@ -26,7 +48,7 @@ func TestIPCRoundTrip(t *testing.T) {
 		received <- p
 	}()
 
-	client, err := DialIPC(sock)
+	client, err := DialIPC(ep)
 	if err != nil {
 		t.Fatalf("DialIPC: %v", err)
 	}

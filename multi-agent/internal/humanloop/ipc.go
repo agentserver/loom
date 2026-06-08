@@ -1,6 +1,6 @@
 // Package humanloop wires the slave's chat backend to the user at the driver:
 // when the backend's stdio MCP server "humanloop" receives an ask_user /
-// request_permission tool call, it forwards the payload over a unix socket
+// request_permission tool call, it forwards the payload over an IPC endpoint
 // to the slave's chat executor, which pauses the conversation.
 package humanloop
 
@@ -9,15 +9,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"os"
-	"path/filepath"
+	"strings"
 )
 
 // Payload is what humanloop server sends to the executor when the model calls
 // ask_user or request_permission. It mirrors AskUserPayload in
 // internal/executor; keeping them as two types avoids a cyclic import.
 type Payload struct {
-	Kind     string   `json:"kind"`              // "ask_user" | "request_permission"
+	Kind     string   `json:"kind"` // "ask_user" | "request_permission"
 	Question string   `json:"question,omitempty"`
 	Options  []string `json:"options,omitempty"`
 	Context  string   `json:"context,omitempty"`
@@ -26,23 +25,40 @@ type Payload struct {
 	Reason   string   `json:"reason,omitempty"`
 }
 
-// IPCServer listens on a unix socket for a single Payload from the humanloop
-// MCP subcommand and then closes.
-type IPCServer struct {
-	ln   net.Listener
-	path string
+type Endpoint struct {
+	Network string `json:"network"`
+	Address string `json:"address"`
 }
 
-func ListenIPC(path string) (*IPCServer, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, err
+func EndpointArg(ep Endpoint) string {
+	b, _ := json.Marshal(ep)
+	return string(b)
+}
+
+func ParseEndpointArg(arg string) (Endpoint, error) {
+	arg = strings.TrimSpace(arg)
+	if arg == "" {
+		return Endpoint{}, fmt.Errorf("humanloop endpoint is empty")
 	}
-	_ = os.Remove(path) // best-effort: drop stale socket
-	ln, err := net.Listen("unix", path)
-	if err != nil {
-		return nil, fmt.Errorf("humanloop listen %s: %w", path, err)
+	if strings.HasPrefix(arg, "{") {
+		var ep Endpoint
+		if err := json.Unmarshal([]byte(arg), &ep); err != nil {
+			return Endpoint{}, fmt.Errorf("parse humanloop endpoint: %w", err)
+		}
+		return ep, nil
 	}
-	return &IPCServer{ln: ln, path: path}, nil
+	return Endpoint{Network: "unix", Address: arg}, nil
+}
+
+// IPCServer listens for a single Payload from the humanloop
+// MCP subcommand and then closes.
+type IPCServer struct {
+	ln      net.Listener
+	cleanup func()
+}
+
+func ListenIPC(baseDir string) (*IPCServer, Endpoint, error) {
+	return listenIPC(baseDir)
 }
 
 func (s *IPCServer) Receive() (Payload, error) {
@@ -64,19 +80,27 @@ func (s *IPCServer) Receive() (Payload, error) {
 
 func (s *IPCServer) Close() error {
 	err := s.ln.Close()
-	_ = os.Remove(s.path)
+	if s.cleanup != nil {
+		s.cleanup()
+	}
 	return err
 }
 
-// IPCClient dials the executor's socket and sends one Payload.
+// IPCClient dials the executor's endpoint and sends one Payload.
 type IPCClient struct {
 	conn net.Conn
 }
 
-func DialIPC(path string) (*IPCClient, error) {
-	c, err := net.Dial("unix", path)
+func DialIPC(ep Endpoint) (*IPCClient, error) {
+	if ep.Network == "" {
+		return nil, fmt.Errorf("humanloop endpoint network is empty")
+	}
+	if ep.Address == "" {
+		return nil, fmt.Errorf("humanloop endpoint address is empty")
+	}
+	c, err := net.Dial(ep.Network, ep.Address)
 	if err != nil {
-		return nil, fmt.Errorf("humanloop dial %s: %w", path, err)
+		return nil, fmt.Errorf("humanloop dial %s %s: %w", ep.Network, ep.Address, err)
 	}
 	return &IPCClient{conn: c}, nil
 }

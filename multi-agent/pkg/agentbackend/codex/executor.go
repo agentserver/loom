@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -28,8 +27,8 @@ type executor struct {
 	maxQuestions     int    // default 5
 	shutdownGraceSec int    // default 10
 
-	// Test hook: when non-nil, invoked with the unix socket path right after
-	// the listener is up, in its own goroutine.
+	// Test hook: when non-nil, invoked with the endpoint arg right after the
+	// listener is up, in its own goroutine.
 	socketHookForTest func(string)
 }
 
@@ -109,24 +108,23 @@ func (e *executor) runWithArgv(ctx context.Context, argvHead []string, prompt st
 		return agentbackend.Result{}, err
 	}
 	defer os.RemoveAll(sockDir)
-	sockPath := filepath.Join(sockDir, "hl.sock")
-
-	srv, err := humanloop.ListenIPC(sockPath)
+	srv, ep, err := humanloop.ListenIPC(sockDir)
 	if err != nil {
 		return agentbackend.Result{}, err
 	}
 	defer srv.Close()
 	if e.socketHookForTest != nil {
-		go e.socketHookForTest(sockPath)
+		go e.socketHookForTest(humanloop.EndpointArg(ep))
 	}
 
 	// Inline `-c` overrides for humanloop MCP. codex parses each value as TOML,
 	// falling back to literal string. Wrapping command in double-quotes makes
 	// it a TOML string; args is a TOML array of strings.
+	endpointArg := humanloop.EndpointArg(ep)
 	mcpArgs := []string{
-		"-c", fmt.Sprintf(`mcp_servers.loom_humanloop.command="%s"`, e.binSelf),
-		"-c", fmt.Sprintf(`mcp_servers.loom_humanloop.args=["humanloop-mcp","%s","%s"]`,
-			sockPath, strconv.Itoa(e.maxQuestions)),
+		"-c", fmt.Sprintf("mcp_servers.loom_humanloop.command=%s", tomlString(e.binSelf)),
+		"-c", fmt.Sprintf("mcp_servers.loom_humanloop.args=[%s,%s,%s]",
+			tomlString("humanloop-mcp"), tomlString(endpointArg), tomlString(strconv.Itoa(e.maxQuestions))),
 	}
 	args := append([]string{}, argvHead...)
 	args = append(args, mcpArgs...)
@@ -277,4 +275,9 @@ func (e *executor) runWithArgv(ctx context.Context, argvHead []string, prompt st
 		SessionID:        sessionID,
 		AwaitingUser:     awaiting,
 	}, nil
+}
+
+func tomlString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }

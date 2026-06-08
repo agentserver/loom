@@ -28,8 +28,8 @@ type executor struct {
 	maxQuestions     int    // default 5
 	shutdownGraceSec int    // default 10
 
-	// Test hook: when non-nil, invoked with the unix socket path right after
-	// the listener is up, in its own goroutine.
+	// Test hook: when non-nil, invoked with the endpoint arg right after the
+	// listener is up, in its own goroutine.
 	socketHookForTest func(string)
 }
 
@@ -55,19 +55,17 @@ func (e *executor) Run(ctx context.Context, t agentbackend.Task, sink agentbacke
 		return agentbackend.Result{}, err
 	}
 	defer os.RemoveAll(sockDir)
-	sockPath := filepath.Join(sockDir, "hl.sock")
-
-	srv, err := humanloop.ListenIPC(sockPath)
+	srv, ep, err := humanloop.ListenIPC(sockDir)
 	if err != nil {
 		return agentbackend.Result{}, err
 	}
 	defer srv.Close()
 	if e.socketHookForTest != nil {
-		go e.socketHookForTest(sockPath)
+		go e.socketHookForTest(humanloop.EndpointArg(ep))
 	}
 
 	mcpConfigPath := filepath.Join(sockDir, "mcp.json")
-	if err := writeHumanloopMCPConfig(mcpConfigPath, e.binSelf, sockPath, e.maxQuestions); err != nil {
+	if err := writeHumanloopMCPConfig(mcpConfigPath, e.binSelf, ep, e.maxQuestions); err != nil {
 		return agentbackend.Result{}, err
 	}
 
@@ -263,12 +261,12 @@ func (e *executor) RunResume(ctx context.Context, sessionID, answer string, sink
 	return sub.Run(ctx, agentbackend.Task{Prompt: "User answered: " + answer}, sink)
 }
 
-func writeHumanloopMCPConfig(path, binSelf, sockPath string, max int) error {
+func writeHumanloopMCPConfig(path, binSelf string, ep humanloop.Endpoint, max int) error {
 	cfg := map[string]any{
 		"mcpServers": map[string]any{
 			"loom_humanloop": map[string]any{
 				"command": binSelf,
-				"args":    []string{"humanloop-mcp", sockPath, strconv.Itoa(max)},
+				"args":    []string{"humanloop-mcp", humanloop.EndpointArg(ep), strconv.Itoa(max)},
 			},
 		},
 	}
