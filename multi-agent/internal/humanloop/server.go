@@ -10,9 +10,13 @@ import (
 // ServeStdio reads JSON-RPC 2.0 requests from r line-by-line and writes
 // responses to w. The server implements the MCP subset we need:
 // initialize / notifications/initialized / tools/list / tools/call.
-// ipcSocket is the path of the executor's IPC server; max is the per-process
-// quota for tools/call invocations of ask_user|request_permission.
-func ServeStdio(r io.Reader, w io.Writer, ipcSocket string, max int) error {
+// endpointArg is the executor's IPC endpoint; max is the per-process quota for
+// tools/call invocations of ask_user|request_permission.
+func ServeStdio(r io.Reader, w io.Writer, endpointArg string, max int) error {
+	ep, err := ParseEndpointArg(endpointArg)
+	if err != nil {
+		return err
+	}
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 1<<16), 1<<22)
 	used := 0
@@ -38,7 +42,7 @@ func ServeStdio(r io.Reader, w io.Writer, ipcSocket string, max int) error {
 		case "tools/list":
 			writeResult(w, req.ID, map[string]interface{}{"tools": toolList()})
 		case "tools/call":
-			text := handleCall(req.Params, ipcSocket, &used, max)
+			text := handleCall(req.Params, ep, &used, max)
 			writeResult(w, req.ID, map[string]interface{}{
 				"content": []map[string]interface{}{
 					{"type": "text", "text": text},

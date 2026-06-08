@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -30,14 +29,13 @@ func drive(t *testing.T, sock string, max int, lines ...string) []string {
 }
 
 func TestServerInitializeAndToolsList(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "hl.sock")
-	srv, err := ListenIPC(sock)
+	srv, ep, err := ListenIPC(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer srv.Close()
 
-	resps := drive(t, sock, 5,
+	resps := drive(t, EndpointArg(ep), 5,
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`,
 		`{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`,
 		`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`,
@@ -52,8 +50,7 @@ func TestServerInitializeAndToolsList(t *testing.T) {
 }
 
 func TestServerAskUserForwardsAndReturnsSubmitted(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "hl.sock")
-	srv, err := ListenIPC(sock)
+	srv, ep, err := ListenIPC(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +66,7 @@ func TestServerAskUserForwardsAndReturnsSubmitted(t *testing.T) {
 		got <- p
 	}()
 
-	resps := drive(t, sock, 5,
+	resps := drive(t, EndpointArg(ep), 5,
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`,
 		`{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`,
 		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ask_user","arguments":{"question":"q?","options":["a","b"]}}}`,

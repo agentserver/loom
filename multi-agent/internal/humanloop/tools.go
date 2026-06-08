@@ -43,7 +43,7 @@ func toolList() []map[string]interface{} {
 	}
 }
 
-func handleCall(rawParams json.RawMessage, ipcSocket string, used *int, max int) string {
+func handleCall(rawParams json.RawMessage, ep Endpoint, used *int, max int) string {
 	var p struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -79,7 +79,7 @@ func handleCall(rawParams json.RawMessage, ipcSocket string, used *int, max int)
 		Reason:   args.Reason,
 	}
 
-	client, err := DialIPC(ipcSocket)
+	client, err := DialIPC(ep)
 	if err != nil {
 		return fmt.Sprintf(`{"status":"error","reason":"ipc dial: %s"}`, err.Error())
 	}
