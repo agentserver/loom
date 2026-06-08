@@ -232,7 +232,7 @@ func (e *executor) Run(ctx context.Context, t agentbackend.Task, sink agentbacke
 	}
 	if killed {
 		sink.Close()
-		return agentbackend.Result{}, fmt.Errorf("claude did not exit within %ds grace window after stdin close; SIGTERM/SIGKILL applied", e.shutdownGraceSec)
+		return agentbackend.Result{}, fmt.Errorf("claude did not exit within %ds grace window after stdin close; graceful termination/forced kill applied", e.shutdownGraceSec)
 	}
 	sink.Close()
 	return agentbackend.Result{
