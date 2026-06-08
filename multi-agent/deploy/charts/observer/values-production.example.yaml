@@ -69,7 +69,9 @@ resources:
 
 migration:
   enabled: true
-  useHelmHook: true
+  # Production CI/CD uses the named Job mode with --wait-for-jobs because the
+  # migration container depends on the chart-created Secret.
+  useHelmHook: false
   jobNameSuffix: ""
 
 postgresql:

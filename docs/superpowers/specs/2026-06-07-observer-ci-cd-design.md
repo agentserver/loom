@@ -26,6 +26,8 @@ PostgreSQL, and MinIO.
 - Pushes to `master` deploy an isolated smoke release named
   `observer-ci-<github.run_number>`, test it through `kubectl port-forward` on
   local runner port `18190`, then uninstall the release and delete its PVCs.
+- CI/CD uses the chart's named migration Job mode, not Helm pre-install hooks,
+  because the migration container depends on the chart-created Secret.
 - The Helm release name `observer` and the public route are used only by manual
   release deployments.
 - Observer production identity uses agentserver by default in CD. Legacy

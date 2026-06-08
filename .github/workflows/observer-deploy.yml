@@ -141,7 +141,7 @@ jobs:
                   "bucket": "observer-artifacts",
                   "persistence": {"enabled": True, "size": "1Gi"},
               },
-              "migration": {"useHelmHook": True},
+              "migration": {"useHelmHook": False},
               "retention": {"enabled": False},
           }
           with open("/tmp/observer-smoke-values.json", "w", encoding="utf-8") as f:
@@ -286,6 +286,7 @@ jobs:
                   },
                   "bucket": "observer-artifacts",
               },
+              "migration": {"useHelmHook": False},
           }
           with open("/tmp/observer-release-secret-values.json", "w", encoding="utf-8") as f:
               json.dump(values, f)
