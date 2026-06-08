@@ -9,7 +9,6 @@ Slaves advertise skills through their discovery card. The driver and planner sho
 - `bash`: run explicit Bash through native slave-agent code. On Windows this
   is advertised only when real Bash is detected, such as Git Bash or WSL.
 - `powershell`: run explicit PowerShell through native slave-agent code.
-- `shell`: run through the slave runtime's default command interface.
 - `file`: stateless file read/write/stat through a native slave-agent executor.
 - `claude_permissions`: read or patch Claude Code permissions through native slave-agent code.
 
@@ -144,22 +143,12 @@ Windows paths when targeting Windows slaves. Do not wrap PowerShell in
 `run_slave_bash`; Bash is available on Windows only when the slave has
 detected a real Bash implementation such as Git Bash or WSL.
 
-## `shell`
+## Default shell selection
 
-Prompt is JSON:
-
-```json
-{
-  "script": "python --version",
-  "timeout_sec": 60,
-  "env": {"KEY": "value"}
-}
-```
-
-Use when the command is intentionally shell-agnostic and the slave runtime can
-choose the default interface. Windows slaves default to PowerShell unless they
-explicitly route otherwise; Unix-like slaves usually default to Bash or POSIX
-shell.
+`shell` is a driver-side convenience helper, not a slave skill. The driver's
+`run_slave_shell` tool reads the target card's default `command_interfaces`
+entry and delegates to `skill:"powershell"` or `skill:"bash"`. Windows slaves
+default to PowerShell; Unix-like slaves usually default to Bash.
 
 ## `file`
 
