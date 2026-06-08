@@ -8,6 +8,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+const stillActive uint32 = 259
+
 func TerminateProcess(p *os.Process) error {
 	if p == nil {
 		return nil
@@ -43,5 +45,5 @@ func ProcessExists(pid int) bool {
 	if err := windows.GetExitCodeProcess(h, &code); err != nil {
 		return false
 	}
-	return code == windows.STILL_ACTIVE
+	return code == stillActive
 }

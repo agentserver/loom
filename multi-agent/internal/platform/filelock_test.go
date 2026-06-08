@@ -2,6 +2,7 @@ package platform
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -40,5 +41,26 @@ func TestTryLockCanReacquireAfterUnlock(t *testing.T) {
 	}
 	if err := second.Unlock(); err != nil {
 		t.Fatalf("second Unlock: %v", err)
+	}
+}
+
+func TestFileLockWriteStringWritesThroughLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "holder.lock")
+	lock, err := TryLock(path)
+	if err != nil {
+		t.Fatalf("TryLock: %v", err)
+	}
+	if err := lock.WriteString("123\n"); err != nil {
+		t.Fatalf("WriteString: %v", err)
+	}
+	if err := lock.Unlock(); err != nil {
+		t.Fatalf("Unlock: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != "123\n" {
+		t.Fatalf("lock file content = %q, want %q", got, "123\n")
 	}
 }

@@ -2,6 +2,7 @@ package platform
 
 import (
 	"errors"
+	"io"
 	"os"
 )
 
@@ -23,4 +24,24 @@ func (l *FileLock) Unlock() error {
 		return err
 	}
 	return closeErr
+}
+
+func (l *FileLock) WriteString(s string) error {
+	if l == nil || l.file == nil {
+		return os.ErrInvalid
+	}
+	if err := l.file.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := l.file.Seek(0, 0); err != nil {
+		return err
+	}
+	n, err := l.file.WriteString(s)
+	if err != nil {
+		return err
+	}
+	if n != len(s) {
+		return io.ErrShortWrite
+	}
+	return nil
 }
