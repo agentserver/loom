@@ -28,6 +28,52 @@ func TestParseEndpointArgAcceptsLegacyUnixPath(t *testing.T) {
 	}
 }
 
+func TestParseEndpointArgRejectsEmptyJSONEndpointFields(t *testing.T) {
+	for _, arg := range []string{
+		`{"network":"","address":"127.0.0.1:1234"}`,
+		`{"network":"tcp","address":""}`,
+	} {
+		if _, err := ParseEndpointArg(arg); err == nil {
+			t.Fatalf("ParseEndpointArg(%s) succeeded, want error", arg)
+		}
+	}
+}
+
+func TestParseEndpointArgRejectsUnsupportedNetwork(t *testing.T) {
+	if _, err := ParseEndpointArg(`{"network":"udp","address":"127.0.0.1:1234"}`); err == nil {
+		t.Fatal("ParseEndpointArg accepted unsupported network")
+	}
+}
+
+func TestParseEndpointArgRejectsNonLoopbackTCP(t *testing.T) {
+	for _, arg := range []string{
+		`{"network":"tcp","address":"0.0.0.0:1234"}`,
+		`{"network":"tcp","address":"192.168.1.1:1234"}`,
+	} {
+		if _, err := ParseEndpointArg(arg); err == nil {
+			t.Fatalf("ParseEndpointArg(%s) succeeded, want error", arg)
+		}
+	}
+}
+
+func TestParseEndpointArgAcceptsLoopbackTCP(t *testing.T) {
+	for _, arg := range []string{
+		`{"network":"tcp","address":"127.0.0.1:1234"}`,
+		`{"network":"tcp","address":"localhost:1234"}`,
+		`{"network":"tcp","address":"[::1]:1234"}`,
+	} {
+		if _, err := ParseEndpointArg(arg); err != nil {
+			t.Fatalf("ParseEndpointArg(%s): %v", arg, err)
+		}
+	}
+}
+
+func TestParseEndpointArgInvalidJSONDoesNotFallBackToPath(t *testing.T) {
+	if _, err := ParseEndpointArg(`{"network":"tcp"`); err == nil {
+		t.Fatal("ParseEndpointArg accepted invalid JSON as legacy path")
+	}
+}
+
 func TestIPCRoundTrip(t *testing.T) {
 	srv, ep, err := ListenIPC(t.TempDir())
 	if err != nil {

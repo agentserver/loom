@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/BurntSushi/toml"
+
 	"github.com/yourorg/multi-agent/internal/humanloop"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
@@ -253,5 +255,44 @@ echo "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\"
 	}
 	if !strings.Contains(res.Summary, "User answered: the user's answer") {
 		t.Errorf("expected 'User answered: …' in summary, got %q", res.Summary)
+	}
+}
+
+func TestHumanloopMCPArgsAreTOMLSafe(t *testing.T) {
+	binSelf := `C:\Program Files\Loom "Agent"\slave-agent.exe`
+	ep := humanloop.Endpoint{Network: "unix", Address: `C:\Users\Loom "Agent"\hl.sock`}
+	args := humanloopMCPArgs(binSelf, ep, 7)
+	if len(args) != 4 || args[0] != "-c" || args[2] != "-c" {
+		t.Fatalf("unexpected mcp args shape: %#v", args)
+	}
+
+	var cfg struct {
+		MCPServers map[string]struct {
+			Command string   `toml:"command"`
+			Args    []string `toml:"args"`
+		} `toml:"mcp_servers"`
+	}
+	if _, err := toml.Decode(args[1]+"\n"+args[3], &cfg); err != nil {
+		t.Fatalf("decode TOML overrides: %v\n%s\n%s", err, args[1], args[3])
+	}
+	got := cfg.MCPServers["loom_humanloop"]
+	if got.Command != binSelf {
+		t.Fatalf("command = %q, want %q", got.Command, binSelf)
+	}
+	wantArgs := []string{"humanloop-mcp", humanloop.EndpointArg(ep), "7"}
+	if len(got.Args) != len(wantArgs) {
+		t.Fatalf("args = %#v, want %#v", got.Args, wantArgs)
+	}
+	for i := range wantArgs {
+		if got.Args[i] != wantArgs[i] {
+			t.Fatalf("args[%d] = %q, want %q", i, got.Args[i], wantArgs[i])
+		}
+	}
+	parsed, err := humanloop.ParseEndpointArg(got.Args[1])
+	if err != nil {
+		t.Fatalf("ParseEndpointArg(%q): %v", got.Args[1], err)
+	}
+	if parsed != ep {
+		t.Fatalf("endpoint = %+v, want %+v", parsed, ep)
 	}
 }
