@@ -58,20 +58,20 @@ func (s *Store) Refresh(ctx context.Context, in Input) error {
 }
 
 type snapshot struct {
-	GeneratedAt       string
-	Reason            string
-	DisplayName       string
-	Description       string
-	ServerName        string
-	WorkDir           string
-	Runtime           runtimeInfo
-	Skills            []string
-	Permissions       agentbackend.State
-	Resources         *config.Resources
-	Servers           []serverDoc
-	CurrentState      string
-	RecentHistory     string
-	CommandPresence   []commandPresence
+	GeneratedAt     string
+	Reason          string
+	DisplayName     string
+	Description     string
+	ServerName      string
+	WorkDir         string
+	Runtime         runtimeInfo
+	Skills          []string
+	Permissions     agentbackend.State
+	Resources       *config.Resources
+	Servers         []serverDoc
+	CurrentState    string
+	RecentHistory   string
+	CommandPresence []commandPresence
 }
 
 type runtimeInfo struct {
@@ -411,7 +411,7 @@ func upsertTool(tools []capability.MCPToolDescriptor, tool capability.MCPToolDes
 }
 
 func scanCommands(cfg *config.Config) []commandPresence {
-	names := []string{"python3", "node", "npm", "go", "docker"}
+	names := []string{"python3", "node", "npm", "go", "docker", "powershell.exe", "powershell", "pwsh", "bash"}
 	if cfg != nil {
 		switch cfg.Agent.Kind {
 		case "codex":

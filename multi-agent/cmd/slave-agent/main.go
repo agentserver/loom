@@ -17,6 +17,7 @@ import (
 
 	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/capabilitydoc"
+	"github.com/yourorg/multi-agent/internal/commandiface"
 	"github.com/yourorg/multi-agent/internal/config"
 	"github.com/yourorg/multi-agent/internal/dispatch"
 	"github.com/yourorg/multi-agent/internal/executor"
@@ -151,6 +152,7 @@ func run(cfgPath string) error {
 	if err != nil {
 		return err
 	}
+	caps := normalizeDiscoveryForRuntime(cfg, commandiface.Detector{})
 
 	s, err := store.Open("data.db")
 	if err != nil {
@@ -202,6 +204,8 @@ func run(cfgPath string) error {
 	defer cancel()
 
 	tn := tunnel.New(cfg, cfgPath, ui)
+	tn.SetPlatform(caps.Platform)
+	tn.SetCommandInterfaces(caps.CommandInterfaces)
 	if err := tn.EnsureRegistered(ctx); err != nil {
 		return err
 	}
@@ -238,9 +242,7 @@ func run(cfgPath string) error {
 		Backend:  resumeAdapter{backend},
 		FlockDir: filepath.Join(workdir, "humanloop"),
 	})
-	if hasSkill(cfg.Discovery.Skills, "bash") {
-		routes["bash"] = executor.NewBashExecutor(executor.BashConfig{WorkDir: cfg.Claude.WorkDir})
-	}
+	registerRuntimeShellRoutes(routes, cfg)
 	if hasSkill(cfg.Discovery.Skills, "file") {
 		routes["file"] = executor.NewFileExecutor(executor.FileConfig{WorkDir: cfg.Claude.WorkDir})
 	}
