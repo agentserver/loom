@@ -38,7 +38,8 @@ func NewPowerShellExecutor(cfg PowerShellConfig) *PowerShellExecutor {
 }
 
 func powerShellArgs(script string) []string {
-	return []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script}
+	wrapped := fmt.Sprintf("& { %s }; if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }", script)
+	return []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", wrapped}
 }
 
 func (e *PowerShellExecutor) resolveBin() (string, error) {
@@ -121,6 +122,9 @@ func (e *PowerShellExecutor) Run(ctx context.Context, t Task, sink Sink) (Result
 	if err != nil {
 		if runCtx.Err() == context.DeadlineExceeded {
 			return Result{Summary: string(body)}, fmt.Errorf("powershell timeout")
+		}
+		if _, ok := err.(*exec.ExitError); !ok {
+			return Result{Summary: string(body)}, fmt.Errorf("powershell start: %w", err)
 		}
 		return Result{Summary: string(body)}, fmt.Errorf("powershell exit code %d", exitCode)
 	}

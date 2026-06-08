@@ -26,7 +26,8 @@ func TestPowerShellExecutorRejectsMissingScript(t *testing.T) {
 func TestPowerShellCommandArgs(t *testing.T) {
 	script := "Write-Output 'hello'"
 	got := powerShellArgs(script)
-	want := []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script}
+	wantCommand := "& { Write-Output 'hello' }; if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }"
+	want := []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", wantCommand}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("powerShellArgs() = %#v, want %#v", got, want)
 	}
@@ -75,7 +76,12 @@ func TestPowerShellExecutorCreatesWorkDir(t *testing.T) {
 		t.Skip("fake shell helper is POSIX-only")
 	}
 	workdir := filepath.Join(t.TempDir(), "nested", "work")
-	exec := NewPowerShellExecutor(PowerShellConfig{WorkDir: workdir, Bin: fakePowerShellBin(t)})
+	exec := NewPowerShellExecutor(PowerShellConfig{WorkDir: workdir, Bin: fakePowerShellBin(t, `#!/bin/sh
+if [ "$1" != "-NoProfile" ] || [ "$2" != "-ExecutionPolicy" ] || [ "$3" != "Bypass" ] || [ "$4" != "-Command" ]; then
+	exit 64
+fi
+pwd
+`)})
 	res, err := exec.Run(context.Background(), Task{Prompt: `{"script":"ignored"}`}, noopSink{})
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
@@ -89,6 +95,73 @@ func TestPowerShellExecutorCreatesWorkDir(t *testing.T) {
 	}
 	if got.WorkDir != workdir {
 		t.Fatalf("workdir = %q, want %q", got.WorkDir, workdir)
+	}
+}
+
+func TestPowerShellExecutorPreservesNonZeroExitCode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell helper is POSIX-only")
+	}
+	exec := NewPowerShellExecutor(PowerShellConfig{WorkDir: t.TempDir(), Bin: fakePowerShellBin(t, `#!/bin/sh
+exit 7
+`)})
+	res, err := exec.Run(context.Background(), Task{Prompt: `{"script":"ignored"}`}, noopSink{})
+	if err == nil {
+		t.Fatal("Run succeeded, want non-zero exit error")
+	}
+	if !strings.Contains(err.Error(), "powershell exit code 7") {
+		t.Fatalf("error = %q, want exit code 7 message", err.Error())
+	}
+	var got PowerShellResult
+	if jsonErr := json.Unmarshal([]byte(res.Summary), &got); jsonErr != nil {
+		t.Fatalf("summary is not PowerShellResult JSON: %v\n%s", jsonErr, res.Summary)
+	}
+	if got.ExitCode != 7 {
+		t.Fatalf("exit_code = %d, want 7; result=%+v", got.ExitCode, got)
+	}
+}
+
+func TestPowerShellExecutorTimeoutReturnsStructuredSummary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell helper is POSIX-only")
+	}
+	exec := NewPowerShellExecutor(PowerShellConfig{WorkDir: t.TempDir(), Bin: fakePowerShellBin(t, `#!/bin/sh
+while :; do
+	:
+done
+`)})
+	res, err := exec.Run(context.Background(), Task{Prompt: `{"script":"ignored","timeout_sec":1}`}, noopSink{})
+	if err == nil {
+		t.Fatal("Run succeeded, want timeout error")
+	}
+	if !strings.Contains(err.Error(), "powershell timeout") {
+		t.Fatalf("error = %q, want timeout message", err.Error())
+	}
+	var got PowerShellResult
+	if jsonErr := json.Unmarshal([]byte(res.Summary), &got); jsonErr != nil {
+		t.Fatalf("summary is not PowerShellResult JSON: %v\n%s", jsonErr, res.Summary)
+	}
+	if got.WorkDir == "" {
+		t.Fatalf("workdir missing from result: %+v", got)
+	}
+}
+
+func TestPowerShellExecutorReportsStartupError(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing-powershell")
+	exec := NewPowerShellExecutor(PowerShellConfig{WorkDir: t.TempDir(), Bin: missing})
+	res, err := exec.Run(context.Background(), Task{Prompt: `{"script":"ignored"}`}, noopSink{})
+	if err == nil {
+		t.Fatal("Run succeeded, want startup error")
+	}
+	if !strings.Contains(err.Error(), "powershell start:") {
+		t.Fatalf("error = %q, want startup diagnostic", err.Error())
+	}
+	if !strings.Contains(err.Error(), missing) {
+		t.Fatalf("error = %q, want missing binary path %q", err.Error(), missing)
+	}
+	var got PowerShellResult
+	if jsonErr := json.Unmarshal([]byte(res.Summary), &got); jsonErr != nil {
+		t.Fatalf("summary is not PowerShellResult JSON: %v\n%s", jsonErr, res.Summary)
 	}
 }
 
@@ -110,15 +183,9 @@ func findPowerShellForTest(t *testing.T) string {
 	return ""
 }
 
-func fakePowerShellBin(t *testing.T) string {
+func fakePowerShellBin(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "fake-powershell")
-	body := `#!/bin/sh
-if [ "$1" != "-NoProfile" ] || [ "$2" != "-ExecutionPolicy" ] || [ "$3" != "Bypass" ] || [ "$4" != "-Command" ]; then
-	exit 64
-fi
-pwd
-`
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
