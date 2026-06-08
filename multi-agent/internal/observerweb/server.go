@@ -363,14 +363,18 @@ func (h *handler) artifacts(w http.ResponseWriter, r *http.Request) {
 		"url":         absoluteURL(r, "/api/artifacts/"+url.PathEscape(art.ID)),
 	}
 	if h.objects != nil {
-		objectKey := objectstore.ArtifactKey(agent.WorkspaceID, art.ID)
-		putURL, err := h.objects.PutPresignedURL(r.Context(), objectKey, req.MIME, defaultObjectPresignTTL)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+		if h.objectProxyEnabled {
+			resp["put_url"] = absoluteURL(r, "/api/artifacts/"+url.PathEscape(art.ID)+"/content")
+		} else {
+			objectKey := objectstore.ArtifactKey(agent.WorkspaceID, art.ID)
+			putURL, err := h.objects.PutPresignedURL(r.Context(), objectKey, req.MIME, defaultObjectPresignTTL)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			resp["put_url"] = putURL
+			resp["object_key"] = objectKey
 		}
-		resp["put_url"] = putURL
-		resp["object_key"] = objectKey
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -513,6 +517,10 @@ func (h *handler) completeArtifact(w http.ResponseWriter, r *http.Request, id st
 		http.Error(w, "object store not configured", http.StatusInternalServerError)
 		return
 	}
+	if h.objectProxyEnabled {
+		http.Error(w, "object proxy enabled", http.StatusForbidden)
+		return
+	}
 	var req struct {
 		MIME      string `json:"mime"`
 		Bytes     int64  `json:"bytes"`
@@ -616,7 +624,7 @@ func (h *handler) writeTokens(w http.ResponseWriter, r *http.Request) {
 		"write_id": wr.ID,
 		"put_url":  absoluteURL(r, "/api/writes/"+url.PathEscape(wr.ID)),
 	}
-	if h.objects != nil {
+	if h.objects != nil && !h.objectProxyEnabled {
 		objectKey := objectstore.WriteKey(agent.WorkspaceID, wr.ID)
 		putURL, err := h.objects.PutPresignedURL(r.Context(), objectKey, "", defaultObjectPresignTTL)
 		if err != nil {
@@ -690,6 +698,10 @@ func (h *handler) completeWrite(w http.ResponseWriter, r *http.Request, id strin
 	}
 	if h.objects == nil {
 		http.Error(w, "object store not configured", http.StatusInternalServerError)
+		return
+	}
+	if h.objectProxyEnabled {
+		http.Error(w, "object proxy enabled", http.StatusForbidden)
 		return
 	}
 	var req struct {

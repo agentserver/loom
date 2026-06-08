@@ -137,3 +137,76 @@ grep -q 'image: "registry.nj.cs.ac.cn/dockerhub/postgres:16-alpine"' <<<"$manage
 grep -q 'name: wait-for-observer-schema' <<<"$managed_stack"
 grep -q 'psql "$OBSERVER_POSTGRES_WAIT_DSN"' <<<"$managed_stack"
 grep -q 'SELECT 1 FROM telemetry_api_keys LIMIT 1' <<<"$managed_stack"
+
+production_stack="$(helm template observer-prod "$CHART_DIR" \
+  -f "$CHART_DIR/values-production.example.yaml" \
+  --set existingSecret= \
+  --set secret.create=true \
+  --set secret.databaseUrl='postgres://observer:observer@observer-prod-observer-postgresql:5432/observer?sslmode=disable' \
+  --set secret.s3AccessKey=minioadmin \
+  --set secret.s3SecretKey=minioadmin \
+  --set secret.telemetryKeys.telemetry-global-key=ops-secret \
+  --set postgresql.auth.password=observer \
+  --set minio.auth.rootUser=minioadmin \
+  --set minio.auth.rootPassword=minioadmin)"
+grep -q 'max_bytes: 104857600' <<<"$production_stack"
+
+production_observer="$(awk '
+  $0 == "---" {
+    if (doc ~ /kind: Deployment/ && doc ~ /name: observer-prod-observer/) {
+      print doc
+    }
+    doc = ""
+    next
+  }
+  { doc = doc $0 "\n" }
+  END {
+    if (doc ~ /kind: Deployment/ && doc ~ /name: observer-prod-observer/) {
+      print doc
+    }
+  }
+' <<<"$production_stack")"
+grep -q 'cpu: 500m' <<<"$production_observer"
+grep -q 'memory: 512Mi' <<<"$production_observer"
+grep -q 'cpu: "2"' <<<"$production_observer"
+grep -q 'memory: 2Gi' <<<"$production_observer"
+
+production_postgresql="$(awk '
+  $0 == "---" {
+    if (doc ~ /kind: StatefulSet/ && doc ~ /name: observer-prod-observer-postgresql/) {
+      print doc
+    }
+    doc = ""
+    next
+  }
+  { doc = doc $0 "\n" }
+  END {
+    if (doc ~ /kind: StatefulSet/ && doc ~ /name: observer-prod-observer-postgresql/) {
+      print doc
+    }
+  }
+' <<<"$production_stack")"
+grep -q 'cpu: "1"' <<<"$production_postgresql"
+grep -q 'memory: 2Gi' <<<"$production_postgresql"
+grep -q 'cpu: "2"' <<<"$production_postgresql"
+grep -q 'memory: 8Gi' <<<"$production_postgresql"
+
+production_minio="$(awk '
+  $0 == "---" {
+    if (doc ~ /kind: StatefulSet/ && doc ~ /name: observer-prod-observer-minio/) {
+      print doc
+    }
+    doc = ""
+    next
+  }
+  { doc = doc $0 "\n" }
+  END {
+    if (doc ~ /kind: StatefulSet/ && doc ~ /name: observer-prod-observer-minio/) {
+      print doc
+    }
+  }
+' <<<"$production_stack")"
+grep -q 'cpu: 500m' <<<"$production_minio"
+grep -q 'memory: 1Gi' <<<"$production_minio"
+grep -q 'cpu: "2"' <<<"$production_minio"
+grep -q 'memory: 8Gi' <<<"$production_minio"

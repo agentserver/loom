@@ -473,7 +473,7 @@ func TestArtifactLazyHTTPFlow(t *testing.T) {
 	require.Equal(t, "hello", rr.Body.String())
 }
 
-func TestCreateArtifactReturnsPresignedPutURL(t *testing.T) {
+func TestCreateArtifactReturnsProxyPutURLByDefault(t *testing.T) {
 	_, st := newTestHandler(t)
 	h := NewWithOptions(st, nil, Options{Objects: objectstore.NewMemory()})
 	seedAPIKey(t, st, "ak-default", "ak_secret")
@@ -487,7 +487,8 @@ func TestCreateArtifactReturnsPresignedPutURL(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
-	require.Contains(t, rr.Body.String(), `"put_url":"memory://put/`)
+	require.NotContains(t, rr.Body.String(), "memory://put/")
+	require.NotContains(t, rr.Body.String(), `"object_key"`)
 
 	var created struct {
 		ArtifactID string `json:"artifact_id"`
@@ -500,8 +501,10 @@ func TestCreateArtifactReturnsPresignedPutURL(t *testing.T) {
 	require.NotEmpty(t, created.ArtifactID)
 	require.Equal(t, "registered", created.State)
 	require.Contains(t, created.URL, "/api/artifacts/"+created.ArtifactID)
-	require.Equal(t, objectstore.ArtifactKey("ws1", created.ArtifactID), created.ObjectKey)
-	require.NotEmpty(t, created.PutURL)
+	require.Equal(t, "", created.ObjectKey)
+	parsedPutURL, err := url.Parse(created.PutURL)
+	require.NoError(t, err)
+	require.Equal(t, "/api/artifacts/"+created.ArtifactID+"/content", parsedPutURL.Path)
 }
 
 func TestArtifactDirectUploadCompleteReturnsPresignedGetURLWhenProxyDisabled(t *testing.T) {
@@ -604,9 +607,22 @@ func TestArtifactLegacyProxyRoundTripUsesObjectStore(t *testing.T) {
 	var created struct {
 		ArtifactID string `json:"artifact_id"`
 		URL        string `json:"url"`
+		ObjectKey  string `json:"object_key"`
 	}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &created))
 	require.Contains(t, created.URL, "/api/artifacts/"+created.ArtifactID)
+	require.Empty(t, created.ObjectKey)
+
+	completeBody, err := json.Marshal(map[string]interface{}{
+		"mime": "text/plain", "sha256": "sha", "bytes": 1, "object_key": objectstore.ArtifactKey("ws1", created.ArtifactID),
+	})
+	require.NoError(t, err)
+	req = httptest.NewRequest(http.MethodPost, "/api/artifacts/"+created.ArtifactID+"/complete", bytes.NewReader(completeBody))
+	req.Header.Set("Authorization", "Bearer driver-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code, rr.Body.String())
 
 	req = httptest.NewRequest(http.MethodPut, "/api/artifacts/"+created.ArtifactID+"/content", bytes.NewBufferString("hello from object store"))
 	req.Header.Set("Authorization", "Bearer driver-token")
@@ -738,7 +754,7 @@ func TestWriteHTTPFlow(t *testing.T) {
 	require.Contains(t, rr.Body.String(), `"content":"ZG9uZQ=="`)
 }
 
-func TestCreateWriteTokenReturnsObjectStorePutURL(t *testing.T) {
+func TestCreateWriteTokenReturnsProxyPutURLByDefault(t *testing.T) {
 	_, st := newTestHandler(t)
 	h := NewWithOptions(st, nil, Options{Objects: objectstore.NewMemory()})
 	seedAPIKey(t, st, "ak-default", "ak_secret")
@@ -752,7 +768,9 @@ func TestCreateWriteTokenReturnsObjectStorePutURL(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
-	require.Contains(t, rr.Body.String(), `"object_put_url":"memory://put/`)
+	require.NotContains(t, rr.Body.String(), "memory://put/")
+	require.NotContains(t, rr.Body.String(), `"object_put_url"`)
+	require.NotContains(t, rr.Body.String(), `"object_key"`)
 
 	var created struct {
 		WriteID      string `json:"write_id"`
@@ -766,8 +784,8 @@ func TestCreateWriteTokenReturnsObjectStorePutURL(t *testing.T) {
 	parsedPutURL, err := url.Parse(created.PutURL)
 	require.NoError(t, err)
 	require.True(t, strings.HasPrefix(parsedPutURL.Path, "/api/writes/"), "put_url path=%q", parsedPutURL.Path)
-	require.Contains(t, created.ObjectPutURL, "memory://put/")
-	require.Equal(t, objectstore.WriteKey("ws1", created.WriteID), created.ObjectKey)
+	require.Empty(t, created.ObjectPutURL)
+	require.Empty(t, created.ObjectKey)
 }
 
 func TestWriteDirectUploadCompleteReturnsPresignedGetURLWhenProxyDisabled(t *testing.T) {
@@ -879,8 +897,19 @@ func TestWriteLegacyProxyRoundTripUsesObjectStore(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &created))
 	require.Contains(t, created.PutURL, "/api/writes/"+created.WriteID)
-	require.Contains(t, created.ObjectPutURL, "memory://put/")
-	require.Equal(t, objectstore.WriteKey("ws1", created.WriteID), created.ObjectKey)
+	require.Empty(t, created.ObjectPutURL)
+	require.Empty(t, created.ObjectKey)
+
+	completeBody, err := json.Marshal(map[string]interface{}{
+		"mime": "text/plain", "sha256": "sha", "bytes": 1, "object_key": objectstore.WriteKey("ws1", created.WriteID),
+	})
+	require.NoError(t, err)
+	req = httptest.NewRequest(http.MethodPost, "/api/writes/"+created.WriteID+"/complete", bytes.NewReader(completeBody))
+	req.Header.Set("Authorization", "Bearer slave-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code, rr.Body.String())
 
 	req = httptest.NewRequest(http.MethodPut, "/api/writes/"+created.WriteID, bytes.NewBufferString("done via object store"))
 	req.Header.Set("Authorization", "Bearer slave-token")
@@ -889,7 +918,8 @@ func TestWriteLegacyProxyRoundTripUsesObjectStore(t *testing.T) {
 	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
-	stored, err := objects.Open(req.Context(), created.ObjectKey)
+	objectKey := objectstore.WriteKey("ws1", created.WriteID)
+	stored, err := objects.Open(req.Context(), objectKey)
 	require.NoError(t, err)
 	storedBytes, err := io.ReadAll(stored)
 	require.NoError(t, err)
@@ -901,7 +931,7 @@ func TestWriteLegacyProxyRoundTripUsesObjectStore(t *testing.T) {
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	require.Contains(t, rr.Body.String(), `"object_key":"`+created.ObjectKey+`"`)
+	require.Contains(t, rr.Body.String(), `"object_key":"`+objectKey+`"`)
 	require.Contains(t, rr.Body.String(), `"content":"ZG9uZSB2aWEgb2JqZWN0IHN0b3Jl"`)
 }
 

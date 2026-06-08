@@ -45,6 +45,9 @@ config:
       secretKeyEnv: OBSERVER_S3_SECRET_KEY
       secretKeySecretKey: s3-secret-key
       presignTTL: 15m
+    proxy:
+      enabled: true
+      maxBytes: 104857600
   telemetry:
     enabled: true
     apiKeys:
@@ -61,11 +64,11 @@ config:
 
 resources:
   requests:
-    cpu: 250m
-    memory: 256Mi
+    cpu: 500m
+    memory: 512Mi
   limits:
-    cpu: "1"
-    memory: 1Gi
+    cpu: "2"
+    memory: 2Gi
 
 migration:
   enabled: true
@@ -85,6 +88,13 @@ postgresql:
     accessModes:
       - ReadWriteOnce
     size: 20Gi
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      cpu: "2"
+      memory: 8Gi
 
 minio:
   enabled: true
@@ -95,3 +105,10 @@ minio:
     accessModes:
       - ReadWriteOnce
     size: 50Gi
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 8Gi
