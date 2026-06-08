@@ -55,6 +55,25 @@ hooked="$(helm template observer-test "$CHART_DIR" \
   --set migration.useHelmHook=true)"
 grep -q 'name: observer-test-observer-migrate' <<<"$hooked"
 grep -q 'helm.sh/hook' <<<"$hooked"
+hooked_migration="$(awk '
+  $0 == "---" {
+    if (doc ~ /kind: Job/ && doc ~ /name: observer-test-observer-migrate/) {
+      print doc
+    }
+    doc = ""
+    next
+  }
+  { doc = doc $0 "\n" }
+  END {
+    if (doc ~ /kind: Job/ && doc ~ /name: observer-test-observer-migrate/) {
+      print doc
+    }
+  }
+' <<<"$hooked")"
+if grep -q 'serviceAccountName:' <<<"$hooked_migration"; then
+  echo "hooked migration job must not depend on chart-created service account" >&2
+  exit 1
+fi
 
 agentserver_only="$(helm template observer-test "$CHART_DIR" \
   --set secret.create=true \

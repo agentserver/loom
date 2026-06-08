@@ -19,7 +19,9 @@ spec:
         {{- include "observer.selectorLabels" . | nindent 8 }}
     spec:
       restartPolicy: OnFailure
+      {{- if not .Values.migration.useHelmHook }}
       serviceAccountName: {{ include "observer.serviceAccountName" . }}
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
