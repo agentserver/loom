@@ -26,8 +26,26 @@ jobs:
           cache-dependency-path: multi-agent/go.sum
       - run: go mod tidy -diff
       - run: go vet ./...
+      - run: GOOS=windows GOARCH=amd64 go test -exec=true ./cmd/driver-agent ./cmd/slave-agent
+      - run: CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o /tmp/driver-agent.windows-amd64.exe ./cmd/driver-agent
+      - run: CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o /tmp/slave-agent.windows-amd64.exe ./cmd/slave-agent
       - run: go test ./... -race -count=1 -coverprofile=cover.out
       - run: go test -tags=contract ./tests/contract/...
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: multi-agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: multi-agent/go.mod
+          cache-dependency-path: multi-agent/go.sum
+      - run: go test ./cmd/driver-agent ./cmd/slave-agent ./internal/humanloop ./internal/executor ./pkg/agentbackend/claude ./pkg/agentbackend/codex -count=1
+      - run: go build -o driver-agent.windows-amd64.exe ./cmd/driver-agent
+      - run: go build -o slave-agent.windows-amd64.exe ./cmd/slave-agent
 
   helm:
     runs-on: ubuntu-latest
