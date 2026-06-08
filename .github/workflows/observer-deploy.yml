@@ -79,7 +79,7 @@ jobs:
           chmod 600 "$HOME/.kube/config"
           kubectl --context "$KUBE_CONTEXT" config set-context "$KUBE_CONTEXT" --namespace="$OBSERVER_NAMESPACE"
           kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" auth can-i create deployments
-          kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" auth can-i create pods/portforward
+          kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" auth can-i create jobs
       - name: Generate smoke values
         run: |
           python3 - <<'PY'
@@ -170,25 +170,52 @@ jobs:
             --wait \
             --wait-for-jobs \
             --timeout 10m
-      - name: Smoke through local port-forward
+      - name: Smoke from cluster
         run: |
           set -euo pipefail
-          kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" port-forward "svc/$SMOKE_RELEASE-observer" 18190:8090 >/tmp/observer-port-forward.log 2>&1 &
-          pf_pid="$!"
-          trap 'kill "$pf_pid" 2>/dev/null || true' EXIT
-          for _ in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:18190/readyz >/tmp/observer-readyz.out 2>/tmp/observer-readyz.err; then
-              curl -fsS http://127.0.0.1:18190/healthz
-              exit 0
-            fi
-            sleep 1
-          done
-          cat /tmp/observer-port-forward.log || true
-          cat /tmp/observer-readyz.err || true
-          exit 1
+          cat >/tmp/observer-smoke-job.yaml <<EOF
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ${SMOKE_RELEASE}-http-smoke
+            namespace: ${OBSERVER_NAMESPACE}
+          spec:
+            backoffLimit: 3
+            ttlSecondsAfterFinished: 3600
+            template:
+              spec:
+                restartPolicy: Never
+                imagePullSecrets:
+                  - name: observer-registry
+                containers:
+                  - name: smoke
+                    image: ${REGISTRY_PULL}/dockerhub/busybox:1.36
+                    command:
+                      - /bin/sh
+                      - -ec
+                    args:
+                      - |
+                        wget -qO- "http://${SMOKE_RELEASE}-observer:8090/readyz"
+                        wget -qO- "http://${SMOKE_RELEASE}-observer:8090/healthz"
+                    resources:
+                      requests:
+                        cpu: 25m
+                        memory: 64Mi
+                      limits:
+                        cpu: 100m
+                        memory: 128Mi
+          EOF
+          kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" apply -f /tmp/observer-smoke-job.yaml
+          if ! kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" wait --for=condition=complete "job/${SMOKE_RELEASE}-http-smoke" --timeout=120s; then
+            kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" logs "job/${SMOKE_RELEASE}-http-smoke" --all-containers=true || true
+            kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" describe "job/${SMOKE_RELEASE}-http-smoke" || true
+            exit 1
+          fi
+          kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" logs "job/${SMOKE_RELEASE}-http-smoke" --all-containers=true
       - name: Cleanup smoke stack
         if: always()
         run: |
+          kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" delete job "$SMOKE_RELEASE-http-smoke" --ignore-not-found || true
           helm --kube-context "$KUBE_CONTEXT" uninstall "$SMOKE_RELEASE" -n "$OBSERVER_NAMESPACE" --ignore-not-found || true
           kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" delete pvc -l app.kubernetes.io/instance="$SMOKE_RELEASE" --ignore-not-found || true
 
