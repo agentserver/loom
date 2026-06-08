@@ -85,7 +85,7 @@ func TestDetectUnixBashDefault(t *testing.T) {
 
 	got := d.Detect([]string{"chat", "bash", "powershell"})
 
-	wantSkills := []string{"chat", "bash", "powershell"}
+	wantSkills := []string{"chat", "bash"}
 	if !reflect.DeepEqual(got.Skills, wantSkills) {
 		t.Fatalf("skills = %v, want %v", got.Skills, wantSkills)
 	}
@@ -94,6 +94,27 @@ func TestDetectUnixBashDefault(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.CommandInterfaces, wantInterfaces) {
 		t.Fatalf("command interfaces = %#v, want %#v", got.CommandInterfaces, wantInterfaces)
+	}
+}
+
+func TestWSLListOutputHasDistroFiltersInstallMessages(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{name: "empty", body: "", want: false},
+		{name: "english no installed", body: "Windows Subsystem for Linux has no installed distributions.\n", want: false},
+		{name: "install hint", body: "Use 'wsl.exe --install' to install.\n", want: false},
+		{name: "utf16 zeros", body: "U\x00b\x00u\x00n\x00t\x00u\x00\n\x00", want: true},
+		{name: "distro", body: "Ubuntu\n", want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := wslListOutputHasDistro([]byte(tc.body)); got != tc.want {
+				t.Fatalf("wslListOutputHasDistro(%q) = %v, want %v", tc.body, got, tc.want)
+			}
+		})
 	}
 }
 
