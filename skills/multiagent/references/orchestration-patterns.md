@@ -66,6 +66,41 @@ Driver files are local to the driver machine. Remote agents receive artifact URL
 
 Anti-pattern: `run_slave_bash` with a `cat <<EOF` or base64-decode heredoc to ship a file. Use `write_slave_file` instead.
 
+Windows anti-pattern: using `run_slave_powershell` with here-strings such as
+`@' ... '@ | Set-Content`, `[Convert]::FromBase64String(...)`, or
+`Out-File` payload reconstruction to ship bytes. Use `write_slave_file`
+instead.
+
+Shell-agnostic anti-pattern: using `run_slave_shell` to smuggle file payloads
+through whichever shell the target happens to choose. File transfer should use
+`write_slave_file` / `read_slave_file`, not shell heredocs, here-strings, or
+base64 encode/decode pipelines.
+
+PowerShell command example for inspecting a Windows slave after using file
+tools with `run_slave_powershell`:
+
+```json
+{
+  "target_display_name": "win-slave",
+  "script": "Get-Item -Path .\\generated_mcp\\foo\\v1.py | Select-Object FullName,Length",
+  "timeout_sec": 30
+}
+```
+
+Shell-agnostic Windows inspection example with `run_slave_shell`:
+
+```json
+{
+  "target_display_name": "win-slave",
+  "script": "Test-Path -Path .\\generated_mcp\\foo\\v1.py",
+  "timeout_sec": 30
+}
+```
+
+Use these examples only for command execution or verification. The file
+contents should still be uploaded with `write_slave_file` and downloaded with
+`read_slave_file`.
+
 ## Permissions
 
 If a slave says a command is blocked by Claude Code permissions:
