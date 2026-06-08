@@ -163,7 +163,7 @@ func agentAvailable(c agentsdk.AgentCard) bool {
 // skills submit_task forwards the caller's prompt verbatim.
 func jsonPromptSkill(skill string) bool {
 	switch skill {
-	case "mcp", "bash", "register_mcp", "unregister_mcp", "claude_permissions", "file", "chat_resume":
+	case "mcp", "bash", "powershell", "register_mcp", "unregister_mcp", "claude_permissions", "permissions", "file", "chat_resume":
 		return true
 	}
 	return false
