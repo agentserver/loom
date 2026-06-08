@@ -11,11 +11,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	executorpkg "github.com/yourorg/multi-agent/internal/executor"
 	"github.com/yourorg/multi-agent/internal/humanloop"
+	"github.com/yourorg/multi-agent/internal/platform"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
@@ -232,7 +232,7 @@ func (e *executor) runWithArgv(ctx context.Context, argvHead []string, prompt st
 		}
 	case <-time.After(time.Duration(e.shutdownGraceSec) * time.Second):
 		killed = true
-		_ = cmd.Process.Signal(syscall.SIGTERM)
+		_ = platform.TerminateProcess(cmd.Process)
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):

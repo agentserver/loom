@@ -3,10 +3,12 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
+
+	"github.com/yourorg/multi-agent/internal/platform"
 )
 
 // ResumeBackend is the slice of agentbackend.Backend that ChatResumeExecutor
@@ -48,15 +50,14 @@ func (e *ChatResumeExecutor) Run(ctx context.Context, t Task, sink Sink) (Result
 		return Result{}, fmt.Errorf("chat_resume: mkdir %s: %w", e.cfg.FlockDir, err)
 	}
 	lockPath := filepath.Join(e.cfg.FlockDir, body.SessionID+".lock")
-	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
+	lock, err := platform.TryLock(lockPath)
 	if err != nil {
+		if errors.Is(err, platform.ErrLocked) {
+			return Result{}, fmt.Errorf("chat_resume: session busy (flock=%s)", lockPath)
+		}
 		return Result{}, fmt.Errorf("chat_resume: open lock: %w", err)
 	}
-	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return Result{}, fmt.Errorf("chat_resume: session busy (flock=%s)", lockPath)
-	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	defer lock.Unlock()
 
 	return e.cfg.Backend.RunResume(ctx, body.SessionID, body.Answer, sink)
 }

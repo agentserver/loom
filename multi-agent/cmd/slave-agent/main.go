@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -9,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -23,6 +23,7 @@ import (
 	"github.com/yourorg/multi-agent/internal/journal"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/observerclient"
+	"github.com/yourorg/multi-agent/internal/platform"
 	"github.com/yourorg/multi-agent/internal/poller"
 	"github.com/yourorg/multi-agent/internal/store"
 	"github.com/yourorg/multi-agent/internal/tunnel"
@@ -48,48 +49,50 @@ func main() {
 	}
 }
 
-// acquireInstanceLock takes an exclusive flock on $CWD/slave-agent.lock so two
+// acquireInstanceLock takes an exclusive lock on $CWD/slave-agent.lock so two
 // slave-agents in the same install dir can't fight for the broker tunnel
 // (single-occupancy → 1s EOF flap, the "mode B" outage).
 //
 // When the lock is already held, behavior depends on whether we were started
-// by systemd (INVOCATION_ID env, set by systemd ≥232): systemd-managed starts
-// SIGTERM the holder and retake the lock (last-start-wins is the right
+// by a service manager (INVOCATION_ID env, set by systemd ≥232): managed starts
+// terminate the holder and retake the lock (last-start-wins is the right
 // semantics for `systemctl restart` and on-failure respawns); manual starts
 // refuse with a clear error so an operator probing with ssh doesn't
 // accidentally knock over the production unit.
 //
 // The holder's pid is written to the lock file so operators can identify it.
-// The returned *os.File must stay open for the process lifetime.
-func acquireInstanceLock() (*os.File, error) {
+// The returned lock must stay open for the process lifetime.
+func acquireInstanceLock() (*platform.FileLock, error) {
 	lockPath, err := filepath.Abs("slave-agent.lock")
 	if err != nil {
 		return nil, fmt.Errorf("resolve lock path: %w", err)
 	}
-	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
+	lock, err := platform.TryLock(lockPath)
 	if err != nil {
-		return nil, fmt.Errorf("open lock file %s: %w", lockPath, err)
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		holderPid := readHolderPid(lockPath)
+		if !errors.Is(err, platform.ErrLocked) {
+			return nil, fmt.Errorf("open lock file %s: %w", lockPath, err)
+		}
 		if os.Getenv("INVOCATION_ID") == "" {
-			f.Close()
 			return nil, fmt.Errorf("another slave-agent is already running in this install dir "+
 				"(lock=%s holder_pid=%d); refusing to start. "+
-				"If this is a stale lock, run: pkill -f 'slave-agent .*%s' && rm %s",
-				lockPath, holderPid, filepath.Base(filepath.Dir(lockPath)), lockPath)
+				"If this is a stale lock, stop the running slave-agent for this install dir and remove %s",
+				lockPath, holderPid, lockPath)
 		}
-		log.Printf("acquireInstanceLock: lock held by pid=%d, taking over (systemd-managed start)", holderPid)
-		if err := takeOverLock(f, lockPath, holderPid); err != nil {
-			f.Close()
+		log.Printf("acquireInstanceLock: lock held by pid=%d, taking over (managed start)", holderPid)
+		if err := takeOverLock(lockPath, holderPid); err != nil {
 			return nil, err
 		}
+		lock, err = platform.TryLock(lockPath)
+		if err != nil {
+			return nil, fmt.Errorf("could not acquire %s after terminating pid=%d: %w", lockPath, holderPid, err)
+		}
 	}
-	if err := f.Truncate(0); err == nil {
-		f.Seek(0, 0)
-		fmt.Fprintf(f, "%d\n", os.Getpid())
+	if err := os.WriteFile(lockPath, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o600); err != nil {
+		_ = lock.Unlock()
+		return nil, fmt.Errorf("write lock holder pid: %w", err)
 	}
-	return f, nil
+	return lock, nil
 }
 
 // readHolderPid parses the pid written by the current lock holder. Returns 0
@@ -106,30 +109,31 @@ func readHolderPid(lockPath string) int {
 	return pid
 }
 
-// takeOverLock terminates the current holder (if alive) and retakes the flock.
-// SIGTERM first with a 5s grace window for clean tunnel shutdown, then SIGKILL.
+// takeOverLock terminates the current holder (if alive) and retakes the lock.
+// Graceful termination gets a 5s window before a forced kill.
 // Returns an error if we can't acquire the lock within ~10s total.
-func takeOverLock(f *os.File, lockPath string, holderPid int) error {
+func takeOverLock(lockPath string, holderPid int) error {
 	if holderPid > 0 && holderPid != os.Getpid() {
-		if err := syscall.Kill(holderPid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
-			log.Printf("acquireInstanceLock: SIGTERM pid=%d: %v (continuing)", holderPid, err)
+		if err := platform.TerminatePID(holderPid); err != nil {
+			log.Printf("acquireInstanceLock: terminate pid=%d: %v (continuing)", holderPid, err)
 		}
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {
-			if syscall.Kill(holderPid, 0) == syscall.ESRCH {
+			if !platform.ProcessExists(holderPid) {
 				break
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
-		if syscall.Kill(holderPid, 0) != syscall.ESRCH {
-			log.Printf("acquireInstanceLock: pid=%d still alive after SIGTERM, sending SIGKILL", holderPid)
-			_ = syscall.Kill(holderPid, syscall.SIGKILL)
+		if platform.ProcessExists(holderPid) {
+			log.Printf("acquireInstanceLock: pid=%d still alive after graceful terminate, killing", holderPid)
+			_ = platform.KillPID(holderPid)
 		}
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
-			return nil
+		lock, err := platform.TryLock(lockPath)
+		if err == nil {
+			return lock.Unlock()
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -141,7 +145,7 @@ func run(cfgPath string) error {
 	if err != nil {
 		return err
 	}
-	defer lockFile.Close()
+	defer lockFile.Unlock()
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
@@ -194,7 +198,7 @@ func run(cfgPath string) error {
 	ui := webui.NewHandler(s, journalDir, cfg)
 	webui.SetMCPBridge(ui, mcpExec)
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := signal.NotifyContext(context.Background(), platform.ShutdownSignals()...)
 	defer cancel()
 
 	tn := tunnel.New(cfg, cfgPath, ui)
