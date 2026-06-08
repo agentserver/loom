@@ -147,6 +147,16 @@ jobs:
           with open("/tmp/observer-smoke-values.json", "w", encoding="utf-8") as f:
               json.dump(values, f)
           PY
+      - name: Ensure image pull secret
+        env:
+          REGISTRY_NJ_USERNAME: ${{ secrets.REGISTRY_NJ_USERNAME }}
+          REGISTRY_NJ_PASSWORD: ${{ secrets.REGISTRY_NJ_PASSWORD }}
+        run: |
+          kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" create secret docker-registry observer-registry \
+            --docker-server="$REGISTRY_PULL" \
+            --docker-username="$REGISTRY_NJ_USERNAME" \
+            --docker-password="$REGISTRY_NJ_PASSWORD" \
+            --dry-run=client -o yaml | kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" apply -f -
       - name: Deploy smoke stack
         run: |
           helm --kube-context "$KUBE_CONTEXT" upgrade --install "$SMOKE_RELEASE" \
@@ -156,6 +166,7 @@ jobs:
             -f /tmp/observer-smoke-values.json \
             --set image.repository="$REGISTRY_PULL/$IMAGE_PATH" \
             --set image.tag="${GITHUB_SHA}" \
+            --set imagePullSecrets[0].name=observer-registry \
             --wait \
             --wait-for-jobs \
             --timeout 10m
@@ -292,7 +303,15 @@ jobs:
               json.dump(values, f)
           PY
       - name: Deploy release stack
+        env:
+          REGISTRY_NJ_USERNAME: ${{ secrets.REGISTRY_NJ_USERNAME }}
+          REGISTRY_NJ_PASSWORD: ${{ secrets.REGISTRY_NJ_PASSWORD }}
         run: |
+          kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" create secret docker-registry observer-registry \
+            --docker-server="$REGISTRY_PULL" \
+            --docker-username="$REGISTRY_NJ_USERNAME" \
+            --docker-password="$REGISTRY_NJ_PASSWORD" \
+            --dry-run=client -o yaml | kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" apply -f -
           helm --kube-context "$KUBE_CONTEXT" upgrade --install "$OBSERVER_RELEASE" \
             ./multi-agent/deploy/charts/observer \
             -n "$OBSERVER_NAMESPACE" \
@@ -300,6 +319,7 @@ jobs:
             -f /tmp/observer-release-secret-values.json \
             --set image.repository="$REGISTRY_PULL/$IMAGE_PATH" \
             --set image.tag="${GITHUB_SHA}" \
+            --set imagePullSecrets[0].name=observer-registry \
             --set migration.jobNameSuffix="${GITHUB_SHA::12}" \
             --wait \
             --wait-for-jobs \

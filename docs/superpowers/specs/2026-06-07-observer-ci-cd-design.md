@@ -15,6 +15,8 @@ PostgreSQL, and MinIO.
   public endpoint `registry.nj.cs.ac.cn:10062/loom/observer`.
 - Kubernetes pulls the same image through the Nanjing internal endpoint
   `registry.nj.cs.ac.cn/loom/observer`.
+- CD creates/updates the namespace image pull secret `observer-registry` from
+  the registry robot credentials before Helm deployment.
 - CD uses kubeconfig secret `KUBECONFIG_NJ_PROD` with Kubernetes API server
   `https://k8s-prod.nj.cs.ac.cn:10062`.
 - The deployment namespace is `dev-yuzishu`.
