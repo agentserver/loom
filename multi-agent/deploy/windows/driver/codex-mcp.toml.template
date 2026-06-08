@@ -1,0 +1,8 @@
+# Codex CLI MCP registration for the Windows driver-agent.
+
+[mcp_servers.driver]
+command = "__DRIVER_AGENT__"
+args = ["serve-mcp", "--config", "__CONFIG__"]
+startup_timeout_sec = 30
+tool_timeout_sec = 120
+enabled = true
