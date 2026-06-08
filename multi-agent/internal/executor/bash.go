@@ -12,6 +12,8 @@ import (
 
 type BashConfig struct {
 	WorkDir string
+	Bin     string
+	Args    []string
 }
 
 type BashExecutor struct {
@@ -63,7 +65,16 @@ func (e *BashExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, erro
 	}
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, "/bin/bash", "-lc", req.Script)
+	bin := e.cfg.Bin
+	if bin == "" {
+		bin = "/bin/bash"
+	}
+	args := append([]string{}, e.cfg.Args...)
+	if len(args) == 0 {
+		args = []string{"-lc"}
+	}
+	args = append(args, req.Script)
+	cmd := exec.CommandContext(runCtx, bin, args...)
 	cmd.Dir = workdir
 	cmd.Env = cmd.Environ()
 	for k, v := range req.Env {
