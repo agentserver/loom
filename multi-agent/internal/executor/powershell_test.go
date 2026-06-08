@@ -23,11 +23,21 @@ func TestPowerShellExecutorRejectsMissingScript(t *testing.T) {
 	}
 }
 
+func TestPowerShellExecutorRejectsInvalidJSON(t *testing.T) {
+	exec := NewPowerShellExecutor(PowerShellConfig{WorkDir: t.TempDir(), Bin: "unused"})
+	_, err := exec.Run(context.Background(), Task{Prompt: `{not-json`}, noopSink{})
+	if err == nil {
+		t.Fatal("Run succeeded, want invalid JSON error")
+	}
+	if !strings.Contains(err.Error(), "powershell prompt must be JSON") {
+		t.Fatalf("error = %q, want invalid JSON message", err.Error())
+	}
+}
+
 func TestPowerShellCommandArgs(t *testing.T) {
 	script := "Write-Output 'hello'"
 	got := powerShellArgs(script)
-	wantCommand := "& { Write-Output 'hello' }; if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }"
-	want := []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", wantCommand}
+	want := []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("powerShellArgs() = %#v, want %#v", got, want)
 	}

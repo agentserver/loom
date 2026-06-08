@@ -38,8 +38,7 @@ func NewPowerShellExecutor(cfg PowerShellConfig) *PowerShellExecutor {
 }
 
 func powerShellArgs(script string) []string {
-	wrapped := fmt.Sprintf("& { %s }; if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }", script)
-	return []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", wrapped}
+	return []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script}
 }
 
 func (e *PowerShellExecutor) resolveBin() (string, error) {
