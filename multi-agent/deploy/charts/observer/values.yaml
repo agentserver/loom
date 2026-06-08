@@ -122,6 +122,15 @@ postgresql:
     limits:
       cpu: "1"
       memory: 2Gi
+  wait:
+    enabled: true
+    resources:
+      requests:
+        cpu: 25m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
 
 minio:
   enabled: true

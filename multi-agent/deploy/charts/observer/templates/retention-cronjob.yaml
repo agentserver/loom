@@ -22,6 +22,7 @@ spec:
           imagePullSecrets:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- include "observer.postgresqlWaitInitContainers" . | nindent 10 }}
           containers:
             - name: retention
               image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"

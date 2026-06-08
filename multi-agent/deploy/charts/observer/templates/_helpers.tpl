@@ -68,3 +68,30 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- $baseMax := sub 51 (len $suffix) | int -}}
 {{- printf "%s-%s" ($base | trunc $baseMax | trimSuffix "-") $suffix | trunc 52 | trimSuffix "-" -}}
 {{- end -}}
+
+{{- define "observer.postgresqlWaitInitContainers" -}}
+{{- if and (eq .Values.config.store.driver "postgres") .Values.postgresql.wait.enabled }}
+initContainers:
+  - name: wait-for-postgresql
+    image: "{{ .Values.postgresql.image.repository }}:{{ .Values.postgresql.image.tag }}"
+    imagePullPolicy: {{ .Values.postgresql.image.pullPolicy }}
+    env:
+      - name: OBSERVER_POSTGRES_WAIT_DSN
+        valueFrom:
+          secretKeyRef:
+            name: {{ include "observer.configSecretName" . }}
+            key: {{ default "database-url" .Values.config.store.postgres.dsnSecretKey }}
+    command:
+      - /bin/sh
+      - -ec
+    args:
+      - |
+        until pg_isready -d "$OBSERVER_POSTGRES_WAIT_DSN"; do
+          sleep 2
+        done
+    {{- with .Values.postgresql.wait.resources }}
+    resources:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+{{- end }}
+{{- end -}}
