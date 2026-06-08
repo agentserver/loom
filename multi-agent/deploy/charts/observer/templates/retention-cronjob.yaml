@@ -43,6 +43,10 @@ spec:
                   mountPath: /etc/observer/observer.yaml
                   subPath: observer.yaml
                   readOnly: true
+              {{- with .Values.retention.resources }}
+              resources:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
           volumes:
             - name: observer-config
               secret:

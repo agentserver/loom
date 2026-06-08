@@ -157,4 +157,8 @@ spec:
                 sleep 2
               done
               mc mb --ignore-existing "local/$MINIO_BUCKET"
+          {{- with .Values.minio.bucketJob.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
 {{- end }}

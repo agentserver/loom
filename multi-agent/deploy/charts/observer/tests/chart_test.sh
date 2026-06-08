@@ -74,6 +74,9 @@ if grep -q 'serviceAccountName:' <<<"$hooked_migration"; then
   echo "hooked migration job must not depend on chart-created service account" >&2
   exit 1
 fi
+grep -q 'resources:' <<<"$hooked_migration"
+grep -q 'cpu: 50m' <<<"$hooked_migration"
+grep -q 'memory: 128Mi' <<<"$hooked_migration"
 
 agentserver_only="$(helm template observer-test "$CHART_DIR" \
   --set secret.create=true \

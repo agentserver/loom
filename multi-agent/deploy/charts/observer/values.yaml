@@ -149,6 +149,13 @@ minio:
   bucketJob:
     backoffLimit: 6
     ttlSecondsAfterFinished: 86400
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
   resources:
     requests:
       cpu: 250m
@@ -168,12 +175,26 @@ migration:
   jobNameSuffix: ""
   backoffLimit: 3
   ttlSecondsAfterFinished: 86400
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
 
 retention:
   enabled: true
   schedule: "17 3 * * *"
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
 
 podAnnotations: {}
 podLabels: {}
