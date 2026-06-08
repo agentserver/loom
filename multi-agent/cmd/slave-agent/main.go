@@ -80,15 +80,12 @@ func acquireInstanceLock() (*platform.FileLock, error) {
 				lockPath, holderPid, lockPath)
 		}
 		log.Printf("acquireInstanceLock: lock held by pid=%d, taking over (managed start)", holderPid)
-		if err := takeOverLock(lockPath, holderPid); err != nil {
+		lock, err = takeOverLock(lockPath, holderPid)
+		if err != nil {
 			return nil, err
 		}
-		lock, err = platform.TryLock(lockPath)
-		if err != nil {
-			return nil, fmt.Errorf("could not acquire %s after terminating pid=%d: %w", lockPath, holderPid, err)
-		}
 	}
-	if err := os.WriteFile(lockPath, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o600); err != nil {
+	if err := lock.WriteString(fmt.Sprintf("%d\n", os.Getpid())); err != nil {
 		_ = lock.Unlock()
 		return nil, fmt.Errorf("write lock holder pid: %w", err)
 	}
@@ -112,7 +109,7 @@ func readHolderPid(lockPath string) int {
 // takeOverLock terminates the current holder (if alive) and retakes the lock.
 // Graceful termination gets a 5s window before a forced kill.
 // Returns an error if we can't acquire the lock within ~10s total.
-func takeOverLock(lockPath string, holderPid int) error {
+func takeOverLock(lockPath string, holderPid int) (*platform.FileLock, error) {
 	if holderPid > 0 && holderPid != os.Getpid() {
 		if err := platform.TerminatePID(holderPid); err != nil {
 			log.Printf("acquireInstanceLock: terminate pid=%d: %v (continuing)", holderPid, err)
@@ -133,11 +130,11 @@ func takeOverLock(lockPath string, holderPid int) error {
 	for time.Now().Before(deadline) {
 		lock, err := platform.TryLock(lockPath)
 		if err == nil {
-			return lock.Unlock()
+			return lock, nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return fmt.Errorf("could not acquire %s after terminating pid=%d", lockPath, holderPid)
+	return nil, fmt.Errorf("could not acquire %s after terminating pid=%d", lockPath, holderPid)
 }
 
 func run(cfgPath string) error {

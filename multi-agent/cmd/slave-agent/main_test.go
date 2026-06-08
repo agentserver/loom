@@ -1,6 +1,16 @@
 package main
 
-import "testing"
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/yourorg/multi-agent/internal/platform"
+)
 
 func TestHasSkill(t *testing.T) {
 	if !hasSkill([]string{"chat", "bash"}, "bash") {
@@ -21,4 +31,85 @@ func TestHasSkill_File(t *testing.T) {
 	if hasSkill([]string{"chat"}, "file") {
 		t.Fatal("did not expect file skill")
 	}
+}
+
+func TestAcquireInstanceLockManualSecondRefuses(t *testing.T) {
+	withTempWorkDir(t)
+	t.Setenv("INVOCATION_ID", "")
+
+	first, err := acquireInstanceLock()
+	if err != nil {
+		t.Fatalf("first acquireInstanceLock: %v", err)
+	}
+	defer first.Unlock()
+
+	second, err := acquireInstanceLock()
+	if err == nil {
+		second.Unlock()
+		t.Fatal("second acquireInstanceLock succeeded, want already running error")
+	}
+	if !strings.Contains(err.Error(), "already running") {
+		t.Fatalf("second acquireInstanceLock error = %v, want already running", err)
+	}
+}
+
+func TestAcquireInstanceLockManagedUnknownHolderReturnsHeldLockAndUpdatesPID(t *testing.T) {
+	dir := withTempWorkDir(t)
+	t.Setenv("INVOCATION_ID", "test")
+	lockPath := filepath.Join(dir, "slave-agent.lock")
+
+	blocker, err := platform.TryLock(lockPath)
+	if err != nil {
+		t.Fatalf("blocker TryLock: %v", err)
+	}
+	if err := blocker.WriteString("not-a-pid\n"); err != nil {
+		t.Fatalf("blocker WriteString: %v", err)
+	}
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		_ = blocker.Unlock()
+		close(released)
+	}()
+
+	lock, err := acquireInstanceLock()
+	if err != nil {
+		t.Fatalf("managed acquireInstanceLock: %v", err)
+	}
+	defer lock.Unlock()
+	<-released
+
+	contender, err := platform.TryLock(lockPath)
+	if err == nil {
+		contender.Unlock()
+		t.Fatal("managed acquireInstanceLock returned without holding lock")
+	}
+	if !errors.Is(err, platform.ErrLocked) {
+		t.Fatalf("contender TryLock error = %v, want ErrLocked", err)
+	}
+
+	got, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	want := fmt.Sprintf("%d\n", os.Getpid())
+	if string(got) != want {
+		t.Fatalf("lock file content = %q, want %q", got, want)
+	}
+}
+
+func withTempWorkDir(t *testing.T) string {
+	t.Helper()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	dir := t.TempDir()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("Chdir(%s): %v", dir, err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldwd)
+	})
+	return dir
 }

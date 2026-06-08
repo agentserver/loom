@@ -26,7 +26,7 @@ type ChatResumeConfig struct {
 }
 
 // ChatResumeExecutor handles the chat_resume skill: parses the JSON prompt
-// {session_id, answer, kind}, takes an exclusive flock on FlockDir/<sid>.lock
+// {session_id, answer, kind}, takes an exclusive lock on FlockDir/<sid>.lock
 // to prevent two simultaneous resumes from racing on the same backend session
 // jsonl, then delegates to Backend.RunResume.
 type ChatResumeExecutor struct{ cfg ChatResumeConfig }
@@ -53,7 +53,7 @@ func (e *ChatResumeExecutor) Run(ctx context.Context, t Task, sink Sink) (Result
 	lock, err := platform.TryLock(lockPath)
 	if err != nil {
 		if errors.Is(err, platform.ErrLocked) {
-			return Result{}, fmt.Errorf("chat_resume: session busy (flock=%s)", lockPath)
+			return Result{}, fmt.Errorf("chat_resume: session busy (lock=%s)", lockPath)
 		}
 		return Result{}, fmt.Errorf("chat_resume: open lock: %w", err)
 	}
