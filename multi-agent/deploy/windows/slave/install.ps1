@@ -95,11 +95,15 @@ New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
 $slaveExe = Join-Path $installDir "slave-agent.exe"
 $configPath = Join-Path $installDir "config.yaml"
-$serviceScriptPath = Join-Path $installDir "slave-agent-service.ps1"
 Copy-Item -LiteralPath $binPath -Destination $slaveExe -Force
-Copy-Item -LiteralPath (Join-Path $here "slave-agent-service.ps1") -Destination $serviceScriptPath -Force
 
-$skills = @("chat", "chat_resume", "powershell", "file", "permissions")
+$skills = @("powershell", "file", "permissions")
+$agentCommand = Get-Command $Agent -ErrorAction SilentlyContinue
+if ($null -ne $agentCommand) {
+    $skills = @("chat", "chat_resume") + $skills
+} else {
+    Write-Warning "$Agent was not found. The chat and chat_resume skills will not be advertised."
+}
 if ($EnableBash) {
     $bash = Get-Command "bash.exe" -ErrorAction SilentlyContinue
     if ($null -ne $bash) {
@@ -133,27 +137,5 @@ Write-Host "  Set-Location `"$installDir`""
 Write-Host "  .\slave-agent.exe `"$configPath`""
 
 if ($InstallService) {
-    $resolvedServiceName = if ($ServiceName -ne "") {
-        Get-SafeServiceName $ServiceName
-    } else {
-        "loom-slave-$(Get-SafeServiceName $Name)"
-    }
-
-    $existing = Get-Service -Name $resolvedServiceName -ErrorAction SilentlyContinue
-    if ($null -ne $existing) {
-        throw "Service already exists: $resolvedServiceName"
-    }
-
-    $powershellExe = Join-Path $PSHOME "powershell.exe"
-    if (-not (Test-Path -LiteralPath $powershellExe -PathType Leaf)) {
-        $powershellExe = "powershell.exe"
-    }
-
-    $binaryPath = "`"$powershellExe`" -NoProfile -ExecutionPolicy Bypass -File `"$serviceScriptPath`" -ServiceName `"$resolvedServiceName`" -Config `"$configPath`""
-    New-Service -Name $resolvedServiceName -BinaryPathName $binaryPath -DisplayName "Loom Slave Agent ($Name)" -StartupType Automatic | Out-Null
-    Start-Service -Name $resolvedServiceName
-
-    Write-Host ""
-    Write-Host "Service installed and started: $resolvedServiceName"
-    Write-Host "Log file: $(Join-Path $installDir "slave.log")"
+    throw "InstallService is not supported yet on Windows. Use the foreground command or wrap slave-agent.exe with a real Windows service supervisor such as WinSW or NSSM."
 }

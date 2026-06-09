@@ -979,7 +979,7 @@ func TestPowerShellExecutorRunsScriptWhenAvailable(t *testing.T) {
 	res, err := ps.Run(context.Background(), Task{
 		ID:     "task-ps",
 		Skill:  "powershell",
-		Prompt: `{"script":"Write-Output $env:LOOM_TEST_VALUE; Write-Error 'warn'","timeout_sec":10,"env":{"LOOM_TEST_VALUE":"hello-ps"}}`,
+		Prompt: `{"script":"Write-Output $env:LOOM_TEST_VALUE; [Console]::Error.Write(\"warn\\n\")","timeout_sec":10,"env":{"LOOM_TEST_VALUE":"hello-ps"}}`,
 	}, noopSink{})
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
@@ -2421,7 +2421,13 @@ if (!(Test-Path $Bin)) {
 $DestBin = Join-Path $LoomHome "slave-agent.exe"
 Copy-Item -Force $Bin $DestBin
 
-$Skills = @("chat","chat_resume","powershell","file","permissions")
+$Skills = @("powershell","file","permissions")
+$AgentCommand = Get-Command $Agent -ErrorAction SilentlyContinue
+if ($null -ne $AgentCommand) {
+  $Skills = @("chat","chat_resume") + $Skills
+} else {
+  Write-Warning "$Agent was not found. The chat and chat_resume skills will not be advertised."
+}
 if ($EnableBash) {
   $Bash = Get-Command bash.exe -ErrorAction SilentlyContinue
   if ($null -ne $Bash) {
@@ -2448,22 +2454,11 @@ $ConfigPath = Join-Path $LoomHome "config.yaml"
 Set-Content -Path $ConfigPath -Value $Config -Encoding UTF8
 
 if ($InstallService) {
-  $Wrapper = Join-Path $LoomHome "slave-agent-service.ps1"
-  $WrapperBody = Get-Content (Join-Path $Here "slave-agent-service.ps1") -Raw
-  $WrapperBody = $WrapperBody.Replace("__SLAVE_BIN__", $DestBin.Replace("\","\\"))
-  $WrapperBody = $WrapperBody.Replace("__CONFIG_PATH__", $ConfigPath.Replace("\","\\"))
-  Set-Content -Path $Wrapper -Value $WrapperBody -Encoding UTF8
-  $Existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-  if ($null -eq $Existing) {
-    New-Service -Name $ServiceName -BinaryPathName "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$Wrapper`"" -StartupType Automatic
-  }
-  Start-Service -Name $ServiceName
-  Write-Host "Service started: $ServiceName"
-} else {
-  Write-Host "Slave installed at $LoomHome"
-  Write-Host "Start in foreground with:"
-  Write-Host "  $DestBin $ConfigPath"
+  throw "InstallService is not supported yet on Windows. Use the foreground command or wrap slave-agent.exe with a real Windows service supervisor such as WinSW or NSSM."
 }
+Write-Host "Slave installed at $LoomHome"
+Write-Host "Start in foreground with:"
+Write-Host "  $DestBin $ConfigPath"
 ```
 
 - [ ] **Step 4: Add Windows slave templates**

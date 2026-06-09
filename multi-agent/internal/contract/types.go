@@ -1,6 +1,10 @@
 package contract
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/yourorg/multi-agent/internal/commandiface"
+)
 
 const Version = 1
 
@@ -79,15 +83,17 @@ type ResourceSnapshot struct {
 }
 
 type ResourceAgent struct {
-	AgentID     string          `json:"agent_id"`
-	ShortID     string          `json:"short_id,omitempty"`
-	DisplayName string          `json:"display_name"`
-	Description string          `json:"description,omitempty"`
-	Status      string          `json:"status"`
-	Skills      []string        `json:"skills,omitempty"`
-	Tools       []string        `json:"tools,omitempty"`
-	MCPTools    json.RawMessage `json:"mcp_tools,omitempty"`
-	Resources   json.RawMessage `json:"resources,omitempty"`
+	AgentID           string                          `json:"agent_id"`
+	ShortID           string                          `json:"short_id,omitempty"`
+	DisplayName       string                          `json:"display_name"`
+	Description       string                          `json:"description,omitempty"`
+	Status            string                          `json:"status"`
+	Skills            []string                        `json:"skills,omitempty"`
+	Tools             []string                        `json:"tools,omitempty"`
+	MCPTools          json.RawMessage                 `json:"mcp_tools,omitempty"`
+	Resources         json.RawMessage                 `json:"resources,omitempty"`
+	Platform          commandiface.Platform           `json:"platform,omitempty"`
+	CommandInterfaces []commandiface.CommandInterface `json:"command_interfaces,omitempty"`
 }
 
 type ArtifactRecord struct {

@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
+
+	"github.com/yourorg/multi-agent/internal/commandiface"
 )
 
 func TestTaskContractApplyDefaults(t *testing.T) {
@@ -207,6 +209,38 @@ func TestTaskContractValidateRejectsUnsupportedExposeCodePolicy(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "execution_policy.expose_code_to_user") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestResourceSnapshotIncludesPlatformAndCommandInterfaces(t *testing.T) {
+	snapshot := NewResourceSnapshot([]agentsdk.AgentCard{{
+		AgentID:     "slave-win",
+		DisplayName: "slave-windows",
+		Status:      "available",
+		Card: json.RawMessage(`{
+			"skills":["powershell","file"],
+			"platform":{"os":"windows","arch":"amd64"},
+			"command_interfaces":[
+				{"skill":"powershell","kind":"powershell","command":"powershell.exe","default":true}
+			]
+		}`),
+	}}, "driver")
+
+	if len(snapshot.Agents) != 1 {
+		t.Fatalf("agents = %d, want 1", len(snapshot.Agents))
+	}
+	got := snapshot.Agents[0]
+	if got.Platform != (commandiface.Platform{OS: "windows", Arch: "amd64"}) {
+		t.Fatalf("platform = %#v, want windows/amd64", got.Platform)
+	}
+	want := []commandiface.CommandInterface{{
+		Skill:   "powershell",
+		Kind:    "powershell",
+		Command: "powershell.exe",
+		Default: true,
+	}}
+	if len(got.CommandInterfaces) != len(want) || got.CommandInterfaces[0] != want[0] {
+		t.Fatalf("command_interfaces = %#v, want %#v", got.CommandInterfaces, want)
 	}
 }
 

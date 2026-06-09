@@ -2,20 +2,23 @@ package claude
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
 func TestLLMRunnerEchoesStdin(t *testing.T) {
-	dir := t.TempDir()
-	fakeBin := filepath.Join(dir, "claude")
-	script := "#!/usr/bin/env bash\nread line\nprintf '%s\\n' \"$line\"\n"
-	if err := os.WriteFile(fakeBin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	fakeBin := buildFakeClaude(t, `package main
+import (
+	"bufio"
+	"fmt"
+	"os"
+)
+func main() {
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	fmt.Print(line)
+}
+`)
 	cfg := agentbackend.ClaudeConfig{Bin: fakeBin, ExtraArgs: nil}
 	llm := newLLM(cfg, nil)
 	out, err := llm.Run(context.Background(), "ping")
