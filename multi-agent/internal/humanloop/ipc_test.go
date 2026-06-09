@@ -179,6 +179,54 @@ func TestIPCRejectsInvalidSecretBeforeReceivingValidPayload(t *testing.T) {
 	}
 }
 
+func TestIPCReadTimeoutPreventsSilentConnectionFromBlockingValidPayload(t *testing.T) {
+	srv, ep, err := ListenIPC(t.TempDir())
+	if err != nil {
+		t.Fatalf("ListenIPC: %v", err)
+	}
+	defer srv.Close()
+
+	blocker, err := net.Dial(ep.Network, ep.Address)
+	if err != nil {
+		t.Fatalf("dial blocker: %v", err)
+	}
+	defer blocker.Close()
+
+	received := make(chan Payload, 1)
+	errs := make(chan error, 1)
+	go func() {
+		p, err := srv.Receive()
+		if err != nil {
+			errs <- err
+			return
+		}
+		received <- p
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+
+	want := Payload{Kind: "ask_user", Question: "valid after blocker"}
+	client, err := DialIPC(ep)
+	if err != nil {
+		t.Fatalf("DialIPC: %v", err)
+	}
+	defer client.Close()
+	if err := client.Send(want); err != nil {
+		t.Fatalf("Send valid payload: %v", err)
+	}
+
+	select {
+	case got := <-received:
+		if !payloadJSONEqual(got, want) {
+			t.Fatalf("payload = %+v, want %+v", got, want)
+		}
+	case err := <-errs:
+		t.Fatalf("Receive returned error: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("silent unauthenticated connection blocked valid IPC payload")
+	}
+}
+
 func sendRawIPC(ep Endpoint, p Payload) error {
 	c, err := net.Dial(ep.Network, ep.Address)
 	if err != nil {

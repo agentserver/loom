@@ -9,9 +9,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
+	"time"
 )
 
 // Payload is what humanloop server sends to the executor when the model calls
@@ -37,6 +39,8 @@ type ipcMessage struct {
 	Secret  string  `json:"secret,omitempty"`
 	Payload Payload `json:"payload"`
 }
+
+const preauthReadTimeout = 250 * time.Millisecond
 
 func EndpointArg(ep Endpoint) string {
 	b, _ := json.Marshal(ep)
@@ -133,8 +137,15 @@ func (s *IPCServer) receiveOne() (Payload, bool, error) {
 		return Payload{}, false, fmt.Errorf("humanloop accept: %w", err)
 	}
 	defer conn.Close()
+	if s.secret != "" {
+		_ = conn.SetReadDeadline(time.Now().Add(preauthReadTimeout))
+	}
 	line, err := bufio.NewReader(conn).ReadBytes('\n')
 	if err != nil {
+		var netErr net.Error
+		if s.secret != "" && errors.As(err, &netErr) && netErr.Timeout() {
+			return Payload{}, false, nil
+		}
 		return Payload{}, false, fmt.Errorf("humanloop read: %w", err)
 	}
 	if s.secret != "" {

@@ -226,7 +226,7 @@ Patch prompt:
 ```json
 {
   "op": "patch",
-  "allow_presets": ["python", "curl", "file_write"],
+  "presets": ["python", "curl", "file_write"],
   "allow_add": ["Bash(pip install *)"],
   "allow_remove": [],
   "deny_add": [],
