@@ -151,7 +151,7 @@ func (s *IPCServer) receiveOne() (Payload, bool, error) {
 	if s.secret != "" {
 		var msg ipcMessage
 		if err := json.Unmarshal(line, &msg); err != nil {
-			return Payload{}, false, fmt.Errorf("humanloop unmarshal: %w", err)
+			return Payload{}, false, nil
 		}
 		if msg.Secret != s.secret {
 			return Payload{}, false, nil
