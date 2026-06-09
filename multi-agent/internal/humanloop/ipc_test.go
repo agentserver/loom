@@ -2,12 +2,13 @@ package humanloop
 
 import (
 	"encoding/json"
+	"net"
 	"testing"
 	"time"
 )
 
 func TestEndpointArgRoundTrip(t *testing.T) {
-	in := Endpoint{Network: "tcp", Address: "127.0.0.1:49152"}
+	in := Endpoint{Network: "tcp", Address: "127.0.0.1:49152", Secret: "test-secret"}
 	arg := EndpointArg(in)
 	got, err := ParseEndpointArg(arg)
 	if err != nil {
@@ -32,6 +33,7 @@ func TestParseEndpointArgRejectsEmptyJSONEndpointFields(t *testing.T) {
 	for _, arg := range []string{
 		`{"network":"","address":"127.0.0.1:1234"}`,
 		`{"network":"tcp","address":""}`,
+		`{"network":"tcp","address":"127.0.0.1:1234","secret":""}`,
 	} {
 		if _, err := ParseEndpointArg(arg); err == nil {
 			t.Fatalf("ParseEndpointArg(%s) succeeded, want error", arg)
@@ -58,9 +60,9 @@ func TestParseEndpointArgRejectsNonLoopbackTCP(t *testing.T) {
 
 func TestParseEndpointArgAcceptsLoopbackTCP(t *testing.T) {
 	for _, arg := range []string{
-		`{"network":"tcp","address":"127.0.0.1:1234"}`,
-		`{"network":"tcp","address":"localhost:1234"}`,
-		`{"network":"tcp","address":"[::1]:1234"}`,
+		`{"network":"tcp","address":"127.0.0.1:1234","secret":"test-secret"}`,
+		`{"network":"tcp","address":"localhost:1234","secret":"test-secret"}`,
+		`{"network":"tcp","address":"[::1]:1234","secret":"test-secret"}`,
 	} {
 		if _, err := ParseEndpointArg(arg); err != nil {
 			t.Fatalf("ParseEndpointArg(%s): %v", arg, err)
@@ -82,6 +84,9 @@ func TestIPCRoundTrip(t *testing.T) {
 	defer srv.Close()
 	if ep.Network == "" || ep.Address == "" {
 		t.Fatalf("empty endpoint: %+v", ep)
+	}
+	if ep.Secret == "" {
+		t.Fatalf("endpoint missing secret: %+v", ep)
 	}
 
 	received := make(chan Payload, 1)
@@ -115,4 +120,82 @@ func TestIPCRoundTrip(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for IPC payload")
 	}
+}
+
+func TestIPCRejectsInvalidSecretBeforeReceivingValidPayload(t *testing.T) {
+	srv, ep, err := ListenIPC(t.TempDir())
+	if err != nil {
+		t.Fatalf("ListenIPC: %v", err)
+	}
+	defer srv.Close()
+	if ep.Secret == "" {
+		t.Fatal("ListenIPC returned endpoint without secret")
+	}
+
+	received := make(chan Payload, 1)
+	errs := make(chan error, 1)
+	go func() {
+		p, err := srv.Receive()
+		if err != nil {
+			errs <- err
+			return
+		}
+		received <- p
+	}()
+
+	wrong := ep
+	wrong.Secret = "wrong-secret"
+	if err := sendRawIPC(wrong, Payload{Kind: "ask_user", Question: "wrong"}); err != nil {
+		t.Fatalf("send wrong secret: %v", err)
+	}
+
+	select {
+	case got := <-received:
+		t.Fatalf("server accepted payload with wrong secret: %+v", got)
+	case err := <-errs:
+		t.Fatalf("server returned after wrong secret instead of waiting for valid payload: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	want := Payload{Kind: "ask_user", Question: "valid"}
+	client, err := DialIPC(ep)
+	if err != nil {
+		t.Fatalf("DialIPC: %v", err)
+	}
+	defer client.Close()
+	if err := client.Send(want); err != nil {
+		t.Fatalf("Send valid payload: %v", err)
+	}
+
+	select {
+	case got := <-received:
+		if !payloadJSONEqual(got, want) {
+			t.Fatalf("payload = %+v, want %+v", got, want)
+		}
+	case err := <-errs:
+		t.Fatalf("Receive returned error: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for valid IPC payload")
+	}
+}
+
+func sendRawIPC(ep Endpoint, p Payload) error {
+	c, err := net.Dial(ep.Network, ep.Address)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	b, err := json.Marshal(ipcMessage{Secret: ep.Secret, Payload: p})
+	if err != nil {
+		return err
+	}
+	b = append(b, '\n')
+	_, err = c.Write(b)
+	return err
+}
+
+func payloadJSONEqual(a, b Payload) bool {
+	aj, _ := json.Marshal(a)
+	bj, _ := json.Marshal(b)
+	return string(aj) == string(bj)
 }

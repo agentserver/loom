@@ -169,7 +169,7 @@ func TestGetSlaveClaudePermissionsDelegatesPermissionSkillAndWaits(t *testing.T)
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
 			return []agentsdk.AgentCard{
-				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["claude_permissions"],"short_id":"sa"}`)},
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["permissions"],"short_id":"sa"}`)},
 			}, nil
 		},
 		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
@@ -188,10 +188,37 @@ func TestGetSlaveClaudePermissionsDelegatesPermissionSkillAndWaits(t *testing.T)
 	out, err := tool.Call(context.Background(), json.RawMessage(`{"target_display_name":"slave-a"}`))
 	require.NoError(t, err)
 	require.Equal(t, "slave-a", delegated.TargetID)
-	require.Equal(t, "claude_permissions", delegated.Skill)
+	require.Equal(t, "permissions", delegated.Skill)
 	require.JSONEq(t, `{"op":"get"}`, delegated.Prompt)
 	require.Contains(t, string(out), `"task_id":"task-2"`)
 	require.Contains(t, string(out), `"allow":["Read"]`)
+}
+
+func TestGetSlaveClaudePermissionsFallsBackToLegacySkill(t *testing.T) {
+	var delegated agentsdk.DelegateTaskRequest
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["claude_permissions"],"short_id":"sa"}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			delegated = req
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-legacy"}, nil
+		},
+		getTaskFunc: func(id string, includeOutput bool) (*agentsdk.TaskInfo, error) {
+			return &agentsdk.TaskInfo{
+				TaskID: "task-legacy",
+				Status: "completed",
+				Result: json.RawMessage(`"{\"path\":\"/w/.claude/settings.local.json\",\"allow\":[],\"deny\":[]}"`),
+			}, nil
+		},
+	}
+	tool := toolByName(t, newTestTools(t, sdk), "get_slave_claude_permissions")
+	_, err := tool.Call(context.Background(), json.RawMessage(`{"target_display_name":"slave-a"}`))
+	require.NoError(t, err)
+	require.Equal(t, "claude_permissions", delegated.Skill)
+	require.JSONEq(t, `{"op":"get"}`, delegated.Prompt)
 }
 
 func TestUpdateSlaveClaudePermissionsDelegatesPermissionSkillAndWaits(t *testing.T) {
@@ -199,7 +226,7 @@ func TestUpdateSlaveClaudePermissionsDelegatesPermissionSkillAndWaits(t *testing
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
 			return []agentsdk.AgentCard{
-				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["claude_permissions"],"short_id":"sa"}`)},
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["permissions"],"short_id":"sa"}`)},
 			}, nil
 		},
 		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
@@ -218,8 +245,9 @@ func TestUpdateSlaveClaudePermissionsDelegatesPermissionSkillAndWaits(t *testing
 	out, err := tool.Call(context.Background(), json.RawMessage(`{"target_display_name":"slave-a","allow_presets":["curl"],"allow_add":["Read"]}`))
 	require.NoError(t, err)
 	require.Equal(t, "slave-a", delegated.TargetID)
-	require.Equal(t, "claude_permissions", delegated.Skill)
-	require.JSONEq(t, `{"op":"patch","allow_presets":["curl"],"allow_add":["Read"]}`, delegated.Prompt)
+	require.Equal(t, "permissions", delegated.Skill)
+	require.JSONEq(t, `{"op":"patch","presets":["curl"],"allow_add":["Read"]}`, delegated.Prompt)
+	require.NotContains(t, delegated.Prompt, "allow_presets")
 	require.Contains(t, string(out), `"task_id":"task-3"`)
 	require.Contains(t, string(out), `"allow":["Bash(curl *)","Read"]`)
 }
@@ -239,5 +267,5 @@ func TestSlaveClaudePermissionsRejectsMissingPermissionSkill(t *testing.T) {
 	tool := toolByName(t, newTestTools(t, sdk), "get_slave_claude_permissions")
 	_, err := tool.Call(context.Background(), json.RawMessage(`{"target_display_name":"slave-a"}`))
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "does not advertise claude_permissions")
+	require.Contains(t, err.Error(), "does not advertise permissions or claude_permissions")
 }
