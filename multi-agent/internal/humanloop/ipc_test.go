@@ -227,6 +227,58 @@ func TestIPCReadTimeoutPreventsSilentConnectionFromBlockingValidPayload(t *testi
 	}
 }
 
+func TestIPCMalformedFrameDoesNotStopReceivingValidPayload(t *testing.T) {
+	srv, ep, err := ListenIPC(t.TempDir())
+	if err != nil {
+		t.Fatalf("ListenIPC: %v", err)
+	}
+	defer srv.Close()
+
+	received := make(chan Payload, 1)
+	errs := make(chan error, 1)
+	go func() {
+		p, err := srv.Receive()
+		if err != nil {
+			errs <- err
+			return
+		}
+		received <- p
+	}()
+
+	if err := sendRawLine(ep, "not-json\n"); err != nil {
+		t.Fatalf("send malformed frame: %v", err)
+	}
+
+	select {
+	case got := <-received:
+		t.Fatalf("server accepted malformed frame as payload: %+v", got)
+	case err := <-errs:
+		t.Fatalf("Receive returned after malformed frame instead of waiting for valid payload: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	want := Payload{Kind: "ask_user", Question: "valid after malformed frame"}
+	client, err := DialIPC(ep)
+	if err != nil {
+		t.Fatalf("DialIPC: %v", err)
+	}
+	defer client.Close()
+	if err := client.Send(want); err != nil {
+		t.Fatalf("Send valid payload: %v", err)
+	}
+
+	select {
+	case got := <-received:
+		if !payloadJSONEqual(got, want) {
+			t.Fatalf("payload = %+v, want %+v", got, want)
+		}
+	case err := <-errs:
+		t.Fatalf("Receive returned error: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("malformed unauthenticated frame stopped valid IPC payload")
+	}
+}
+
 func sendRawIPC(ep Endpoint, p Payload) error {
 	c, err := net.Dial(ep.Network, ep.Address)
 	if err != nil {
@@ -239,6 +291,16 @@ func sendRawIPC(ep Endpoint, p Payload) error {
 	}
 	b = append(b, '\n')
 	_, err = c.Write(b)
+	return err
+}
+
+func sendRawLine(ep Endpoint, line string) error {
+	c, err := net.Dial(ep.Network, ep.Address)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	_, err = c.Write([]byte(line))
 	return err
 }
 
