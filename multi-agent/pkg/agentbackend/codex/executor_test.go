@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -30,11 +32,26 @@ func TestExecutorReplaysFixture(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	fakeBin := filepath.Join(dir, "codex")
-	script := "#!/usr/bin/env bash\ncat >/dev/null\ncat <<'EOF'\n" + string(fix) + "\nEOF\n"
-	if err := os.WriteFile(fakeBin, []byte(script), 0o755); err != nil {
+	framesPath := filepath.Join(dir, "frames.ndjson")
+	if err := os.WriteFile(framesPath, fix, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	fakeBin := buildFakeCodex(t, fmt.Sprintf(`package main
+import (
+	"fmt"
+	"io"
+	"os"
+)
+func main() {
+	_, _ = io.Copy(io.Discard, os.Stdin)
+	body, err := os.ReadFile(%q)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Print(string(body))
+	fmt.Println()
+}
+`, framesPath))
 	b := New(agentbackend.CodexConfig{Bin: fakeBin, WorkDir: dir}, nil)
 	sink := &captureSink{}
 	res, err := b.Run(context.Background(), agentbackend.Task{Prompt: "ignored"}, sink)
@@ -56,16 +73,12 @@ func TestExecutorReplaysFixture(t *testing.T) {
 // stream-json frames (one per line) and exits 0.
 func writeFakeCodex(t *testing.T, frames []string) string {
 	t.Helper()
-	dir := t.TempDir()
-	script := filepath.Join(dir, "codex")
-	body := "#!/bin/bash\n"
+	body := "package main\nimport \"fmt\"\nfunc main() {\n"
 	for _, f := range frames {
-		body += "echo '" + f + "'\n"
+		body += fmt.Sprintf("fmt.Println(%q)\n", f)
 	}
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return script
+	body += "}\n"
+	return buildFakeCodex(t, body)
 }
 
 // writeFakeCodexReadsStdinThenExits emits a thread.started event, drains
@@ -75,20 +88,20 @@ func writeFakeCodex(t *testing.T, frames []string) string {
 // sleep elapses the script emits a final agent_message and exits 0.
 func writeFakeCodexReadsStdinThenExits(t *testing.T, threadID string) string {
 	t.Helper()
-	dir := t.TempDir()
-	script := filepath.Join(dir, "codex")
-	body := fmt.Sprintf(`#!/bin/bash
-echo '{"type":"thread.started","thread_id":"%s"}'
-cat > /dev/null
-# Simulate model processing time — gives the test's IPC hook (50ms delay)
-# time to land before we exit and tear down the listener.
-sleep 0.5
-echo '{"type":"item.completed","item":{"type":"agent_message","text":"bye"}}'
-`, threadID)
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return script
+	return buildFakeCodex(t, fmt.Sprintf(`package main
+import (
+	"fmt"
+	"io"
+	"os"
+	"time"
+)
+func main() {
+	fmt.Println(%q)
+	_, _ = io.Copy(io.Discard, os.Stdin)
+	time.Sleep(500 * time.Millisecond)
+	fmt.Println(%q)
+}
+`, `{"type":"thread.started","thread_id":"`+threadID+`"}`, `{"type":"item.completed","item":{"type":"agent_message","text":"bye"}}`))
 }
 
 // TestCodexExecutorCapturesThreadID — first thread.started event's thread_id
@@ -145,15 +158,16 @@ func TestCodexExecutorPausesOnHumanloopIPC(t *testing.T) {
 }
 
 func TestCodexExecutorFailsWhenPauseWithoutSessionID(t *testing.T) {
-	dir := t.TempDir()
-	script := filepath.Join(dir, "codex")
-	body := `#!/bin/bash
-# No thread.started event.
-exec sleep 30 < /dev/null > /dev/null 2>&1
-`
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	script := buildFakeCodex(t, `package main
+import (
+	"os"
+	"time"
+)
+func main() {
+	_ = os.Stdout.Close()
+	time.Sleep(30 * time.Second)
+}
+`)
 
 	sockHook := func(arg string) {
 		time.Sleep(50 * time.Millisecond)
@@ -182,16 +196,18 @@ exec sleep 30 < /dev/null > /dev/null 2>&1
 }
 
 func TestCodexExecutorFailsWhenGraceWindowExceeded(t *testing.T) {
-	dir := t.TempDir()
-	script := filepath.Join(dir, "codex")
-	body := `#!/bin/bash
-echo '{"type":"thread.started","thread_id":"thr-stuck"}'
-trap '' PIPE
-exec sleep 30 < /dev/null > /dev/null 2>&1
-`
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	script := buildFakeCodex(t, `package main
+import (
+	"fmt"
+	"os"
+	"time"
+)
+func main() {
+	fmt.Println(`+"`"+`{"type":"thread.started","thread_id":"thr-stuck"}`+"`"+`)
+	_ = os.Stdout.Close()
+	time.Sleep(30 * time.Second)
+}
+`)
 
 	sockHook := func(arg string) {
 		time.Sleep(50 * time.Millisecond)
@@ -229,19 +245,23 @@ exec sleep 30 < /dev/null > /dev/null 2>&1
 // prompt from stdin when the trailing arg is `-`).
 func TestCodexExecutorRunResumeFeedsAnswer(t *testing.T) {
 	dir := t.TempDir()
-	script := filepath.Join(dir, "codex")
 	sentinel := filepath.Join(dir, "args.txt")
-	body := fmt.Sprintf(`#!/bin/bash
-echo "$@" > %q
-echo '{"type":"thread.started","thread_id":"thr-1-resumed"}'
-sleep 0.2
-INPUT=$(dd bs=4096 count=1 iflag=nonblock 2>/dev/null || true)
-ESCAPED=$(printf '%%s' "$INPUT" | sed 's/"/\\"/g')
-echo "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"$ESCAPED\"}}"
-`, sentinel)
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	script := buildFakeCodex(t, fmt.Sprintf(`package main
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+)
+func main() {
+	_ = os.WriteFile(%q, []byte(strings.Join(os.Args[1:], " ")), 0600)
+	fmt.Println(%q)
+	input, _ := io.ReadAll(os.Stdin)
+	text, _ := json.Marshal(string(input))
+	fmt.Printf("{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":%%s}}\n", text)
+}
+`, sentinel, `{"type":"thread.started","thread_id":"thr-1-resumed"}`))
 
 	ex := newExecutor(agentbackend.CodexConfig{Bin: script, WorkDir: t.TempDir()}, nil)
 	res, err := ex.RunResume(context.Background(), "thr-1", "the user's answer", &captureSink{})
@@ -256,6 +276,24 @@ echo "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\"
 	if !strings.Contains(res.Summary, "User answered: the user's answer") {
 		t.Errorf("expected 'User answered: …' in summary, got %q", res.Summary)
 	}
+}
+
+func buildFakeCodex(t *testing.T, source string) string {
+	t.Helper()
+	dir := t.TempDir()
+	src := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(src, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(dir, "codex")
+	if runtime.GOOS == "windows" {
+		exe += ".exe"
+	}
+	cmd := exec.Command("go", "build", "-o", exe, src)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build fake codex: %v\n%s", err, out)
+	}
+	return exe
 }
 
 func TestHumanloopMCPArgsAreTOMLSafe(t *testing.T) {

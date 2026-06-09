@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -36,10 +37,49 @@ func (c *captureSink) Close() {
 
 func fakeClaudePath(t *testing.T) string {
 	t.Helper()
-	_, file, _, _ := runtime.Caller(0)
-	p, err := filepath.Abs(filepath.Join(filepath.Dir(file), "../../../testdata/fake-claude.sh"))
-	require.NoError(t, err)
-	return p
+	return buildFakeClaude(t, `package main
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"time"
+)
+func emit(s string) { fmt.Println(s) }
+func main() {
+	mode := os.Getenv("FAKE_CLAUDE_MODE")
+	if mode == "" {
+		mode = "nochange"
+	}
+	switch mode {
+	case "normal":
+		emit(`+"`"+`{"type":"assistant","message":{"content":[{"type":"text","text":"hello "}]}}`+"`"+`)
+		emit(`+"`"+`{"type":"assistant","message":{"content":[{"type":"text","text":"world"}]}}`+"`"+`)
+		emit(`+"`"+`{"type":"result","subtype":"success"}`+"`"+`)
+	case "capability":
+		emit(`+"`"+`{"type":"assistant","message":{"content":[{"type":"text","text":"installed foo\n=== CAPABILITY ===\nfoo CLI now available"}]}}`+"`"+`)
+		emit(`+"`"+`{"type":"result","subtype":"success"}`+"`"+`)
+	case "nochange":
+		emit(`+"`"+`{"type":"assistant","message":{"content":[{"type":"text","text":"answer\n=== CAPABILITY ===\nNO_CAPABILITY_CHANGE"}]}}`+"`"+`)
+		emit(`+"`"+`{"type":"result","subtype":"success"}`+"`"+`)
+	case "exit1":
+		fmt.Fprintln(os.Stderr, "boom")
+		os.Exit(1)
+	case "sleep":
+		seconds, _ := strconv.Atoi(os.Getenv("FAKE_CLAUDE_SLEEP"))
+		if seconds <= 0 {
+			seconds = 30
+		}
+		time.Sleep(time.Duration(seconds) * time.Second)
+	case "garbage":
+		emit("not json at all")
+		emit(`+"`"+`{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}`+"`"+`)
+		emit(`+"`"+`{"type":"result","subtype":"success"}`+"`"+`)
+	default:
+		fmt.Fprintln(os.Stderr, "unknown FAKE_CLAUDE_MODE: "+mode)
+		os.Exit(2)
+	}
+}
+`)
 }
 
 func TestExecutorParsesAssistantText(t *testing.T) {
@@ -137,14 +177,12 @@ func TestExecutor_GarbageLines_StillCompletes(t *testing.T) {
 // stream-json frames (one per line) and exits 0.
 func writeFakeClaude(t *testing.T, frames []string) string {
 	t.Helper()
-	dir := t.TempDir()
-	script := filepath.Join(dir, "claude")
-	body := "#!/bin/bash\n"
+	body := "package main\nimport \"fmt\"\nfunc main() {\n"
 	for _, f := range frames {
-		body += "echo '" + f + "'\n"
+		body += fmt.Sprintf("fmt.Println(%q)\n", f)
 	}
-	require.NoError(t, os.WriteFile(script, []byte(body), 0o755))
-	return script
+	body += "}\n"
+	return buildFakeClaude(t, body)
 }
 
 // writeFakeClaudeReadsStdinThenExits emits a system frame, reads stdin until
@@ -154,18 +192,20 @@ func writeFakeClaude(t *testing.T, frames []string) string {
 // then emits a final assistant frame and exits 0.
 func writeFakeClaudeReadsStdinThenExits(t *testing.T, sessionID string) string {
 	t.Helper()
-	dir := t.TempDir()
-	script := filepath.Join(dir, "claude")
-	body := fmt.Sprintf(`#!/bin/bash
-echo '{"type":"system","session_id":"%s"}'
-cat > /dev/null
-# Sleep simulates real claude's "model is processing" gap between stdin EOF
-# and the model's first response/tool-call; gives the IPC hook a window.
-sleep 0.5
-echo '{"type":"assistant","message":{"content":[{"type":"text","text":"bye"}]}}'
-`, sessionID)
-	require.NoError(t, os.WriteFile(script, []byte(body), 0o755))
-	return script
+	return buildFakeClaude(t, fmt.Sprintf(`package main
+import (
+	"fmt"
+	"io"
+	"os"
+	"time"
+)
+func main() {
+	fmt.Println(%q)
+	_, _ = io.Copy(io.Discard, os.Stdin)
+	time.Sleep(500 * time.Millisecond)
+	fmt.Println(%q)
+}
+`, `{"type":"system","session_id":"`+sessionID+`"}`, `{"type":"assistant","message":{"content":[{"type":"text","text":"bye"}]}}`))
 }
 
 // TestExecutorCapturesSessionID checks that the first {"type":"system","session_id":...}
@@ -214,20 +254,19 @@ func TestExecutorPausesOnHumanloopIPC(t *testing.T) {
 // but the backend never emitted a system frame with session_id, we cannot
 // resume; treat as failure even though AwaitingUser is set. Spec §Boundaries A.
 func TestExecutorFailsWhenPauseWithoutSessionID(t *testing.T) {
-	// Fake claude that emits NO system frame, just hangs on stdin like the
-	// pause-case helper.
-	dir := t.TempDir()
-	script := filepath.Join(dir, "claude")
-	body := `#!/bin/bash
-# deliberately NO system frame — we want session_id to stay empty
-cat > /dev/null
-# Sleep so the IPC hook has a window to dial in before the fake exits.
-sleep 0.5
-echo '{"type":"assistant","message":{"content":[{"type":"text","text":"bye"}]}}'
-`
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	script := buildFakeClaude(t, `package main
+import (
+	"fmt"
+	"io"
+	"os"
+	"time"
+)
+func main() {
+	_, _ = io.Copy(io.Discard, os.Stdin)
+	time.Sleep(500 * time.Millisecond)
+	fmt.Println(`+"`"+`{"type":"assistant","message":{"content":[{"type":"text","text":"bye"}]}}`+"`"+`)
+}
+`)
 
 	sockHook := func(arg string) {
 		time.Sleep(200 * time.Millisecond)
@@ -258,21 +297,18 @@ echo '{"type":"assistant","message":{"content":[{"type":"text","text":"bye"}]}}'
 // stdin close within the grace window, we SIGTERM/SIGKILL it and report the
 // task as failed. Spec §Boundaries A row 3.
 func TestExecutorFailsWhenGraceWindowExceeded(t *testing.T) {
-	// Fake claude that emits a session frame, then ignores stdin close and
-	// sleeps "forever" — only SIGTERM/SIGKILL will end it.
-	dir := t.TempDir()
-	script := filepath.Join(dir, "claude")
-	body := `#!/bin/bash
-echo '{"type":"system","session_id":"sess-stuck"}'
-trap '' PIPE
-# exec replaces bash with sleep so SIGTERM hits sleep directly (bash would
-# defer signals until its foreground child finishes). Redirect all fds so
-# the parent's pipes get EOF immediately and the scanner doesn't block.
-exec sleep 30 < /dev/null > /dev/null 2>&1
-`
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	script := buildFakeClaude(t, `package main
+import (
+	"fmt"
+	"os"
+	"time"
+)
+func main() {
+	fmt.Println(`+"`"+`{"type":"system","session_id":"sess-stuck"}`+"`"+`)
+	_ = os.Stdout.Close()
+	time.Sleep(30 * time.Second)
+}
+`)
 
 	sockHook := func(arg string) {
 		time.Sleep(50 * time.Millisecond)
@@ -314,29 +350,24 @@ exec sleep 30 < /dev/null > /dev/null 2>&1
 // 2. write "User answered: <answer>" as the prompt to stdin
 // 3. return a normal Result (no AwaitingUser if model didn't call ask_user)
 func TestExecutorRunResumeFeedsAnswer(t *testing.T) {
-	// Fake claude that:
-	// - echoes all args to a sentinel file so we can assert on argv
-	// - emits a system frame (with NEW session_id, claude re-assigns on resume)
-	// - reads stdin, then emits it back as an assistant text frame so we can check it
 	dir := t.TempDir()
-	script := filepath.Join(dir, "claude")
 	sentinel := filepath.Join(dir, "args.txt")
-	// The parent doesn't close stdin on the happy path, so we read with a
-	// short timeout via `dd` to capture the prompt and then proceed.
-	body := fmt.Sprintf(`#!/bin/bash
-echo "$@" > %q
-echo '{"type":"system","session_id":"sess-1-resumed"}'
-# Wait briefly for the parent to finish writing the prompt, then snapshot
-# stdin without blocking on EOF.
-sleep 0.2
-INPUT=$(dd bs=4096 count=1 iflag=nonblock 2>/dev/null || true)
-# stream-json escaping: replace " with \"
-ESCAPED=$(printf '%%s' "$INPUT" | sed 's/"/\\"/g')
-echo "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"$ESCAPED\"}]}}"
-`, sentinel)
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	script := buildFakeClaude(t, fmt.Sprintf(`package main
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+)
+func main() {
+	_ = os.WriteFile(%q, []byte(strings.Join(os.Args[1:], " ")), 0600)
+	fmt.Println(%q)
+	input, _ := io.ReadAll(os.Stdin)
+	text, _ := json.Marshal(string(input))
+	fmt.Printf("{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":%%s}]}}\n", text)
+}
+`, sentinel, `{"type":"system","session_id":"sess-1-resumed"}`))
 
 	ex := newExecutor(agentbackend.ClaudeConfig{Bin: script, WorkDir: t.TempDir()}, nil)
 	res, err := ex.RunResume(context.Background(), "sess-1", "the user's answer", &captureSink{})
@@ -357,4 +388,22 @@ echo "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"tex
 	if res.AwaitingUser != nil {
 		t.Errorf("AwaitingUser should be nil for a non-pausing resume")
 	}
+}
+
+func buildFakeClaude(t *testing.T, source string) string {
+	t.Helper()
+	dir := t.TempDir()
+	src := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(src, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(dir, "claude")
+	if runtime.GOOS == "windows" {
+		exe += ".exe"
+	}
+	cmd := exec.Command("go", "build", "-o", exe, src)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build fake claude: %v\n%s", err, out)
+	}
+	return exe
 }

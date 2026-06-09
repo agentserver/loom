@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
+	"github.com/yourorg/multi-agent/internal/commandiface"
 )
 
 func NewResourceSnapshot(cards []agentsdk.AgentCard, selfID string) ResourceSnapshot {
@@ -17,23 +18,27 @@ func NewResourceSnapshot(cards []agentsdk.AgentCard, selfID string) ResourceSnap
 			continue
 		}
 		var inner struct {
-			Skills    []string        `json:"skills"`
-			Tools     []string        `json:"tools"`
-			MCPTools  json.RawMessage `json:"mcp_tools"`
-			Resources json.RawMessage `json:"resources"`
-			ShortID   string          `json:"short_id"`
+			Skills            []string                        `json:"skills"`
+			Tools             []string                        `json:"tools"`
+			MCPTools          json.RawMessage                 `json:"mcp_tools"`
+			Resources         json.RawMessage                 `json:"resources"`
+			ShortID           string                          `json:"short_id"`
+			Platform          commandiface.Platform           `json:"platform"`
+			CommandInterfaces []commandiface.CommandInterface `json:"command_interfaces"`
 		}
 		_ = json.Unmarshal(c.Card, &inner)
 		out.Agents = append(out.Agents, ResourceAgent{
-			AgentID:     c.AgentID,
-			ShortID:     inner.ShortID,
-			DisplayName: c.DisplayName,
-			Description: c.Description,
-			Status:      c.Status,
-			Skills:      inner.Skills,
-			Tools:       inner.Tools,
-			MCPTools:    inner.MCPTools,
-			Resources:   inner.Resources,
+			AgentID:           c.AgentID,
+			ShortID:           inner.ShortID,
+			DisplayName:       c.DisplayName,
+			Description:       c.Description,
+			Status:            c.Status,
+			Skills:            inner.Skills,
+			Tools:             inner.Tools,
+			MCPTools:          inner.MCPTools,
+			Resources:         inner.Resources,
+			Platform:          inner.Platform,
+			CommandInterfaces: inner.CommandInterfaces,
 		})
 	}
 	return out
