@@ -23,6 +23,9 @@ func buildFakeMCP(t *testing.T) string {
 	_, file, _, _ := runtime.Caller(0)
 	src, _ := filepath.Abs(filepath.Join(filepath.Dir(file), "../../testdata/fake-mcp-stdio"))
 	out := filepath.Join(t.TempDir(), "fake-mcp")
+	if runtime.GOOS == "windows" {
+		out += ".exe"
+	}
 	cmd := exec.Command("go", "build", "-o", out, ".")
 	cmd.Dir = src
 	require.NoError(t, cmd.Run())
@@ -34,6 +37,9 @@ func buildFakeMCPStdio(t *testing.T) string {
 	_, file, _, _ := runtime.Caller(0)
 	src, _ := filepath.Abs(filepath.Join(filepath.Dir(file), "../../testdata/fake-mcp-stdio"))
 	out := filepath.Join(t.TempDir(), "fake-mcp-stdio")
+	if runtime.GOOS == "windows" {
+		out += ".exe"
+	}
 	cmd := exec.Command("go", "build", "-o", out, ".")
 	cmd.Dir = src
 	if out, err := cmd.CombinedOutput(); err != nil {

@@ -346,6 +346,7 @@ Input:
 ```
 
 Requires target skill `permissions` or the legacy alias `claude_permissions`. Uses the task channel today; future design should move this to a dedicated agentserver control channel.
+The driver tool keeps the user-facing `allow_presets` input name, but delegates the generic permissions patch field as `presets` for both `permissions` and `claude_permissions` targets.
 
 ## Slave File Tools
 

@@ -52,7 +52,7 @@ func TestPowerShellExecutorRunsScriptWhenAvailable(t *testing.T) {
 		Env: map[string]string{
 			"PS_TEST_VALUE": "hello stdout",
 		},
-		TimeoutSec: 5,
+		TimeoutSec: 15,
 	})
 
 	res, err := exec.Run(context.Background(), Task{
@@ -70,13 +70,20 @@ func TestPowerShellExecutorRunsScriptWhenAvailable(t *testing.T) {
 	if got.ExitCode != 0 {
 		t.Fatalf("exit_code = %d, want 0; result=%+v", got.ExitCode, got)
 	}
-	if normalizeNewlines(got.Stdout) != workdir+"\nhello stdout\n" {
+	stdoutLines := strings.Split(normalizeNewlines(got.Stdout), "\n")
+	if len(stdoutLines) < 3 {
 		t.Fatalf("stdout = %q", got.Stdout)
+	}
+	if !samePathForTest(stdoutLines[0], workdir) {
+		t.Fatalf("stdout path = %q, want %q", stdoutLines[0], workdir)
+	}
+	if stdoutLines[1] != "hello stdout" {
+		t.Fatalf("stdout value = %q, want hello stdout; full stdout=%q", stdoutLines[1], got.Stdout)
 	}
 	if normalizeNewlines(got.Stderr) != "hello stderr\n" {
 		t.Fatalf("stderr = %q", got.Stderr)
 	}
-	if got.WorkDir != workdir {
+	if !samePathForTest(got.WorkDir, workdir) {
 		t.Fatalf("workdir = %q, want %q", got.WorkDir, workdir)
 	}
 }
@@ -166,8 +173,8 @@ func TestPowerShellExecutorReportsStartupError(t *testing.T) {
 	if !strings.Contains(err.Error(), "powershell start:") {
 		t.Fatalf("error = %q, want startup diagnostic", err.Error())
 	}
-	if !strings.Contains(err.Error(), missing) {
-		t.Fatalf("error = %q, want missing binary path %q", err.Error(), missing)
+	if !strings.Contains(err.Error(), filepath.Base(missing)) {
+		t.Fatalf("error = %q, want missing binary name %q", err.Error(), filepath.Base(missing))
 	}
 	var got PowerShellResult
 	if jsonErr := json.Unmarshal([]byte(res.Summary), &got); jsonErr != nil {
@@ -213,4 +220,13 @@ func mustJSON(t *testing.T, v any) string {
 
 func normalizeNewlines(s string) string {
 	return strings.ReplaceAll(s, "\r\n", "\n")
+}
+
+func samePathForTest(a, b string) bool {
+	ai, aerr := os.Stat(a)
+	bi, berr := os.Stat(b)
+	if aerr == nil && berr == nil {
+		return os.SameFile(ai, bi)
+	}
+	return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
 }

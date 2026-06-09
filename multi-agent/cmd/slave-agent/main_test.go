@@ -76,7 +76,7 @@ func TestAcquireInstanceLockManagedUnknownHolderReturnsHeldLockAndUpdatesPID(t *
 	if err != nil {
 		t.Fatalf("managed acquireInstanceLock: %v", err)
 	}
-	defer lock.Unlock()
+	t.Cleanup(func() { _ = lock.Unlock() })
 	<-released
 
 	contender, err := platform.TryLock(lockPath)
@@ -88,6 +88,9 @@ func TestAcquireInstanceLockManagedUnknownHolderReturnsHeldLockAndUpdatesPID(t *
 		t.Fatalf("contender TryLock error = %v, want ErrLocked", err)
 	}
 
+	if err := lock.Unlock(); err != nil {
+		t.Fatalf("managed lock Unlock: %v", err)
+	}
 	got, err := os.ReadFile(lockPath)
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)

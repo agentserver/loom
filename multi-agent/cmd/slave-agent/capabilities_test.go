@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/yourorg/multi-agent/internal/commandiface"
@@ -80,10 +82,7 @@ func TestRegisterRuntimeShellRoutesUsesNormalizedSkills(t *testing.T) {
 
 func TestRegisterRuntimeShellRoutesUsesDetectedBashCommand(t *testing.T) {
 	workdir := t.TempDir()
-	fakeBash := filepath.Join(t.TempDir(), "fake-bash")
-	if err := os.WriteFile(fakeBash, []byte("#!/bin/sh\nprintf 'fake-bash:%s:%s\\n' \"$1\" \"$2\"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	fakeBash := buildFakeBashCommand(t)
 	cfg := &config.Config{Claude: config.Claude{WorkDir: workdir}}
 	caps := commandiface.Capabilities{
 		Skills: []string{"bash"},
@@ -109,6 +108,42 @@ func TestRegisterRuntimeShellRoutesUsesDetectedBashCommand(t *testing.T) {
 	if got.Stdout != "fake-bash:-lc:echo ok\n" {
 		t.Fatalf("stdout = %q, want fake bash command to receive -lc and script", got.Stdout)
 	}
+}
+
+func buildFakeBashCommand(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	src := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(src, []byte(`package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	arg1 := ""
+	arg2 := ""
+	if len(os.Args) > 1 {
+		arg1 = os.Args[1]
+	}
+	if len(os.Args) > 2 {
+		arg2 = os.Args[2]
+	}
+	fmt.Printf("fake-bash:%s:%s\n", arg1, arg2)
+}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(dir, "fake-bash")
+	if runtime.GOOS == "windows" {
+		exe += ".exe"
+	}
+	cmd := exec.Command("go", "build", "-o", exe, src)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build fake bash: %v\n%s", err, out)
+	}
+	return exe
 }
 
 func equalStrings(a, b []string) bool {

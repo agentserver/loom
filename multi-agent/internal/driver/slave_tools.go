@@ -228,19 +228,19 @@ func (u *updateSlaveClaudePermissionsTool) Call(ctx context.Context, raw json.Ra
 		return nil, &MCPToolError{Message: "invalid args: " + err.Error()}
 	}
 	prompt, err := json.Marshal(struct {
-		Op           string   `json:"op"`
-		AllowPresets []string `json:"allow_presets,omitempty"`
-		AllowAdd     []string `json:"allow_add,omitempty"`
-		AllowRemove  []string `json:"allow_remove,omitempty"`
-		DenyAdd      []string `json:"deny_add,omitempty"`
-		DenyRemove   []string `json:"deny_remove,omitempty"`
+		Op          string   `json:"op"`
+		Presets     []string `json:"presets,omitempty"`
+		AllowAdd    []string `json:"allow_add,omitempty"`
+		AllowRemove []string `json:"allow_remove,omitempty"`
+		DenyAdd     []string `json:"deny_add,omitempty"`
+		DenyRemove  []string `json:"deny_remove,omitempty"`
 	}{
-		Op:           "patch",
-		AllowPresets: args.AllowPresets,
-		AllowAdd:     args.AllowAdd,
-		AllowRemove:  args.AllowRemove,
-		DenyAdd:      args.DenyAdd,
-		DenyRemove:   args.DenyRemove,
+		Op:          "patch",
+		Presets:     args.AllowPresets,
+		AllowAdd:    args.AllowAdd,
+		AllowRemove: args.AllowRemove,
+		DenyAdd:     args.DenyAdd,
+		DenyRemove:  args.DenyRemove,
 	})
 	if err != nil {
 		return nil, &MCPToolError{Message: err.Error()}
@@ -253,16 +253,22 @@ func (t *Tools) delegatePermissionTask(ctx context.Context, targetAgentID, targe
 	if err != nil {
 		return nil, err
 	}
-	if !hasSkill(card, "claude_permissions") {
-		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise claude_permissions"}
+	skill := ""
+	switch {
+	case hasSkill(card, "permissions"):
+		skill = "permissions"
+	case hasSkill(card, "claude_permissions"):
+		skill = "claude_permissions"
+	default:
+		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise permissions or claude_permissions"}
 	}
 	resp, err := t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
 		TargetID: card.AgentID,
-		Skill:    "claude_permissions",
+		Skill:    skill,
 		Prompt:   prompt,
 	})
 	if err != nil {
-		return nil, &MCPToolError{Message: "delegate claude_permissions task: " + err.Error()}
+		return nil, &MCPToolError{Message: "delegate " + skill + " task: " + err.Error()}
 	}
 	return t.waitDelegatedTask(ctx, resp.TaskID, 0)
 }

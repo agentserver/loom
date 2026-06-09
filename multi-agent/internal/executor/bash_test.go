@@ -3,7 +3,10 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -13,6 +16,7 @@ func (noopSink) Write(eventType, data string) {}
 func (noopSink) Close()                       {}
 
 func TestBashExecutorRunsScriptAndReturnsStructuredOutput(t *testing.T) {
+	skipOnWindowsForPOSIXBash(t)
 	workdir := t.TempDir()
 	exec := NewBashExecutor(BashConfig{WorkDir: workdir})
 	res, err := exec.Run(context.Background(), Task{
@@ -42,6 +46,7 @@ func TestBashExecutorRunsScriptAndReturnsStructuredOutput(t *testing.T) {
 }
 
 func TestBashExecutorFailsOnNonZeroExitWithResult(t *testing.T) {
+	skipOnWindowsForPOSIXBash(t)
 	exec := NewBashExecutor(BashConfig{WorkDir: t.TempDir()})
 	res, err := exec.Run(context.Background(), Task{
 		ID:     "task-1",
@@ -69,6 +74,7 @@ func TestBashExecutorRejectsMissingScript(t *testing.T) {
 }
 
 func TestBashExecutorCreatesWorkDir(t *testing.T) {
+	skipOnWindowsForPOSIXBash(t)
 	workdir := filepath.Join(t.TempDir(), "nested", "work")
 	exec := NewBashExecutor(BashConfig{WorkDir: workdir})
 	res, err := exec.Run(context.Background(), Task{Prompt: `{"script":"pwd"}`}, noopSink{})
@@ -82,4 +88,63 @@ func TestBashExecutorCreatesWorkDir(t *testing.T) {
 	if got.Stdout != workdir+"\n" {
 		t.Fatalf("stdout = %q, want pwd output", got.Stdout)
 	}
+}
+
+func TestBashExecutorUsesConfiguredCommandAndArgs(t *testing.T) {
+	bin := buildFakeBashForTest(t)
+	exec := NewBashExecutor(BashConfig{
+		WorkDir: t.TempDir(),
+		Bin:     bin,
+		Args:    []string{"--fake-shell", "-c"},
+	})
+	res, err := exec.Run(context.Background(), Task{Prompt: `{"script":"echo ok"}`}, noopSink{})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	var got BashResult
+	if err := json.Unmarshal([]byte(res.Summary), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Stdout != "args:--fake-shell|-c|echo ok\n" {
+		t.Fatalf("stdout = %q, want configured args and script", got.Stdout)
+	}
+	if got.ExitCode != 0 {
+		t.Fatalf("exit_code = %d, want 0", got.ExitCode)
+	}
+}
+
+func skipOnWindowsForPOSIXBash(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("requires POSIX bash semantics")
+	}
+}
+
+func buildFakeBashForTest(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	src := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(src, []byte(`package main
+
+import (
+	"fmt"
+	"os"
+	"strings"
+)
+
+func main() {
+	fmt.Printf("args:%s\n", strings.Join(os.Args[1:], "|"))
+}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(dir, "fake-bash")
+	if runtime.GOOS == "windows" {
+		exe += ".exe"
+	}
+	cmd := exec.Command("go", "build", "-o", exe, src)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build fake bash: %v\n%s", err, out)
+	}
+	return exe
 }
