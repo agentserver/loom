@@ -183,6 +183,15 @@ func observerRoleForCard(c agentsdk.AgentCard) string {
 	return observer.RoleSlave
 }
 
+func listAgentRoleForCard(c agentsdk.AgentCard) string {
+	switch c.AgentType {
+	case observer.RoleDriver, observer.RoleMaster, observer.RoleSlave:
+		return c.AgentType
+	default:
+		return observerRoleForCard(c)
+	}
+}
+
 func cardShortID(c agentsdk.AgentCard) string {
 	// agentserver v0.40.0 does not expose short_id as a top-level AgentCard
 	// field. Agents that need peer-proxy addressing publish it inside card.
@@ -197,12 +206,20 @@ type listAgentsTool struct{ t *Tools }
 
 func (l *listAgentsTool) Name() string { return "list_agents" }
 func (l *listAgentsTool) Description() string {
-	return "List agents in the workspace (driver-self filtered out)."
+	return "List agents in the workspace with role and status; returns available agents unless include_unavailable is true (driver-self filtered out)."
 }
 func (l *listAgentsTool) InputSchema() json.RawMessage {
-	return json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`)
+	return json.RawMessage(`{"type":"object","properties":{"include_unavailable":{"type":"boolean"}},"additionalProperties":false}`)
 }
-func (l *listAgentsTool) Call(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
+func (l *listAgentsTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	var args struct {
+		IncludeUnavailable bool `json:"include_unavailable"`
+	}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &args); err != nil {
+			return nil, &MCPToolError{Message: "invalid args: " + err.Error()}
+		}
+	}
 	cards, err := l.t.sdk.DiscoverAgents(ctx)
 	if err != nil {
 		return nil, &MCPToolError{Message: err.Error()}
@@ -210,6 +227,8 @@ func (l *listAgentsTool) Call(ctx context.Context, _ json.RawMessage) (json.RawM
 	type out struct {
 		AgentID           string                          `json:"agent_id"`
 		DisplayName       string                          `json:"display_name"`
+		Status            string                          `json:"status"`
+		Role              string                          `json:"role"`
 		ShortID           string                          `json:"short_id,omitempty"`
 		Skills            []string                        `json:"skills"`
 		Tools             []string                        `json:"tools"`
@@ -224,13 +243,16 @@ func (l *listAgentsTool) Call(ctx context.Context, _ json.RawMessage) (json.RawM
 		if c.AgentID == l.t.cfg.Credentials.SandboxID {
 			continue
 		}
+		if !args.IncludeUnavailable && !agentAvailable(c) {
+			continue
+		}
 		card := parseAgentCard(c)
 		var platform *commandiface.Platform
 		if card.Platform != (commandiface.Platform{}) {
 			platform = &card.Platform
 		}
 		results = append(results, out{
-			AgentID: c.AgentID, DisplayName: c.DisplayName, ShortID: card.ShortID,
+			AgentID: c.AgentID, DisplayName: c.DisplayName, Status: c.Status, Role: listAgentRoleForCard(c), ShortID: card.ShortID,
 			Skills: card.Skills, Tools: card.Tools, MCPTools: card.MCPTools, Resources: card.Resources,
 			Platform: platform, CommandInterfaces: card.CommandInterfaces, Description: c.Description,
 		})

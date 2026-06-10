@@ -20,10 +20,16 @@ def _filter_slaves(
     skill: str | None = None,
     mcp_tool: str | None = None,
 ) -> list[dict]:
-    """Subset of agents matching all given criteria. Drivers (no skills) excluded
-    when filtering by skill/mcp_tool."""
+    """Subset of slave agents matching all given criteria.
+
+    Newer drivers return a role field. When present, only role="slave" is
+    accepted; legacy responses without role keep the old criteria-only behavior.
+    """
     out: list[dict] = []
     for a in agents:
+        role = a.get("role")
+        if role is not None and role != "slave":
+            continue
         if name is not None and a.get("display_name") != name:
             continue
         if skill is not None:

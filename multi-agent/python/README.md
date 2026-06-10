@@ -70,6 +70,10 @@ with loom.workflow(goal="weather lookup") as wf:
     res = wf.chat("Will it rain in Beijing tomorrow?", target=slave).wait()
 ```
 
+`list_slaves()` and `find_slave()` only return agents whose discovery role is
+`slave` when the driver provides role metadata; peer drivers and masters are
+excluded from these Python helpers.
+
 ### 4. File I/O via placeholders
 
 ```python
