@@ -13,6 +13,11 @@ Prefer driver-to-slave orchestration. Avoid routing through an intermediate coor
 
 Do not assume driver and slaves share a local filesystem. Move user files through driver manifests and observer artifacts. Use target IDs or display names from live discovery, not stale examples.
 
+When the user asks which agents are online, call `list_agents`. It returns only
+currently `available` agents unless `include_unavailable:true` is explicitly
+passed, and includes each agent's `role` (`driver`, `master`, or `slave`) plus
+`status`; do not infer role from display names.
+
 Do not assume every slave has Bash. Inspect each target's `platform` and
 `command_interfaces` from `list_agents` or `inspect_capabilities` before
 choosing a shell helper. Use `run_slave_shell` when the shell is unspecified,

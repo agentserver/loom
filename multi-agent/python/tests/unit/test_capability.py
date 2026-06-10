@@ -35,6 +35,26 @@ def test_filter_no_match_returns_empty():
     assert out == []
 
 
+def test_filter_uses_role_to_exclude_non_slaves():
+    agents = [
+        {"agent_id": "d1", "display_name": "driver-peer", "role": "driver", "skills": ["chat"]},
+        {"agent_id": "m1", "display_name": "master-peer", "role": "master", "skills": ["fanout"]},
+        {"agent_id": "s1", "display_name": "slave-peer", "role": "slave", "skills": ["chat", "fanout"]},
+    ]
+    out = _filter_slaves(agents)
+    assert [a["display_name"] for a in out] == ["slave-peer"]
+    out = _filter_slaves(agents, skill="fanout")
+    assert [a["display_name"] for a in out] == ["slave-peer"]
+
+
+def test_filter_keeps_legacy_agents_without_role():
+    agents = [
+        {"agent_id": "legacy", "display_name": "legacy-slave", "skills": ["chat"]},
+    ]
+    out = _filter_slaves(agents, skill="chat")
+    assert [a["display_name"] for a in out] == ["legacy-slave"]
+
+
 def test_mcpspec_from_dir(tmp_path):
     spec = {"name": "mytool", "tools": [{"name": "do_thing"}]}
     cases = [{"in": {"a": 1}, "expect_substring": "ok"}]

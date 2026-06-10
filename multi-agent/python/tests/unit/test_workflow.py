@@ -102,6 +102,23 @@ def test_workflow_find_slave_by_skill_unique():
         set_client(None)
 
 
+def test_workflow_list_slaves_excludes_non_slave_roles():
+    mock = _MockClient([
+        ("list_agents", {"agents": [
+            {"agent_id": "d1", "display_name": "driver-peer", "role": "driver", "skills": ["chat"]},
+            {"agent_id": "m1", "display_name": "master-peer", "role": "master", "skills": ["fanout"]},
+            {"agent_id": "s1", "display_name": "slave-peer", "role": "slave", "skills": ["chat", "fanout"]},
+        ]}),
+    ])
+    set_client(mock)
+    try:
+        with workflow(goal="…") as wf:
+            names = wf.list_slaves()
+        assert names == ["slave-peer"]
+    finally:
+        set_client(None)
+
+
 def test_workflow_find_slave_none_raises():
     mock = _MockClient([
         ("list_agents", {"agents": [

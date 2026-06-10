@@ -9,10 +9,13 @@ The driver runs as a stdio MCP server inside Claude Code and also registers as a
 Input:
 
 ```json
-{}
+{"include_unavailable": false}
 ```
 
-Returns visible agents excluding driver self:
+Returns currently `available` agents excluding the current driver itself. Offline
+and busy agents are omitted unless `include_unavailable:true` is passed. Each
+result includes `status` and `role`; use `role` instead of display-name
+heuristics to distinguish drivers, masters, and slaves.
 
 ```json
 {
@@ -20,6 +23,8 @@ Returns visible agents excluding driver self:
     {
       "agent_id": "sandbox-id",
       "display_name": "slave-windows",
+      "status": "available",
+      "role": "slave",
       "short_id": "abc123",
       "platform": {"os": "windows", "arch": "amd64"},
       "command_interfaces": [
@@ -33,6 +38,14 @@ Returns visible agents excluding driver self:
   ]
 }
 ```
+
+`role` is one of `driver`, `master`, or `slave`. Agent cards with an explicit
+`agent_type` of `driver`, `master`, or `slave` use that value; otherwise agents
+advertising `fanout`, `route`, or `fanout_strict` are treated as `master`, and
+remaining returned agents are treated as `slave`.
+
+Set `include_unavailable:true` only for diagnostics or cleanup; normal routing
+and "who is online" answers should use the default available-only result.
 
 ### `inspect_capabilities`
 

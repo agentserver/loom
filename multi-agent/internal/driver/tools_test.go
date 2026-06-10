@@ -590,7 +590,7 @@ func TestTool_ListAgents_FiltersSelf(t *testing.T) {
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
 			return []agentsdk.AgentCard{
 				{AgentID: "sbx-driver", DisplayName: "driver-yuzishu"},
-				{AgentID: "sbx-master", DisplayName: "master-prod",
+				{AgentID: "sbx-master", DisplayName: "master-prod", Status: "available",
 					Card: json.RawMessage(`{"skills":["fanout"],"tools":[],"mcp_tools":[{"server":"refund_policy_checker","name":"evaluate_rows","input_schema":{"type":"object"}}]}`)},
 			}, nil
 		},
@@ -615,6 +615,72 @@ func TestTool_ListAgents_FiltersSelf(t *testing.T) {
 		}
 	}
 	t.Fatal("list_agents tool not registered")
+}
+
+func TestTool_ListAgents_ReturnsOnlyAvailableAgentsWithRoleAndStatus(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "sbx-driver", DisplayName: "current-driver", AgentType: "driver", Status: "available"},
+				{AgentID: "other-driver", DisplayName: "other-driver", AgentType: "driver", Status: "available"},
+				{AgentID: "master-a", DisplayName: "master-a", Status: "available", Card: json.RawMessage(`{"skills":["fanout"]}`)},
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["chat"]}`)},
+				{AgentID: "slave-offline", DisplayName: "slave-offline", Status: "offline", Card: json.RawMessage(`{"skills":["chat"]}`)},
+				{AgentID: "slave-busy", DisplayName: "slave-busy", Status: "busy", Card: json.RawMessage(`{"skills":["chat"]}`)},
+			}, nil
+		},
+	}
+	out, err := toolByName(t, newTestTools(t, sdk), "list_agents").Call(context.Background(), json.RawMessage(`{}`))
+	require.NoError(t, err)
+
+	var got struct {
+		Agents []struct {
+			AgentID string `json:"agent_id"`
+			Status  string `json:"status"`
+			Role    string `json:"role"`
+		} `json:"agents"`
+	}
+	require.NoError(t, json.Unmarshal(out, &got))
+	require.Equal(t, []struct {
+		AgentID string `json:"agent_id"`
+		Status  string `json:"status"`
+		Role    string `json:"role"`
+	}{
+		{AgentID: "other-driver", Status: "available", Role: "driver"},
+		{AgentID: "master-a", Status: "available", Role: "master"},
+		{AgentID: "slave-a", Status: "available", Role: "slave"},
+	}, got.Agents)
+}
+
+func TestTool_ListAgents_CanIncludeUnavailableAgents(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "sbx-driver", DisplayName: "current-driver", AgentType: "driver", Status: "available"},
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["chat"]}`)},
+				{AgentID: "slave-offline", DisplayName: "slave-offline", Status: "offline", Card: json.RawMessage(`{"skills":["chat"]}`)},
+				{AgentID: "slave-busy", DisplayName: "slave-busy", Status: "busy", Card: json.RawMessage(`{"skills":["chat"]}`)},
+			}, nil
+		},
+	}
+	out, err := toolByName(t, newTestTools(t, sdk), "list_agents").Call(context.Background(), json.RawMessage(`{"include_unavailable":true}`))
+	require.NoError(t, err)
+
+	var got struct {
+		Agents []struct {
+			AgentID string `json:"agent_id"`
+			Status  string `json:"status"`
+		} `json:"agents"`
+	}
+	require.NoError(t, json.Unmarshal(out, &got))
+	require.Equal(t, []struct {
+		AgentID string `json:"agent_id"`
+		Status  string `json:"status"`
+	}{
+		{AgentID: "slave-a", Status: "available"},
+		{AgentID: "slave-offline", Status: "offline"},
+		{AgentID: "slave-busy", Status: "busy"},
+	}, got.Agents)
 }
 
 func TestTool_InspectCapabilitiesReturnsSnapshotAndSavesIt(t *testing.T) {
