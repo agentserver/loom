@@ -4,10 +4,12 @@ on:
     paths:
       - multi-agent/**
       - .github/workflows/multi-agent.yml
+      - .github/workflows/release.yml
   pull_request:
     paths:
       - multi-agent/**
       - .github/workflows/multi-agent.yml
+      - .github/workflows/release.yml
 
 permissions:
   contents: read

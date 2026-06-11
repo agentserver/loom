@@ -63,6 +63,18 @@ func TestReleaseWorkflowUsesDriverSkillsPackagingScript(t *testing.T) {
 	}
 }
 
+func TestMultiAgentCIRunsForReleaseWorkflowChanges(t *testing.T) {
+	workflow := filepath.Join(repoRoot(t), "..", ".github", "workflows", "multi-agent.yml")
+	data, err := os.ReadFile(workflow)
+	if err != nil {
+		t.Fatalf("read multi-agent workflow: %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, ".github/workflows/release.yml") {
+		t.Fatalf("multi-agent CI paths must include release.yml so release workflow tests run on workflow-only changes\n%s", text)
+	}
+}
+
 func requireRun(t *testing.T, dir string, name string, args ...string) {
 	t.Helper()
 	cmd := exec.Command(name, args...)
