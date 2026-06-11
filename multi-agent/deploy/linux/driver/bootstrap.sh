@@ -29,12 +29,13 @@
 # codex mode (--agent codex):
 #   .codex/config.toml       # Codex CLI MCP server registration
 #   AGENTS.md                # Codex project notes (from driver-codex-prompts.tar.gz)
+#   .agents/skills/...       # Codex skills used by AGENTS.md
 #
 #   logs/
 #
 # Required release assets at $RELEASE_BASE:
 #   driver-agent.linux-{amd64,arm64}
-#   driver-skills.tar.gz          # claude: tar of .claude/skills/{multiagent,...}
+#   driver-skills.tar.gz          # tar of skills/{multiagent,...}
 #   driver-codex-prompts.tar.gz   # codex: tar containing AGENTS.md (built from
 #                                 #   deploy/linux/driver/prompts-codex/)
 #   bootstrap-driver.sh   (this file)
@@ -144,6 +145,13 @@ else
   tmp_tar="$(mktemp)"
   curl -fL --progress-bar -o "$tmp_tar" "$RELEASE_BASE/driver-codex-prompts.tar.gz"
   tar -xzf "$tmp_tar" -C "$PROJECT/"
+  rm -f "$tmp_tar"
+
+  echo "==> downloading driver-skills.tar.gz"
+  mkdir -p "$PROJECT/.agents/skills"
+  tmp_tar="$(mktemp)"
+  curl -fL --progress-bar -o "$tmp_tar" "$RELEASE_BASE/driver-skills.tar.gz"
+  tar -xzf "$tmp_tar" -C "$PROJECT/.agents/skills/"
   rm -f "$tmp_tar"
 fi
 
@@ -275,6 +283,7 @@ else
       config.yaml              # 0600
       .codex/config.toml       # Codex CLI MCP registration
       AGENTS.md                # Codex project notes (auto-read by codex)
+      .agents/skills/...       # Codex skills used by AGENTS.md
       logs/
 
 ==> one-time agentserver registration (opens a device-code URL on stderr):

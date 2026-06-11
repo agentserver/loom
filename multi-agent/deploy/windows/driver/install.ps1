@@ -129,6 +129,11 @@ if ($Agent -eq "codex") {
 }
 
 $repoRoot = Resolve-FullPath (Join-Path $here "..\..\..\..")
+$repoSkills = Join-Path $repoRoot "skills"
+if (($Agent -eq "codex") -and (Test-Path -LiteralPath $repoSkills -PathType Container)) {
+    Copy-DirectoryContents -Source $repoSkills -Destination (Join-Path $projectDir ".agents\skills")
+}
+
 $multiagentSkill = Join-Path $repoRoot "skills\multiagent"
 if (Test-Path -LiteralPath $multiagentSkill -PathType Container) {
     Copy-DirectoryContents -Source $multiagentSkill -Destination (Join-Path $projectDir "skills\multiagent")
