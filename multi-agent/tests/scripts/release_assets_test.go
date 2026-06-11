@@ -75,6 +75,35 @@ func TestMultiAgentCIRunsForReleaseWorkflowChanges(t *testing.T) {
 	}
 }
 
+func TestDriverCodexPromptAssetUsesLightweightRouter(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "driver-codex-prompts.tar.gz")
+	promptDir := filepath.Join(repoRoot(t), "deploy", "linux", "driver", "prompts-codex")
+	requireRun(t, repoRoot(t), "tar", "-C", promptDir, "-czf", out, ".")
+
+	agents := string(tarFileContent(t, out, "AGENTS.md"))
+	for _, want := range []string{
+		"# Agentserver Driver Workspace",
+		"Use the `multiagent` skill",
+		"mcp_servers.driver",
+		"Discover agents and resources before acting",
+		"Superpower skills",
+	} {
+		if !strings.Contains(agents, want) {
+			t.Fatalf("AGENTS.md missing router prompt fragment %q\n%s", want, agents)
+		}
+	}
+
+	for _, forbidden := range []string{
+		"mcp__driver__",
+		"## Core tools",
+		"## Permissions skill",
+	} {
+	if strings.Contains(agents, forbidden) {
+			t.Fatalf("AGENTS.md still contains verbose tool documentation %q\n%s", forbidden, agents)
+		}
+	}
+}
+
 func requireRun(t *testing.T, dir string, name string, args ...string) {
 	t.Helper()
 	cmd := exec.Command(name, args...)
@@ -125,4 +154,38 @@ func tarEntries(t *testing.T, path string) []string {
 	}
 	sort.Strings(entries)
 	return entries
+}
+
+func tarFileContent(t *testing.T, path string, name string) []byte {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gz.Close()
+
+	tr := tar.NewReader(gz)
+	for {
+		h, err := tr.Next()
+		if err != nil {
+			if err == io.EOF {
+				t.Fatalf("archive missing %s", name)
+			}
+			t.Fatal(err)
+		}
+		if strings.TrimPrefix(h.Name, "./") != name {
+			continue
+		}
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
 }
