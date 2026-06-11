@@ -63,18 +63,6 @@ func TestReleaseWorkflowUsesDriverSkillsPackagingScript(t *testing.T) {
 	}
 }
 
-func TestMultiAgentCIRunsForReleaseWorkflowChanges(t *testing.T) {
-	workflow := filepath.Join(repoRoot(t), "..", ".github", "workflows", "multi-agent.yml")
-	data, err := os.ReadFile(workflow)
-	if err != nil {
-		t.Fatalf("read multi-agent workflow: %v", err)
-	}
-	text := string(data)
-	if !strings.Contains(text, ".github/workflows/release.yml") {
-		t.Fatalf("multi-agent CI paths must include release.yml so release workflow tests run on workflow-only changes\n%s", text)
-	}
-}
-
 func TestDriverCodexPromptAssetUsesLightweightRouter(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "driver-codex-prompts.tar.gz")
 	promptDir := filepath.Join(repoRoot(t), "deploy", "linux", "driver", "prompts-codex")
@@ -98,9 +86,55 @@ func TestDriverCodexPromptAssetUsesLightweightRouter(t *testing.T) {
 		"## Core tools",
 		"## Permissions skill",
 	} {
-	if strings.Contains(agents, forbidden) {
+		if strings.Contains(agents, forbidden) {
 			t.Fatalf("AGENTS.md still contains verbose tool documentation %q\n%s", forbidden, agents)
 		}
+	}
+}
+
+func TestDriverCodexBootstrapInstallsSkillsForRouterPrompt(t *testing.T) {
+	bootstrap := filepath.Join(repoRoot(t), "deploy", "linux", "driver", "bootstrap.sh")
+	data, err := os.ReadFile(bootstrap)
+	if err != nil {
+		t.Fatalf("read bootstrap script: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"driver-codex-prompts.tar.gz",
+		"driver-skills.tar.gz",
+		`"$PROJECT/.agents/skills"`,
+		".agents/skills/...",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("codex bootstrap must install skills for router prompt; missing %q\n%s", want, text)
+		}
+	}
+}
+
+func TestDriverCodexInstallersInstallSkillsForRouterPrompt(t *testing.T) {
+	for _, script := range []string{
+		filepath.Join(repoRoot(t), "deploy", "linux", "driver", "install.sh"),
+		filepath.Join(repoRoot(t), "deploy", "windows", "driver", "install.ps1"),
+	} {
+		data, err := os.ReadFile(script)
+		if err != nil {
+			t.Fatalf("read %s: %v", script, err)
+		}
+		if !strings.Contains(string(data), ".agents") {
+			t.Fatalf("%s must install Codex skills under .agents/skills for router prompt\n%s", script, data)
+		}
+	}
+}
+
+func TestMultiAgentCIRunsForReleaseWorkflowChanges(t *testing.T) {
+	workflow := filepath.Join(repoRoot(t), "..", ".github", "workflows", "multi-agent.yml")
+	data, err := os.ReadFile(workflow)
+	if err != nil {
+		t.Fatalf("read multi-agent workflow: %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, ".github/workflows/release.yml") {
+		t.Fatalf("multi-agent CI paths must include release.yml so release workflow tests run on workflow-only changes\n%s", text)
 	}
 }
 

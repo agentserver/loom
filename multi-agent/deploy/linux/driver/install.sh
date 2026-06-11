@@ -29,7 +29,7 @@
 #   --api-key KEY         observer.api_key (skip manual edit; or hand-edit after)
 #   --agent KIND          agent CLI to pair with: claude (default) or codex
 #   --skill-bundle PATH   claude: directory of skills to copy into .claude/skills/
-#                         codex: directory containing prompts-codex/ to copy into project
+#                         codex: directory of skills to copy into .agents/skills/
 #                         (default: auto-detected from local tree if present)
 #   --token-dir PATH      observer token parent dir (default: ~/.loom/<NAME>)
 #   --bin PATH            override driver-agent binary path
@@ -43,6 +43,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BIN_DIR="$HERE/../bin"
+REPO_ROOT="$(cd "$HERE/../../../.." && pwd)"
 
 PROJECT=""
 NAME=""
@@ -107,9 +108,9 @@ if [[ -z "$SKILL_BUNDLE" ]]; then
       SKILL_BUNDLE="$HERE/../../../tests/prod_test/driver/.claude/skills/multiagent"
     fi
   else
-    # Default: the local prompts-codex directory (contains AGENTS.md)
-    if [[ -d "$HERE/prompts-codex" ]]; then
-      SKILL_BUNDLE="$HERE/prompts-codex"
+    # Default: repo skills, copied to Codex's project-scoped .agents/skills.
+    if [[ -d "$REPO_ROOT/skills" ]]; then
+      SKILL_BUNDLE="$REPO_ROOT/skills"
     fi
   fi
 fi
@@ -162,21 +163,36 @@ else
 fi
 
 # Copy skill / prompts bundle
-if [[ -n "$SKILL_BUNDLE" ]]; then
-  if [[ "$AGENT" == "claude" ]]; then
-    if [[ -d "$SKILL_BUNDLE" ]]; then
-      echo "==> copying skill bundle from $SKILL_BUNDLE"
-      mkdir -p "$PROJECT_ABS/.claude/skills"
-      cp -r "$SKILL_BUNDLE" "$PROJECT_ABS/.claude/skills/"
+if [[ "$AGENT" == "claude" ]]; then
+  if [[ -n "$SKILL_BUNDLE" && -d "$SKILL_BUNDLE" ]]; then
+    echo "==> copying skill bundle from $SKILL_BUNDLE"
+    mkdir -p "$PROJECT_ABS/.claude/skills"
+    cp -r "$SKILL_BUNDLE" "$PROJECT_ABS/.claude/skills/"
+  fi
+else
+  # codex: copy AGENTS.md plus repo-scoped skills that AGENTS.md routes to.
+  if [[ -f "$HERE/prompts-codex/AGENTS.md" ]]; then
+    echo "==> copying AGENTS.md from $HERE/prompts-codex"
+    cp "$HERE/prompts-codex/AGENTS.md" "$PROJECT_ABS/AGENTS.md"
+  elif [[ -n "$SKILL_BUNDLE" && -f "$SKILL_BUNDLE/AGENTS.md" ]]; then
+    echo "==> copying AGENTS.md from $SKILL_BUNDLE"
+    cp "$SKILL_BUNDLE/AGENTS.md" "$PROJECT_ABS/AGENTS.md"
+  fi
+
+  if [[ -n "$SKILL_BUNDLE" ]]; then
+    CODEX_SKILL_BUNDLE="$SKILL_BUNDLE"
+    if [[ -f "$SKILL_BUNDLE/AGENTS.md" && -d "$REPO_ROOT/skills" ]]; then
+      CODEX_SKILL_BUNDLE="$REPO_ROOT/skills"
     fi
-  else
-    # codex: SKILL_BUNDLE is the prompts-codex/ directory; copy AGENTS.md into project root
-    if [[ -f "$SKILL_BUNDLE/AGENTS.md" ]]; then
-      echo "==> copying AGENTS.md from $SKILL_BUNDLE"
-      cp "$SKILL_BUNDLE/AGENTS.md" "$PROJECT_ABS/AGENTS.md"
-    elif [[ -d "$SKILL_BUNDLE" ]]; then
-      echo "==> copying prompts bundle from $SKILL_BUNDLE"
-      cp -r "$SKILL_BUNDLE/." "$PROJECT_ABS/"
+
+    if [[ -d "$CODEX_SKILL_BUNDLE" && ! -f "$CODEX_SKILL_BUNDLE/AGENTS.md" ]]; then
+      echo "==> copying Codex skills from $CODEX_SKILL_BUNDLE"
+      mkdir -p "$PROJECT_ABS/.agents/skills"
+      if [[ -f "$CODEX_SKILL_BUNDLE/SKILL.md" ]]; then
+        cp -r "$CODEX_SKILL_BUNDLE" "$PROJECT_ABS/.agents/skills/"
+      else
+        cp -r "$CODEX_SKILL_BUNDLE/." "$PROJECT_ABS/.agents/skills/"
+      fi
     fi
   fi
 fi
@@ -225,6 +241,7 @@ else
       config.yaml              # 0600 — paste observer.api_key if you didn't pass --api-key
       .codex/config.toml       # Codex CLI MCP registration
       AGENTS.md                # Codex project notes (auto-read by codex)
+      .agents/skills/...       # Codex skills used by AGENTS.md
       logs/                    # audit logs land here
 
 ==> one-time agentserver registration (device-code OAuth):

@@ -11,7 +11,7 @@ pre-registered), see `../../../tests/prod_test/driver/`.
 
 | File | Purpose |
 |---|---|
-| `install.sh` | Renders templates, drops binary + config + `.mcp.json` into a project dir, optionally copies a multiagent skill bundle |
+| `install.sh` | Renders templates, drops binary + config + MCP registration into a project dir, optionally copies skill bundles |
 | `config.yaml.template` | Driver config with placeholders for name, token dir |
 | `.mcp.json.template` | Tells Claude Code how to launch `driver-agent serve-mcp` |
 
@@ -64,7 +64,7 @@ claude
 | `--workspace ID` | `ws-default` | `observer.workspace_id`. Must match a workspace defined on the observer. |
 | `--desc TEXT` | `Linux driver-agent (<NAME>)` | `discovery.description`. |
 | `--api-key KEY` | (none) | Writes `observer.api_key`. Without this, edit `config.yaml` by hand. |
-| `--skill-bundle PATH` | `../../../tests/prod_test/driver/.claude/skills/multiagent` if present | Skill dir to copy under `<project>/.claude/skills/`. |
+| `--skill-bundle PATH` | Claude: `../../../tests/prod_test/driver/.claude/skills/multiagent` if present; Codex: repo `skills/` if present | Claude copies under `<project>/.claude/skills/`; Codex copies under `<project>/.agents/skills/`. |
 | `--token-dir PATH` | `~/.loom/<NAME>` | Parent dir for `observer.token`. Must be absolute. |
 | `--bin PATH` | `../bin/driver-agent.linux-<arch>` | Override the binary path (e.g., point at a downloaded release asset). |
 | `--agent CLI` | `claude` | `claude` or `codex`. Codex mode writes `.codex/config.toml` instead of `.mcp.json`, drops `AGENTS.md` + optional `.codex/prompts/`, and renders `agent.kind: codex` in `config.yaml`. |
@@ -79,6 +79,8 @@ claude
 ├── .claude/
 │   └── skills/
 │       └── multiagent/     # only if --skill-bundle resolved
+├── .agents/
+│   └── skills/             # Codex skills when --agent codex
 └── logs/                   # audit logs (driver_defaults.audit_log_dir)
 
 ~/.loom/<NAME>/
