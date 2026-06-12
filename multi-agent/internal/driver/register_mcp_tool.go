@@ -65,5 +65,16 @@ func (r *registerSlaveMCPTool) Call(ctx context.Context, raw json.RawMessage) (j
 	if err != nil {
 		return nil, &MCPToolError{Message: "delegate register_mcp task: " + err.Error()}
 	}
+	if err := r.t.recordDelegatedTask(delegatedTaskRecord{
+		Tool:              r.Name(),
+		Response:          resp,
+		TargetID:          card.AgentID,
+		TargetDisplayName: card.DisplayName,
+		Skill:             "register_mcp",
+		Wait:              true,
+		TimeoutSec:        args.TimeoutSec,
+	}); err != nil {
+		return nil, err
+	}
 	return r.t.waitDelegatedTask(ctx, resp.TaskID, args.TimeoutSec)
 }

@@ -13,7 +13,7 @@ type runSlaveBashTool struct{ t *Tools }
 
 func (r *runSlaveBashTool) Name() string { return "run_slave_bash" }
 func (r *runSlaveBashTool) Description() string {
-	return "Run an explicit Bash script on a selected slave that advertises a Bash command interface."
+	return "Run an explicit Bash script on a selected slave that advertises a Bash command interface. Returns task_id immediately by default; pass wait:true to block for completion."
 }
 func (r *runSlaveBashTool) InputSchema() json.RawMessage {
 	return shellToolInputSchema()
@@ -37,14 +37,14 @@ func (r *runSlaveBashTool) Call(ctx context.Context, raw json.RawMessage) (json.
 		}
 		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise bash"}
 	}
-	return r.t.delegateShellTask(ctx, card, "bash", args)
+	return r.t.delegateShellTask(ctx, card, r.Name(), "bash", args)
 }
 
 type runSlavePowerShellTool struct{ t *Tools }
 
 func (r *runSlavePowerShellTool) Name() string { return "run_slave_powershell" }
 func (r *runSlavePowerShellTool) Description() string {
-	return "Run an explicit PowerShell script on a selected slave that advertises a PowerShell command interface."
+	return "Run an explicit PowerShell script on a selected slave that advertises a PowerShell command interface. Returns task_id immediately by default; pass wait:true to block for completion."
 }
 func (r *runSlavePowerShellTool) InputSchema() json.RawMessage {
 	return shellToolInputSchema()
@@ -65,14 +65,14 @@ func (r *runSlavePowerShellTool) Call(ctx context.Context, raw json.RawMessage) 
 		}
 		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise powershell"}
 	}
-	return r.t.delegateShellTask(ctx, card, "powershell", args)
+	return r.t.delegateShellTask(ctx, card, r.Name(), "powershell", args)
 }
 
 type runSlaveShellTool struct{ t *Tools }
 
 func (r *runSlaveShellTool) Name() string { return "run_slave_shell" }
 func (r *runSlaveShellTool) Description() string {
-	return "Run a script on a selected slave using its default advertised shell command interface."
+	return "Run a script on a selected slave using its default advertised shell command interface. Returns task_id immediately by default; pass wait:true to block for completion."
 }
 func (r *runSlaveShellTool) InputSchema() json.RawMessage {
 	return shellToolInputSchema()
@@ -93,13 +93,13 @@ func (r *runSlaveShellTool) Call(ctx context.Context, raw json.RawMessage) (json
 			if !parsed.SupportsExplicitShell(commandInterface.Kind) {
 				return nil, &MCPToolError{Message: "target " + card.DisplayName + " default " + commandInterface.Kind + " command interface is not supported by advertised skills"}
 			}
-			return r.t.delegateShellTask(ctx, card, commandInterface.Kind, args)
+			return r.t.delegateShellTask(ctx, card, r.Name(), commandInterface.Kind, args)
 		default:
 			return nil, &MCPToolError{Message: "target " + card.DisplayName + " default command interface kind " + commandInterface.Kind + " is unsupported; expected bash or powershell"}
 		}
 	}
 	if len(parsed.CommandInterfaces) == 0 && parsed.HasSkill("bash") {
-		return r.t.delegateShellTask(ctx, card, "bash", args)
+		return r.t.delegateShellTask(ctx, card, r.Name(), "bash", args)
 	}
 	if parsed.SupportsExplicitShell("powershell") {
 		return nil, &MCPToolError{Message: "target " + card.DisplayName + " has no default shell command interface; use run_slave_powershell"}
@@ -123,7 +123,7 @@ func shellToolInputSchema() json.RawMessage {
         "script":{"type":"string"},
         "env":{"type":"object","additionalProperties":{"type":"string"}},
         "timeout_sec":{"type":"integer"},
-        "wait":{"type":"boolean"}
+        "wait":{"type":"boolean","description":"When true, block until the delegated task completes. Defaults to false and returns task_id immediately."}
     },"required":["script"],"additionalProperties":false}`)
 }
 
@@ -138,7 +138,7 @@ func parseShellToolArgs(raw json.RawMessage) (shellToolArgs, error) {
 	return args, nil
 }
 
-func (t *Tools) delegateShellTask(ctx context.Context, card agentsdk.AgentCard, skill string, args shellToolArgs) (json.RawMessage, error) {
+func (t *Tools) delegateShellTask(ctx context.Context, card agentsdk.AgentCard, toolName, skill string, args shellToolArgs) (json.RawMessage, error) {
 	prompt, err := json.Marshal(struct {
 		Script     string            `json:"script"`
 		TimeoutSec int               `json:"timeout_sec,omitempty"`
@@ -156,9 +156,20 @@ func (t *Tools) delegateShellTask(ctx context.Context, card agentsdk.AgentCard, 
 	if err != nil {
 		return nil, &MCPToolError{Message: "delegate " + skill + " task: " + err.Error()}
 	}
-	wait := true
+	wait := false
 	if args.Wait != nil {
 		wait = *args.Wait
+	}
+	if err := t.recordDelegatedTask(delegatedTaskRecord{
+		Tool:              toolName,
+		Response:          resp,
+		TargetID:          card.AgentID,
+		TargetDisplayName: card.DisplayName,
+		Skill:             skill,
+		Wait:              wait,
+		TimeoutSec:        args.TimeoutSec,
+	}); err != nil {
+		return nil, err
 	}
 	if !wait {
 		return json.Marshal(map[string]interface{}{
@@ -192,7 +203,7 @@ func (g *getSlaveClaudePermissionsTool) Call(ctx context.Context, raw json.RawMe
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return nil, &MCPToolError{Message: "invalid args: " + err.Error()}
 	}
-	return g.t.delegatePermissionTask(ctx, args.TargetAgentID, args.TargetDisplayName, `{"op":"get"}`)
+	return g.t.delegatePermissionTask(ctx, g.Name(), args.TargetAgentID, args.TargetDisplayName, `{"op":"get"}`)
 }
 
 type updateSlaveClaudePermissionsTool struct{ t *Tools }
@@ -245,10 +256,10 @@ func (u *updateSlaveClaudePermissionsTool) Call(ctx context.Context, raw json.Ra
 	if err != nil {
 		return nil, &MCPToolError{Message: err.Error()}
 	}
-	return u.t.delegatePermissionTask(ctx, args.TargetAgentID, args.TargetDisplayName, string(prompt))
+	return u.t.delegatePermissionTask(ctx, u.Name(), args.TargetAgentID, args.TargetDisplayName, string(prompt))
 }
 
-func (t *Tools) delegatePermissionTask(ctx context.Context, targetAgentID, targetDisplayName, prompt string) (json.RawMessage, error) {
+func (t *Tools) delegatePermissionTask(ctx context.Context, toolName, targetAgentID, targetDisplayName, prompt string) (json.RawMessage, error) {
 	card, err := t.resolveAvailableAgent(ctx, targetAgentID, targetDisplayName)
 	if err != nil {
 		return nil, err
@@ -269,6 +280,16 @@ func (t *Tools) delegatePermissionTask(ctx context.Context, targetAgentID, targe
 	})
 	if err != nil {
 		return nil, &MCPToolError{Message: "delegate " + skill + " task: " + err.Error()}
+	}
+	if err := t.recordDelegatedTask(delegatedTaskRecord{
+		Tool:              toolName,
+		Response:          resp,
+		TargetID:          card.AgentID,
+		TargetDisplayName: card.DisplayName,
+		Skill:             skill,
+		Wait:              true,
+	}); err != nil {
+		return nil, err
 	}
 	return t.waitDelegatedTask(ctx, resp.TaskID, 0)
 }

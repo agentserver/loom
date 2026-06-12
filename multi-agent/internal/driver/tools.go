@@ -38,6 +38,7 @@ type ContractRunner interface {
 type Tools struct {
 	reg            *FileRegistry
 	audit          *AuditLog
+	taskJournal    *TaskJournal
 	sdk            SDKClient
 	cfg            *Config
 	observer       ObserverSink
@@ -50,8 +51,42 @@ func NewTools(reg *FileRegistry, audit *AuditLog, sdk SDKClient, cfg *Config, ob
 	return &Tools{reg: reg, audit: audit, sdk: sdk, cfg: cfg, observer: obs, relay: NewObserverRelay(cfg, toTokenSource(obs))}
 }
 
+func (t *Tools) SetTaskJournal(j *TaskJournal) {
+	t.taskJournal = j
+}
+
 func (t *Tools) SetContractRunner(r ContractRunner) {
 	t.contractRunner = r
+}
+
+type delegatedTaskRecord struct {
+	Tool              string
+	Response          *agentsdk.DelegateTaskResponse
+	TargetID          string
+	TargetDisplayName string
+	Skill             string
+	Wait              bool
+	TimeoutSec        int
+}
+
+func (t *Tools) recordDelegatedTask(rec delegatedTaskRecord) error {
+	if t.taskJournal == nil || rec.Response == nil || rec.Response.TaskID == "" {
+		return nil
+	}
+	if err := t.taskJournal.Append(TaskRecord{
+		Tool:              rec.Tool,
+		TaskID:            rec.Response.TaskID,
+		SessionID:         rec.Response.SessionID,
+		TargetID:          rec.TargetID,
+		TargetDisplayName: rec.TargetDisplayName,
+		Skill:             rec.Skill,
+		Status:            rec.Response.Status,
+		Wait:              rec.Wait,
+		TimeoutSec:        rec.TimeoutSec,
+	}); err != nil {
+		return &MCPToolError{Message: fmt.Sprintf("task %s was created but driver failed to record it in driver-tasks.jsonl: %v", rec.Response.TaskID, err)}
+	}
+	return nil
 }
 
 func (t *Tools) emit(ev observer.Event) {
@@ -64,6 +99,7 @@ func (t *Tools) emit(ev observer.Event) {
 func (t *Tools) All() []Tool {
 	return []Tool{
 		&listAgentsTool{t},
+		&listDriverTasksTool{t},
 		&inspectCapabilitiesTool{t},
 		&runSlaveBashTool{t},
 		&runSlavePowerShellTool{t},
@@ -261,6 +297,39 @@ func (l *listAgentsTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 }
 
 // =========================================================================
+// list_driver_tasks
+// =========================================================================
+
+type listDriverTasksTool struct{ t *Tools }
+
+func (l *listDriverTasksTool) Name() string { return "list_driver_tasks" }
+func (l *listDriverTasksTool) Description() string {
+	return "List locally recorded driver-created delegated task IDs for recovery after MCP client timeouts or interrupts."
+}
+func (l *listDriverTasksTool) InputSchema() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{"limit":{"type":"integer"},"task_id":{"type":"string"}},"additionalProperties":false}`)
+}
+func (l *listDriverTasksTool) Call(_ context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	var args struct {
+		Limit  int    `json:"limit,omitempty"`
+		TaskID string `json:"task_id,omitempty"`
+	}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &args); err != nil {
+			return nil, &MCPToolError{Message: "invalid args: " + err.Error()}
+		}
+	}
+	if l.t.taskJournal == nil {
+		return json.Marshal(map[string]interface{}{"journal_path": "", "tasks": []TaskRecord{}})
+	}
+	records, err := l.t.taskJournal.Recent(args.Limit, args.TaskID)
+	if err != nil {
+		return nil, &MCPToolError{Message: err.Error()}
+	}
+	return json.Marshal(map[string]interface{}{"journal_path": l.t.taskJournal.Path(), "tasks": records})
+}
+
+// =========================================================================
 // submit_task
 // =========================================================================
 
@@ -428,6 +497,17 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	})
 	if err != nil {
 		return nil, &MCPToolError{Message: "delegate: " + err.Error()}
+	}
+	if err := s.t.recordDelegatedTask(delegatedTaskRecord{
+		Tool:              s.Name(),
+		Response:          resp,
+		TargetID:          targetID,
+		TargetDisplayName: targetName,
+		Skill:             skill,
+		Wait:              false,
+		TimeoutSec:        timeout,
+	}); err != nil {
+		return nil, err
 	}
 	s.t.emit(observer.Event{
 		Type:          observer.EventDriverTaskSubmitted,
@@ -1013,6 +1093,16 @@ func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	})
 	if err != nil {
 		return nil, &MCPToolError{Message: "delegate chat_resume: " + err.Error()}
+	}
+	if err := r.t.recordDelegatedTask(delegatedTaskRecord{
+		Tool:       r.Name(),
+		Response:   resp,
+		TargetID:   info.TargetID,
+		Skill:      "chat_resume",
+		Wait:       true,
+		TimeoutSec: timeout,
+	}); err != nil {
+		return nil, err
 	}
 
 	return r.t.waitDelegatedTask(ctx, resp.TaskID, timeout)

@@ -110,8 +110,10 @@ python3 skills/mcp-acceptance/scripts/remote_run.py \
     > /tmp/payload.sh
 
 # 2. Driver Claude passes the script content to run_slave_bash, e.g.
-#    run_slave_bash(target_display_name="slave-a", script=<contents of payload.sh>)
+#    run_slave_bash(target_display_name="slave-a", script=<contents of payload.sh>, wait=true)
 #    Exit code propagates: 0 = pass, 1 = case failed, 2 = server unreachable.
+#    If the MCP client times out or is interrupted, call list_driver_tasks to
+#    recover the delegated task_id before re-running the acceptance task.
 
 # 3. Only on success:
 register_slave_mcp --spec spec.json --source_path generated_mcp/foo/v1.py
@@ -131,7 +133,7 @@ When the slave advertises `file`, you can skip the bundled payload entirely:
 write_slave_file(target=slave-a, path="/tmp/mcpa/server.py",  source_path="generated_mcp/foo/v1.py")
 write_slave_file(target=slave-a, path="/tmp/mcpa/cases.jsonl", source_path="generated_mcp/foo/cases.jsonl")
 write_slave_file(target=slave-a, path="/tmp/mcpa/runner.py",  source_path="skills/mcp-acceptance/scripts/mcp_acceptance.py")
-run_slave_bash(target=slave-a, script="python3 /tmp/mcpa/runner.py --server 'python3 /tmp/mcpa/server.py' --cases /tmp/mcpa/cases.jsonl")
+run_slave_bash(target=slave-a, script="python3 /tmp/mcpa/runner.py --server 'python3 /tmp/mcpa/server.py' --cases /tmp/mcpa/cases.jsonl", wait=true)
 # exit code propagates: 0 = pass, 1 = case failed, 2 = server unreachable.
 ```
 
