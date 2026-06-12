@@ -322,11 +322,11 @@ func (l *listDriverTasksTool) Call(_ context.Context, raw json.RawMessage) (json
 	if l.t.taskJournal == nil {
 		return json.Marshal(map[string]interface{}{"journal_path": "", "tasks": []TaskRecord{}})
 	}
-	records, err := l.t.taskJournal.Recent(args.Limit, args.TaskID)
+	records, warnings, err := l.t.taskJournal.RecentWithWarnings(args.Limit, args.TaskID)
 	if err != nil {
 		return nil, &MCPToolError{Message: err.Error()}
 	}
-	return json.Marshal(map[string]interface{}{"journal_path": l.t.taskJournal.Path(), "tasks": records})
+	return json.Marshal(map[string]interface{}{"journal_path": l.t.taskJournal.Path(), "tasks": records, "warnings": warnings})
 }
 
 // =========================================================================
