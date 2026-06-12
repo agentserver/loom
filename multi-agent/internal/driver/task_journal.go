@@ -72,26 +72,35 @@ func (j *TaskJournal) Append(rec TaskRecord) error {
 }
 
 func (j *TaskJournal) Recent(limit int, taskID string) ([]TaskRecord, error) {
+	records, _, err := j.RecentWithWarnings(limit, taskID)
+	return records, err
+}
+
+func (j *TaskJournal) RecentWithWarnings(limit int, taskID string) ([]TaskRecord, []string, error) {
 	limit = normalizeTaskJournalLimit(limit)
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
 	f, err := os.Open(j.path)
 	if os.IsNotExist(err) {
-		return []TaskRecord{}, nil
+		return []TaskRecord{}, nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("open task journal for read: %w", err)
+		return nil, nil, fmt.Errorf("open task journal for read: %w", err)
 	}
 	defer f.Close()
 
 	records := []TaskRecord{}
+	warnings := []string{}
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	line := 0
 	for scanner.Scan() {
+		line++
 		var rec TaskRecord
 		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
-			return nil, fmt.Errorf("parse task journal line: %w", err)
+			warnings = append(warnings, fmt.Sprintf("skipped malformed task journal line %d: %v", line, err))
+			continue
 		}
 		if taskID != "" && rec.TaskID != taskID {
 			continue
@@ -99,7 +108,7 @@ func (j *TaskJournal) Recent(limit int, taskID string) ([]TaskRecord, error) {
 		records = append(records, rec)
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read task journal: %w", err)
+		return nil, warnings, fmt.Errorf("read task journal: %w", err)
 	}
 	for i, k := 0, len(records)-1; i < k; i, k = i+1, k-1 {
 		records[i], records[k] = records[k], records[i]
@@ -107,7 +116,7 @@ func (j *TaskJournal) Recent(limit int, taskID string) ([]TaskRecord, error) {
 	if len(records) > limit {
 		records = records[:limit]
 	}
-	return records, nil
+	return records, warnings, nil
 }
 
 func normalizeTaskJournalLimit(limit int) int {

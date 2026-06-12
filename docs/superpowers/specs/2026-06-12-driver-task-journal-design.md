@@ -150,12 +150,15 @@ Behavior:
 - Caps `limit` at `500`.
 - If `task_id` is provided, filters to matching records.
 - Returns the journal path so an operator can inspect the file directly.
+- Skips malformed JSONL lines and returns `warnings` so one partial write or
+  manual edit does not break recovery for older valid task IDs.
 
 Example result:
 
 ```json
 {
   "journal_path": "/home/agent/.cache/multi-agent/drv-001/driver-tasks.jsonl",
+  "warnings": [],
   "tasks": [
     {
       "ts": "2026-06-12T03:30:00Z",

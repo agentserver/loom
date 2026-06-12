@@ -60,6 +60,7 @@ Returns locally recorded driver-created delegated task IDs, newest first:
 ```json
 {
   "journal_path": "/home/agent/.cache/multi-agent/drv-001/driver-tasks.jsonl",
+  "warnings": [],
   "tasks": [
     {
       "ts": "2026-06-12T03:30:00Z",
@@ -80,7 +81,9 @@ Returns locally recorded driver-created delegated task IDs, newest first:
 Use this after an interrupted or timed-out long driver `tools/call` before
 deciding the task was never created. The journal records metadata only; it
 does not include prompts, scripts, environment variables, file contents,
-tokens, or credentials.
+tokens, or credentials. If the journal contains malformed JSONL lines, the
+tool skips those lines and returns `warnings`; valid older task records remain
+recoverable.
 
 ### `inspect_capabilities`
 

@@ -3,6 +3,7 @@ package driver
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -92,4 +93,31 @@ func TestListDriverTasksReturnsEmptyArrayWhenJournalIsEmpty(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &out))
 	require.NotNil(t, out.Tasks)
 	require.Empty(t, out.Tasks)
+}
+
+func TestListDriverTasksSkipsMalformedJournalLinesWithWarning(t *testing.T) {
+	tools := newTestTools(t, &fakeSDK{})
+	require.NoError(t, tools.taskJournal.Append(TaskRecord{Tool: "submit_task", TaskID: "task-1"}))
+
+	f, err := os.OpenFile(tools.taskJournal.Path(), os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = f.WriteString(`{"task_id":` + "\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	require.NoError(t, tools.taskJournal.Append(TaskRecord{Tool: "run_slave_bash", TaskID: "task-2"}))
+
+	raw, err := toolByName(t, tools, "list_driver_tasks").Call(context.Background(), json.RawMessage(`{}`))
+	require.NoError(t, err)
+
+	var out struct {
+		Tasks    []TaskRecord `json:"tasks"`
+		Warnings []string     `json:"warnings"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &out))
+	require.Len(t, out.Tasks, 2)
+	require.Equal(t, "task-2", out.Tasks[0].TaskID)
+	require.Equal(t, "task-1", out.Tasks[1].TaskID)
+	require.Len(t, out.Warnings, 1)
+	require.Contains(t, out.Warnings[0], "skipped malformed task journal line 2")
 }
