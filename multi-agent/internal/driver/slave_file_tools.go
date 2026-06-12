@@ -131,6 +131,16 @@ func (r *readSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (json
 	if err != nil {
 		return nil, &MCPToolError{Message: "delegate file read: " + err.Error()}
 	}
+	if err := r.t.recordDelegatedTask(delegatedTaskRecord{
+		Tool:              r.Name(),
+		Response:          resp,
+		TargetID:          card.AgentID,
+		TargetDisplayName: card.DisplayName,
+		Skill:             "file",
+		Wait:              true,
+	}); err != nil {
+		return nil, err
+	}
 	waitOut, err := r.t.waitDelegatedTask(ctx, resp.TaskID, 0)
 	if err != nil {
 		return nil, err
@@ -331,6 +341,16 @@ func (w *writeSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (jso
 	if err != nil {
 		return nil, &MCPToolError{Message: "delegate file write: " + err.Error()}
 	}
+	if err := w.t.recordDelegatedTask(delegatedTaskRecord{
+		Tool:              w.Name(),
+		Response:          resp,
+		TargetID:          card.AgentID,
+		TargetDisplayName: card.DisplayName,
+		Skill:             "file",
+		Wait:              true,
+	}); err != nil {
+		return nil, err
+	}
 	waitOut, err := w.t.waitDelegatedTask(ctx, resp.TaskID, 0)
 	if err != nil {
 		return nil, err
@@ -399,6 +419,16 @@ func (s *statSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (json
 	})
 	if err != nil {
 		return nil, &MCPToolError{Message: "delegate file stat: " + err.Error()}
+	}
+	if err := s.t.recordDelegatedTask(delegatedTaskRecord{
+		Tool:              s.Name(),
+		Response:          resp,
+		TargetID:          card.AgentID,
+		TargetDisplayName: card.DisplayName,
+		Skill:             "file",
+		Wait:              true,
+	}); err != nil {
+		return nil, err
 	}
 	waitOut, err := s.t.waitDelegatedTask(ctx, resp.TaskID, 0)
 	if err != nil {

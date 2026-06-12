@@ -47,6 +47,41 @@ remaining returned agents are treated as `slave`.
 Set `include_unavailable:true` only for diagnostics or cleanup; normal routing
 and "who is online" answers should use the default available-only result.
 
+### `list_driver_tasks`
+
+Input:
+
+```json
+{"limit": 50, "task_id": "optional-task-id"}
+```
+
+Returns locally recorded driver-created delegated task IDs, newest first:
+
+```json
+{
+  "journal_path": "/home/agent/.cache/multi-agent/drv-001/driver-tasks.jsonl",
+  "tasks": [
+    {
+      "ts": "2026-06-12T03:30:00Z",
+      "event": "delegate_task",
+      "tool": "run_slave_bash",
+      "task_id": "task-abc",
+      "target_id": "agent-123",
+      "target_display_name": "slave-local-prod",
+      "skill": "bash",
+      "status": "submitted",
+      "wait": true,
+      "timeout_sec": 600
+    }
+  ]
+}
+```
+
+Use this after an interrupted or timed-out long driver `tools/call` before
+deciding the task was never created. The journal records metadata only; it
+does not include prompts, scripts, environment variables, file contents,
+tokens, or credentials.
+
 ### `inspect_capabilities`
 
 Input:
@@ -241,6 +276,13 @@ Currently a v1 stub: returns current status and notes that cancel is not impleme
 
 ## Slave Control Helpers
 
+Shell helpers default to asynchronous submission: if `wait` is omitted or
+`false`, the tool returns `task_id`, target metadata, skill, and initial status
+without waiting for the remote command. Pass `"wait": true` only for short
+commands where blocking the MCP call until completion is intentional. For long
+commands, keep the default and poll with `get_task`, `wait_task`, or
+`tail_subtasks`.
+
 ### `run_slave_bash`
 
 Input:
@@ -252,7 +294,7 @@ Input:
   "script": "python3 - <<'PY'\nprint('ok')\nPY",
   "env": {"KEY": "value"},
   "timeout_sec": 60,
-  "wait": true
+  "wait": false
 }
 ```
 
@@ -272,7 +314,7 @@ Input:
   "script": "Get-ChildItem -Path . | Select-Object -First 5",
   "env": {"KEY": "value"},
   "timeout_sec": 60,
-  "wait": true
+  "wait": false
 }
 ```
 
@@ -292,7 +334,7 @@ Input:
   "script": "python --version",
   "env": {"KEY": "value"},
   "timeout_sec": 60,
-  "wait": true
+  "wait": false
 }
 ```
 

@@ -106,6 +106,17 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 	if err != nil {
 		return nil, &MCPToolError{Message: "delegate: " + err.Error()}
 	}
+	if err := s.t.recordDelegatedTask(delegatedTaskRecord{
+		Tool:              s.Name(),
+		Response:          resp,
+		TargetID:          targetID,
+		TargetDisplayName: targetName,
+		Skill:             skill,
+		Wait:              false,
+		TimeoutSec:        timeout,
+	}); err != nil {
+		return nil, err
+	}
 
 	contractBody, err := json.Marshal(tc)
 	if err != nil {

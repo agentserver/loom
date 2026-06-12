@@ -119,6 +119,15 @@ func runServe(args []string) {
 		die("audit log: " + err.Error())
 	}
 	defer audit.Close()
+	taskJournalPath, err := resolveDriverLocalPath(cfg, "driver-tasks.jsonl")
+	if err != nil {
+		die("task journal path: " + err.Error())
+	}
+	taskJournal, err := driver.NewTaskJournal(taskJournalPath)
+	if err != nil {
+		die("task journal: " + err.Error())
+	}
+	defer taskJournal.Close()
 	reg := driver.NewFileRegistry(cfg.DriverDefaults.MaxDirCacheEntries)
 
 	cli := agentsdk.NewClient(agentsdk.Config{ServerURL: cfg.Server.URL, Name: cfg.Server.Name})
@@ -162,6 +171,7 @@ func runServe(args []string) {
 
 	sdkClient := driver.NewAgentSDKClient(cli, cfg.Server.URL, cfg.Credentials.ProxyToken)
 	tools := driver.NewTools(reg, audit, sdkClient, cfg, obs)
+	tools.SetTaskJournal(taskJournal)
 	backend, err := agentbackend.New(agentbackend.Config{
 		Kind:   agentbackend.Kind(cfg.Agent.Kind),
 		Claude: agentbackend.ClaudeConfig{Bin: cfg.Claude.Bin, WorkDir: cfg.Claude.WorkDir, ExtraArgs: cfg.Claude.Args},
@@ -201,6 +211,10 @@ func runServe(args []string) {
 }
 
 func resolveAuditPath(cfg *driver.Config) (string, error) {
+	return resolveDriverLocalPath(cfg, "audit.log")
+}
+
+func resolveDriverLocalPath(cfg *driver.Config, name string) (string, error) {
 	dir := cfg.DriverDefaults.AuditLogDir
 	if dir == "" {
 		u, err := user.Current()
@@ -209,7 +223,7 @@ func resolveAuditPath(cfg *driver.Config) (string, error) {
 		}
 		dir = filepath.Join(u.HomeDir, ".cache", "multi-agent", cfg.Credentials.ShortID)
 	}
-	return filepath.Join(dir, "audit.log"), nil
+	return filepath.Join(dir, name), nil
 }
 
 func publishCard(cfg *driver.Config) error {

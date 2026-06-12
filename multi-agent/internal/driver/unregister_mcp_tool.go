@@ -60,5 +60,16 @@ func (u *unregisterSlaveMCPTool) Call(ctx context.Context, raw json.RawMessage) 
 	if err != nil {
 		return nil, &MCPToolError{Message: "delegate unregister_mcp task: " + err.Error()}
 	}
+	if err := u.t.recordDelegatedTask(delegatedTaskRecord{
+		Tool:              u.Name(),
+		Response:          resp,
+		TargetID:          card.AgentID,
+		TargetDisplayName: card.DisplayName,
+		Skill:             "unregister_mcp",
+		Wait:              true,
+		TimeoutSec:        args.TimeoutSec,
+	}); err != nil {
+		return nil, err
+	}
 	return u.t.waitDelegatedTask(ctx, resp.TaskID, args.TimeoutSec)
 }

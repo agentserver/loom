@@ -82,13 +82,20 @@ func newTestToolsWithObserver(t *testing.T, sdk SDKClient, obs ObserverSink) *To
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { a.Close() })
+	j, err := NewTaskJournal(filepath.Join(dir, "driver-tasks.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { j.Close() })
 	cfg := &Config{}
 	cfg.Server.URL = "https://srv.example.com"
 	cfg.Credentials.ShortID = "drv-001"
 	cfg.Credentials.SandboxID = "sbx-driver"
 	cfg.DriverDefaults.TaskTimeoutSec = 600
 	cfg.DriverDefaults.AuditLogDir = dir // expose so cache root and audit log path are predictable
-	return NewTools(NewFileRegistry(50000), a, sdk, cfg, obs)
+	tools := NewTools(NewFileRegistry(50000), a, sdk, cfg, obs)
+	tools.SetTaskJournal(j)
+	return tools
 }
 
 func submitContractToolForTest(t *testing.T, tools *Tools) Tool {
@@ -111,6 +118,38 @@ func toolByName(t *testing.T, tools *Tools, name string) Tool {
 	}
 	t.Fatalf("%s tool not registered", name)
 	return nil
+}
+
+func TestSubmitTaskRecordsDelegatedTask(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{
+					AgentID:     "agent-1",
+					DisplayName: "master-1",
+					Status:      "available",
+					Card:        json.RawMessage(`{"skills":["fanout"]}`),
+				},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-submit", SessionID: "session-1", Status: "submitted"}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+
+	_, err := toolByName(t, tools, "submit_task").Call(context.Background(), json.RawMessage(`{"prompt":"do work","skill":"chat"}`))
+	require.NoError(t, err)
+
+	records, err := tools.taskJournal.Recent(1, "task-submit")
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, "submit_task", records[0].Tool)
+	require.Equal(t, "agent-1", records[0].TargetID)
+	require.Equal(t, "master-1", records[0].TargetDisplayName)
+	require.Equal(t, "chat", records[0].Skill)
+	require.Equal(t, "session-1", records[0].SessionID)
+	require.False(t, records[0].Wait)
 }
 
 func testTaskContract() contract.TaskContract {

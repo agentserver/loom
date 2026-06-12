@@ -30,13 +30,78 @@ func TestRunSlaveBashDelegatesBashSkillAndWaits(t *testing.T) {
 		},
 	}
 	tool := toolByName(t, newTestTools(t, sdk), "run_slave_bash")
-	out, err := tool.Call(context.Background(), json.RawMessage(`{"target_display_name":"slave-a","script":"echo ok","timeout_sec":30}`))
+	out, err := tool.Call(context.Background(), json.RawMessage(`{"target_display_name":"slave-a","script":"echo ok","timeout_sec":30,"wait":true}`))
 	require.NoError(t, err)
 	require.Equal(t, "slave-a", delegated.TargetID)
 	require.Equal(t, "bash", delegated.Skill)
 	require.JSONEq(t, `{"script":"echo ok","timeout_sec":30}`, delegated.Prompt)
 	require.Contains(t, string(out), `"task_id":"task-1"`)
 	require.Contains(t, string(out), `"stdout":"ok\n"`)
+}
+
+func TestRunSlaveBashWaitTrueRecordsTaskBeforePolling(t *testing.T) {
+	getTaskCalled := false
+	var tools *Tools
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{
+					AgentID:     "agent-1",
+					DisplayName: "slave-1",
+					Status:      "available",
+					Card:        json.RawMessage(`{"skills":["bash"],"command_interfaces":[{"skill":"bash","kind":"bash","command":"/bin/bash","default":true}]}`),
+				},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-wait", Status: "submitted"}, nil
+		},
+		getTaskFunc: func(taskID string, includeOutput bool) (*agentsdk.TaskInfo, error) {
+			getTaskCalled = true
+			records, err := tools.taskJournal.Recent(1, "task-wait")
+			require.NoError(t, err)
+			require.Len(t, records, 1)
+			require.Equal(t, "run_slave_bash", records[0].Tool)
+			require.True(t, records[0].Wait)
+			return &agentsdk.TaskInfo{TaskID: taskID, Status: "completed", Output: "ok"}, nil
+		},
+	}
+	tools = newTestTools(t, sdk)
+
+	_, err := toolByName(t, tools, "run_slave_bash").Call(context.Background(), json.RawMessage(`{"target_display_name":"slave-1","script":"sleep 30","wait":true}`))
+	require.NoError(t, err)
+	require.True(t, getTaskCalled)
+}
+
+func TestPermissionTaskRecordsBeforeWaiting(t *testing.T) {
+	var tools *Tools
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{
+					AgentID:     "agent-1",
+					DisplayName: "slave-1",
+					Status:      "available",
+					Card:        json.RawMessage(`{"skills":["permissions"]}`),
+				},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-perm", Status: "submitted"}, nil
+		},
+		getTaskFunc: func(taskID string, includeOutput bool) (*agentsdk.TaskInfo, error) {
+			records, err := tools.taskJournal.Recent(1, "task-perm")
+			require.NoError(t, err)
+			require.Len(t, records, 1)
+			require.Equal(t, "get_slave_claude_permissions", records[0].Tool)
+			require.True(t, records[0].Wait)
+			return &agentsdk.TaskInfo{TaskID: taskID, Status: "completed", Output: `{"ok":true}`}, nil
+		},
+	}
+	tools = newTestTools(t, sdk)
+
+	_, err := toolByName(t, tools, "get_slave_claude_permissions").Call(context.Background(), json.RawMessage(`{"target_display_name":"slave-1"}`))
+	require.NoError(t, err)
 }
 
 func TestRunSlaveBashRejectsMissingBashSkill(t *testing.T) {
@@ -112,6 +177,75 @@ func TestRunSlavePowerShellDelegatesPowerShellSkillAndJSONPrompt(t *testing.T) {
 	require.Equal(t, 45, delegated.TimeoutSeconds)
 	require.JSONEq(t, `{"script":"Write-Output ok","timeout_sec":45,"env":{"A":"B"}}`, delegated.Prompt)
 	require.JSONEq(t, `{"task_id":"task-ps","target_id":"slave-win","target_display_name":"slave-win","skill":"powershell","status":"submitted"}`, string(out))
+}
+
+func TestRunSlavePowerShellReturnsTaskIDByDefault(t *testing.T) {
+	var delegated agentsdk.DelegateTaskRequest
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "slave-win", DisplayName: "slave-win", Status: "available", Card: json.RawMessage(`{
+					"skills":["powershell"],
+					"command_interfaces":[{"skill":"powershell","kind":"powershell","command":"pwsh","default":true}]
+				}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			delegated = req
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-long", Status: "submitted"}, nil
+		},
+		getTaskFunc: func(id string, includeOutput bool) (*agentsdk.TaskInfo, error) {
+			t.Fatalf("default run_slave_powershell must not wait for delegated task")
+			return nil, nil
+		},
+	}
+
+	tool := toolByName(t, newTestTools(t, sdk), "run_slave_powershell")
+	out, err := tool.Call(context.Background(), json.RawMessage(`{
+		"target_display_name":"slave-win",
+		"script":"Start-Sleep -Seconds 600",
+		"timeout_sec":600
+	}`))
+
+	require.NoError(t, err)
+	require.Equal(t, "slave-win", delegated.TargetID)
+	require.Equal(t, "powershell", delegated.Skill)
+	require.Equal(t, 600, delegated.TimeoutSeconds)
+	require.JSONEq(t, `{"task_id":"task-long","target_id":"slave-win","target_display_name":"slave-win","skill":"powershell","status":"submitted"}`, string(out))
+}
+
+func TestRunSlavePowerShellWaitTrueWaitsForCompletion(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "slave-win", DisplayName: "slave-win", Status: "available", Card: json.RawMessage(`{
+					"skills":["powershell"],
+					"command_interfaces":[{"skill":"powershell","kind":"powershell","command":"pwsh","default":true}]
+				}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-ps", Status: "submitted"}, nil
+		},
+		getTaskFunc: func(id string, includeOutput bool) (*agentsdk.TaskInfo, error) {
+			return &agentsdk.TaskInfo{
+				TaskID: "task-ps",
+				Status: "completed",
+				Result: json.RawMessage(`"{\"exit_code\":0,\"stdout\":\"done\\n\",\"stderr\":\"\",\"workdir\":\"C:\\\\work\"}"`),
+			}, nil
+		},
+	}
+
+	tool := toolByName(t, newTestTools(t, sdk), "run_slave_powershell")
+	out, err := tool.Call(context.Background(), json.RawMessage(`{
+		"target_display_name":"slave-win",
+		"script":"Write-Output done",
+		"wait":true
+	}`))
+
+	require.NoError(t, err)
+	require.Contains(t, string(out), `"task_id":"task-ps"`)
+	require.Contains(t, string(out), `"stdout":"done\n"`)
 }
 
 func TestRunSlaveShellUsesDefaultCommandInterface(t *testing.T) {

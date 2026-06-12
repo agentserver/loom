@@ -1,11 +1,14 @@
 package driver
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 // mockTool: simplest possible Tool implementer for testing dispatch.
@@ -136,6 +139,72 @@ func TestMCPServer_ToolsCall_ErrorCode(t *testing.T) {
 	}
 }
 
+func TestMCPServer_ConcurrentToolsCall(t *testing.T) {
+	releaseSlow := make(chan struct{})
+	slowStarted := make(chan struct{})
+	released := false
+	release := func() {
+		if !released {
+			close(releaseSlow)
+			released = true
+		}
+	}
+	defer release()
+
+	tools := []Tool{
+		&mockTool{name: "slow", call: func(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+			close(slowStarted)
+			<-releaseSlow
+			return json.RawMessage(`{"ok":"slow"}`), nil
+		}},
+		&mockTool{name: "fast", call: func(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+			return json.RawMessage(`{"ok":"fast"}`), nil
+		}},
+	}
+	in := strings.NewReader(
+		`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"slow","arguments":{}}}` + "\n" +
+			`{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"fast","arguments":{}}}` + "\n",
+	)
+	outR, outW := io.Pipe()
+	srv := NewMCPServer(tools)
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- srv.Serve(in, outW)
+		_ = outW.Close()
+	}()
+
+	select {
+	case <-slowStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("slow tool was not invoked")
+	}
+
+	reader := bufio.NewReader(outR)
+	line, ok := readLineBefore(t, reader, 200*time.Millisecond)
+	if !ok {
+		t.Fatal("fast tools/call did not respond while slow tools/call was still running")
+	}
+	id, text := decodeToolResponse(t, line)
+	if id != 11 || !strings.Contains(text, `"ok":"fast"`) {
+		t.Fatalf("first response = id %d text %q, want fast response id 11", id, text)
+	}
+
+	release()
+	line = readLineEventually(t, reader, 2*time.Second)
+	id, text = decodeToolResponse(t, line)
+	if id != 10 || !strings.Contains(text, `"ok":"slow"`) {
+		t.Fatalf("second response = id %d text %q, want slow response id 10", id, text)
+	}
+	select {
+	case err := <-serveErr:
+		if err != nil {
+			t.Fatalf("Serve returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return after input EOF and slow tool completion")
+	}
+}
+
 func TestMCPServer_UnknownMethod_ReturnsMethodNotFound(t *testing.T) {
 	in := strings.NewReader(`{"jsonrpc":"2.0","id":5,"method":"weird/thing"}` + "\n")
 	var out bytes.Buffer
@@ -151,6 +220,57 @@ func TestMCPServer_UnknownMethod_ReturnsMethodNotFound(t *testing.T) {
 	if resp.Error.Code != -32601 {
 		t.Errorf("code: %d", resp.Error.Code)
 	}
+}
+
+func readLineBefore(t *testing.T, r *bufio.Reader, d time.Duration) ([]byte, bool) {
+	t.Helper()
+	ch := make(chan []byte, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		line, err := r.ReadBytes('\n')
+		if err != nil {
+			errCh <- err
+			return
+		}
+		ch <- line
+	}()
+	select {
+	case line := <-ch:
+		return line, true
+	case err := <-errCh:
+		t.Fatalf("read response: %v", err)
+		return nil, false
+	case <-time.After(d):
+		return nil, false
+	}
+}
+
+func readLineEventually(t *testing.T, r *bufio.Reader, d time.Duration) []byte {
+	t.Helper()
+	line, ok := readLineBefore(t, r, d)
+	if !ok {
+		t.Fatalf("timed out reading response after %s", d)
+	}
+	return line
+}
+
+func decodeToolResponse(t *testing.T, line []byte) (int, string) {
+	t.Helper()
+	var resp struct {
+		ID     int `json:"id"`
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(line, &resp); err != nil {
+		t.Fatalf("unmarshal response: %v (line=%s)", err, string(line))
+	}
+	if len(resp.Result.Content) != 1 {
+		t.Fatalf("response content count = %d, want 1 (line=%s)", len(resp.Result.Content), string(line))
+	}
+	return resp.ID, resp.Result.Content[0].Text
 }
 
 func firstLine(s string) []byte {

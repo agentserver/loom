@@ -41,6 +41,15 @@ Slave control helpers:
 - `write_slave_file`: writes to a path on a slave that advertises `file`. Pass exactly one of `content` (inline, ≤ 4 KiB), `source_blob` (a sha256 returned from a prior tool), or `source_path` (a driver-local absolute path).
 - `stat_slave_file`: stats a path on a slave that advertises `file`. Returns `exists:false` for missing paths rather than erroring.
 
+Shell helpers return a `task_id` immediately by default. Pass `"wait": true`
+only when you intentionally want the MCP call to block until completion; for
+long commands, keep the default and poll with `wait_task`.
+
+If a long helper call is interrupted or an outer MCP client times out,
+use `list_driver_tasks` to recover recently created task IDs. The driver also
+appends each delegated task to `driver-tasks.jsonl` as soon as agentserver
+returns the `task_id`, before waiting for completion.
+
 Permission tools currently submit ordinary tasks with `skill="claude_permissions"` because the current agentserver does not expose the needed custom-agent peer/control proxy. The task is handled by native Go code in `slave-agent`; it is not a request for the slave's Claude Code process to edit its own permissions. Future work should migrate this control operation to a dedicated agentserver control channel.
 
 Example permission patch:
@@ -58,7 +67,8 @@ Example Bash execution:
 {
   "target_display_name": "slave-a-online-dag-160628",
   "script": "python3 - <<'PY'\nprint('ok')\nPY",
-  "timeout_sec": 60
+  "timeout_sec": 60,
+  "wait": true
 }
 ```
 
@@ -81,6 +91,29 @@ Every file registration, fetch, and PUT is recorded as JSONL at `~/.cache/multi-
 {"ts":"...","event":"register_read","path":"/home/me/x.csv","sha256":"abc","bytes":12345}
 {"ts":"...","event":"fetch_blob","path":"/home/me/x.csv","sha256":"abc","bytes":12345,"task_id":"t-9","peer_short_id":"slave-1"}
 {"ts":"...","event":"put_blob","path":"/home/me/out.parquet","sha256":"def","bytes":54321,"task_id":"t-9","peer_short_id":"slave-2","overwrite":true}
+```
+
+## Task journal
+
+Every driver-created delegated task is recorded as JSONL at
+`~/.cache/multi-agent/<short_id>/driver-tasks.jsonl` beside `audit.log`
+(overridable via `driver_defaults.audit_log_dir`). Each line records metadata
+such as `tool`, `task_id`, `target_id`, `target_display_name`, `skill`,
+`status`, `wait`, and `timeout_sec`.
+
+The journal does not store prompts, scripts, environment variables, file
+contents, tokens, or credentials.
+
+Use the MCP tool `list_driver_tasks` to read recent records:
+
+```json
+{"limit": 20}
+```
+
+Filter to one task ID when needed:
+
+```json
+{"task_id": "task-abc"}
 ```
 
 ## Notes

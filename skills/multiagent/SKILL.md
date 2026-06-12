@@ -25,6 +25,15 @@ choosing a shell helper. Use `run_slave_shell` when the shell is unspecified,
 `run_slave_bash` only when the target advertises a real Bash command
 interface.
 
+Shell helpers are asynchronous by default and return a `task_id`. Pass
+`wait:true` only for short commands where blocking the MCP call is intentional;
+otherwise monitor with `get_task`, `wait_task`, and `tail_subtasks`.
+
+If an outer MCP client times out, a stdio session is interrupted, or a long
+`wait:true` helper response is lost, call `list_driver_tasks` before assuming
+the task was lost. The driver records each delegated `task_id` locally as soon
+as agentserver returns it.
+
 ## Default Workflow
 
 1. Call `inspect_capabilities` before planning nontrivial work.
@@ -103,6 +112,9 @@ Do not call `register_slave_mcp` directly from a one-shot Claude generation: `re
 - Calling `run_slave_bash` on a Windows / PowerShell target. Bash means real
   Bash only; use `run_slave_powershell` or `run_slave_shell` when the target
   does not advertise Bash in `command_interfaces`.
+- Assuming a timed-out driver tool created no task. Check `list_driver_tasks`
+  for a locally recorded `task_id`, then inspect it with `get_task` or
+  `wait_task`.
 - Hand-rolling `cat <<EOF` or base64-decode payloads over `run_slave_bash` to ship a file when the slave advertises `file` — use `write_slave_file`. Same for `cat`-via-bash to pull a log back; use `read_slave_file` (returns a `blob_handle` + driver-local `cache_path`, bytes stay out of LLM context).
 - Auto-answering an `awaiting_user` question without surfacing it to the
   real human (you are the proxy, not the decider).

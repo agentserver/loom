@@ -63,8 +63,13 @@ type jsonRPCError struct {
 }
 
 // Serve reads one JSON-RPC message per line from r and writes responses to w.
+// Tool calls run concurrently so a long-running tool cannot block later
+// requests; response ids let JSON-RPC clients match out-of-order replies.
 // Returns when r reaches EOF or an "exit" notification is received.
 func (s *MCPServer) Serve(r io.Reader, w io.Writer) error {
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
 	for scanner.Scan() {
@@ -80,7 +85,7 @@ func (s *MCPServer) Serve(r io.Reader, w io.Writer) error {
 		if req.Method == "exit" {
 			return nil
 		}
-		s.dispatch(w, &req)
+		s.dispatch(context.Background(), w, &req, &wg)
 	}
 	return scanner.Err()
 }
@@ -93,7 +98,7 @@ func (s *MCPServer) WaitForLines(n int) {
 	}
 }
 
-func (s *MCPServer) dispatch(w io.Writer, req *jsonRPCRequest) {
+func (s *MCPServer) dispatch(ctx context.Context, w io.Writer, req *jsonRPCRequest, wg *sync.WaitGroup) {
 	switch req.Method {
 	case "initialize":
 		s.handleInitialize(w, req)
@@ -102,7 +107,7 @@ func (s *MCPServer) dispatch(w io.Writer, req *jsonRPCRequest) {
 	case "tools/list":
 		s.handleToolsList(w, req)
 	case "tools/call":
-		s.handleToolsCall(w, req)
+		s.handleToolsCall(ctx, w, req, wg)
 	case "shutdown":
 		s.writeResult(w, req.ID, struct{}{})
 	default:
@@ -141,7 +146,7 @@ func (s *MCPServer) handleToolsList(w io.Writer, req *jsonRPCRequest) {
 	s.writeResult(w, req.ID, map[string]interface{}{"tools": out})
 }
 
-func (s *MCPServer) handleToolsCall(w io.Writer, req *jsonRPCRequest) {
+func (s *MCPServer) handleToolsCall(ctx context.Context, w io.Writer, req *jsonRPCRequest, wg *sync.WaitGroup) {
 	var p struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -155,16 +160,22 @@ func (s *MCPServer) handleToolsCall(w io.Writer, req *jsonRPCRequest) {
 		s.writeError(w, idOrNull(req.ID), -32602, "unknown tool: "+p.Name)
 		return
 	}
-	result, err := t.Call(context.Background(), p.Arguments)
-	if err != nil {
-		s.writeError(w, idOrNull(req.ID), -32000, err.Error())
-		return
-	}
-	s.writeResult(w, req.ID, map[string]interface{}{
-		"content": []map[string]interface{}{
-			{"type": "text", "text": string(result)},
-		},
-	})
+	id := req.ID
+	args := p.Arguments
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		result, err := t.Call(ctx, args)
+		if err != nil {
+			s.writeError(w, idOrNull(id), -32000, err.Error())
+			return
+		}
+		s.writeResult(w, id, map[string]interface{}{
+			"content": []map[string]interface{}{
+				{"type": "text", "text": string(result)},
+			},
+		})
+	}()
 }
 
 func (s *MCPServer) writeResult(w io.Writer, id *json.RawMessage, result interface{}) {

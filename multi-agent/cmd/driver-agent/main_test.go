@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"runtime"
 	"testing"
 
@@ -32,4 +33,18 @@ func TestPublishCardIncludesPlatform(t *testing.T) {
 	require.NotNil(t, card, "missing card: %v", got)
 	platform, _ := card["platform"].(map[string]interface{})
 	require.Equal(t, map[string]interface{}{"os": runtime.GOOS, "arch": runtime.GOARCH}, platform)
+}
+
+func TestResolveDriverLocalPathUsesAuditLogDir(t *testing.T) {
+	cfg := &driver.Config{}
+	cfg.Credentials.ShortID = "drv-001"
+	cfg.DriverDefaults.AuditLogDir = t.TempDir()
+
+	auditPath, err := resolveDriverLocalPath(cfg, "audit.log")
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(cfg.DriverDefaults.AuditLogDir, "audit.log"), auditPath)
+
+	journalPath, err := resolveDriverLocalPath(cfg, "driver-tasks.jsonl")
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(cfg.DriverDefaults.AuditLogDir, "driver-tasks.jsonl"), journalPath)
 }
