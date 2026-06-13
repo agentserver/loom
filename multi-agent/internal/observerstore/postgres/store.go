@@ -186,6 +186,26 @@ func (s *Store) AgentBoundWorkspace(agentID string) (workspaceID string, found b
 	return ws, true, nil
 }
 
+// AgentLastActiveAt mirrors SQLiteStore.AgentLastActiveAt for the postgres backend.
+// Returns (zero, false, nil) on unknown agent or unparseable timestamp.
+// Fixes part of §1.3 #11 of docs/review-2026-06-13.md.
+func (s *Store) AgentLastActiveAt(workspaceID, agentID string) (time.Time, bool, error) {
+	var lastSeen string
+	err := s.db.QueryRow(`SELECT last_seen_at FROM agents WHERE workspace_id=$1 AND id=$2`,
+		workspaceID, agentID).Scan(&lastSeen)
+	if err == sql.ErrNoRows {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	t, perr := time.Parse(time.RFC3339Nano, lastSeen)
+	if perr != nil {
+		return time.Time{}, false, nil
+	}
+	return t, true, nil
+}
+
 func (s *Store) UpsertAgent(a observerstore.Agent, token, apiKeyID string) error {
 	return s.UpsertAgentWithExternalIdentity(a, token, apiKeyID)
 }
@@ -197,16 +217,18 @@ func (s *Store) UpsertAgentWithExternalIdentity(a observerstore.Agent, token, ap
 	if apiKeyID == "" {
 		return errors.New("observerstore: apiKeyID must not be empty")
 	}
+	now := observerstore.NowUTC()
 	_, err := s.db.Exec(
-		`INSERT INTO agents(workspace_id, id, role, display_name, token_hash, created_by_api_key_id, external_sandbox_id, external_user_id)
-         VALUES($1, $2, $3, $4, $5, $6, $7, $8)
+		`INSERT INTO agents(workspace_id, id, role, display_name, token_hash, created_by_api_key_id, external_sandbox_id, external_user_id, last_seen_at)
+         VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9)
          ON CONFLICT(workspace_id, id) DO UPDATE SET
             role = excluded.role,
             display_name = excluded.display_name,
             token_hash = excluded.token_hash,
             external_sandbox_id = excluded.external_sandbox_id,
-            external_user_id = excluded.external_user_id`,
-		a.WorkspaceID, a.ID, a.Role, a.DisplayName, observerstore.TokenHash(token), apiKeyID, a.ExternalSandboxID, a.ExternalUserID,
+            external_user_id = excluded.external_user_id,
+            last_seen_at = excluded.last_seen_at`,
+		a.WorkspaceID, a.ID, a.Role, a.DisplayName, observerstore.TokenHash(token), apiKeyID, a.ExternalSandboxID, a.ExternalUserID, now,
 	)
 	return err
 }
@@ -262,14 +284,15 @@ func (s *Store) RecordExternalIdentity(a observerstore.Agent, workspaceName stri
 		return err
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO agents(workspace_id, id, role, display_name, token_hash, created_by_api_key_id, external_sandbox_id, external_user_id)
-         VALUES($1, $2, $3, $4, $5, $6, $7, $8)
+		`INSERT INTO agents(workspace_id, id, role, display_name, token_hash, created_by_api_key_id, external_sandbox_id, external_user_id, last_seen_at)
+         VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9)
          ON CONFLICT(workspace_id, id) DO UPDATE SET
             role = excluded.role,
             display_name = excluded.display_name,
             external_sandbox_id = excluded.external_sandbox_id,
-            external_user_id = excluded.external_user_id`,
-		a.WorkspaceID, a.ID, a.Role, a.DisplayName, observerstore.TokenHash(agentToken), observerstore.ExternalIdentityAPIKeyID, a.ExternalSandboxID, a.ExternalUserID,
+            external_user_id = excluded.external_user_id,
+            last_seen_at = excluded.last_seen_at`,
+		a.WorkspaceID, a.ID, a.Role, a.DisplayName, observerstore.TokenHash(agentToken), observerstore.ExternalIdentityAPIKeyID, a.ExternalSandboxID, a.ExternalUserID, now,
 	); err != nil {
 		return err
 	}
@@ -460,7 +483,7 @@ func (s *Store) MarkArtifactAvailable(workspaceID, ownerAgentID, artifactID, mim
 		return err
 	}
 	if n == 0 {
-		return fmt.Errorf("artifact not found")
+		return observerstore.ErrArtifactNotFound
 	}
 	_, err = s.db.Exec(`UPDATE artifact_requests SET state=$1, updated_at=$2 WHERE workspace_id=$3 AND artifact_id=$4 AND owner_agent_id=$5 AND state=$6`,
 		observerstore.ArtifactStateAvailable, now, workspaceID, artifactID, ownerAgentID, observerstore.ArtifactStatePending)
@@ -522,7 +545,7 @@ func (s *Store) MarkWriteCompleted(workspaceID, writerAgentID, writeID, mime, sh
 		return err
 	}
 	if n == 0 {
-		return fmt.Errorf("write not found or already completed")
+		return observerstore.ErrWriteNotFound
 	}
 	return nil
 }
