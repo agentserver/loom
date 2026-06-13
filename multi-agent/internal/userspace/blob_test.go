@@ -58,6 +58,45 @@ func TestBlobStore_ReleaseToZeroRemovesFile(t *testing.T) {
 	require.Equal(t, 0, rc)
 }
 
+// TestBlobStore_PutReleasePutOpenWorks pins the §1.3 #13 PR3 fix:
+// after Release-to-0 removes the on-disk file (row intentionally retained
+// for audit, see Release comment), the next Put MUST recreate the file
+// when it bumps refcount 0→1. Otherwise the subsequent Open opens a
+// deleted path and fails.
+func TestBlobStore_PutReleasePutOpenWorks(t *testing.T) {
+	db := newTestDB(t)
+	b, err := NewBlobStore(db, t.TempDir())
+	require.NoError(t, err)
+	content := []byte("test-content")
+
+	// First Put: refcount 0→1, writes file.
+	h1, err := b.Put(content)
+	require.NoError(t, err)
+
+	// Release to 0: file removed, row retained.
+	require.NoError(t, b.Release(h1))
+
+	// Second Put on same content: previously bumped refcount 0→1 but
+	// didn't recreate the file, so Open would fail. Fixed: must recreate.
+	h2, err := b.Put(content)
+	require.NoError(t, err)
+	require.Equal(t, h1, h2)
+
+	// Refcount must now be 1 (Release dropped to 0, Put bumped to 1).
+	var rc int
+	require.NoError(t, db.QueryRow(`SELECT refcount FROM userspace_blobs WHERE sha256=?`, h2).Scan(&rc))
+	require.Equal(t, 1, rc)
+
+	// Open must succeed — the file was recreated by Put.
+	r, sz, err := b.Open(h2)
+	require.NoError(t, err, "Open after Put-Release-Put must succeed; file must have been recreated")
+	defer r.Close()
+	require.Equal(t, int64(len(content)), sz)
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	require.Equal(t, content, got)
+}
+
 // TestBlobStore_ConcurrentPutSameSha_NoDoubleWrite pins the §1.3 #13(a)
 // invariant: N goroutines Put(same content) must produce ONE blob file
 // on disk and a final refcount == N. Old code (SELECT → ErrNoRows →
