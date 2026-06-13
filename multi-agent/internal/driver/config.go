@@ -88,6 +88,11 @@ type Observer struct {
 	AgentID          string `yaml:"agent_id"`
 	APIKey           string `yaml:"api_key"`
 	TokenStatePath   string `yaml:"token_state_path"`
+	// ForceRegister, when true, instructs observerclient to set "force":true
+	// on register. Use to recover from a stale duplicate-takeover 409 after
+	// a within-5-min restart. Defaults to false so accidental takeovers of
+	// a still-live sibling driver remain blocked. See §1.3 #11.
+	ForceRegister bool `yaml:"force_register,omitempty"`
 }
 
 // LoadConfig reads + validates the yaml at path and applies DriverDefaults defaults.

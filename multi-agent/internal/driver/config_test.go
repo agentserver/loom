@@ -91,6 +91,60 @@ discovery: {display_name: drv}
 	}
 }
 
+// TestDriverConfig_ObserverForceRegisterRoundTrip locks the §1.3 #11 PR2
+// fix: the operator-facing `observer.force_register: true` YAML field must
+// round-trip into cfg.Observer.ForceRegister so cmd/driver-agent can pass it
+// through to observerclient.New. Without this field, observerclient's
+// ForceRegister flag is unreachable from configuration.
+func TestDriverConfig_ObserverForceRegisterRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "driver.yaml")
+	if err := os.WriteFile(path, []byte(`
+server: {url: https://x, name: drv}
+discovery: {display_name: driver-display}
+observer:
+  enabled: true
+  url: https://observer.example
+  workspace_id: ws1
+  agent_id: drv-1
+  api_key: ak_secret
+  token_state_path: ` + filepath.Join(dir, "obs.token") + `
+  force_register: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !c.Observer.ForceRegister {
+		t.Fatalf("observer.force_register: want true, got false")
+	}
+
+	// Default (omitted) must remain false — never accidentally takeover.
+	path2 := filepath.Join(dir, "driver2.yaml")
+	if err := os.WriteFile(path2, []byte(`
+server: {url: https://x, name: drv}
+discovery: {display_name: driver-display}
+observer:
+  enabled: true
+  url: https://observer.example
+  workspace_id: ws1
+  agent_id: drv-1
+  api_key: ak_secret
+  token_state_path: `+filepath.Join(dir, "obs2.token")+`
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c2, err := LoadConfig(path2)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if c2.Observer.ForceRegister {
+		t.Fatalf("observer.force_register default: want false, got true")
+	}
+}
+
 func TestLoadConfig_ObserverURLWithEnabledFalseKeepsDisabledAndDefaultsAgentID(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "driver.yaml")
