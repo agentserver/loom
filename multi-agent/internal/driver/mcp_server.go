@@ -67,50 +67,98 @@ type jsonRPCError struct {
 	Data    interface{} `json:"data,omitempty"`
 }
 
+// scannedLine carries one stdin line (or terminal error) from the reader
+// goroutine to the Serve main loop, so the main loop can select on ctx.Done()
+// rather than block in scanner.Scan().
+type scannedLine struct {
+	bytes []byte // owned copy, safe to use after the next scan
+	err   error  // non-nil on EOF or scanner error; signals the read loop has ended
+}
+
 // Serve reads one JSON-RPC message per line from r and writes responses to w.
 // Tool calls run concurrently so a long-running tool cannot block later
 // requests; response ids let JSON-RPC clients match out-of-order replies.
 // Returns when r reaches EOF, ctx is cancelled, or an "exit" notification is
 // received. The ctx is propagated into every tool Call so callers that wait
 // (e.g. wait_task long-polling) can unwind when the driver shuts down.
+//
+// Reads happen in a goroutine so the main loop can wake on ctx cancel even
+// when stdin is silent (production case: parent codex doesn't close driver's
+// stdin on SIGTERM). The reader goroutine still blocks in scanner.Scan() — Go
+// has no portable way to interrupt a syscall read on os.Stdin — but it is
+// abandoned once Serve returns; the GC reclaims it when the underlying file
+// is closed, which happens at process exit.
 func (s *MCPServer) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 	var wg sync.WaitGroup
+	lines := make(chan scannedLine, 1)
 
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
-	for scanner.Scan() {
-		if ctx.Err() != nil {
-			wg.Wait()
-			return ctx.Err()
+	go func() {
+		defer close(lines)
+		scanner := bufio.NewScanner(r)
+		scanner.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
+		for scanner.Scan() {
+			// scanner.Bytes() is reused on next Scan; copy before handing off.
+			b := append([]byte(nil), scanner.Bytes()...)
+			select {
+			case lines <- scannedLine{bytes: b}:
+			case <-ctx.Done():
+				return
+			}
 		}
+		// Scan() returned false: either EOF (Err()==nil) or a scanner error.
+		err := scanner.Err()
+		if err == nil {
+			err = io.EOF
+		}
+		select {
+		case lines <- scannedLine{err: err}:
+		case <-ctx.Done():
+		}
+	}()
+
+	for {
 		if atomic.LoadInt32(&s.broken) == 1 {
 			wg.Wait()
 			return errors.New("mcp stdout broken pipe")
 		}
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var req jsonRPCRequest
-		if err := json.Unmarshal(line, &req); err != nil {
-			s.writeError(w, json.RawMessage(`null`), -32700, "parse error: "+err.Error())
-			continue
-		}
-		if req.Method == "exit" {
+		select {
+		case <-ctx.Done():
 			wg.Wait()
-			return nil
+			return ctx.Err()
+		case ln, ok := <-lines:
+			if !ok {
+				// reader goroutine exited (ctx done before terminal msg arrived)
+				wg.Wait()
+				if atomic.LoadInt32(&s.broken) == 1 {
+					return errors.New("mcp stdout broken pipe")
+				}
+				return ctx.Err()
+			}
+			if ln.err != nil {
+				wg.Wait()
+				if atomic.LoadInt32(&s.broken) == 1 {
+					return errors.New("mcp stdout broken pipe")
+				}
+				if errors.Is(ln.err, io.EOF) {
+					return ctx.Err() // nil unless cancelled
+				}
+				return ln.err
+			}
+			if len(ln.bytes) == 0 {
+				continue
+			}
+			var req jsonRPCRequest
+			if err := json.Unmarshal(ln.bytes, &req); err != nil {
+				s.writeError(w, json.RawMessage(`null`), -32700, "parse error: "+err.Error())
+				continue
+			}
+			if req.Method == "exit" {
+				wg.Wait()
+				return nil
+			}
+			s.dispatch(ctx, w, &req, &wg)
 		}
-		s.dispatch(ctx, w, &req, &wg)
 	}
-	scanErr := scanner.Err()
-	wg.Wait()
-	if atomic.LoadInt32(&s.broken) == 1 {
-		return errors.New("mcp stdout broken pipe")
-	}
-	if scanErr != nil {
-		return scanErr
-	}
-	return ctx.Err() // nil if not cancelled
 }
 
 // WaitForLines is a test helper that blocks until at least n response lines
