@@ -64,7 +64,15 @@ func TestRoute_EmptyMeansNoCandidate(t *testing.T) {
 func TestPlan_DiamondParsedCorrectly(t *testing.T) {
 	withMode(t, "plan_diamond", func() {
 		p := newPlanner(t, "plan_diamond")
-		nodes, err := p.Plan(context.Background(), "x", demoAgents)
+		// The plan_diamond fake fixture targets agents a-d; expand the
+		// permitted set so the §1.5 #21 target_id validator accepts it.
+		agents := []agentsdk.AgentCard{
+			{AgentID: "agent-a", DisplayName: "A", Status: "available"},
+			{AgentID: "agent-b", DisplayName: "B", Status: "available"},
+			{AgentID: "agent-c", DisplayName: "C", Status: "available"},
+			{AgentID: "agent-d", DisplayName: "D", Status: "available"},
+		}
+		nodes, err := p.Plan(context.Background(), "x", agents)
 		require.NoError(t, err)
 		require.Len(t, nodes, 4)
 		require.Equal(t, "n1", nodes[0].ID)
@@ -77,7 +85,7 @@ func TestPlan_InvalidJSONErrors(t *testing.T) {
 	withMode(t, "plan_invalid_json", func() {
 		p := newPlanner(t, "plan_invalid_json")
 		_, err := p.Plan(context.Background(), "x", demoAgents)
-		require.ErrorContains(t, err, "plan unmarshal")
+		require.ErrorContains(t, err, "after 3 attempts")
 	})
 }
 
@@ -263,4 +271,151 @@ func TestAgentsJSON_IncludesStructuredMCPTools(t *testing.T) {
 			t.Errorf("agentsJSON missing %q in:\n%s", want, out)
 		}
 	}
+}
+
+// fakeLLM is an in-process agentbackend.LLMRunner that returns
+// scripted outputs in order across successive Run calls. Tests can
+// inspect the prompts the planner sent and force retry by returning
+// invalid JSON or unknown target_ids early in the script.
+// Not safe for concurrent Run calls; tests must drive it serially.
+type fakeLLM struct {
+	outputs []string
+	prompts []string // captured for inspection
+	calls   int
+}
+
+func (f *fakeLLM) Run(_ context.Context, prompt string) (string, error) {
+	f.prompts = append(f.prompts, prompt)
+	if f.calls >= len(f.outputs) {
+		f.calls++
+		return "", nil // exhausted; let the planner's empty-output path surface
+	}
+	out := f.outputs[f.calls]
+	f.calls++
+	return out, nil
+}
+
+// newScriptedPlanner builds a Planner backed by fakeLLM with a 5s
+// per-call timeout. Tests that need to observe prompts read from
+// the returned *fakeLLM.
+func newScriptedPlanner(t *testing.T, outputs ...string) (*Planner, *fakeLLM) {
+	t.Helper()
+	llm := &fakeLLM{outputs: outputs}
+	return New(config.Planner{TimeoutSec: 5}, llm), llm
+}
+
+// TestPlan_RetriesOnJSONParseError pins §1.5 #21: a malformed JSON
+// response triggers retry with the parse error fed back to the LLM.
+func TestPlan_RetriesOnJSONParseError(t *testing.T) {
+	p, llm := newScriptedPlanner(t,
+		"not json at all", // attempt 1: parse fails
+		`[{"id":"n1","target_id":"agent-a","prompt":"do thing"}]`, // attempt 2: succeeds
+	)
+	nodes, err := p.Plan(context.Background(), "task", demoAgents)
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	require.Equal(t, "agent-a", nodes[0].TargetID)
+	require.Equal(t, 2, llm.calls, "should retry once on parse error")
+	require.Contains(t, llm.prompts[1], "previous_attempt_error",
+		"retry prompt should include feedback boundary")
+	require.Contains(t, llm.prompts[1], "failed to parse",
+		"retry feedback should mention parse failure")
+}
+
+// TestPlan_RetriesOnUnknownTargetID pins §1.5 #21: a plan referencing
+// an agent not in the available list triggers retry with the offending
+// id and the permitted set fed back.
+func TestPlan_RetriesOnUnknownTargetID(t *testing.T) {
+	p, llm := newScriptedPlanner(t,
+		`[{"id":"n1","target_id":"hallucinated-agent","prompt":"x"}]`, // attempt 1: bad id
+		`[{"id":"n1","target_id":"agent-b","prompt":"x"}]`,            // attempt 2: succeeds
+	)
+	nodes, err := p.Plan(context.Background(), "task", demoAgents)
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	require.Equal(t, "agent-b", nodes[0].TargetID)
+	require.Equal(t, 2, llm.calls)
+	require.Contains(t, llm.prompts[1], "hallucinated-agent",
+		"retry feedback should name the offending id")
+}
+
+// TestPlan_SucceedsOnSecondAttempt is a regression guard for the
+// happy-after-retry path used by both error types.
+func TestPlan_SucceedsOnSecondAttempt(t *testing.T) {
+	p, llm := newScriptedPlanner(t,
+		`[{"id":"n1","target_id":"NOPE","prompt":"x"}]`,
+		`[{"id":"n1","target_id":"agent-a","prompt":"x"}]`,
+	)
+	_, err := p.Plan(context.Background(), "task", demoAgents)
+	require.NoError(t, err)
+	require.Equal(t, 2, llm.calls)
+}
+
+// TestPlan_GivesUpAfter3Attempts pins §1.5 #21 retry cap: 1 initial
+// + 2 retries; after that, return an error that names the last
+// failure so the caller can act on it.
+func TestPlan_GivesUpAfter3Attempts(t *testing.T) {
+	p, llm := newScriptedPlanner(t,
+		`[{"id":"n1","target_id":"NOPE","prompt":"x"}]`,
+		`[{"id":"n1","target_id":"NOPE2","prompt":"x"}]`,
+		`[{"id":"n1","target_id":"NOPE3","prompt":"x"}]`,
+	)
+	_, err := p.Plan(context.Background(), "task", demoAgents)
+	require.Error(t, err)
+	require.Equal(t, 3, llm.calls, "should attempt exactly 3 times")
+	require.Contains(t, err.Error(), "after 3 attempts")
+}
+
+// TestRoute_RetriesOnJSONParse pins §1.5 #21 for Route.
+func TestRoute_RetriesOnJSONParse(t *testing.T) {
+	p, llm := newScriptedPlanner(t,
+		"junk",
+		`{"target_id":"agent-a"}`,
+	)
+	target, err := p.Route(context.Background(), "task", demoAgents)
+	require.NoError(t, err)
+	require.Equal(t, "agent-a", target)
+	require.Equal(t, 2, llm.calls)
+}
+
+// TestRoute_RetriesOnUnknownTargetID pins §1.5 #21 for Route.
+func TestRoute_RetriesOnUnknownTargetID(t *testing.T) {
+	p, llm := newScriptedPlanner(t,
+		`{"target_id":"bogus"}`,
+		`{"target_id":"agent-b"}`,
+	)
+	target, err := p.Route(context.Background(), "task", demoAgents)
+	require.NoError(t, err)
+	require.Equal(t, "agent-b", target)
+	require.Equal(t, 2, llm.calls)
+	require.Contains(t, llm.prompts[1], "bogus", "feedback should name offending id")
+}
+
+// TestRoute_AcceptsEmptyTargetID pins the §1.5 #21 contract: an
+// empty target_id is a legitimate "no suitable agent" response,
+// NOT a validation failure. Should succeed on first attempt.
+func TestRoute_AcceptsEmptyTargetID(t *testing.T) {
+	p, llm := newScriptedPlanner(t, `{"target_id":""}`)
+	target, err := p.Route(context.Background(), "task", demoAgents)
+	require.NoError(t, err)
+	require.Equal(t, "", target)
+	require.Equal(t, 1, llm.calls, "empty target_id must not trigger retry")
+}
+
+// TestRoute_NoLongerFallsBackToRawTrim is a regression test pinning
+// §1.5 #21: the old fallback `strings.TrimSpace(out)` would have
+// returned "Sure, here is the answer:" as a literal agent id. The
+// new code MUST treat parse failure as a retry trigger, not a
+// passthrough. After exhausting retries with garbage, we should
+// see an error — not a freeform string returned.
+func TestRoute_NoLongerFallsBackToRawTrim(t *testing.T) {
+	p, _ := newScriptedPlanner(t,
+		"Sure, here is the answer: agent-a",
+		"I think you want agent-a",
+		"agent-a",
+	)
+	target, err := p.Route(context.Background(), "task", demoAgents)
+	require.Error(t, err, "freeform LLM text must not be returned as a target_id")
+	require.Equal(t, "", target)
+	require.Contains(t, err.Error(), "after 3 attempts")
 }

@@ -3,7 +3,9 @@ package planner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -46,32 +48,139 @@ type SubResult struct {
 	NodeID, TargetID, Prompt, Status, Output, Error string
 }
 
-func (p *Planner) Route(ctx context.Context, prompt string, agents []agentsdk.AgentCard) (string, error) {
-	out, err := p.runLLM(ctx, routePrompt(prompt, agents, ""))
-	if err != nil {
-		return "", err
+const planMaxAttempts = 3 // 1 initial + 2 retries; see §1.5 #21 decision record
+
+var (
+	// errPlanParse signals the LLM output did not parse as JSON; the
+	// retry loop feeds the parse error back to the LLM for self-repair.
+	errPlanParse = errors.New("plan parse")
+	// errPlanValidate signals one or more nodes referenced an unknown
+	// target_id; retry feeds the offending ids and the permitted set back.
+	errPlanValidate = errors.New("plan validate")
+)
+
+// agentIDSet returns the set of agent_ids available for a given
+// planning call. Used by validatePlanNodes to white-list target_id.
+// Cards with an empty AgentID are skipped: otherwise "" would land
+// in the permitted set and defeat Route's `target_id:""` "no
+// suitable agent" sentinel by making it look like a valid pick.
+func agentIDSet(agents []agentsdk.AgentCard) map[string]struct{} {
+	set := make(map[string]struct{}, len(agents))
+	for _, a := range agents {
+		if a.AgentID != "" {
+			set[a.AgentID] = struct{}{}
+		}
 	}
-	var r struct {
-		TargetID string `json:"target_id"`
-	}
-	if json.Unmarshal([]byte(out), &r) == nil {
-		return r.TargetID, nil
-	}
-	// Fallback: trim and treat as raw target_id
-	return strings.TrimSpace(out), nil
+	return set
 }
 
+// validatePlanNodes returns nil if every node's target_id is in
+// permitted. Otherwise returns a descriptive error naming every
+// offending node and listing the permitted set, so the retry loop
+// can give the LLM enough info to self-repair on the next attempt.
+func validatePlanNodes(nodes []Node, permitted map[string]struct{}) error {
+	var bad []string
+	for _, n := range nodes {
+		if _, ok := permitted[n.TargetID]; !ok {
+			bad = append(bad, fmt.Sprintf(`%s→%q`, n.ID, n.TargetID))
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	allowed := make([]string, 0, len(permitted))
+	for id := range permitted {
+		allowed = append(allowed, id)
+	}
+	sort.Strings(allowed) // deterministic feedback to LLM + stable error messages
+	return fmt.Errorf("unknown target_id(s): [%s]; permitted: [%s]",
+		strings.Join(bad, ", "),
+		strings.Join(allowed, ", "),
+	)
+}
+
+// Route asks the LLM to pick a single agent. Returns "" when no
+// agent is suitable. Retries up to planMaxAttempts on parse failure
+// or unknown target_id (empty target_id is a legitimate response,
+// not a validation failure). Deletes the old TrimSpace-as-id
+// fallback that turned any LLM freeform text into a dispatch target.
+// Fixes §1.5 #21 of docs/review-2026-06-13.md.
+func (p *Planner) Route(ctx context.Context, prompt string, agents []agentsdk.AgentCard) (string, error) {
+	permitted := agentIDSet(agents)
+	var lastErr error
+	var feedback string
+	for attempt := 1; attempt <= planMaxAttempts; attempt++ {
+		out, err := p.runLLM(ctx, routePrompt(prompt, agents, feedback))
+		if err != nil {
+			return "", err
+		}
+		var r struct {
+			TargetID string `json:"target_id"`
+		}
+		if err := json.Unmarshal([]byte(out), &r); err != nil {
+			// Route output is a one-liner ({"target_id":"..."}); 256 bytes
+			// is plenty to show the LLM what its previous attempt produced.
+			lastErr = fmt.Errorf("%w: %v; output: %s", errPlanParse, err, truncate(out, 256))
+			feedback = fmt.Sprintf(
+				`Your previous response failed to parse: %v. Return EXACTLY one line of JSON: {"target_id":"<agent_id>"} or {"target_id":""}.`,
+				err,
+			)
+			continue
+		}
+		if r.TargetID == "" {
+			return "", nil // "no suitable agent" — legitimate contract
+		}
+		if _, ok := permitted[r.TargetID]; !ok {
+			lastErr = fmt.Errorf(`%w: target_id %q not in available agents`, errPlanValidate, r.TargetID)
+			feedback = fmt.Sprintf(
+				`Your previous response chose target_id %q which is not in the available agents list. Pick one of the listed agent_id values or use "" if none is suitable.`,
+				r.TargetID,
+			)
+			continue
+		}
+		return r.TargetID, nil
+	}
+	return "", fmt.Errorf("planner: route rejected after %d attempts; last error: %w", planMaxAttempts, lastErr)
+}
+
+// Plan asks the LLM to decompose a task into a DAG. It runs up to
+// planMaxAttempts attempts, retrying with structured feedback on
+// parse failure or unknown target_id. Returns the last error
+// wrapped with the attempt count after the cap.
+// Fixes §1.5 #21 of docs/review-2026-06-13.md.
 func (p *Planner) Plan(ctx context.Context, prompt string, agents []agentsdk.AgentCard) ([]Node, error) {
-	out, err := p.runLLM(ctx, planPrompt(prompt, agents, ""))
-	if err != nil {
-		return nil, err
+	permitted := agentIDSet(agents)
+	var lastErr error
+	var feedback string
+	for attempt := 1; attempt <= planMaxAttempts; attempt++ {
+		out, err := p.runLLM(ctx, planPrompt(prompt, agents, feedback))
+		if err != nil {
+			return nil, err // LLM transport / timeout — don't retry here
+		}
+		out = stripJSONFence(out)
+		var nodes []Node
+		if err := json.Unmarshal([]byte(out), &nodes); err != nil {
+			// Plan output is a JSON array of nodes; 512 bytes captures
+			// enough structural context (vs Route's 256) for the LLM to
+			// see where its previous attempt went off the rails.
+			lastErr = fmt.Errorf("%w: %v; output: %s", errPlanParse, err, truncate(out, 512))
+			feedback = fmt.Sprintf(
+				"Your previous response failed to parse as JSON: %v. The output was:\n%s\nReturn ONLY a valid JSON array as instructed.",
+				err, truncate(out, 512),
+			)
+			continue
+		}
+		if err := validatePlanNodes(nodes, permitted); err != nil {
+			lastErr = fmt.Errorf("%w: %v", errPlanValidate, err)
+			feedback = fmt.Sprintf(
+				"Your previous response contained invalid target_id values: %v. Return ONLY a JSON array where every target_id is one of the available agents listed above.",
+				err,
+			)
+			continue
+		}
+		return nodes, nil
 	}
-	out = stripJSONFence(out)
-	var nodes []Node
-	if err := json.Unmarshal([]byte(out), &nodes); err != nil {
-		return nil, fmt.Errorf("plan unmarshal: %w; output: %s", err, truncate(out, 512))
-	}
-	return nodes, nil
+	return nil, fmt.Errorf("planner: plan rejected after %d attempts; last error: %w", planMaxAttempts, lastErr)
 }
 
 func stripJSONFence(out string) string {
