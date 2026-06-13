@@ -125,13 +125,17 @@ fi
 echo "==> staging into $PROJECT_ABS"
 install -m 0755 "$BIN" "$PROJECT_ABS/driver-agent"
 
-# Render config.yaml from template
+# Render config.yaml from template. __PROJECT_DIR__ is substituted here
+# so driver_defaults.workdir (and any future placeholder) gets the real
+# absolute path; the MCP templates below also substitute it because they
+# are rendered from a different template file.
 sed \
   -e "s|__AGENT_NAME__|$NAME|g" \
   -e "s|__DESCRIPTION__|$DESC|g" \
   -e "s|__LOOM_HOME__|$TOKEN_DIR|g" \
   -e "s|__OBSERVER_URL__|$OBSERVER_URL|g" \
   -e "s|__WORKSPACE_ID__|$WORKSPACE_ID|g" \
+  -e "s|__PROJECT_DIR__|$PROJECT_ABS|g" \
   "$HERE/config.yaml.template" > "$PROJECT_ABS/config.yaml"
 
 # Replace the multiline __AGENT_BLOCK__ placeholder via python3
