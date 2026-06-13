@@ -464,3 +464,106 @@ func TestLoadConfig_ObserverEnabledRequiresAPIKeyAndTokenStatePath(t *testing.T)
 		})
 	}
 }
+
+// TestLoadConfig_DriverDefaultsWorkDirDefaultsToClaudeWorkdir pins §1.4 #17 P1:
+// out of the box, DriverDefaults.WorkDir falls back to claude.workdir so the
+// source_path validation accepts project-internal files.
+func TestLoadConfig_DriverDefaultsWorkDirDefaultsToClaudeWorkdir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "driver.yaml")
+	if err := os.WriteFile(path, []byte(`
+server: {url: https://x, name: drv}
+discovery: {display_name: drv}
+claude:
+  workdir: /opt/project/claude
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if c.DriverDefaults.WorkDir != "/opt/project/claude" {
+		t.Errorf("DriverDefaults.WorkDir: want /opt/project/claude, got %q", c.DriverDefaults.WorkDir)
+	}
+}
+
+// TestLoadConfig_DriverDefaultsWorkDirCodexAgentUsesCodexWorkdir pins §1.4 #17 P1
+// for the codex variant: agent.kind=codex picks codex.workdir, not claude.workdir.
+func TestLoadConfig_DriverDefaultsWorkDirCodexAgentUsesCodexWorkdir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "driver.yaml")
+	if err := os.WriteFile(path, []byte(`
+server: {url: https://x, name: drv}
+discovery: {display_name: drv}
+agent:
+  kind: codex
+codex:
+  workdir: /opt/project/a
+claude:
+  workdir: /opt/project/b
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if c.DriverDefaults.WorkDir != "/opt/project/a" {
+		t.Errorf("DriverDefaults.WorkDir: want /opt/project/a (codex.workdir), got %q", c.DriverDefaults.WorkDir)
+	}
+}
+
+// TestLoadConfig_DriverDefaultsWorkDirCwdFallback covers the no-agent-workdir
+// case: when neither claude.workdir nor codex.workdir is set, the default is
+// the process cwd so source_path validation still has SOME root rather than
+// rejecting every path.
+func TestLoadConfig_DriverDefaultsWorkDirCwdFallback(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "driver.yaml")
+	if err := os.WriteFile(path, []byte(`
+server: {url: https://x, name: drv}
+discovery: {display_name: drv}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if c.DriverDefaults.WorkDir == "" {
+		t.Fatalf("DriverDefaults.WorkDir must not be empty after fallback")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if c.DriverDefaults.WorkDir != cwd {
+		t.Errorf("DriverDefaults.WorkDir: want cwd %q, got %q", cwd, c.DriverDefaults.WorkDir)
+	}
+}
+
+// TestLoadConfig_DriverDefaultsWorkDirExplicitWins covers operator override:
+// an explicit driver_defaults.workdir is preserved, not clobbered by the
+// fallback chain.
+func TestLoadConfig_DriverDefaultsWorkDirExplicitWins(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "driver.yaml")
+	if err := os.WriteFile(path, []byte(`
+server: {url: https://x, name: drv}
+discovery: {display_name: drv}
+claude:
+  workdir: /opt/project/claude
+driver_defaults:
+  workdir: /opt/explicit
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if c.DriverDefaults.WorkDir != "/opt/explicit" {
+		t.Errorf("explicit driver_defaults.workdir should win: got %q", c.DriverDefaults.WorkDir)
+	}
+}
