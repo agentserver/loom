@@ -147,14 +147,14 @@ func TestFileExecutor_ReadAbsolutePath(t *testing.T) {
 	if err := json.Unmarshal([]byte(res.Summary), &got); err != nil {
 		t.Fatalf("summary not FileReadResult JSON: %v\n%s", err, res.Summary)
 	}
-	// Same EvalSymlinks normalization as TestFileExecutor_ReadWholeFile_UTF8;
-	// got.Path is reported in the symlink-resolved frame (e.workDir).
-	wantPath := abs
-	if resolved, err := filepath.EvalSymlinks(workdir); err == nil {
-		wantPath = filepath.Join(resolved, "abs.txt")
-	}
-	if got.Path != wantPath || got.Content != "xyz" {
-		t.Fatalf("got %+v want path %q", got, wantPath)
+	// For absolute caller paths, resolvePath returns them unchanged; the
+	// jail check resolves symlinks internally for the comparison but
+	// result.Path is the raw caller input so the operator sees what they
+	// asked for. (Relative paths go through filepath.Join(e.workDir, ...)
+	// where e.workDir is symlink-resolved at constructor time — that
+	// asymmetry is covered by TestFileExecutor_ReadWholeFile_UTF8.)
+	if got.Path != abs || got.Content != "xyz" {
+		t.Fatalf("got %+v want path %q", got, abs)
 	}
 }
 
