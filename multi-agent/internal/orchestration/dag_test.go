@@ -1,6 +1,7 @@
 package orchestration
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -218,4 +219,39 @@ func TestScheduler_Append_RejectsDuplicateID(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected duplicate id error")
 	}
+}
+
+// TestScheduler_Append_RejectsUnknownDep prevents the silent "node never
+// becomes ready" failure that produces a 60s scheduler-stuck false positive.
+// Fixes §1.2 #8 (part 1) of docs/review-2026-06-13.md.
+func TestScheduler_Append_RejectsUnknownDep(t *testing.T) {
+	s := NewScheduler([]planner.Node{{ID: "a"}}, 1)
+	err := s.Append([]planner.Node{{ID: "b", DependsOn: []string{"ghost"}}})
+	require.Error(t, err)
+	require.True(t, strings.Contains(err.Error(), "ghost"),
+		"error must reference unknown dep id: %v", err)
+}
+
+func TestScheduler_Append_AllowsCrossAppendDep(t *testing.T) {
+	s := NewScheduler([]planner.Node{{ID: "a"}}, 1)
+	// x depends on y, both in the SAME Append batch — must NOT error.
+	err := s.Append([]planner.Node{
+		{ID: "y"},
+		{ID: "x", DependsOn: []string{"y"}},
+	})
+	require.NoError(t, err, "cross-append dep should be allowed: %v", err)
+}
+
+func TestScheduler_Append_AllowsDepOnExistingNode(t *testing.T) {
+	s := NewScheduler([]planner.Node{{ID: "a"}}, 1)
+	err := s.Append([]planner.Node{{ID: "b", DependsOn: []string{"a"}}})
+	require.NoError(t, err, "dep on existing scheduler node should be allowed: %v", err)
+}
+
+func TestScheduler_Append_RejectsSelfDep(t *testing.T) {
+	s := NewScheduler([]planner.Node{{ID: "a"}}, 1)
+	err := s.Append([]planner.Node{{ID: "x", DependsOn: []string{"x"}}})
+	require.Error(t, err)
+	require.True(t, strings.Contains(err.Error(), "depends on itself"),
+		"error must reference self-dep: %v", err)
 }
