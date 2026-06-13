@@ -53,6 +53,7 @@ type registerRequest struct {
 	DisplayName   string `json:"display_name"`
 	WorkspaceID   string `json:"workspace_id"`
 	WorkspaceName string `json:"workspace_name,omitempty"`
+	Force         bool   `json:"force,omitempty"`
 }
 
 type registerResponse struct {
@@ -70,6 +71,7 @@ func register(
 	ctx context.Context,
 	httpc *http.Client,
 	baseURL, apiKey, agentID, role, displayName, workspaceID, workspaceName string,
+	force bool,
 ) (token, workspaceIDReturned string, err error) {
 	body, _ := json.Marshal(registerRequest{
 		AgentID:       agentID,
@@ -77,6 +79,7 @@ func register(
 		DisplayName:   displayName,
 		WorkspaceID:   workspaceID,
 		WorkspaceName: workspaceName,
+		Force:         force,
 	})
 	url := strings.TrimRight(baseURL, "/") + "/api/agents/register"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -124,7 +127,8 @@ func (c *Client) loadOrRegister(ctx context.Context) (string, error) {
 
 	httpc := &http.Client{Timeout: registerTimeout}
 	tok, ws, err := register(regCtx, httpc, c.cfg.URL, c.cfg.APIKey,
-		c.cfg.AgentID, c.cfg.AgentRole, c.cfg.AgentID, c.cfg.WorkspaceID, c.cfg.WorkspaceName)
+		c.cfg.AgentID, c.cfg.AgentRole, c.cfg.AgentID, c.cfg.WorkspaceID, c.cfg.WorkspaceName,
+		c.cfg.ForceRegister)
 	if err != nil {
 		return "", err
 	}
@@ -168,7 +172,8 @@ func (c *Client) handle401(ctx context.Context) {
 
 	httpc := &http.Client{Timeout: registerTimeout}
 	tok, _, err := register(regCtx, httpc, c.cfg.URL, c.cfg.APIKey,
-		c.cfg.AgentID, c.cfg.AgentRole, c.cfg.AgentID, c.cfg.WorkspaceID, c.cfg.WorkspaceName)
+		c.cfg.AgentID, c.cfg.AgentRole, c.cfg.AgentID, c.cfg.WorkspaceID, c.cfg.WorkspaceName,
+		c.cfg.ForceRegister)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "observerclient: ingest 401 → re-register failed: %v\n", err)
 		return

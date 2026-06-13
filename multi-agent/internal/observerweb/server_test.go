@@ -1237,15 +1237,15 @@ func TestRegisterReissueInvalidatesOldToken(t *testing.T) {
 	seedAPIKey(t, st, "ak-default", "ak_real")
 	seedTelemetryKey(t, st, "ops", "ops-secret", "*")
 
-	register := func() string {
-		body := postRegister(t, h, "ak_real",
-			`{"agent_id":"slave-a","role":"slave","display_name":"Slave A","workspace_id":"ws1"}`,
-			http.StatusOK)
-		return extractToken(t, body)
-	}
-
-	first := register()
-	second := register()
+	// 1st call: fresh register, no force needed.
+	first := extractToken(t, postRegister(t, h, "ak_real",
+		`{"agent_id":"slave-a","role":"slave","display_name":"Slave A","workspace_id":"ws1"}`,
+		http.StatusOK))
+	// 2nd call: same agent_id within 5min — must pass force=true to take
+	// over (§1.3 #11 guard rejects silent takeover by default).
+	second := extractToken(t, postRegister(t, h, "ak_real",
+		`{"agent_id":"slave-a","role":"slave","display_name":"Slave A","workspace_id":"ws1","force":true}`,
+		http.StatusOK))
 	require.NotEqual(t, first, second, "reissue must return a new token")
 
 	// Old token: ingest now fails 401.
@@ -1330,7 +1330,8 @@ func TestRegister_TokenRotation(t *testing.T) {
 	h, st := newTestHandler(t)
 	seedAPIKey(t, st, "ak-1", "key1")
 	body1 := postRegister(t, h, "key1", `{"agent_id":"a","role":"slave","workspace_id":"ws-A"}`, http.StatusOK)
-	body2 := postRegister(t, h, "key1", `{"agent_id":"a","role":"slave","workspace_id":"ws-A"}`, http.StatusOK)
+	// 2nd register within 5min must pass force=true (§1.3 #11).
+	body2 := postRegister(t, h, "key1", `{"agent_id":"a","role":"slave","workspace_id":"ws-A","force":true}`, http.StatusOK)
 	require.NotEqual(t, extractToken(t, body1), extractToken(t, body2))
 	_, ok, err := st.ValidateToken(extractToken(t, body1))
 	require.NoError(t, err)
@@ -1679,4 +1680,82 @@ func TestPutArtifact_DBErrorWithDeleteFailureLogsOrphan(t *testing.T) {
 	require.Contains(t, ro.deleted(), objectKey, "Delete must still be attempted even when it fails")
 	require.Contains(t, out, "ORPHAN OBJECT")
 	require.Contains(t, out, objectKey)
+}
+
+// TestRegister_RejectsRecentDuplicateWithoutForce pins the §1.3 #11 invariant:
+// same agent_id within 5 minutes → 409 unless caller passes "force":true.
+// Stops the double-driver-same-id mutual-eviction loop where a stray second
+// process knocks the first off observer's auth without warning.
+func TestRegister_RejectsRecentDuplicateWithoutForce(t *testing.T) {
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-default", "ak_secret")
+	seedTelemetryKey(t, st, "ops", "ops-secret", "*")
+
+	// 1st register: fresh agent → 200 + token-A.
+	tokA := extractToken(t, postRegister(t, h, "ak_secret",
+		`{"agent_id":"slave-a","role":"slave","display_name":"Slave A","workspace_id":"ws1"}`,
+		http.StatusOK))
+
+	// 2nd register without force: must 409. Body must mention "force" and
+	// "recently" so the operator knows how to recover.
+	body := postRegister(t, h, "ak_secret",
+		`{"agent_id":"slave-a","role":"slave","display_name":"Slave A","workspace_id":"ws1"}`,
+		http.StatusConflict)
+	require.Contains(t, body, "force")
+	require.Contains(t, body, "recently")
+
+	// token-A must still work — silent rotation is exactly what the guard
+	// prevents. Use the same ingest endpoint that requires per-agent auth.
+	evBody, _ := json.Marshal(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave-a", AgentRole: observer.RoleSlave,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "t1", Summary: "x", Status: "assigned",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(evBody))
+	req.Header.Set("Authorization", "Bearer "+tokA)
+	req.Header.Set("X-Loom-Telemetry-Key", "ops-secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.NotEqual(t, http.StatusUnauthorized, rr.Code,
+		"token-A must NOT be rotated by a rejected duplicate register; got %d body=%s", rr.Code, rr.Body.String())
+}
+
+// TestRegister_AcceptsRecentDuplicateWithForce verifies the explicit opt-in.
+// 1st register issues token-A; 2nd with {"force":true} issues token-B
+// (token-A invalidated because UpsertAgent overwrites token_hash).
+func TestRegister_AcceptsRecentDuplicateWithForce(t *testing.T) {
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-default", "ak_real")
+	seedTelemetryKey(t, st, "ops", "ops-secret", "*")
+
+	// 1st register: fresh agent → 200 + token-A.
+	tokA := extractToken(t, postRegister(t, h, "ak_real",
+		`{"agent_id":"slave-a","role":"slave","display_name":"Slave A","workspace_id":"ws1"}`,
+		http.StatusOK))
+
+	// 2nd register with force=true: 200 + new token-B.
+	tokB := extractToken(t, postRegister(t, h, "ak_real",
+		`{"agent_id":"slave-a","role":"slave","display_name":"Slave A","workspace_id":"ws1","force":true}`,
+		http.StatusOK))
+	require.NotEqual(t, tokA, tokB, "force=true must rotate the token")
+
+	evBody, _ := json.Marshal(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave-a", AgentRole: observer.RoleSlave,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "t1", Summary: "x", Status: "assigned",
+	})
+
+	// token-A must now 401.
+	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(evBody))
+	req.Header.Set("Authorization", "Bearer "+tokA)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusUnauthorized, rr.Code,
+		"token-A must be invalidated after force-takeover; body=%s", rr.Body.String())
+
+	// token-B must work.
+	req = httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(evBody))
+	req.Header.Set("Authorization", "Bearer "+tokB)
+	req.Header.Set("X-Loom-Telemetry-Key", "ops-secret")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusAccepted, rr.Code, rr.Body.String())
 }

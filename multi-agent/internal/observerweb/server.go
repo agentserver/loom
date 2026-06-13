@@ -27,6 +27,11 @@ const defaultMaxEventBodyBytes = 256 << 10
 const defaultObjectPresignTTL = 15 * time.Minute
 const defaultMaxObjectProxyBytes = 8 << 20
 
+// recentRegisterWindow is how recent a (workspace, agent_id) registration
+// must be before the register handler refuses a duplicate without
+// force=true. See §1.3 #11 of docs/review-2026-06-13.md.
+const recentRegisterWindow = 5 * time.Minute
+
 var errObjectProxyTooLarge = errors.New("object proxy content too large")
 
 type Store = observerstore.Store
@@ -1056,6 +1061,7 @@ type registerRequest struct {
 	DisplayName   string `json:"display_name"`
 	WorkspaceID   string `json:"workspace_id"`
 	WorkspaceName string `json:"workspace_name,omitempty"`
+	Force         bool   `json:"force,omitempty"`
 }
 
 type registerResponse struct {
@@ -1135,6 +1141,27 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("agent already bound to workspace %s", existing),
 			http.StatusConflict)
 		return
+	}
+
+	// Duplicate-takeover guard: refuse to rotate the token of an agent_id
+	// that's still actively talking to observer, unless caller explicitly
+	// opts in. Stops the double-driver-same-id mutual-eviction loop where
+	// a stray second process silently knocks the first off observer's auth.
+	// Fixes §1.3 #11 of docs/review-2026-06-13.md.
+	if !req.Force {
+		lastActive, hasLastActive, err := h.s.AgentLastActiveAt(req.WorkspaceID, req.AgentID)
+		if err != nil {
+			log.Printf("observer: AgentLastActiveAt error: %v", err)
+			http.Error(w, "internal", http.StatusInternalServerError)
+			return
+		}
+		if hasLastActive && time.Since(lastActive) < recentRegisterWindow {
+			http.Error(w,
+				fmt.Sprintf("agent %s already registered recently (last registered %s ago); pass {\"force\":true} to take over",
+					req.AgentID, time.Since(lastActive).Round(time.Second)),
+				http.StatusConflict)
+			return
+		}
 	}
 
 	token, err := mintAgentToken()
