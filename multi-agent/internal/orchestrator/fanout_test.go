@@ -636,6 +636,12 @@ func TestMCPValidationReplanContext_IncludesJSONFieldPathGuidance(t *testing.T) 
 // the FIX for that regression.
 //
 // Fixes §1.2 #8 (part 2) of docs/review-2026-06-13.md.
+//
+// PR #11 review P2 update: when the orphaned new node is REQUIRED (the
+// fake-planner's v2 has no "optional":true), the parent must fail rather
+// than silently completing. Without this, a planner that emits a replan
+// depending on a superseded id would produce a "successful" parent task
+// where required work was discarded.
 func TestFanout_ReplanSupersedeBeforeAppend(t *testing.T) {
 	rf := filepath.Join(t.TempDir(), "round")
 	t.Setenv("FAKE_PLANNER_ROUND_FILE", rf)
@@ -648,10 +654,12 @@ func TestFanout_ReplanSupersedeBeforeAppend(t *testing.T) {
 
 	_, err := o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: "do"})
 
-	// Fanout completes without the 60s scheduler-stuck timeout. n0_v2 is
-	// orphaned (never ready), so no real work runs — but it must be
-	// explicitly reported as skipped so the reducer + observer see it.
-	require.NoError(t, err)
+	// n0_v2 is REQUIRED (no optional:true in fake-planner output) and gets
+	// orphaned. Parent must fail with a "required" error — the silent
+	// optional-downgrade was the PR #11 P2 regression.
+	require.Error(t, err, "required orphan replan node must fail the parent task, not silently downgrade to optional")
+	require.Contains(t, err.Error(), "n0_v2", "error must name the orphan node id")
+	require.Contains(t, err.Error(), "required", "error must mark the orphan as required-failure")
 	require.Empty(t, sdk.dispatched, "n0_v2 must not be dispatched (dep n0 is finished:skipped, not completed)")
 
 	done := eventsOfType(obs.events, observer.EventMasterSubtaskDone)
@@ -673,6 +681,34 @@ func TestFanout_ReplanSupersedeBeforeAppend(t *testing.T) {
 		"orphan event must include a reason explaining the cause")
 	require.Contains(t, errByNode["n0_v2"], "n0",
 		"orphan event must name the superseded dep")
+}
+
+// TestFanout_ReplanOptionalOrphanContinues verifies that when the orphan
+// replan node is explicitly marked optional, the parent still completes
+// (only the optional work is silently skipped — that's the contract of
+// optional nodes). This is the boundary case the P2 fix must NOT break.
+// Mirror of TestFanout_ReplanSupersedeBeforeAppend with optional:true.
+func TestFanout_ReplanOptionalOrphanContinues(t *testing.T) {
+	rf := filepath.Join(t.TempDir(), "round")
+	t.Setenv("FAKE_PLANNER_ROUND_FILE", rf)
+
+	sdk := &fakeSDKQueue{
+		agents: []agentsdk.AgentCard{agentWithRenderTool(t)},
+	}
+	obs := &fakeObserver{}
+	o := newOrchWithObserver(t, sdk, "plan_mcp_validation_replan_dep_old_optional", obs)
+
+	_, err := o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: "do"})
+	require.NoError(t, err, "optional orphan replan must NOT fail the parent")
+	require.Empty(t, sdk.dispatched, "n0_v2 must not be dispatched")
+
+	done := eventsOfType(obs.events, observer.EventMasterSubtaskDone)
+	statusByNode := map[string]string{}
+	for _, ev := range done {
+		statusByNode[ev.SubtaskID] = ev.Status
+	}
+	require.Equal(t, "skipped", statusByNode["n0_v2"],
+		"optional orphan still reported as skipped (just doesn't fail the parent)")
 }
 
 func TestFanout_MCPValidationReplanRejectsDisallowedContractTarget(t *testing.T) {

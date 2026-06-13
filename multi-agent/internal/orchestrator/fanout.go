@@ -653,6 +653,15 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 				// such node as skipped so the reducer sees it via
 				// AllFinished() and the observer sees an explicit done
 				// event. See §1.2 #8 (part 2) of docs/review-2026-06-13.md.
+				//
+				// PR #11 review P2: do NOT silently downgrade required orphans
+				// to optional. A planner emitting "replan node deps on the id
+				// being replaced" is a planner design error; if the new node
+				// is required (Optional=false), the parent task must fail
+				// loudly instead of returning a successful summary with the
+				// required work missing. Optional orphans remain a clean
+				// skip — that IS the contract of optional nodes.
+				var requiredOrphan *FinishedNode
 				for _, np := range newPlan {
 					for _, dep := range np.DependsOn {
 						if !supersededByID[dep] {
@@ -660,11 +669,26 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 						}
 						reason := fmt.Sprintf("orphaned: depends on superseded %s", dep)
 						if fn, ok := sched.MarkOrphaned(np.ID, reason); ok {
-							optionalByID[fn.NodeID] = true
+							// optionalByID[np.ID] was already set in the
+							// Append loop above (line ~644) from np.Optional —
+							// do NOT overwrite. recordSkippedDone makes the
+							// observer + reducer see it either way; the
+							// required-failure path below converts a required
+							// orphan into a parent-level failure.
 							recordSkippedDone(fn)
+							if !np.Optional && requiredOrphan == nil {
+								fnCopy := fn
+								requiredOrphan = &fnCopy
+							}
 						}
 						break
 					}
+				}
+				if requiredOrphan != nil {
+					cancelAll()
+					drainInFlight()
+					emitRequiredNodeFailed(*requiredOrphan, "")
+					return executor.Result{}, fmt.Errorf("required node %s skipped: %s", requiredOrphan.NodeID, requiredOrphan.Error)
 				}
 				continue
 			}

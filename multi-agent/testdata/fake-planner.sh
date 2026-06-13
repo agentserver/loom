@@ -77,6 +77,8 @@ EOF
     # (about-to-be-superseded) node id. This is a planner design error,
     # but it's the scenario where MarkSuperseded ordering observably
     # differs from Append ordering. See TestFanout_ReplanSupersedeBeforeAppend.
+    # Note: v2 is REQUIRED (no optional:true) — the test verifies the
+    # parent fails rather than silently downgrading.
     rf="${FAKE_PLANNER_ROUND_FILE:-/tmp/_fpround}"
     r=$(cat "$rf" 2>/dev/null || echo 0)
     case "$r" in
@@ -89,6 +91,29 @@ EOF
       1) cat <<'EOF'
 [
   {"id":"v2","target_id":"agent-a","prompt":"after","depends_on":["n0"]}
+]
+EOF
+         ;;
+      *) echo "REDUCED";;
+    esac
+    echo $((r+1)) > "$rf"
+    ;;
+  plan_mcp_validation_replan_dep_old_optional)
+    # Same as plan_mcp_validation_replan_dep_old but the replan node is
+    # explicitly optional, so the orphan downgrade does NOT fail the parent.
+    # See TestFanout_ReplanOptionalOrphanContinues.
+    rf="${FAKE_PLANNER_ROUND_FILE:-/tmp/_fpround}"
+    r=$(cat "$rf" 2>/dev/null || echo 0)
+    case "$r" in
+      0) cat <<'EOF'
+[
+  {"id":"n0","target_id":"agent-a","skill":"mcp","prompt":"{\"server\":\"srv\",\"tool\":\"render\",\"args\":{\"n\":7,\"put_url_128\":\"http://x\"}}"}
+]
+EOF
+         ;;
+      1) cat <<'EOF'
+[
+  {"id":"v2","target_id":"agent-a","prompt":"after","depends_on":["n0"],"optional":true}
 ]
 EOF
          ;;
