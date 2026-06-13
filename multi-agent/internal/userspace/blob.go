@@ -46,38 +46,52 @@ func NewBlobStore(db *sql.DB, root string) (*BlobStore, error) {
 	return &BlobStore{db: db, root: root}, nil
 }
 
-// Put writes content (if not already present) and increments refcount.
-// Returns the sha256 hex digest.
+// Put writes content if it's not already stored, otherwise bumps the
+// existing row's refcount. Atomic against concurrent Put(same content):
+// INSERT OR IGNORE inside a tx picks exactly one winner that writes the
+// file; losers UPDATE refcount instead. Fixes §1.3 #13(a) of
+// docs/review-2026-06-13.md.
 func (b *BlobStore) Put(content []byte) (string, error) {
 	sum := sha256.Sum256(content)
 	hexsum := hex.EncodeToString(sum[:])
 	path := b.pathFor(hexsum)
 
-	var existing int
-	err := b.db.QueryRow(`SELECT refcount FROM userspace_blobs WHERE sha256=?`, hexsum).Scan(&existing)
-	switch {
-	case err == sql.ErrNoRows:
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return "", err
-		}
-		if err := os.WriteFile(path, content, 0o644); err != nil {
-			return "", err
-		}
-		_, err = b.db.Exec(`
-			INSERT INTO userspace_blobs(sha256, size_bytes, blob_path, refcount, created_at)
-			VALUES(?, ?, ?, 1, ?)`,
-			hexsum, len(content), filepath.Join(blobShard(hexsum), hexsum), nowUTC())
-		if err != nil {
-			os.Remove(path)
-			return "", err
-		}
-		return hexsum, nil
-	case err != nil:
+	tx, err := b.db.Begin()
+	if err != nil {
 		return "", err
-	default:
-		_, err = b.db.Exec(`UPDATE userspace_blobs SET refcount = refcount + 1 WHERE sha256=?`, hexsum)
-		return hexsum, err
 	}
+	defer tx.Rollback() //nolint:errcheck
+
+	res, err := tx.Exec(`
+		INSERT OR IGNORE INTO userspace_blobs(sha256, size_bytes, blob_path, refcount, created_at)
+		VALUES(?, ?, ?, 1, ?)`,
+		hexsum, len(content), filepath.Join(blobShard(hexsum), hexsum), nowUTC())
+	if err != nil {
+		return "", err
+	}
+	inserted, _ := res.RowsAffected()
+	if inserted == 0 {
+		// Loser: row already existed. Bump refcount.
+		if _, err := tx.Exec(
+			`UPDATE userspace_blobs SET refcount = refcount + 1 WHERE sha256=?`, hexsum); err != nil {
+			return "", err
+		}
+		return hexsum, tx.Commit()
+	}
+	// Winner: we own this row, write the content file. WriteFile sits
+	// before Commit so a write failure rolls back the row (defer Rollback
+	// takes care of it via the early return path).
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	return hexsum, nil
 }
 
 // ErrBlobNotFound is returned by Open when the blob has refcount 0 or no row.
@@ -324,15 +338,23 @@ func (b *ObjectBlobStore) putObject(key string, content []byte, hexsum string) e
 	return nil
 }
 
+// upsertObjectBlob inserts or refcount-bumps the metadata row for an
+// object-store-backed blob. Canonical write path uses object_key only;
+// the legacy hasBlobPath dual-write was an unfinished migration that
+// materialized duplicate columns into user data (object_key value copied
+// into blob_path). We still satisfy the legacy NOT NULL constraint by
+// writing an empty string sentinel into blob_path when that column
+// exists; the read path keys off object_key only. Fixes §1.3 #13(b).
 func (b *ObjectBlobStore) upsertObjectBlob(hexsum string, sizeBytes int, key string) error {
 	if b.hasBlobPath {
+		// Legacy schema: blob_path is NOT NULL. Satisfy the constraint with
+		// an empty sentinel instead of duplicating object_key into it.
 		_, err := b.db.Exec(`
 			INSERT INTO userspace_blobs(sha256, size_bytes, object_key, blob_path, refcount, created_at)
-			VALUES($1, $2, $3, $3, 1, $4)
+			VALUES($1, $2, $3, '', 1, $4)
 			ON CONFLICT(sha256) DO UPDATE SET
 			    size_bytes = excluded.size_bytes,
 			    object_key = excluded.object_key,
-			    blob_path = excluded.blob_path,
 			    refcount = CASE
 			        WHEN userspace_blobs.refcount > 0 THEN userspace_blobs.refcount + 1
 			        ELSE 1

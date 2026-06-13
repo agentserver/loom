@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,6 +56,57 @@ func TestBlobStore_ReleaseToZeroRemovesFile(t *testing.T) {
 	var rc int
 	require.NoError(t, db.QueryRow(`SELECT refcount FROM userspace_blobs WHERE sha256=?`, sum).Scan(&rc))
 	require.Equal(t, 0, rc)
+}
+
+// TestBlobStore_ConcurrentPutSameSha_NoDoubleWrite pins the §1.3 #13(a)
+// invariant: N goroutines Put(same content) must produce ONE blob file
+// on disk and a final refcount == N. Old code (SELECT → ErrNoRows →
+// WriteFile + INSERT) had a TOCTOU race that under -race manifests as
+// either failures > 0 (UNIQUE constraint) or refcount < N (concurrent
+// updates lost).
+func TestBlobStore_ConcurrentPutSameSha_NoDoubleWrite(t *testing.T) {
+	db := newTestDB(t)
+	// modernc.org/sqlite `:memory:` is per-connection; pin to a single conn
+	// so all goroutines see the same schema/data.
+	db.SetMaxOpenConns(1)
+	b, err := NewBlobStore(db, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewBlobStore: %v", err)
+	}
+	content := []byte("hello-world-blob-content")
+	const N = 20
+	var wg sync.WaitGroup
+	var failures int32
+	var hexsum string
+	var hexsumMu sync.Mutex
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			h, err := b.Put(content)
+			if err != nil {
+				atomic.AddInt32(&failures, 1)
+				t.Logf("put err: %v", err)
+				return
+			}
+			hexsumMu.Lock()
+			hexsum = h
+			hexsumMu.Unlock()
+		}()
+	}
+	wg.Wait()
+	if failures > 0 {
+		t.Fatalf("concurrent Put failures: %d (must be 0)", failures)
+	}
+	// Final refcount must equal N.
+	var rc int
+	if err := db.QueryRow(
+		`SELECT refcount FROM userspace_blobs WHERE sha256=?`, hexsum).Scan(&rc); err != nil {
+		t.Fatalf("refcount query: %v", err)
+	}
+	if rc != N {
+		t.Fatalf("expected refcount=%d, got %d (TOCTOU: concurrent Put didn't atomically bump)", N, rc)
+	}
 }
 
 func TestBlobStore_OpenZeroRefcountFails(t *testing.T) {
