@@ -499,3 +499,60 @@ func TestLoadHumanloopOverrides(t *testing.T) {
 		t.Errorf("override failed: got %+v", cfg.Humanloop)
 	}
 }
+
+// TestLoad_CodexWorkDirMirrorsToClaude pins the PR #14 P1 follow-up:
+// Linux --agent codex install generates config with only codex.workdir
+// set; cmd/slave-agent.NewFileExecutor used to read cfg.Claude.WorkDir
+// unconditionally, falling back to os.Getwd() on codex slaves (process
+// cwd → "/" in foreground startup). The loader now mirrors workdir in
+// BOTH directions so callers reading either field see the populated
+// value.
+func TestLoad_CodexWorkDirMirrorsToClaude(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	body := `
+server: { url: x, name: y }
+credentials: {}
+agent: { kind: codex }
+codex: { workdir: /var/lib/loom/codex }
+discovery: { display_name: a }
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Codex.WorkDir != "/var/lib/loom/codex" {
+		t.Fatalf("Codex.WorkDir=%q want /var/lib/loom/codex", c.Codex.WorkDir)
+	}
+	if c.Claude.WorkDir != "/var/lib/loom/codex" {
+		t.Fatalf("Claude.WorkDir=%q want mirror of codex.workdir", c.Claude.WorkDir)
+	}
+}
+
+// TestLoad_ClaudeWorkDirMirrorsToCodex is the pre-existing direction
+// (kept for explicitness alongside the reverse mirror above): when only
+// claude.workdir is set, Codex.WorkDir inherits it.
+func TestLoad_ClaudeWorkDirMirrorsToCodex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	body := `
+server: { url: x, name: y }
+credentials: {}
+claude: { workdir: /var/lib/loom/claude }
+discovery: { display_name: a }
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Claude.WorkDir != "/var/lib/loom/claude" {
+		t.Fatalf("Claude.WorkDir=%q", c.Claude.WorkDir)
+	}
+	if c.Codex.WorkDir != "/var/lib/loom/claude" {
+		t.Fatalf("Codex.WorkDir=%q want mirror of claude.workdir", c.Codex.WorkDir)
+	}
+}

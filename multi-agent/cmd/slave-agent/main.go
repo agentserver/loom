@@ -246,7 +246,16 @@ func run(cfgPath string) error {
 	})
 	registerRuntimeShellRoutes(routes, cfg, caps)
 	if hasSkill(cfg.Discovery.Skills, "file") {
-		routes["file"] = executor.NewFileExecutor(executor.FileConfig{WorkDir: cfg.Claude.WorkDir})
+		// Select the file-jail root by agent kind so codex slaves
+		// don't fall back to os.Getwd() when only codex.workdir is
+		// populated (config.Load now reverse-mirrors the field, but
+		// pin intent here too — codex slave reads codex.workdir).
+		// See PR #14 P1 follow-up.
+		fileWorkDir := cfg.Claude.WorkDir
+		if cfg.Agent.Kind == "codex" {
+			fileWorkDir = cfg.Codex.WorkDir
+		}
+		routes["file"] = executor.NewFileExecutor(executor.FileConfig{WorkDir: fileWorkDir})
 	}
 	enumerateMCPTools := func(ctx context.Context) []capability.MCPToolDescriptor {
 		allDesc := []capability.MCPToolDescriptor{}
