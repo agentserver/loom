@@ -309,16 +309,45 @@ func TestMCPServerServe_StopsOnContextCancel(t *testing.T) {
 	go func() { done <- srv.Serve(ctx, pr, &out) }()
 
 	// Give the tool a moment to be dispatched, then cancel.
+	// Reader stays open intentionally: Serve must unblock on ctx cancel even
+	// when stdin would otherwise stay open forever (real production case:
+	// codex doesn't close driver's stdin on SIGTERM).
 	time.Sleep(50 * time.Millisecond)
 	cancel()
-	_ = pr.Close() // unblock scanner so loop can exit
 
 	select {
 	case <-done:
-		// expected within 1s; the deferred wg.Wait inside Serve must also
-		// observe the cancelled ctx
+		// expected within 1s; Serve must wake out of its read on ctx cancel
+		// (it cannot wait for pw to close — production parent won't close stdin)
 	case <-time.After(2 * time.Second):
 		t.Fatalf("Serve did not return after ctx cancel; out=%s", out.String())
+	}
+	_ = pw.Close()
+}
+
+// TestMCPServerServe_StopsOnContextCancel_Idle verifies the SIGTERM-on-idle
+// path: even with NO in-flight tool call and NO pending stdin data, ctx
+// cancel must unblock the Serve loop (otherwise driver-agent's
+// signal.NotifyContext is a no-op when the parent isn't sending requests).
+func TestMCPServerServe_StopsOnContextCancel_Idle(t *testing.T) {
+	pr, pw := io.Pipe() // reader stays open with no data forever
+	defer pw.Close()
+
+	var out bytes.Buffer
+	srv := NewMCPServer([]Tool{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ctx, pr, &out) }()
+
+	// Let Serve enter its blocking read, then cancel.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+		// expected: Serve wakes out of its read and returns ctx.Err()
+	case <-time.After(2 * time.Second):
+		t.Fatal("idle Serve did not return after ctx cancel")
 	}
 }
 
