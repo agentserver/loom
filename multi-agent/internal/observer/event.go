@@ -22,6 +22,7 @@ const (
 	EventMasterSubtaskDone                = "master_subtask_done"
 	EventMasterTaskCompleted              = "master_task_completed"
 	EventMasterTaskFailed                 = "master_task_failed"
+	EventMasterTaskResumed                = "master_task_resumed"
 	EventMasterPlanningProgress           = "master_planning_progress"
 	EventMasterPlanningCompleted          = "master_planning_completed"
 	EventMasterMCPReplan                  = "master_mcp_replan"

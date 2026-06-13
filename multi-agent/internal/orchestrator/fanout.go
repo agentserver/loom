@@ -30,6 +30,25 @@ func fanoutNoProgressTimeout(cfg config.Fanout) time.Duration {
 	return 60 * time.Second
 }
 
+// looksLikeMCPPrompt reports whether a persisted SubTaskRow prompt parses as
+// a {server,tool,args} MCP call envelope. Used by runFanoutResume Phase 2 to
+// refuse re-dispatching such a node as plain chat: SubTaskRow doesn't persist
+// Skill, so the resume loop would otherwise send structured MCP arguments to
+// a slave's chat LLM, the LLM would return prose, the reducer would accept
+// it as a completed node, and the user would get a silently degraded result
+// indistinguishable from a real MCP execution. Fail fast instead.
+func looksLikeMCPPrompt(prompt string) bool {
+	var v struct {
+		Server string          `json:"server"`
+		Tool   string          `json:"tool"`
+		Args   json.RawMessage `json:"args"`
+	}
+	if err := json.Unmarshal([]byte(prompt), &v); err != nil {
+		return false
+	}
+	return v.Server != "" && v.Tool != ""
+}
+
 // parseOutputHandle attempts to interpret s as a phase-boundary handle JSON
 // document. Unlike transport.ParseHandle, it does not require a non-empty URL
 // field — phase-boundary handles may carry url:"" by convention.
@@ -769,6 +788,328 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 	}
 	summary, rerr := o.planner.Reduce(ctx, t.Prompt, results)
 	if rerr != nil {
+		if len(writeURLs) == 0 {
+			return executor.Result{}, fmt.Errorf("reduce: %w", rerr)
+		}
+		summary = orchestration.FallbackReduceSummary(results, rerr)
+	}
+	if err := o.putManifestWrites(ctx, t.Prompt, summary); err != nil {
+		return executor.Result{}, err
+	}
+	return executor.Result{Summary: summary}, nil
+}
+
+// rebuildSchedulerFromRows reconstructs Scheduler + outputs map + in-flight
+// node descriptors from persisted sub_tasks rows. Used by runFanoutResume
+// after a driver restart so we don't lose DAG state.
+func rebuildSchedulerFromRows(
+	rows []store.SubTaskRow,
+	maxConc int,
+) (sched *Scheduler, plan []planner.Node, outputs map[string]string, inFlight []store.SubTaskRow) {
+	plan = make([]planner.Node, 0, len(rows))
+	for _, r := range rows {
+		plan = append(plan, planner.Node{
+			ID:        r.NodeID,
+			TargetID:  r.TargetID,
+			Prompt:    r.Prompt,
+			DependsOn: r.DependsOn,
+			// Skill / Optional / SystemContext not persisted; resume path is
+			// limited to chat-skilled nodes whose only progress signal is
+			// child_task_id + status. If the new run needs more, extend
+			// SubTaskRow.
+		})
+	}
+	sched = NewScheduler(plan, maxConc)
+	outputs = map[string]string{}
+	for _, r := range rows {
+		switch r.Status {
+		case "completed":
+			sched.MarkDispatched(r.NodeID)
+			sched.Report(r.NodeID, "completed", r.Output, "")
+			outputs[r.NodeID] = r.Output
+		case "skipped", "failed", "cancelled":
+			sched.MarkDispatched(r.NodeID)
+			sched.Report(r.NodeID, r.Status, "", r.Error)
+		case "assigned", "running":
+			sched.MarkDispatched(r.NodeID)
+			inFlight = append(inFlight, r)
+		case "pending", "":
+			// already in pending
+		}
+	}
+	return
+}
+
+// runFanoutResume continues a fanout DAG using state rebuilt from sub_tasks.
+// Minimum-viable implementation (Option 2 of plan §Task 6):
+//   - Await each in-flight node synchronously via WaitForTask, fold the
+//     terminal state into the store + scheduler.
+//   - Dispatch any newly-ready pending nodes sequentially through the SDK
+//     and await each one before moving on.
+//   - Reduce + return the final summary.
+//
+// Tradeoffs vs. the full runFanout loop: no replan, no parallelism, no
+// observer progress events for newly-dispatched resume nodes, no synthetic
+// artifact dispatch, no MCP validation. Resume nodes are treated as
+// required chat-skilled jobs. The full integration (Option 1) is a
+// follow-up — see commit message.
+func (o *Orchestrator) runFanoutResume(ctx context.Context, t executor.Task, rows []store.SubTaskRow) (executor.Result, error) {
+	maxConc := o.cfg.MaxConcurrency
+	if maxConc <= 0 {
+		maxConc = 1
+	}
+	sched, _, outputs, inFlight := rebuildSchedulerFromRows(rows, maxConc)
+
+	// Track all node objects for reduce input + observer attribution.
+	allNodes := make([]planner.Node, 0, len(rows))
+	nodeByID := make(map[string]planner.Node, len(rows))
+	for _, r := range rows {
+		n := planner.Node{ID: r.NodeID, TargetID: r.TargetID, Prompt: r.Prompt, DependsOn: r.DependsOn}
+		allNodes = append(allNodes, n)
+		nodeByID[r.NodeID] = n
+	}
+
+	sseSink := o.store.ChunkSink(t.ID)
+	defer sseSink.Close()
+
+	emitSubtaskDone := func(nodeID, status, childTaskID, output, errMsg string) {
+		payload := map[string]string{}
+		if output != "" {
+			payload["output"] = output
+		}
+		if errMsg != "" {
+			payload["error"] = errMsg
+		}
+		o.emit(observer.Event{
+			Type:        observer.EventMasterSubtaskDone,
+			TaskID:      t.ID,
+			SubtaskID:   nodeID,
+			ChildTaskID: childTaskID,
+			Status:      status,
+			Payload:     observerPayload(payload),
+		})
+	}
+
+	finishNode := func(r store.SubTaskRow, info *agentsdk.TaskInfo, waitErr error) error {
+		if waitErr != nil {
+			_ = o.store.UpdateSubTask(t.ID, r.NodeID, map[string]interface{}{
+				"status":      "failed",
+				"error":       waitErr.Error(),
+				"finished_at": time.Now().UTC().Format(time.RFC3339Nano),
+			})
+			sched.Report(r.NodeID, "failed", "", waitErr.Error())
+			sseSink.Write("subtask_done", fmt.Sprintf(`{"node_id":%q,"status":"failed"}`, r.NodeID))
+			emitSubtaskDone(r.NodeID, "failed", r.ChildTaskID, "", waitErr.Error())
+			n := nodeByID[r.NodeID]
+			o.emit(observer.Event{
+				Type:          observer.EventMasterRequiredNodeFailed,
+				TaskID:        t.ID,
+				SubtaskID:     r.NodeID,
+				ChildTaskID:   r.ChildTaskID,
+				Status:        "failed",
+				TargetAgentID: n.TargetID,
+				TargetRole:    observer.RoleSlave,
+				Payload: observerPayload(map[string]interface{}{
+					"required": true,
+					"node_id":  r.NodeID,
+					"status":   "failed",
+					"error":    waitErr.Error(),
+				}),
+			})
+			return fmt.Errorf("resume node %s failed: %w", r.NodeID, waitErr)
+		}
+		output := taskOutput(info)
+		if info.Status == "completed" {
+			_ = o.store.UpdateSubTask(t.ID, r.NodeID, map[string]interface{}{
+				"status":      "completed",
+				"output":      output,
+				"finished_at": time.Now().UTC().Format(time.RFC3339Nano),
+			})
+			sched.Report(r.NodeID, "completed", output, "")
+			outputs[r.NodeID] = output
+			sseSink.Write("subtask_done", fmt.Sprintf(`{"node_id":%q,"status":"completed","output_len":%d}`, r.NodeID, len(output)))
+			emitSubtaskDone(r.NodeID, "completed", r.ChildTaskID, output, "")
+			return nil
+		}
+		failReason := info.FailureReason
+		if failReason == "" {
+			failReason = info.Status
+		}
+		_ = o.store.UpdateSubTask(t.ID, r.NodeID, map[string]interface{}{
+			"status":      info.Status,
+			"error":       failReason,
+			"finished_at": time.Now().UTC().Format(time.RFC3339Nano),
+		})
+		sched.Report(r.NodeID, info.Status, "", failReason)
+		sseSink.Write("subtask_done", fmt.Sprintf(`{"node_id":%q,"status":%q}`, r.NodeID, info.Status))
+		emitSubtaskDone(r.NodeID, info.Status, r.ChildTaskID, "", failReason)
+		// Only emit RequiredNodeFailed for genuinely-failed nodes. runFanout's
+		// invariant is that 'skipped' is a downstream-propagation status, not
+		// a primary failure — emitting RequiredNodeFailed for skipped here
+		// would diverge from that semantics and double-fire on whichever node
+		// was the real cause. (Resume currently treats all nodes as required;
+		// the condition matches runFanout's required-failure shape modulo
+		// optional bookkeeping that sub_tasks doesn't persist.)
+		if info.Status == "failed" {
+			n := nodeByID[r.NodeID]
+			o.emit(observer.Event{
+				Type:          observer.EventMasterRequiredNodeFailed,
+				TaskID:        t.ID,
+				SubtaskID:     r.NodeID,
+				ChildTaskID:   r.ChildTaskID,
+				Status:        info.Status,
+				TargetAgentID: n.TargetID,
+				TargetRole:    observer.RoleSlave,
+				Payload: observerPayload(map[string]interface{}{
+					"required": true,
+					"node_id":  r.NodeID,
+					"status":   info.Status,
+					"error":    failReason,
+				}),
+			})
+		}
+		return fmt.Errorf("resume node %s %s: %s", r.NodeID, info.Status, failReason)
+	}
+
+	// Phase 1: await every in-flight row synchronously.
+	for _, r := range inFlight {
+		if err := ctx.Err(); err != nil {
+			return executor.Result{}, err
+		}
+		if r.ChildTaskID == "" {
+			// Driver crashed between MarkDispatched and the store update
+			// that records child_task_id. We can't poll without an id —
+			// fail the node so the reducer sees it.
+			_ = o.store.UpdateSubTask(t.ID, r.NodeID, map[string]interface{}{
+				"status":      "failed",
+				"error":       "resume: no child_task_id recorded",
+				"finished_at": time.Now().UTC().Format(time.RFC3339Nano),
+			})
+			sched.Report(r.NodeID, "failed", "", "resume: no child_task_id recorded")
+			emitSubtaskDone(r.NodeID, "failed", "", "", "resume: no child_task_id recorded")
+			return executor.Result{}, fmt.Errorf("resume node %s: no child_task_id recorded", r.NodeID)
+		}
+		info, werr := o.sdk.WaitForTask(ctx, r.ChildTaskID, 5*time.Second)
+		if err := finishNode(r, info, werr); err != nil {
+			return executor.Result{}, err
+		}
+	}
+
+	// Phase 2: dispatch any newly-ready pending nodes sequentially.
+	for !sched.Done() {
+		ready := sched.Ready()
+		if len(ready) == 0 {
+			return executor.Result{}, fmt.Errorf("resume scheduler stuck: pending nodes have unmet deps")
+		}
+		for _, n := range ready {
+			if err := ctx.Err(); err != nil {
+				return executor.Result{}, err
+			}
+			// Refuse to re-dispatch a pending node whose prompt looks like an
+			// MCP call envelope. SubTaskRow doesn't persist Skill, so this
+			// loop would otherwise DelegateTask it as chat — the slave LLM
+			// would answer in prose, the reducer would happily accept the
+			// prose as the node's output, and the user would never know.
+			// Fail fast and loudly so the parent can be restarted fresh.
+			if looksLikeMCPPrompt(n.Prompt) {
+				errMsg := fmt.Sprintf("resume cannot re-dispatch likely-MCP node %s (Skill/SystemContext not persisted in sub_tasks); restart parent fresh", n.ID)
+				_ = o.store.UpdateSubTask(t.ID, n.ID, map[string]interface{}{
+					"status":      "failed",
+					"error":       errMsg,
+					"finished_at": time.Now().UTC().Format(time.RFC3339Nano),
+				})
+				if fn, ok := sched.MarkOrphaned(n.ID, errMsg); ok {
+					_ = fn // recorded via emit + store update above
+				} else {
+					// Fallback: still mark something terminal so the
+					// scheduler doesn't loop on this node.
+					sched.MarkDispatched(n.ID)
+					sched.Report(n.ID, "failed", "", errMsg)
+				}
+				sseSink.Write("subtask_done", fmt.Sprintf(`{"node_id":%q,"status":"failed"}`, n.ID))
+				emitSubtaskDone(n.ID, "failed", "", "", errMsg)
+				nForEmit := nodeByID[n.ID]
+				o.emit(observer.Event{
+					Type:          observer.EventMasterRequiredNodeFailed,
+					TaskID:        t.ID,
+					SubtaskID:     n.ID,
+					Status:        "failed",
+					TargetAgentID: nForEmit.TargetID,
+					TargetRole:    observer.RoleSlave,
+					Payload: observerPayload(map[string]interface{}{
+						"required": true,
+						"node_id":  n.ID,
+						"status":   "failed",
+						"error":    errMsg,
+					}),
+				})
+				return executor.Result{}, fmt.Errorf("%s", errMsg)
+			}
+			rendered, rerr := Render(n.Prompt, outputs)
+			if rerr != nil {
+				_ = o.store.UpdateSubTask(t.ID, n.ID, map[string]interface{}{
+					"status":      "failed",
+					"error":       rerr.Error(),
+					"finished_at": time.Now().UTC().Format(time.RFC3339Nano),
+				})
+				sched.MarkDispatched(n.ID)
+				sched.Report(n.ID, "failed", "", rerr.Error())
+				emitSubtaskDone(n.ID, "failed", "", "", rerr.Error())
+				return executor.Result{}, fmt.Errorf("resume render node %s: %w", n.ID, rerr)
+			}
+			sched.MarkDispatched(n.ID)
+			_ = o.store.UpdateSubTask(t.ID, n.ID, map[string]interface{}{
+				"status":     "assigned",
+				"prompt":     rendered,
+				"started_at": time.Now().UTC().Format(time.RFC3339Nano),
+			})
+			sseSink.Write("subtask_dispatched", fmt.Sprintf(`{"node_id":%q,"target_id":%q}`, n.ID, n.TargetID))
+			resp, derr := o.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
+				TargetID:       n.TargetID,
+				Prompt:         rendered,
+				TimeoutSeconds: o.cfg.SubTaskDefaults.TimeoutSec,
+			})
+			if derr != nil {
+				_ = o.store.UpdateSubTask(t.ID, n.ID, map[string]interface{}{
+					"status":      "failed",
+					"error":       derr.Error(),
+					"finished_at": time.Now().UTC().Format(time.RFC3339Nano),
+				})
+				sched.Report(n.ID, "failed", "", derr.Error())
+				emitSubtaskDone(n.ID, "failed", "", "", derr.Error())
+				return executor.Result{}, fmt.Errorf("resume dispatch node %s: %w", n.ID, derr)
+			}
+			_ = o.store.UpdateSubTask(t.ID, n.ID, map[string]interface{}{"child_task_id": resp.TaskID})
+			o.emit(observer.Event{
+				Type:          observer.EventMasterSubtaskDispatched,
+				TaskID:        t.ID,
+				SubtaskID:     n.ID,
+				ChildTaskID:   resp.TaskID,
+				Status:        "assigned",
+				TargetAgentID: n.TargetID,
+				TargetRole:    observer.RoleSlave,
+			})
+			info, werr := o.sdk.WaitForTask(ctx, resp.TaskID, 5*time.Second)
+			r := store.SubTaskRow{ParentID: t.ID, NodeID: n.ID, ChildTaskID: resp.TaskID}
+			if err := finishNode(r, info, werr); err != nil {
+				return executor.Result{}, err
+			}
+		}
+	}
+
+	// Reduce identical to runFanout's tail.
+	fins := sched.AllFinished()
+	results := make([]planner.SubResult, len(fins))
+	for i, f := range fins {
+		n := nodeByID[f.NodeID]
+		results[i] = planner.SubResult{
+			NodeID: f.NodeID, TargetID: n.TargetID, Prompt: n.Prompt,
+			Status: f.Status, Output: f.Output, Error: f.Error,
+		}
+	}
+	summary, rerr := o.planner.Reduce(ctx, t.Prompt, results)
+	if rerr != nil {
+		writeURLs, _ := parseManifestWriteURLs(t.Prompt)
 		if len(writeURLs) == 0 {
 			return executor.Result{}, fmt.Errorf("reduce: %w", rerr)
 		}
