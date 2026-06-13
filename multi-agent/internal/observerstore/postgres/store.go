@@ -356,6 +356,17 @@ func (s *Store) Ingest(ev observer.Event) error {
 	if err != nil {
 		return err
 	}
+	// Bump agents.last_seen_at so the §1.3 #11 register-takeover guard sees
+	// telemetry-only activity. Without this, a legacy ingestor that only emits
+	// events via /api/events keeps last_seen_at frozen at first-register time
+	// and the 5-min duplicate-id guard expires while it's still live.
+	// Best-effort: 0 rows affected (e.g. agentserver-audit identity) is OK.
+	if ev.WorkspaceID != "" && ev.AgentID != "" {
+		if _, err := tx.Exec(`UPDATE agents SET last_seen_at=$1 WHERE workspace_id=$2 AND id=$3`,
+			observerstore.NowUTC(), ev.WorkspaceID, ev.AgentID); err != nil {
+			return err
+		}
+	}
 	if inserted == 0 {
 		return tx.Commit()
 	}

@@ -297,6 +297,46 @@ func TestIngestIsIdempotentByEventID(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 
+// TestIngest_BumpsLastSeenAt locks the §1.3 #11 PR2 fix: a legacy ingestor
+// that only emits /api/events must extend agents.last_seen_at so the register
+// takeover guard correctly sees it as "still alive".
+func TestIngest_BumpsLastSeenAt(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	before, ok, err := s.AgentLastActiveAt("ws1", "driver")
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	// Make sure the clock has time to tick — NowUTC is RFC3339Nano so this
+	// is fine in practice but be safe in CI.
+	time.Sleep(2 * time.Millisecond)
+
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "driver", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "mt-lsa", Summary: "ping",
+	}))
+
+	after, ok, err := s.AgentLastActiveAt("ws1", "driver")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.True(t, after.After(before),
+		"last_seen_at must advance after Ingest: before=%s after=%s", before, after)
+}
+
+// TestIngest_BumpsLastSeenAtIgnoresUnknownAgent ensures the best-effort UPDATE
+// for an unknown (workspace, agent) doesn't error — e.g. agentserver-audit
+// identities that don't have an agents row.
+func TestIngest_BumpsLastSeenAtIgnoresUnknownAgent(t *testing.T) {
+	s := testStore(t)
+	defer s.Close()
+
+	require.NoError(t, s.Ingest(observer.Event{
+		WorkspaceID: "ws1", AgentID: "ghost", AgentRole: observer.RoleDriver,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "mt-ghost", Summary: "ping",
+	}))
+}
+
 func TestGeneratedEventIDsDoNotCollideForRepeatedEvents(t *testing.T) {
 	s := testStore(t)
 	defer s.Close()

@@ -1759,3 +1759,53 @@ func TestRegister_AcceptsRecentDuplicateWithForce(t *testing.T) {
 	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusAccepted, rr.Code, rr.Body.String())
 }
+
+// TestRegister_RejectsAfterRecentIngest locks the §1.3 #11 PR2 fix:
+// the duplicate-takeover guard reads agents.last_seen_at, and that timestamp
+// must be bumped not only by (re)register but also by ingest. A legacy
+// process emitting telemetry only via /api/events must keep the guard armed.
+func TestRegister_RejectsAfterRecentIngest(t *testing.T) {
+	h, st := newTestHandler(t)
+	seedAPIKey(t, st, "ak-default", "ak_secret")
+	seedTelemetryKey(t, st, "ops", "ops-secret", "*")
+
+	// 1st register: fresh agent → 200 + token-A.
+	tokA := extractToken(t, postRegister(t, h, "ak_secret",
+		`{"agent_id":"slave-x","role":"slave","display_name":"Slave X","workspace_id":"ws1"}`,
+		http.StatusOK))
+
+	// Push the guard back: artificially backdate last_seen_at so we know the
+	// only thing keeping it "recent" is the ingest below, not the prior
+	// register. (Without this, the test would pass even if the Ingest path
+	// didn't bump last_seen_at, because the register itself was just now.)
+	require.NoError(t, st.SetAgentLastSeenAtForTest("ws1", "slave-x",
+		time.Now().Add(-1*time.Hour)))
+
+	// Confirm the guard would now ALLOW takeover at this exact instant.
+	la, found, err := st.AgentLastActiveAt("ws1", "slave-x")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.True(t, time.Since(la) > 30*time.Minute,
+		"sanity: SetAgentLastSeenAtForTest didn't backdate (la=%s)", la)
+
+	// Ingest one telemetry event — this is the only path that must keep
+	// the guard armed for legacy ingestors.
+	evBody, _ := json.Marshal(observer.Event{
+		WorkspaceID: "ws1", AgentID: "slave-x", AgentRole: observer.RoleSlave,
+		Type: observer.EventDriverTaskSubmitted, TaskID: "tping", Summary: "ping", Status: "assigned",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/events", bytes.NewReader(evBody))
+	req.Header.Set("Authorization", "Bearer "+tokA)
+	req.Header.Set("X-Loom-Telemetry-Key", "ops-secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusAccepted, rr.Code, rr.Body.String())
+
+	// Now re-register without force: must 409 because ingest bumped
+	// last_seen_at into the 5-minute window.
+	body := postRegister(t, h, "ak_secret",
+		`{"agent_id":"slave-x","role":"slave","display_name":"Slave X","workspace_id":"ws1"}`,
+		http.StatusConflict)
+	require.Contains(t, body, "force")
+	require.Contains(t, body, "recently")
+}
