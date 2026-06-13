@@ -95,6 +95,20 @@ func (t *Tools) emit(ev observer.Event) {
 	}
 }
 
+// logRelayErr surfaces an observer-relay operation error in two places:
+// stderr (so it shows up in driver-agent's log) and the audit log
+// (so it's queryable later). Used by callers that intentionally degrade
+// relay failures to warnings instead of aborting the request.
+func (t *Tools) logRelayErr(op string, err error) {
+	if err == nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "driver: observer relay %s: %v\n", op, err)
+	if t.audit != nil {
+		t.audit.Log(AuditEvent{Event: "observer_relay_error", Op: op, Error: err.Error()})
+	}
+}
+
 // All returns the driver MCP tools in stable order.
 func (t *Tools) All() []Tool {
 	return []Tool{

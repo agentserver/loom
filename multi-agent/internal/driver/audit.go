@@ -21,6 +21,8 @@ type AuditEvent struct {
 	TaskID      string `json:"task_id,omitempty"`
 	PeerShortID string `json:"peer_short_id,omitempty"`
 	Overwrite   bool   `json:"overwrite,omitempty"`
+	Op          string `json:"op,omitempty"`
+	Error       string `json:"error,omitempty"`
 }
 
 type AuditLog struct {
