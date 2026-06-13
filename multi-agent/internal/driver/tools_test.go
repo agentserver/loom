@@ -2171,3 +2171,56 @@ func TestSubmitContractTask_DegradesRecordDelegatedTaskFailureToWarning(t *testi
 	// existing warnings field must include a record-delegated-task entry
 	require.Regexp(t, `record[ _]delegated[ _]task`, string(out))
 }
+
+// TestWaitTask_DegradesSyncWritesFailureToWarning verifies that when wait_task
+// observes the remote task is completed but the observer relay SyncWrites
+// call fails (e.g. observer 401 from a botched bootstrap), wait_task still
+// returns the task output as the main response and surfaces the relay
+// failure as a warning. Without this, an observer-side hiccup would mask a
+// successful task as a failure to the caller — violating the same §1.1 #1
+// invariant submit_task already honors. Discovered by the PR #11 e2e re-run
+// where every wait_task failed with "observer sync writes: list writes
+// status 401" while the slave-side task had completed normally.
+func TestWaitTask_DegradesSyncWritesFailureToWarning(t *testing.T) {
+	observerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only fail the /api/writes list endpoint that SyncWrites hits;
+		// other endpoints (not exercised by this test path) would 404 by
+		// default which is fine for the assertion.
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/writes") {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		t.Fatalf("unexpected observer request: %s %s", r.Method, r.URL.Path)
+	}))
+	defer observerServer.Close()
+
+	sdk := &fakeSDK{
+		getTaskFunc: func(id string, _ bool) (*agentsdk.TaskInfo, error) {
+			return &agentsdk.TaskInfo{
+				TaskID: id,
+				Status: "completed",
+				Output: "slave finished fine",
+			}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	tools.cfg.Observer.Enabled = true
+	tools.cfg.Observer.URL = observerServer.URL
+	tools.cfg.Observer.APIKey = "ak-test"
+	tools.cfg.DriverDefaults.ArtifactTransport = ArtifactTransportObserverLazy
+	tools.relay = NewObserverRelay(tools.cfg, stubTokenSource("test-token"))
+
+	args, _ := json.Marshal(map[string]any{
+		"task_id":           "task-wait-1",
+		"poll_interval_sec": 1,
+		"timeout_sec":       5,
+	})
+	out, err := toolByName(t, tools, "wait_task").Call(context.Background(), args)
+	require.NoError(t, err, "wait_task must NOT return error when remote task is completed; observer relay failure degrades to warning")
+	s := string(out)
+	require.Contains(t, s, `"warnings"`)
+	require.Contains(t, s, "observer sync writes")
+	// Main response fields still present
+	require.Contains(t, s, `"status":"completed"`)
+	require.Contains(t, s, `"is_final":true`)
+}
