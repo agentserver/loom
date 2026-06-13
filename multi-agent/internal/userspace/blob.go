@@ -76,6 +76,24 @@ func (b *BlobStore) Put(content []byte) (string, error) {
 			`UPDATE userspace_blobs SET refcount = refcount + 1 WHERE sha256=?`, hexsum); err != nil {
 			return "", err
 		}
+		// Recover from the documented Release-to-0 case: the row is
+		// intentionally retained after refcount→0 (Release at blob.go) but
+		// the on-disk file is removed. The next Put bumps refcount 0→1 and
+		// MUST recreate the file, otherwise the subsequent Open would
+		// `os.Open` a deleted path and fail. Same tx semantics as the
+		// winner path: WriteFile before Commit; defer Rollback handles
+		// the early-return failure path.
+		if _, err := os.Stat(path); err != nil {
+			if !os.IsNotExist(err) {
+				return "", err
+			}
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				return "", err
+			}
+			if err := os.WriteFile(path, content, 0o644); err != nil {
+				return "", err
+			}
+		}
 		return hexsum, tx.Commit()
 	}
 	// Winner: we own this row, write the content file. WriteFile sits
