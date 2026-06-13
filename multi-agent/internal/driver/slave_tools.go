@@ -160,6 +160,9 @@ func (t *Tools) delegateShellTask(ctx context.Context, card agentsdk.AgentCard, 
 	if args.Wait != nil {
 		wait = *args.Wait
 	}
+	// DelegateTask succeeded — degrade journal append failure to a log entry
+	// so we still return task_id (wait=false) or wait (wait=true). See
+	// §1.1 #1 of the 2026-06-13 review.
 	if err := t.recordDelegatedTask(delegatedTaskRecord{
 		Tool:              toolName,
 		Response:          resp,
@@ -169,7 +172,7 @@ func (t *Tools) delegateShellTask(ctx context.Context, card agentsdk.AgentCard, 
 		Wait:              wait,
 		TimeoutSec:        args.TimeoutSec,
 	}); err != nil {
-		return nil, err
+		t.logRelayErr("record_delegated_task", err)
 	}
 	if !wait {
 		return json.Marshal(map[string]interface{}{
@@ -281,6 +284,9 @@ func (t *Tools) delegatePermissionTask(ctx context.Context, toolName, targetAgen
 	if err != nil {
 		return nil, &MCPToolError{Message: "delegate " + skill + " task: " + err.Error()}
 	}
+	// DelegateTask succeeded — degrade journal append failure to a log entry
+	// so we still wait on the permission task. See §1.1 #1 of the
+	// 2026-06-13 review.
 	if err := t.recordDelegatedTask(delegatedTaskRecord{
 		Tool:              toolName,
 		Response:          resp,
@@ -289,7 +295,7 @@ func (t *Tools) delegatePermissionTask(ctx context.Context, toolName, targetAgen
 		Skill:             skill,
 		Wait:              true,
 	}); err != nil {
-		return nil, err
+		t.logRelayErr("record_delegated_task", err)
 	}
 	return t.waitDelegatedTask(ctx, resp.TaskID, 0)
 }
