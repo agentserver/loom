@@ -9,10 +9,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
@@ -188,7 +190,7 @@ func runServe(args []string) {
 	}))
 	mcpSrv := driver.NewMCPServer(tools.All())
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	if cfg.DriverDefaults.ArtifactTransport == driver.ArtifactTransportObserverLazy {
 		go driver.NewObserverRelay(cfg, obs).ServePendingLoop(ctx, reg, audit, 2*time.Second)
