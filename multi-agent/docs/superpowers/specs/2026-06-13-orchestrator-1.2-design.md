@@ -80,7 +80,7 @@ func (o *Orchestrator) Run(ctx context.Context, t executor.Task) (executor.Resul
 
 `resumeOrReplay`：
 - task 已 `completed` → 返回 stored output
-- task 已 `failed` → 返回原 error  
+- task 已 `failed` → 返回原 error
 - task 仍 `running`/`assigned`：
   - `o.store.ListSubTasks(t.ID)` → 若空 → 继续走原 Run path（前次 plan 没写库就崩了；可以重 plan）
   - 若非空 → emit 新事件 `EventMasterTaskResumed`（payload: counts of completed/in-flight/pending），调 `runFanoutResume(ctx, t, rows)`（共享 runFanout 大部分逻辑，只是初始化 Scheduler 从 rows）
