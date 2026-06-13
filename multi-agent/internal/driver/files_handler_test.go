@@ -199,6 +199,59 @@ func TestFilesHandler_Put_OverwriteFalse_Conflict(t *testing.T) {
 	}
 }
 
+// TestFilesHandler_Put_OverwriteFalse_RaceSafe pins §1.4 #18 PR #14 review P2:
+// when two PUTs both target the same path with overwrite=false, exactly one
+// succeeds (200) and the other gets 409 — even if both pass the pre-flight
+// Stat (target doesn't exist at that moment). The previous Stat-then-Rename
+// path would let both Renames win, with second-write clobbering first.
+//
+// The Link-based placement we now use gives O_CREATE|O_EXCL semantics on the
+// destination inode, which the second PUT proves by issuing AFTER the first
+// has succeeded (so it hits the Link, not the pre-flight Stat — the new
+// target file is fresh, with the first PUT's content, and the second token
+// was issued back when no target existed). If Link is wired correctly, the
+// second PUT gets 409 via fs.ErrExist. If we'd kept Rename, the second
+// would 200 and overwrite the first body — exactly the bug.
+func TestFilesHandler_Put_OverwriteFalse_RaceSafe(t *testing.T) {
+	h, r, _ := newTestHandler(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "out.txt")
+	// Two tokens issued BEFORE the target exists, both with overwrite=false.
+	// Mirrors two concurrent callers each obtaining a write token while the
+	// target is still absent.
+	tok1 := r.RegisterWrite(target, false, "task-1")
+	tok2 := r.RegisterWrite(target, false, "task-2")
+
+	// First PUT: target absent, overwrite=false -> Link succeeds, 200.
+	w1 := httptest.NewRecorder()
+	h.ServeHTTP(w1, reqWithPeer("PUT", "/files/put/"+tok1, strings.NewReader("first-wins")))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first PUT: want 200, got %d (body=%s)", w1.Code, w1.Body.String())
+	}
+
+	// Second PUT: target now exists, overwrite=false. Even if the second
+	// caller's view skipped the pre-flight Stat (concurrent race), the Link
+	// path must refuse with 409 ErrExist.
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, reqWithPeer("PUT", "/files/put/"+tok2, strings.NewReader("second-loses")))
+	if w2.Code != http.StatusConflict {
+		t.Fatalf("second PUT: want 409, got %d (body=%s)", w2.Code, w2.Body.String())
+	}
+
+	// First write content must survive; second must not have clobbered it.
+	got, _ := os.ReadFile(target)
+	if string(got) != "first-wins" {
+		t.Errorf("target body: want %q, got %q", "first-wins", got)
+	}
+
+	// No tmp leftovers from either branch (both error / success paths must
+	// clean up).
+	matches, _ := filepath.Glob(filepath.Join(dir, "out.txt.tmp.*"))
+	if len(matches) != 0 {
+		t.Errorf("tmp leftovers: %v", matches)
+	}
+}
+
 func TestFilesHandler_Put_TokenSingleUse(t *testing.T) {
 	h, r, _ := newTestHandler(t)
 	dir := t.TempDir()

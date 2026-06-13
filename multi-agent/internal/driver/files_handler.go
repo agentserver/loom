@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -283,9 +284,42 @@ func (h *FilesHandler) handlePut(w http.ResponseWriter, r *http.Request, peer st
 		return
 	}
 	out.Close()
-	if err := os.Rename(tmpName, target); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	// Atomic placement.
+	//
+	// overwrite=true: Rename clobbers the target inode atomically.
+	//
+	// overwrite=false: the pre-flight Stat at the top of handlePut catches
+	// the common case where the target already exists, but it's a TOCTOU
+	// fast-path — two concurrent PUTs against the same path can both pass
+	// it and then both Rename, second-write-wins. os.Link gives O_CREATE|
+	// O_EXCL semantics on the destination inode: only one Link can win,
+	// the other gets fs.ErrExist which we surface as 409. tmp lives in the
+	// same parent dir as target (target + ".tmp." + suffix above) so
+	// same-FS link always works. See PR #14 review P2.
+	//
+	// Both branches os.Remove(tmpName) on failure so a rename / link error
+	// (target became a directory, perm change, ENOSPC, EEXIST) never leaks
+	// the tmp file. See PR #14 review P3.
+	if entry.Overwrite {
+		if err := os.Rename(tmpName, target); err != nil {
+			os.Remove(tmpName)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		if err := os.Link(tmpName, target); err != nil {
+			os.Remove(tmpName)
+			if errors.Is(err, fs.ErrExist) {
+				http.Error(w, "target exists and overwrite=false", http.StatusConflict)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// Link leaves the tmp inode visible at tmpName too; remove that
+		// name now that target is durably linked. Best-effort; the inode
+		// is the same one either way.
+		_ = os.Remove(tmpName)
 	}
 	// Best-effort: fsync the parent directory so the new dirent survives a
 	// crash between rename and dir flush. Not all filesystems support this
