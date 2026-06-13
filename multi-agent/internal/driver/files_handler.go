@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,10 +19,13 @@ import (
 type FilesHandler struct {
 	reg   *FileRegistry
 	audit *AuditLog
+	// maxPutBytes caps PUT body size. Default 1 GiB (set by NewFilesHandler).
+	// Tests may shrink this; production code should not mutate it.
+	maxPutBytes int64
 }
 
 func NewFilesHandler(reg *FileRegistry, audit *AuditLog) *FilesHandler {
-	return &FilesHandler{reg: reg, audit: audit}
+	return &FilesHandler{reg: reg, audit: audit, maxPutBytes: 1 << 30}
 }
 
 // ServeHTTP enforces the peer header then dispatches by path.
@@ -240,18 +244,35 @@ func (h *FilesHandler) handlePut(w http.ResponseWriter, r *http.Request, peer st
 		http.Error(w, "target exists and overwrite=false", http.StatusConflict)
 		return
 	}
+	// Cap the upload size. http.MaxBytesReader returns *http.MaxBytesError
+	// from Read once the limit is exceeded, which io.Copy surfaces as
+	// copyErr below.
+	limit := h.maxPutBytes
+	if limit <= 0 {
+		limit = 1 << 30
+	}
+	body := http.MaxBytesReader(w, r.Body, limit)
+	defer body.Close()
+
 	tmpName := fmt.Sprintf("%s.tmp.%s", target, randSuffix())
-	out, err := os.OpenFile(tmpName, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	// O_EXCL refuses to truncate a pre-existing same-name tmp; 0o600 keeps
+	// the partial upload from being world-readable during the PUT.
+	out, err := os.OpenFile(tmpName, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	hasher := sha256.New()
 	mw := io.MultiWriter(out, hasher)
-	written, copyErr := io.Copy(mw, r.Body)
+	written, copyErr := io.Copy(mw, body)
 	if copyErr != nil {
 		out.Close()
 		os.Remove(tmpName)
+		var maxErr *http.MaxBytesError
+		if errors.As(copyErr, &maxErr) {
+			http.Error(w, fmt.Sprintf("body exceeds %d bytes", limit), http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, copyErr.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -265,6 +286,13 @@ func (h *FilesHandler) handlePut(w http.ResponseWriter, r *http.Request, peer st
 	if err := os.Rename(tmpName, target); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	// Best-effort: fsync the parent directory so the new dirent survives a
+	// crash between rename and dir flush. Not all filesystems support this
+	// (tmpfs ignores it); ignore errors.
+	if pf, err := os.Open(parent); err == nil {
+		_ = pf.Sync()
+		pf.Close()
 	}
 	sha := hex.EncodeToString(hasher.Sum(nil))
 	if entry.TaskID != "" {
