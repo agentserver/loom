@@ -1987,3 +1987,60 @@ func TestResumeTaskRejectsMissingArgs(t *testing.T) {
 		}
 	}
 }
+
+// TestSubmitTask_DegradesUpdateWriteTaskFailureToWarning verifies that when
+// DelegateTask succeeds (slave is already running the task) but observer
+// UpdateWriteTask fails, submit_task still returns task_id and surfaces the
+// failure as a warning. This is the §1.1 #1 invariant: "DelegateTask success
+// ⇒ Claude always gets a task_id".
+func TestSubmitTask_DegradesUpdateWriteTaskFailureToWarning(t *testing.T) {
+	observerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/write-tokens":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"write_id":"w-1","put_url":"http://example/put"}`))
+		case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/api/writes/"):
+			http.Error(w, "store unavailable", http.StatusInternalServerError)
+		default:
+			t.Fatalf("unexpected observer request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer observerServer.Close()
+
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{{
+				AgentID: "slave-a", DisplayName: "slave-a", Status: "available",
+				Card: json.RawMessage(`{"skills":["chat"]}`),
+			}}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-77", SessionID: "sess-77", Status: "assigned"}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	tools.cfg.Observer.Enabled = true
+	tools.cfg.Observer.URL = observerServer.URL
+	tools.cfg.Observer.APIKey = "ak-test"
+	tools.cfg.DriverDefaults.ArtifactTransport = ArtifactTransportObserverLazy
+	tools.relay = NewObserverRelay(tools.cfg, stubTokenSource("test-token"))
+
+	tmp := t.TempDir()
+	args, _ := json.Marshal(map[string]any{
+		"prompt":              "do work",
+		"skill":               "chat",
+		"target_display_name": "slave-a",
+		"write_paths":         []map[string]any{{"path": tmp + "/out.txt", "overwrite": true}},
+	})
+
+	out, err := toolByName(t, tools, "submit_task").Call(context.Background(), args)
+	require.NoError(t, err, "submit_task must NOT return error; DelegateTask already succeeded")
+	require.Contains(t, string(out), `"task_id":"task-77"`)
+	require.Contains(t, string(out), `"warnings"`)
+	require.Contains(t, string(out), "update_write_task")
+
+	// reg.TrackTask must still have been called so that wait_task can later
+	// find the write tokens for this task.
+	written := tools.reg.WrittenFiles("task-77")
+	require.NotNil(t, written, "TrackTask should have been called even after warning")
+}

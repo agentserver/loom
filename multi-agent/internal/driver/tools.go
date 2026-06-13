@@ -512,6 +512,14 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	if err != nil {
 		return nil, &MCPToolError{Message: "delegate: " + err.Error()}
 	}
+
+	// From this point on, the task is running on the slave. Any helper-step
+	// failure (journal, write-token rebind, observer UpdateWriteTask) is
+	// degraded to a warning rather than returned as error — otherwise Claude
+	// would think the task failed to dispatch and either re-submit (double
+	// run) or abandon it. See §1.1 #1 of the 2026-06-13 review.
+	var warnings []string
+
 	if err := s.t.recordDelegatedTask(delegatedTaskRecord{
 		Tool:              s.Name(),
 		Response:          resp,
@@ -521,8 +529,10 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		Wait:              false,
 		TimeoutSec:        timeout,
 	}); err != nil {
-		return nil, err
+		warnings = append(warnings, "record delegated task: "+err.Error())
+		s.t.logRelayErr("record_delegated_task", err)
 	}
+
 	s.t.emit(observer.Event{
 		Type:          observer.EventDriverTaskSubmitted,
 		TaskID:        resp.TaskID,
@@ -537,18 +547,23 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	}
 	for _, writeID := range observerWriteIDs {
 		if err := s.t.observerRelay().UpdateWriteTask(ctx, writeID, resp.TaskID); err != nil {
-			return nil, &MCPToolError{Message: "observer update write task: " + err.Error()}
+			warnings = append(warnings, fmt.Sprintf("observer update_write_task %s: %v", writeID, err))
+			s.t.logRelayErr("update_write_task", err)
 		}
 	}
 	s.t.reg.TrackTask(resp.TaskID, writeTokens)
 
-	return json.Marshal(map[string]interface{}{
+	respMap := map[string]interface{}{
 		"task_id":             resp.TaskID,
 		"session_id":          resp.SessionID,
 		"target_id":           targetID,
 		"target_display_name": targetName,
 		"manifest":            manifest,
-	})
+	}
+	if len(warnings) > 0 {
+		respMap["warnings"] = warnings
+	}
+	return json.Marshal(respMap)
 }
 
 // =========================================================================
