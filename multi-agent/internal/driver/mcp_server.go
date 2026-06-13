@@ -4,9 +4,13 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"os"
 	"sync"
 	"sync/atomic"
+	"syscall"
 )
 
 // Tool is what the MCP server dispatches to. Each tool advertises a name,
@@ -31,6 +35,7 @@ type MCPServer struct {
 	toolOrder []string
 	writeMu   sync.Mutex
 	linesOut  int64
+	broken    int32 // set to 1 by writeLine when the writer returns EPIPE/closed-pipe
 }
 
 func NewMCPServer(tools []Tool) *MCPServer {
@@ -70,13 +75,17 @@ type jsonRPCError struct {
 // (e.g. wait_task long-polling) can unwind when the driver shuts down.
 func (s *MCPServer) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 	var wg sync.WaitGroup
-	defer wg.Wait()
 
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
 	for scanner.Scan() {
 		if ctx.Err() != nil {
+			wg.Wait()
 			return ctx.Err()
+		}
+		if atomic.LoadInt32(&s.broken) == 1 {
+			wg.Wait()
+			return errors.New("mcp stdout broken pipe")
 		}
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -88,12 +97,18 @@ func (s *MCPServer) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 			continue
 		}
 		if req.Method == "exit" {
+			wg.Wait()
 			return nil
 		}
 		s.dispatch(ctx, w, &req, &wg)
 	}
-	if err := scanner.Err(); err != nil {
-		return err
+	scanErr := scanner.Err()
+	wg.Wait()
+	if atomic.LoadInt32(&s.broken) == 1 {
+		return errors.New("mcp stdout broken pipe")
+	}
+	if scanErr != nil {
+		return scanErr
 	}
 	return ctx.Err() // nil if not cancelled
 }
@@ -203,12 +218,25 @@ func (s *MCPServer) writeLine(w io.Writer, v interface{}) {
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	w.Write(b)
-	w.Write([]byte("\n"))
+	if _, err := w.Write(b); err != nil {
+		s.handleWriteErr(err)
+		return
+	}
+	if _, err := w.Write([]byte("\n")); err != nil {
+		s.handleWriteErr(err)
+		return
+	}
 	if f, ok := w.(interface{ Sync() error }); ok {
 		_ = f.Sync()
 	}
 	atomic.AddInt64(&s.linesOut, 1)
+}
+
+func (s *MCPServer) handleWriteErr(err error) {
+	fmt.Fprintf(os.Stderr, "driver: mcp write: %v\n", err)
+	if errors.Is(err, io.ErrClosedPipe) || errors.Is(err, syscall.EPIPE) {
+		atomic.StoreInt32(&s.broken, 1)
+	}
 }
 
 func idOrNull(id *json.RawMessage) json.RawMessage {
