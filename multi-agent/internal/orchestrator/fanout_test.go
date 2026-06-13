@@ -914,3 +914,67 @@ func agentWithCSVProfileTool(t *testing.T) agentsdk.AgentCard {
 	}`)
 	return agentsdk.AgentCard{AgentID: "agent-a", Status: "available", Card: card}
 }
+
+// panickingSDK panics inside DelegateTask, simulating an SDK / artifact /
+// render bug that surfaces inside a fanout worker goroutine.
+type panickingSDK struct {
+	agents      []agentsdk.AgentCard
+	panicMsg    string
+	delegateHit int32
+}
+
+func (p *panickingSDK) DiscoverAgents(_ context.Context) ([]agentsdk.AgentCard, error) {
+	return p.agents, nil
+}
+func (p *panickingSDK) DelegateTask(_ context.Context, _ agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+	panic(p.panicMsg)
+}
+func (p *panickingSDK) WaitForTask(_ context.Context, _ string, _ time.Duration) (*agentsdk.TaskInfo, error) {
+	panic("WaitForTask should not be reached")
+}
+
+// TestFanout_GoroutinePanicTurnsIntoFailedNode verifies that a panic inside
+// a fanout worker goroutine (here: SDK.DelegateTask) is recovered by the
+// protectedGo wrapper and reported as a failed FinishedNode, rather than
+// crashing the driver process. Fixes §1.2 #7 of docs/review-2026-06-13.md.
+func TestFanout_GoroutinePanicTurnsIntoFailedNode(t *testing.T) {
+	sdk := &panickingSDK{
+		agents: []agentsdk.AgentCard{
+			{AgentID: "agent-a", Status: "available"},
+			{AgentID: "agent-b", Status: "available"},
+		},
+		panicMsg: "boom from sdk",
+	}
+	obs := &fakeObserver{}
+	o := newOrchWithObserver(t, sdk, "plan_chain", obs)
+
+	// Before the protectedGo wrapper, this Run call would propagate the
+	// panic out of the goroutine and crash the test binary. After the
+	// fix, the panic is recovered, node "a" is reported failed, and Run
+	// returns the required-node-failure error in an orderly fashion.
+	_, err := o.Run(context.Background(), executor.Task{
+		ID: "panic-task", Skill: "fanout", Prompt: "do work",
+	})
+	require.Error(t, err, "expected required-node failure (panic-recovered)")
+	require.Contains(t, err.Error(), "required node a failed",
+		"panic in worker must surface as failed node, not crash")
+
+	// And the recovered panic message must be threaded into the node's
+	// error so operators can see what blew up.
+	obs.mu.Lock()
+	defer obs.mu.Unlock()
+	var sawPanic bool
+	for _, ev := range obs.events {
+		if ev.Type == observer.EventMasterSubtaskDone && ev.SubtaskID == "a" && ev.Status == "failed" {
+			var payload map[string]string
+			if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+				continue
+			}
+			if strings.Contains(payload["error"], "panic:") && strings.Contains(payload["error"], "boom from sdk") {
+				sawPanic = true
+				break
+			}
+		}
+	}
+	require.True(t, sawPanic, "expected node 'a' done event with panic-recovered error message")
+}

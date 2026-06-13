@@ -292,6 +292,25 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 	fanoutCtx, cancelAll := context.WithCancel(ctx)
 	defer cancelAll()
 
+	// protectedGo wraps a worker goroutine: any panic is recovered and
+	// turned into a 'failed' doneCh send so the scheduler can move on
+	// instead of crashing the driver. nodeID identifies which fanout
+	// node the failure should be attributed to. Fixes §1.2 #7.
+	protectedGo := func(nodeID string, fn func()) {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					doneCh <- done{FinishedNode: FinishedNode{
+						NodeID: nodeID,
+						Status: "failed",
+						Error:  fmt.Sprintf("panic: %v", r),
+					}}
+				}
+			}()
+			fn()
+		}()
+	}
+
 	sseSink := o.store.ChunkSink(t.ID)
 	defer sseSink.Close()
 
@@ -428,7 +447,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 			"started_at": time.Now().UTC().Format(time.RFC3339Nano),
 		})
 		sseSink.Write("subtask_dispatched", fmt.Sprintf(`{"node_id":%q,"target_id":%q}`, n.ID, n.TargetID))
-		go func(n planner.Node, prompt string) {
+		protectedGo(n.ID, func() {
 			resp, err := o.sdk.DelegateTask(fanoutCtx, agentsdk.DelegateTaskRequest{
 				TargetID:       n.TargetID,
 				Skill:          n.Skill,
@@ -465,7 +484,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 				}
 			}
 			doneCh <- done{FinishedNode: f, ChildTaskID: resp.TaskID}
-		}(n, prompt)
+		})
 	}
 	dispatchSynthetic := func(n planner.Node, prompt string) bool {
 		if n.Skill != "" && n.Skill != "chat" {
@@ -480,7 +499,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 				"started_at": time.Now().UTC().Format(time.RFC3339Nano),
 			})
 			sseSink.Write("subtask_dispatched", fmt.Sprintf(`{"node_id":%q,"target_id":%q}`, n.ID, n.TargetID))
-			go func(n planner.Node, rawURL string) {
+			protectedGo(n.ID, func() {
 				content, _, err := o.artifacts.GetArtifact(fanoutCtx, rawURL)
 				if err != nil {
 					doneCh <- done{FinishedNode: FinishedNode{NodeID: n.ID, Status: "failed", Error: err.Error()}}
@@ -488,7 +507,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 				}
 				quoted, _ := json.Marshal(string(content))
 				doneCh <- done{FinishedNode: FinishedNode{NodeID: n.ID, Status: "completed", Output: string(quoted)}}
-			}(n, rawURL)
+			})
 			return true
 		}
 		if rawURL, ok := observerWriteURL(prompt); ok && manifestWriteURL[rawURL] {
@@ -500,13 +519,13 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 				"started_at": time.Now().UTC().Format(time.RFC3339Nano),
 			})
 			sseSink.Write("subtask_dispatched", fmt.Sprintf(`{"node_id":%q,"target_id":%q}`, n.ID, n.TargetID))
-			go func(n planner.Node, rawURL string) {
+			protectedGo(n.ID, func() {
 				doneCh <- done{FinishedNode: FinishedNode{
 					NodeID: n.ID,
 					Status: "completed",
 					Output: "Observer write URL " + rawURL + " is handled by the master reducer.",
 				}}
-			}(n, rawURL)
+			})
 			return true
 		}
 		return false
@@ -520,9 +539,9 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 			if rerr != nil {
 				sched.MarkDispatched(n.ID)
 				inFlight++
-				go func(n planner.Node, e error) {
-					doneCh <- done{FinishedNode: FinishedNode{NodeID: n.ID, Status: "failed", Error: e.Error()}}
-				}(n, rerr)
+				protectedGo(n.ID, func() {
+					doneCh <- done{FinishedNode: FinishedNode{NodeID: n.ID, Status: "failed", Error: rerr.Error()}}
+				})
 				continue
 			}
 			if dispatchSynthetic(n, prompt) {
@@ -534,9 +553,9 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 				if aerr != nil {
 					sched.MarkDispatched(n.ID)
 					inFlight++
-					go func(n planner.Node, e error) {
-						doneCh <- done{FinishedNode: FinishedNode{NodeID: n.ID, Status: "failed", Error: e.Error()}}
-					}(n, aerr)
+					protectedGo(n.ID, func() {
+						doneCh <- done{FinishedNode: FinishedNode{NodeID: n.ID, Status: "failed", Error: aerr.Error()}}
+					})
 					continue
 				}
 			}
@@ -558,9 +577,9 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 				if validationReplans >= maxValidationReplans {
 					sched.MarkDispatched(n.ID)
 					inFlight++
-					go func(n planner.Node, e error) {
-						doneCh <- done{FinishedNode: FinishedNode{NodeID: n.ID, Status: "failed", Error: e.Error()}}
-					}(n, verr)
+					protectedGo(n.ID, func() {
+						doneCh <- done{FinishedNode: FinishedNode{NodeID: n.ID, Status: "failed", Error: verr.Error()}}
+					})
 					continue
 				}
 
