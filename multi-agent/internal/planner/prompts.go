@@ -4,27 +4,124 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/yourorg/multi-agent/internal/capability"
 )
 
-func routePrompt(taskPrompt string, agents []agentsdk.AgentCard) string {
+// planMaxBodyBytes caps each wrapUserContent body. Picked at 64 KiB
+// because modern LLM context windows are 200K+ tokens, leaving room
+// for system prompt + agents JSON + any retry feedback. Malicious
+// or accidentally enormous user/slave text is truncated with a
+// length-disclosing marker so the LLM knows it didn't see the tail.
+// Fixes §1.5 #20 of docs/review-2026-06-13.md.
+const planMaxBodyBytes = 64 * 1024 // 64 KiB
+
+// tagName returns the bare element name from a tag string that may
+// carry attributes, e.g. `sub_output node="n1" target="a"` -> `sub_output`.
+// Closing tags don't carry attributes in our boundary scheme, and the
+// escape needs to match on the bare element name so both `</sub_output>`
+// and `</sub_output foo="bar">` are neutralized.
+func tagName(tag string) string {
+	if i := strings.IndexByte(tag, ' '); i >= 0 {
+		return tag[:i]
+	}
+	return tag
+}
+
+// escapeBoundaryTags neutralizes both opening and closing forms of
+// the wrapper tag inside body by inserting U+200D (ZERO WIDTH JOINER)
+// after '<' (and after '</'). The LLM tokenizer sees the same visual
+// sequence but downstream-style boundary scanners — and the LLM's own
+// pattern recognition for the matching opener it just saw — won't
+// treat the result as a real tag. We escape on the bare element name
+// so any attribute-bearing variant is caught too. Strategy from §1.5
+// spec decision record.
+//
+// Note: the match against "<name" / "</name" is a prefix match, so a
+// body legitimately containing e.g. "<user_task_extra>" is mangled
+// when wrapping with tag "user_task". This is a deliberate conservative
+// trade-off — over-escaping is safe (the LLM still reads the visually
+// identical text fine) and under-escaping would allow boundary
+// breakout, which is the threat this function exists to defeat.
+func escapeBoundaryTags(tag, body string) string {
+	name := tagName(tag)
+	// Escape closing form first ("</name") so we don't double-escape its
+	// '<'. Then escape opening form ("<name" but not "</name").
+	closer := "</" + name
+	if strings.Contains(body, closer) {
+		body = strings.ReplaceAll(body, closer, "<‍/"+name)
+	}
+	opener := "<" + name
+	if strings.Contains(body, opener) {
+		// Insert ZWJ right after '<' so "<name" becomes "<‍name".
+		body = strings.ReplaceAll(body, opener, "<‍"+name)
+	}
+	return body
+}
+
+// wrapUserContent wraps untrusted text in <tag>...</tag> for use
+// inside an LLM prompt. It (a) escapes both opening and closing forms
+// of tag's element name in the body so injected boundary tags can't
+// break out, and (b) truncates bodies over planMaxBodyBytes with a
+// length-disclosing marker. Use this for any string the user or a
+// slave can influence.
+//
+// The closing tag emitted around the body uses only the bare element
+// name (so `tag` can carry attributes like `sub_output node="n1"`
+// without producing an illegal `</sub_output node="n1">` closer).
+//
+// The result always ends in a newline so adjacent wrapped sections
+// don't visually run together when concatenated.
+// Fixes §1.5 #20 of docs/review-2026-06-13.md.
+func wrapUserContent(tag, body string) string {
+	original := len(body)
+	if original > planMaxBodyBytes {
+		// Truncate to a rune boundary so we don't leave a broken UTF-8
+		// sequence at the cut point. Walk backwards from the cap until
+		// we find a valid utf8.RuneStart byte.
+		cut := planMaxBodyBytes
+		for cut > 0 && !utf8.RuneStart(body[cut]) {
+			cut--
+		}
+		body = body[:cut] + fmt.Sprintf("\n...[truncated; original %d bytes]", original)
+	}
+	body = escapeBoundaryTags(tag, body)
+	return "<" + tag + ">\n" + body + "\n</" + tagName(tag) + ">\n"
+}
+
+// routePrompt builds the LLM prompt for single-agent routing.
+// taskPrompt and agentsJSON are wrapped in untrusted-content
+// boundaries (§1.5 #20). feedback is appended as a
+// <previous_attempt_error> block when non-empty, used by the
+// retry loop in Plan/Route (§1.5 #21) to feed parse / validation
+// errors back to the LLM for self-repair.
+func routePrompt(taskPrompt string, agents []agentsdk.AgentCard, feedback string) string {
+	var fb string
+	if feedback != "" {
+		fb = wrapUserContent("previous_attempt_error", feedback)
+	}
 	return fmt.Sprintf(`You are a task router. Given a task and a list of available agents, pick the single agent best suited to handle this task.
 
 Output exactly one line of JSON: {"target_id":"<agent_id>"}.
 If no agent is suitable, output {"target_id":""}.
 
-Task:
-%s
-
-Available agents:
-%s
-`, taskPrompt, agentsJSON(agents))
+%s%s%s`,
+		wrapUserContent("user_task", taskPrompt),
+		wrapUserContent("available_agents", agentsJSON(agents)),
+		fb,
+	)
 }
 
-func planPrompt(taskPrompt string, agents []agentsdk.AgentCard) string {
-	return fmt.Sprintf(`You are a task decomposer. Break the following task into a DAG of 1 to 20 sub-tasks. Output a JSON array; each element has:
+// planPrompt builds the LLM prompt for DAG decomposition.
+// See routePrompt for the boundary + feedback semantics.
+func planPrompt(taskPrompt string, agents []agentsdk.AgentCard, feedback string) string {
+	var fb string
+	if feedback != "" {
+		fb = wrapUserContent("previous_attempt_error", feedback)
+	}
+	body := `You are a task decomposer. Break the following task into a DAG of 1 to 20 sub-tasks. Output a JSON array; each element has:
   - "id": short unique node name (e.g. "n1")
   - "target_id": from the available agents list (the agent_id field)
   - "skill": which executor on the slave should handle it (see below)
@@ -64,23 +161,33 @@ fields.
 
 Output ONLY the JSON array, no commentary.
 
-Task:
-%s
-
-Available agents:
-%s
-`, taskPrompt, agentsJSON(agents))
+`
+	return body + wrapUserContent("user_task", taskPrompt) + wrapUserContent("available_agents", agentsJSON(agents)) + fb
 }
 
+// reducePrompt builds the LLM prompt for reducing sub-task results
+// into a final answer. Every node-controlled string (Prompt, Output,
+// Error) is wrapped with attribute-bearing boundary tags so a
+// malicious slave can't inject pseudo-tags to steer the reducer.
+// See §1.5 #20.
+//
+// Unlike routePrompt / planPrompt, reduce has no retry loop and so
+// takes no feedback parameter: sub-task outputs are facts produced by
+// the executing slaves, not LLM choices to validate against, so there
+// is nothing for the reducer to "re-attempt" against parser feedback.
 func reducePrompt(originalPrompt string, results []SubResult) string {
 	var sb strings.Builder
-	sb.WriteString("Sub-tasks (with status and output):\n")
+	sb.WriteString("Sub-tasks (with status and output):\n\n")
 	for _, r := range results {
-		sb.WriteString(fmt.Sprintf("\n--- node %s [target=%s status=%s] ---\nprompt: %s\n", r.NodeID, r.TargetID, r.Status, r.Prompt))
+		sb.WriteString(fmt.Sprintf("--- node %s [target=%s status=%s] ---\n", r.NodeID, r.TargetID, r.Status))
+		sb.WriteString(wrapUserContent(fmt.Sprintf(`sub_prompt node="%s"`, r.NodeID), r.Prompt))
 		if r.Status == "completed" {
-			sb.WriteString("output: " + r.Output + "\n")
+			sb.WriteString(wrapUserContent(
+				fmt.Sprintf(`sub_output node="%s" target="%s"`, r.NodeID, r.TargetID),
+				r.Output,
+			))
 		} else if r.Error != "" {
-			sb.WriteString("error: " + r.Error + "\n")
+			sb.WriteString(wrapUserContent(fmt.Sprintf(`sub_error node="%s"`, r.NodeID), r.Error))
 		}
 	}
 	writeGuidance := ""
@@ -95,11 +202,12 @@ The original task includes manifest write targets. Do not call curl, do not perf
 If some sub-tasks failed or were skipped, mention which ones explicitly so the caller knows what data is missing.
 %s
 
-Original task:
 %s
-
-%s
-`, writeGuidance, originalPrompt, sb.String())
+%s`,
+		writeGuidance,
+		wrapUserContent("original_task", originalPrompt),
+		sb.String(),
+	)
 }
 
 func agentsJSON(agents []agentsdk.AgentCard) string {

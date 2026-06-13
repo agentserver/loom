@@ -195,7 +195,7 @@ func TestPlan_DecodeNodeKindAndSkill(t *testing.T) {
 func TestPlanPrompt_MentionsKindAndMCPSkill(t *testing.T) {
 	p := planPrompt("do something", []agentsdk.AgentCard{
 		{AgentID: "a1", DisplayName: "x", Description: "y"},
-	})
+	}, "")
 	for _, want := range []string{
 		`"kind"`,       // node attribute documented
 		`skill: "mcp"`, // phase-2 use-node guidance
