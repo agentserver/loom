@@ -136,6 +136,33 @@ w.t.reg.ForgetTask(args.TaskID)
 | `wait_task` / `get_task` 拒空 task_id | 此前传空会"silently 误删"，没有合理调用方依赖空值 |
 | `ServePendingOnce` 返回 joined err | 调用方只有 `ServePendingLoop`，本身就在 log，不做差别处理 |
 
+## Helper-failure 可见性契约（两条平行路径）
+
+post-DelegateTask helper failures（`recordDelegatedTask`、observer relay 的辅助步骤）的"降级面向谁可见"取决于响应 shape：
+
+1. **响应里有 `warnings []string` 字段的工具**（`submit_task`、`submit_contract_task`）—
+   helper 失败 → `warnings = append(...)` **并且** `logHelperErr(category, op, err)`。
+   Claude（调用方）能直接读到 `warnings`；运维同时拿到 stderr + audit。**两路都走。**
+2. **响应里没有 `warnings` 字段的工具**（`register_slave_mcp`、`unregister_slave_mcp`、
+   `resume_task`、`read_slave_file`、`write_slave_file`、`stat_slave_file`、
+   `run_slave_bash` / shell 系、`delegatePermissionTask`，多数 wait=true 后用
+   `waitDelegatedTask` 包装的工具）—
+   helper 失败 → **只**走 `logHelperErr(category, op, err)`，**不**改响应 shape。
+   Claude 只看到正常 task 结果；运维通过 stderr + audit 看到失败。**只走运维路径。**
+
+不强行给所有响应加 `warnings` 字段，因为 (a) `waitDelegatedTask` 包装的 TaskInfo
+shape 是协议级 contract，加字段是破坏性变更；(b) 这些工具的 helper 失败
+（journal append 失败）通常是 driver 本地磁盘问题，Claude 端无任何可操作的补救
+动作 —— 让它知道也无法决策不同的下一步。如果未来发现 Claude 实际需要这个信号，
+单独立项扩展 wait 返回 shape。
+
+`logHelperErr(category, op, err)` 的 category 必须如实分类，避免 PR #10 P2
+讨论里指出的"observer relay 误分类 journal 失败"：
+- `category="observer_relay"` 用于 observer relay 路径（`update_write_task`、
+  `serve_pending`、`save_task_contract` 等）→ audit event `observer_relay_error`
+- `category="driver_journal"` 用于 driver 本地 `taskJournal.Append` 失败（op
+  `record_delegated_task`）→ audit event `driver_journal_error`
+
 ## 不变项 / 反目标
 
 - 不引入 SDK `CancelTask`。
@@ -143,3 +170,4 @@ w.t.reg.ForgetTask(args.TaskID)
 - 不重构 `tools.go` god file。
 - 不修 `files_handler` write 路径。
 - 不改 observer 端协议。
+- 不给 wait=true 工具的响应加 `warnings` 字段（见 "Helper-failure 可见性契约"）。
