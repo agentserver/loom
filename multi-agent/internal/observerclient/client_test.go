@@ -3,6 +3,7 @@ package observerclient
 import (
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -218,7 +219,13 @@ func TestNewEnabledRequiresProxyTokenOrLegacyRegistrationConfig(t *testing.T) {
 	require.Contains(t, err.Error(), "agentserver proxy token or observer api_key")
 }
 
-func TestNewWorkspaceMismatchReturnsError(t *testing.T) {
+// TestNewWorkspaceMismatchDegrades verifies that a workspace-id mismatch
+// from /api/agents/register no longer fails New() — it logs to stderr and
+// returns a degraded Client (token=""). The token file MUST NOT be
+// written; persisting a token for the wrong workspace would silently route
+// events to OTHER-WS forever. Renamed from TestNewWorkspaceMismatchReturnsError
+// to reflect the §1.3 #9 contract change.
+func TestNewWorkspaceMismatchDegrades(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"workspace_id":"OTHER-WS","token":"tk_x"}`))
 	}))
@@ -226,14 +233,15 @@ func TestNewWorkspaceMismatchReturnsError(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "observer.token")
-	_, err := New(Config{
+	c, err := New(Config{
 		Enabled: true, URL: srv.URL, WorkspaceID: "ws-1",
 		AgentID: "agent-1", AgentRole: observer.RoleSlave,
 		APIKey: "ak", TokenStatePath: path,
 	})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "OTHER-WS")
-	require.Contains(t, err.Error(), "ws-1")
+	require.NoError(t, err, "workspace mismatch must NOT fail New (degraded mode)")
+	require.NotNil(t, c)
+	require.Equal(t, "", c.Token(), "no token persisted on workspace mismatch")
+	require.True(t, c.Enabled(), "client stays enabled so operator sees the stderr warning")
 	_, statErr := os.Stat(path)
 	require.True(t, os.IsNotExist(statErr), "mismatch must not persist a token")
 }
@@ -261,7 +269,12 @@ func TestNewWarmStartSkipsRegister(t *testing.T) {
 	c.Close()
 }
 
-func TestNewRegisterFailureReturnsError(t *testing.T) {
+// TestNewRegisterFailureDegrades verifies that a 403 from /api/agents/register
+// at bootstrap time does NOT fail New() — instead returns a degraded client
+// (enabled=true, token="") so the process starts and the operator can fix
+// the api_key without a restart loop. The token file MUST NOT be written
+// (we have no token to persist).
+func TestNewRegisterFailureDegrades(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid api key", http.StatusForbidden)
 	}))
@@ -269,15 +282,80 @@ func TestNewRegisterFailureReturnsError(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "observer.token")
-	_, err := New(Config{
+	c, err := New(Config{
 		Enabled: true, URL: srv.URL, WorkspaceID: "ws-1",
 		AgentID: "agent-1", AgentRole: observer.RoleSlave,
 		APIKey: "ak_bad", TokenStatePath: path,
 	})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "403")
+	require.NoError(t, err, "register 403 must NOT fail New (degraded mode)")
+	require.NotNil(t, c)
+	require.Equal(t, "", c.Token(), "no token persisted on register failure")
+	require.True(t, c.Enabled(), "client stays enabled so handle401 can recover later")
 	_, statErr := os.Stat(path)
-	require.True(t, os.IsNotExist(statErr))
+	require.True(t, os.IsNotExist(statErr), "no token file should be written")
+}
+
+// TestNewBootstrapTimeoutDegradesToEmptyToken pins the §1.3 #9 invariant:
+// if the observer is unreachable at New() time, we MUST NOT block forever.
+// Returning a degraded Client (token="" but enabled=true) lets the process
+// start; the first Emit hits 401 and handle401 takes over once observer
+// recovers. This kills the jetson/HPC startup-deadlock.
+func TestNewBootstrapTimeoutDegradesToEmptyToken(t *testing.T) {
+	// Black-hole TCP listener: accepts the connection but never writes a
+	// response, so register's HTTP roundtrip would hang indefinitely
+	// without the bootstrap timeout.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+
+	dir := t.TempDir()
+	cfg := Config{
+		Enabled:          true,
+		TelemetryEnabled: false,
+		URL:              "http://" + ln.Addr().String(),
+		WorkspaceID:      "ws-1",
+		AgentID:          "agent-1",
+		AgentRole:        observer.RoleSlave,
+		APIKey:           "ak-1",
+		TokenStatePath:   filepath.Join(dir, "tok"),
+		BootstrapTimeout: 200 * time.Millisecond,
+	}
+	start := time.Now()
+	c, err := New(cfg)
+	elapsed := time.Since(start)
+	require.NoError(t, err, "New must NOT return error in degraded mode")
+	require.Less(t, elapsed, 2*time.Second, "New took %v; bootstrap timeout did not fire", elapsed)
+	require.Equal(t, "", c.Token(), "expected empty token in degraded mode")
+	require.True(t, c.Enabled(), "client must stay enabled so handle401 can recover later")
+}
+
+// TestNewBootstrapTimeoutDefaultsTo5s verifies BootstrapTimeout=0 picks up
+// the 5s default rather than meaning "no timeout".
+func TestNewBootstrapTimeoutDefaultsTo5s(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+	dir := t.TempDir()
+	cfg := Config{
+		Enabled:        true,
+		URL:            "http://" + ln.Addr().String(),
+		WorkspaceID:    "ws-1",
+		AgentID:        "agent-1",
+		AgentRole:      observer.RoleSlave,
+		APIKey:         "ak-1",
+		TokenStatePath: filepath.Join(dir, "tok"),
+		// BootstrapTimeout not set → default 5s
+	}
+	// Wrap New() in our own deadline so a regression here doesn't hang
+	// go test for minutes.
+	done := make(chan struct{})
+	go func() { _, _ = New(cfg); close(done) }()
+	select {
+	case <-done:
+		// good
+	case <-time.After(8 * time.Second):
+		t.Fatal("New blocked > 8s; default bootstrap timeout missing")
+	}
 }
 
 func TestCloseReturnsWhenPostStalls(t *testing.T) {

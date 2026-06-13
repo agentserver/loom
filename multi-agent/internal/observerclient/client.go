@@ -33,6 +33,12 @@ type Config struct {
 	APIKey                string
 	AgentserverProxyToken string
 	TokenStatePath        string
+	// BootstrapTimeout caps how long New() will wait on the initial
+	// loadOrRegister roundtrip. Zero → default 5s. Negative → no timeout
+	// (legacy blocking behavior). On timeout, New() returns a degraded
+	// Client (enabled=true, token="") so the process starts up; the first
+	// Emit hits 401 and handle401 acquires a token when observer recovers.
+	BootstrapTimeout time.Duration
 }
 
 type Client struct {
@@ -73,11 +79,32 @@ func New(cfg Config) (*Client, error) {
 		return nil, err
 	}
 
-	tok, err := c.loadOrRegister(context.Background())
-	if err != nil {
-		return nil, err
+	bt := cfg.BootstrapTimeout
+	if bt == 0 {
+		bt = 5 * time.Second
 	}
-	c.token = tok
+	var bootstrapCtx context.Context
+	var bootstrapCancel context.CancelFunc
+	if bt > 0 {
+		bootstrapCtx, bootstrapCancel = context.WithTimeout(context.Background(), bt)
+	} else {
+		bootstrapCtx, bootstrapCancel = context.WithCancel(context.Background())
+	}
+	defer bootstrapCancel()
+	tok, err := c.loadOrRegister(bootstrapCtx)
+	if err != nil {
+		// Degraded mode: process starts; first Emit triggers handle401 which
+		// re-registers once observer is reachable. Far better than hard-fail
+		// on transient observer outage where there's no systemd restart
+		// to recover (jetson, HPC login nodes).
+		// Fixes §1.3 #9 of docs/review-2026-06-13.md.
+		fmt.Fprintf(os.Stderr,
+			"observerclient: bootstrap failed (%v); entering degraded mode — "+
+				"events will queue and post once token is acquired\n", err)
+		c.token = ""
+	} else {
+		c.token = tok
+	}
 
 	if c.telemetryEnabled {
 		c.queue = make(chan observer.Event, queueSize)
