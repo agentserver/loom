@@ -47,7 +47,7 @@ type SubResult struct {
 }
 
 func (p *Planner) Route(ctx context.Context, prompt string, agents []agentsdk.AgentCard) (string, error) {
-	out, err := p.runLLM(ctx, routePrompt(prompt, agents))
+	out, err := p.runLLM(ctx, routePrompt(prompt, agents, ""))
 	if err != nil {
 		return "", err
 	}
@@ -62,7 +62,7 @@ func (p *Planner) Route(ctx context.Context, prompt string, agents []agentsdk.Ag
 }
 
 func (p *Planner) Plan(ctx context.Context, prompt string, agents []agentsdk.AgentCard) ([]Node, error) {
-	out, err := p.runLLM(ctx, planPrompt(prompt, agents))
+	out, err := p.runLLM(ctx, planPrompt(prompt, agents, ""))
 	if err != nil {
 		return nil, err
 	}
