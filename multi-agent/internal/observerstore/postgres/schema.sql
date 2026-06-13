@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS agents (
   created_by_api_key_id text NOT NULL,
   external_sandbox_id text NOT NULL DEFAULT '',
   external_user_id text NOT NULL DEFAULT '',
+  last_seen_at text NOT NULL DEFAULT '',
   PRIMARY KEY (workspace_id, id)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_token_hash ON agents(token_hash);

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"path/filepath"
 	"testing"
@@ -1326,4 +1327,54 @@ func TestListEventsForWorkspace_FiltersByWorkspace(t *testing.T) {
 	emptyEvents, err := st.ListEventsForWorkspace("ws-nonexistent")
 	require.NoError(t, err)
 	require.Empty(t, emptyEvents, "unknown workspace must return empty slice, not error")
+}
+
+// TestMarkArtifactAvailableReturnsErrArtifactNotFound pins the sentinel
+// observerweb uses to distinguish "row missing" (404) from "DB error" (502).
+// Fixes part of §1.3 #10 of docs/review-2026-06-13.md.
+func TestMarkArtifactAvailableReturnsErrArtifactNotFound(t *testing.T) {
+	s := testStore(t)
+	err := s.MarkArtifactAvailable("ws1", "driver", "art-missing", "text/plain", "sha", "key", 1)
+	if !errors.Is(err, ErrArtifactNotFound) {
+		t.Fatalf("expected ErrArtifactNotFound, got %v", err)
+	}
+}
+
+// TestMarkWriteCompletedReturnsErrWriteNotFound mirrors the above for writes.
+func TestMarkWriteCompletedReturnsErrWriteNotFound(t *testing.T) {
+	s := testStore(t)
+	err := s.MarkWriteCompleted("ws1", "driver", "wr-missing", "text/plain", "sha", "key", 1)
+	if !errors.Is(err, ErrWriteNotFound) {
+		t.Fatalf("expected ErrWriteNotFound, got %v", err)
+	}
+}
+
+// TestAgentLastActiveAt_Unknown verifies an unknown agent returns
+// (zero, false, nil) — that's a fresh registration, not an error.
+func TestAgentLastActiveAt_Unknown(t *testing.T) {
+	s := testStore(t)
+	_, found, err := s.AgentLastActiveAt("ws1", "ghost")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if found {
+		t.Fatal("expected found=false for unknown agent")
+	}
+}
+
+// TestAgentLastActiveAt_Known returns a recent timestamp for an
+// already-registered agent (testStore inserts "driver" via UpsertAgent
+// which writes last_seen_at).
+func TestAgentLastActiveAt_Known(t *testing.T) {
+	s := testStore(t)
+	ts, found, err := s.AgentLastActiveAt("ws1", "driver")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if !found {
+		t.Fatal("expected found=true for pre-registered driver")
+	}
+	if time.Since(ts) > 10*time.Second {
+		t.Fatalf("last_seen_at too old: %v", ts)
+	}
 }

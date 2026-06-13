@@ -3,6 +3,7 @@ package observerstore
 import (
 	"io"
 	"testing"
+	"time"
 
 	"github.com/yourorg/multi-agent/internal/observer"
 )
@@ -14,6 +15,7 @@ type portableWebStore interface {
 	UpsertWorkspaceLazy(id, name, apiKeyID string) error
 	UpsertWorkspaceLazyWithExternalUser(id, name, apiKeyID, externalUserID string) error
 	AgentBoundWorkspace(agentID string) (workspaceID string, found bool, err error)
+	AgentLastActiveAt(workspaceID, agentID string) (time.Time, bool, error)
 	UpsertAgent(a Agent, token, apiKeyID string) error
 	UpsertAgentWithExternalIdentity(a Agent, token, apiKeyID string) error
 	RecordExternalIdentity(a Agent, workspaceName string) error

@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/url"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -21,6 +22,15 @@ import (
 
 //go:embed schema.sql
 var schemaSQL string
+
+// ErrArtifactNotFound is returned by MarkArtifactAvailable when no artifact
+// row matches the (workspace, id, owner) key. observerweb maps this to 404;
+// other errors (DB unreachable, constraint violation) map to 502 so the
+// uploading client can distinguish "wrong target" from "server problem".
+var ErrArtifactNotFound = errors.New("observerstore: artifact not found")
+
+// ErrWriteNotFound is the write equivalent of ErrArtifactNotFound.
+var ErrWriteNotFound = errors.New("observerstore: write not found or already completed")
 
 type SQLiteStore struct {
 	db *sql.DB
@@ -85,6 +95,11 @@ func ensureColumns(db *sql.DB) error {
 		return err
 	}
 	if _, err := db.Exec(`ALTER TABLE agents ADD COLUMN external_user_id TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
+		return err
+	}
+	// last_seen_at: bumped by every (re)registration so register's duplicate
+	// takeover guard can tell "fresh slot" from "live agent". §1.3 #11.
+	if _, err := db.Exec(`ALTER TABLE agents ADD COLUMN last_seen_at TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
 		return err
 	}
 	if _, err := db.Exec(`ALTER TABLE tasks ADD COLUMN mcp_status TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
@@ -253,16 +268,18 @@ func (s *SQLiteStore) UpsertAgentWithExternalIdentity(a Agent, token, apiKeyID s
 	if apiKeyID == "" {
 		return errors.New("observerstore: apiKeyID must not be empty")
 	}
+	now := NowUTC()
 	_, err := s.db.Exec(
-		`INSERT INTO agents(workspace_id, id, role, display_name, token_hash, created_by_api_key_id, external_sandbox_id, external_user_id)
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO agents(workspace_id, id, role, display_name, token_hash, created_by_api_key_id, external_sandbox_id, external_user_id, last_seen_at)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(workspace_id, id) DO UPDATE SET
             role = excluded.role,
             display_name = excluded.display_name,
             token_hash = excluded.token_hash,
             external_sandbox_id = excluded.external_sandbox_id,
-            external_user_id = excluded.external_user_id`,
-		a.WorkspaceID, a.ID, a.Role, a.DisplayName, TokenHash(token), apiKeyID, a.ExternalSandboxID, a.ExternalUserID,
+            external_user_id = excluded.external_user_id,
+            last_seen_at = excluded.last_seen_at`,
+		a.WorkspaceID, a.ID, a.Role, a.DisplayName, TokenHash(token), apiKeyID, a.ExternalSandboxID, a.ExternalUserID, now,
 	)
 	return err
 }
@@ -317,14 +334,15 @@ func (s *SQLiteStore) RecordExternalIdentity(a Agent, workspaceName string) erro
 		return err
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO agents(workspace_id, id, role, display_name, token_hash, created_by_api_key_id, external_sandbox_id, external_user_id)
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO agents(workspace_id, id, role, display_name, token_hash, created_by_api_key_id, external_sandbox_id, external_user_id, last_seen_at)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(workspace_id, id) DO UPDATE SET
             role = excluded.role,
             display_name = excluded.display_name,
             external_sandbox_id = excluded.external_sandbox_id,
-            external_user_id = excluded.external_user_id`,
-		a.WorkspaceID, a.ID, a.Role, a.DisplayName, TokenHash(agentToken), ExternalIdentityAPIKeyID, a.ExternalSandboxID, a.ExternalUserID,
+            external_user_id = excluded.external_user_id,
+            last_seen_at = excluded.last_seen_at`,
+		a.WorkspaceID, a.ID, a.Role, a.DisplayName, TokenHash(agentToken), ExternalIdentityAPIKeyID, a.ExternalSandboxID, a.ExternalUserID, now,
 	); err != nil {
 		return err
 	}
@@ -346,6 +364,33 @@ func (s *SQLiteStore) AgentBoundWorkspace(agentID string) (string, bool, error) 
 		return "", false, err
 	}
 	return ws, true, nil
+}
+
+// AgentLastActiveAt returns the last_seen_at timestamp for the given
+// (workspace, agent_id). Used by observerweb's register handler to detect
+// "agent_id already in use" before silently rotating its token out from
+// under the live process. Returns (zero, false, nil) when the agent is
+// unknown — that's a fresh registration.
+//
+// If last_seen_at is malformed on disk, returns (zero, false, nil) so
+// register goes through (better than blocking on corrupt state).
+//
+// Fixes part of §1.3 #11 of docs/review-2026-06-13.md.
+func (s *SQLiteStore) AgentLastActiveAt(workspaceID, agentID string) (time.Time, bool, error) {
+	var lastSeen string
+	err := s.db.QueryRow(`SELECT last_seen_at FROM agents WHERE workspace_id=? AND id=?`,
+		workspaceID, agentID).Scan(&lastSeen)
+	if err == sql.ErrNoRows {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	t, perr := time.Parse(time.RFC3339Nano, lastSeen)
+	if perr != nil {
+		return time.Time{}, false, nil
+	}
+	return t, true, nil
 }
 
 // ListWorkspaceSummaries returns all workspaces ordered by last_seen_at DESC,
@@ -877,7 +922,7 @@ func (s *SQLiteStore) MarkArtifactAvailable(workspaceID, ownerAgentID, artifactI
 		return err
 	}
 	if n == 0 {
-		return fmt.Errorf("artifact not found")
+		return ErrArtifactNotFound
 	}
 	_, err = s.db.Exec(`UPDATE artifact_requests SET state=?, updated_at=? WHERE workspace_id=? AND artifact_id=? AND owner_agent_id=? AND state=?`,
 		ArtifactStateAvailable, now, workspaceID, artifactID, ownerAgentID, ArtifactStatePending)
@@ -960,7 +1005,7 @@ func (s *SQLiteStore) MarkWriteCompleted(workspaceID, writerAgentID, writeID, mi
 		return err
 	}
 	if n == 0 {
-		return fmt.Errorf("write not found or already completed")
+		return ErrWriteNotFound
 	}
 	return nil
 }
