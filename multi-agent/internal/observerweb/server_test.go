@@ -5,13 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/yourorg/multi-agent/internal/identity"
@@ -1459,4 +1463,220 @@ func TestRegister_RejectsBadWorkspaceID(t *testing.T) {
 			require.Contains(t, body, "workspace_id must match")
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// §1.3 #10: artifact/write PUT half-failure path
+// ---------------------------------------------------------------------------
+
+// recordingObjects wraps an objectstore.Store to record Delete calls and
+// optionally inject Delete failures, for testing the half-failure rollback
+// path on artifact/write PUT.
+type recordingObjects struct {
+	inner       objectstore.Store
+	mu          sync.Mutex
+	deletedKeys []string
+	failDelete  bool // when true, Delete returns an error after recording
+}
+
+func (r *recordingObjects) PutPresignedURL(ctx context.Context, key, mime string, expires time.Duration) (string, error) {
+	return r.inner.PutPresignedURL(ctx, key, mime, expires)
+}
+func (r *recordingObjects) GetPresignedURL(ctx context.Context, key string, expires time.Duration) (string, error) {
+	return r.inner.GetPresignedURL(ctx, key, expires)
+}
+func (r *recordingObjects) Put(ctx context.Context, key, mime string, body io.Reader) (objectstore.ObjectInfo, error) {
+	return r.inner.Put(ctx, key, mime, body)
+}
+func (r *recordingObjects) Open(ctx context.Context, key string) (io.ReadCloser, error) {
+	return r.inner.Open(ctx, key)
+}
+func (r *recordingObjects) Delete(ctx context.Context, key string) error {
+	r.mu.Lock()
+	r.deletedKeys = append(r.deletedKeys, key)
+	fail := r.failDelete
+	r.mu.Unlock()
+	if fail {
+		return fmt.Errorf("objectstore: simulated delete failure")
+	}
+	return r.inner.Delete(ctx, key)
+}
+func (r *recordingObjects) deleted() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := append([]string(nil), r.deletedKeys...)
+	return out
+}
+
+// failingStore wraps an observerstore.Store and lets a test inject a
+// non-sentinel error from MarkArtifactAvailable / MarkWriteCompleted so we
+// can exercise the 502 (vs 404) classification in observerweb's PUT path.
+type failingStore struct {
+	observerstore.Store
+	markArtifactErr error
+	markWriteErr    error
+}
+
+func (f *failingStore) MarkArtifactAvailable(workspaceID, ownerAgentID, artifactID, mime, sha256, objectKey string, bytes int64) error {
+	if f.markArtifactErr != nil {
+		return f.markArtifactErr
+	}
+	return f.Store.MarkArtifactAvailable(workspaceID, ownerAgentID, artifactID, mime, sha256, objectKey, bytes)
+}
+func (f *failingStore) MarkWriteCompleted(workspaceID, writerAgentID, writeID, mime, sha256, objectKey string, bytes int64) error {
+	if f.markWriteErr != nil {
+		return f.markWriteErr
+	}
+	return f.Store.MarkWriteCompleted(workspaceID, writerAgentID, writeID, mime, sha256, objectKey, bytes)
+}
+
+// TestPutArtifact_DBErrorReturns502AndRollsBackObject pins the §1.3 #10
+// invariant: when MarkArtifactAvailable fails with a generic (non-sentinel)
+// error — DB unreachable, constraint violation, etc. — the response MUST
+// be 502 (not 404) AND the uploaded object MUST be Delete'd.
+func TestPutArtifact_DBErrorReturns502AndRollsBackObject(t *testing.T) {
+	_, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
+	art, err := st.CreateArtifact(observerstore.ArtifactCreate{
+		WorkspaceID: "ws1", OwnerAgentID: "driver", Path: "/tmp/x.txt", Kind: "file",
+	})
+	require.NoError(t, err)
+	objectKey := objectstore.ArtifactKey("ws1", art.ID)
+
+	ro := &recordingObjects{inner: objectstore.NewMemory()}
+	fs := &failingStore{Store: st, markArtifactErr: errors.New("db down")}
+	h := NewWithOptions(fs, nil, Options{Objects: ro})
+
+	req := httptest.NewRequest(http.MethodPut, "/api/artifacts/"+art.ID+"/content", strings.NewReader("hello"))
+	req.Header.Set("Authorization", "Bearer driver-token")
+	req.Header.Set("Content-Type", "text/plain")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusBadGateway, rr.Code, rr.Body.String())
+	require.Contains(t, ro.deleted(), objectKey)
+}
+
+// TestPutArtifact_RowNotFoundReturns404 ensures the existing 404 path is
+// preserved for ErrArtifactNotFound (genuine "wrong target") so existing
+// clients aren't blocked.
+func TestPutArtifact_RowNotFoundReturns404(t *testing.T) {
+	_, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
+	art, err := st.CreateArtifact(observerstore.ArtifactCreate{
+		WorkspaceID: "ws1", OwnerAgentID: "driver", Path: "/tmp/x.txt", Kind: "file",
+	})
+	require.NoError(t, err)
+	objectKey := objectstore.ArtifactKey("ws1", art.ID)
+
+	ro := &recordingObjects{inner: objectstore.NewMemory()}
+	fs := &failingStore{Store: st, markArtifactErr: observerstore.ErrArtifactNotFound}
+	h := NewWithOptions(fs, nil, Options{Objects: ro})
+
+	req := httptest.NewRequest(http.MethodPut, "/api/artifacts/"+art.ID+"/content", strings.NewReader("hello"))
+	req.Header.Set("Authorization", "Bearer driver-token")
+	req.Header.Set("Content-Type", "text/plain")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusNotFound, rr.Code, rr.Body.String())
+	require.Contains(t, ro.deleted(), objectKey)
+}
+
+// TestPutWrite_DBErrorReturns502AndRollsBackObject mirrors for writes.
+func TestPutWrite_DBErrorReturns502AndRollsBackObject(t *testing.T) {
+	_, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
+	wr, err := st.CreateWrite(observerstore.WriteCreate{
+		WorkspaceID: "ws1", OwnerAgentID: "driver", TaskID: "task-1", Path: "/tmp/out.txt",
+	})
+	require.NoError(t, err)
+	objectKey := objectstore.WriteKey("ws1", wr.ID)
+
+	ro := &recordingObjects{inner: objectstore.NewMemory()}
+	fs := &failingStore{Store: st, markWriteErr: errors.New("db down")}
+	h := NewWithOptions(fs, nil, Options{Objects: ro})
+
+	req := httptest.NewRequest(http.MethodPut, "/api/writes/"+wr.ID, strings.NewReader("done"))
+	req.Header.Set("Authorization", "Bearer slave-token")
+	req.Header.Set("Content-Type", "text/plain")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusBadGateway, rr.Code, rr.Body.String())
+	require.Contains(t, ro.deleted(), objectKey)
+}
+
+// TestPutWrite_RowNotFoundReturns404 mirrors TestPutArtifact_RowNotFoundReturns404
+// for the write path: ErrWriteNotFound must still surface as 404 (genuine
+// "wrong target") while the object is rolled back.
+func TestPutWrite_RowNotFoundReturns404(t *testing.T) {
+	_, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
+	wr, err := st.CreateWrite(observerstore.WriteCreate{
+		WorkspaceID: "ws1", OwnerAgentID: "driver", TaskID: "task-1", Path: "/tmp/out.txt",
+	})
+	require.NoError(t, err)
+	objectKey := objectstore.WriteKey("ws1", wr.ID)
+
+	ro := &recordingObjects{inner: objectstore.NewMemory()}
+	fs := &failingStore{Store: st, markWriteErr: observerstore.ErrWriteNotFound}
+	h := NewWithOptions(fs, nil, Options{Objects: ro})
+
+	req := httptest.NewRequest(http.MethodPut, "/api/writes/"+wr.ID, strings.NewReader("done"))
+	req.Header.Set("Authorization", "Bearer slave-token")
+	req.Header.Set("Content-Type", "text/plain")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusNotFound, rr.Code, rr.Body.String())
+	require.Contains(t, ro.deleted(), objectKey)
+}
+
+// captureLog redirects the default logger's output to a buffer for the
+// duration of fn, returning what was written. Used to assert the
+// "ORPHAN OBJECT" log line is emitted when both DB write and object rollback
+// fail.
+func captureLog(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+	fn()
+	return buf.String()
+}
+
+// TestPutArtifact_DBErrorWithDeleteFailureLogsOrphan exercises the
+// failDelete=true branch of recordingObjects to cover the operationally
+// critical ORPHAN OBJECT log line: when MarkArtifactAvailable fails AND the
+// follow-up Delete also fails, the response classification is still 502
+// (Delete success/failure does not change it) and the orphan is logged with
+// the object key so on-call can find it.
+func TestPutArtifact_DBErrorWithDeleteFailureLogsOrphan(t *testing.T) {
+	_, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
+	art, err := st.CreateArtifact(observerstore.ArtifactCreate{
+		WorkspaceID: "ws1", OwnerAgentID: "driver", Path: "/tmp/x.txt", Kind: "file",
+	})
+	require.NoError(t, err)
+	objectKey := objectstore.ArtifactKey("ws1", art.ID)
+
+	ro := &recordingObjects{inner: objectstore.NewMemory(), failDelete: true}
+	fs := &failingStore{Store: st, markArtifactErr: errors.New("db down")}
+	h := NewWithOptions(fs, nil, Options{Objects: ro})
+
+	var rr *httptest.ResponseRecorder
+	out := captureLog(t, func() {
+		req := httptest.NewRequest(http.MethodPut, "/api/artifacts/"+art.ID+"/content", strings.NewReader("hello"))
+		req.Header.Set("Authorization", "Bearer driver-token")
+		req.Header.Set("Content-Type", "text/plain")
+		rr = httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+	})
+
+	require.Equal(t, http.StatusBadGateway, rr.Code, rr.Body.String())
+	require.Contains(t, ro.deleted(), objectKey, "Delete must still be attempted even when it fails")
+	require.Contains(t, out, "ORPHAN OBJECT")
+	require.Contains(t, out, objectKey)
 }

@@ -490,8 +490,24 @@ func (h *handler) putArtifactContent(w http.ResponseWriter, r *http.Request, id 
 			return
 		}
 		if err := h.s.MarkArtifactAvailable(agent.WorkspaceID, agent.ID, id, r.Header.Get("Content-Type"), info.SHA256, objectKey, info.Bytes); err != nil {
-			_ = h.objects.Delete(r.Context(), objectKey)
-			http.Error(w, err.Error(), http.StatusNotFound)
+			delErr := h.objects.Delete(r.Context(), objectKey)
+			if delErr != nil {
+				log.Printf("observer: ORPHAN OBJECT %s after DB MarkArtifactAvailable failed: db_err=%v delete_err=%v",
+					objectKey, err, delErr)
+			} else {
+				log.Printf("observer: rolled back object %s after DB MarkArtifactAvailable failed: %v",
+					objectKey, err)
+			}
+			// Classify: only ErrArtifactNotFound is "wrong target" (404). Any
+			// other error is a server-side problem (DB unreachable, constraint
+			// violation, etc.) — 502 so the uploading client retries rather
+			// than assumes its target ID was bad. Fixes §1.3 #10 of
+			// docs/review-2026-06-13.md.
+			if errors.Is(err, observerstore.ErrArtifactNotFound) {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -673,8 +689,19 @@ func (h *handler) writeRouter(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := h.s.MarkWriteCompleted(agent.WorkspaceID, agent.ID, id, r.Header.Get("Content-Type"), info.SHA256, objectKey, info.Bytes); err != nil {
-			_ = h.objects.Delete(r.Context(), objectKey)
-			http.Error(w, err.Error(), http.StatusNotFound)
+			delErr := h.objects.Delete(r.Context(), objectKey)
+			if delErr != nil {
+				log.Printf("observer: ORPHAN OBJECT %s after DB MarkWriteCompleted failed: db_err=%v delete_err=%v",
+					objectKey, err, delErr)
+			} else {
+				log.Printf("observer: rolled back object %s after DB MarkWriteCompleted failed: %v",
+					objectKey, err)
+			}
+			if errors.Is(err, observerstore.ErrWriteNotFound) {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
