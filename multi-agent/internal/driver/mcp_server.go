@@ -65,14 +65,19 @@ type jsonRPCError struct {
 // Serve reads one JSON-RPC message per line from r and writes responses to w.
 // Tool calls run concurrently so a long-running tool cannot block later
 // requests; response ids let JSON-RPC clients match out-of-order replies.
-// Returns when r reaches EOF or an "exit" notification is received.
-func (s *MCPServer) Serve(r io.Reader, w io.Writer) error {
+// Returns when r reaches EOF, ctx is cancelled, or an "exit" notification is
+// received. The ctx is propagated into every tool Call so callers that wait
+// (e.g. wait_task long-polling) can unwind when the driver shuts down.
+func (s *MCPServer) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
 	for scanner.Scan() {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		line := scanner.Bytes()
 		if len(line) == 0 {
 			continue
@@ -85,9 +90,12 @@ func (s *MCPServer) Serve(r io.Reader, w io.Writer) error {
 		if req.Method == "exit" {
 			return nil
 		}
-		s.dispatch(context.Background(), w, &req, &wg)
+		s.dispatch(ctx, w, &req, &wg)
 	}
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	return ctx.Err() // nil if not cancelled
 }
 
 // WaitForLines is a test helper that blocks until at least n response lines
