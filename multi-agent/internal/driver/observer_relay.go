@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -252,6 +253,7 @@ func (r *ObserverRelay) ServePendingOnce(ctx context.Context, reg *FileRegistry,
 	if err := json.NewDecoder(resp.Body).Decode(&listed); err != nil {
 		return err
 	}
+	var errs []error
 	for _, pending := range listed.Requests {
 		path, kind, ok := reg.LookupObserverArtifact(pending.ArtifactID)
 		if !ok {
@@ -261,13 +263,15 @@ func (r *ObserverRelay) ServePendingOnce(ctx context.Context, reg *FileRegistry,
 			continue
 		}
 		if err := AssertNoSymlinkLeaf(path); err != nil {
+			errs = append(errs, fmt.Errorf("artifact %s: %w", pending.ArtifactID, err))
 			continue
 		}
 		if err := r.uploadFile(ctx, pending.ArtifactID, path, audit); err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("artifact %s: %w", pending.ArtifactID, err))
+			continue
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (r *ObserverRelay) uploadFile(ctx context.Context, artifactID, path string, audit *AuditLog) error {
@@ -310,7 +314,12 @@ func (r *ObserverRelay) ServePendingLoop(ctx context.Context, reg *FileRegistry,
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		_ = r.ServePendingOnce(ctx, reg, audit)
+		if err := r.ServePendingOnce(ctx, reg, audit); err != nil {
+			fmt.Fprintf(os.Stderr, "driver: observer relay serve pending: %v\n", err)
+			if audit != nil {
+				audit.Log(AuditEvent{Event: "observer_relay_error", Op: "serve_pending", Error: err.Error()})
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return
