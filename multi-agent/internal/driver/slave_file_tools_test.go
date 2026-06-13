@@ -315,7 +315,12 @@ func TestWriteSlaveFile_SourcePathRegistersAndUploads(t *testing.T) {
 	sdk := newAvailableFileSlaveSDK(t,
 		`{"path":"/abs/out","bytes_written":4,"mode":"overwrite"}`, &captured)
 	tools := newTestTools(t, sdk)
-	src := filepath.Join(t.TempDir(), "src")
+	// §1.4 #17: source_path must resolve inside DriverDefaults.WorkDir; the
+	// helper test tools point WorkDir at AuditLogDir so place the temp file
+	// there too.
+	workDir := tools.cfg.DriverDefaults.WorkDir
+	require.NotEmpty(t, workDir, "test helper must set WorkDir for source_path jail")
+	src := filepath.Join(workDir, "src")
 	require.NoError(t, os.WriteFile(src, []byte("ABCD"), 0o644))
 	tool := toolByName(t, tools, "write_slave_file")
 	args, _ := json.Marshal(map[string]string{
@@ -337,6 +342,87 @@ func TestWriteSlaveFile_SourcePathRegistersAndUploads(t *testing.T) {
 	sum := sha256.Sum256([]byte("ABCD"))
 	_, ok := tools.reg.LookupBlob(hex.EncodeToString(sum[:]))
 	require.True(t, ok)
+}
+
+// TestWriteSlaveFile_SourcePathRejectsOutsideJail pins §1.4 #17: a
+// driver-local source_path that resolves outside WorkDir and any
+// configured SourcePathReadRoots must be rejected before os.ReadFile.
+func TestWriteSlaveFile_SourcePathRejectsOutsideJail(t *testing.T) {
+	var delegated bool
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{{
+				AgentID: "slave-b", DisplayName: "slave-b", Status: "available",
+				Card: json.RawMessage(`{"skills":["file"],"short_id":"sb"}`),
+			}}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			delegated = true
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-w1"}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	// "Sensitive" file lives in a SEPARATE tempdir (simulating /etc/shadow).
+	outside := t.TempDir()
+	sensitive := filepath.Join(outside, "shadow")
+	require.NoError(t, os.WriteFile(sensitive, []byte("root:x:0:0"), 0o600))
+
+	tool := toolByName(t, tools, "write_slave_file")
+	args, _ := json.Marshal(map[string]string{
+		"target_display_name": "slave-b", "path": "out", "source_path": sensitive,
+	})
+	_, err := tool.Call(context.Background(), args)
+	require.Error(t, err)
+	require.Contains(t, strings.ToLower(err.Error()), "outside")
+	require.False(t, delegated, "validation must pre-empt the upload")
+}
+
+// TestWriteSlaveFile_SourcePathAcceptsInsideJail covers the happy path
+// when source_path resolves inside DriverDefaults.WorkDir.
+func TestWriteSlaveFile_SourcePathAcceptsInsideJail(t *testing.T) {
+	var captured agentsdk.DelegateTaskRequest
+	sdk := newAvailableFileSlaveSDK(t,
+		`{"path":"/abs/out","bytes_written":2,"mode":"overwrite"}`, &captured)
+	tools := newTestTools(t, sdk)
+	workDir := tools.cfg.DriverDefaults.WorkDir
+	require.NotEmpty(t, workDir)
+	src := filepath.Join(workDir, "inside-src")
+	require.NoError(t, os.WriteFile(src, []byte("OK"), 0o644))
+
+	tool := toolByName(t, tools, "write_slave_file")
+	args, _ := json.Marshal(map[string]string{
+		"target_display_name": "slave-b", "path": "out", "source_path": src,
+	})
+	_, err := tool.Call(context.Background(), args)
+	require.NoError(t, err)
+	var slavePrompt map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(captured.Prompt), &slavePrompt))
+	decoded, _ := base64.StdEncoding.DecodeString(slavePrompt["content"].(string))
+	require.Equal(t, []byte("OK"), decoded)
+}
+
+// TestWriteSlaveFile_SourcePathAcceptsExtraReadRoot pins the operator
+// opt-in: SourcePathReadRoots adds extra dirs beyond WorkDir.
+func TestWriteSlaveFile_SourcePathAcceptsExtraReadRoot(t *testing.T) {
+	var captured agentsdk.DelegateTaskRequest
+	sdk := newAvailableFileSlaveSDK(t,
+		`{"path":"/abs/out","bytes_written":3,"mode":"overwrite"}`, &captured)
+	tools := newTestTools(t, sdk)
+	extraRoot := t.TempDir()
+	tools.cfg.DriverDefaults.SourcePathReadRoots = []string{extraRoot}
+	src := filepath.Join(extraRoot, "extra-src")
+	require.NoError(t, os.WriteFile(src, []byte("EXT"), 0o644))
+
+	tool := toolByName(t, tools, "write_slave_file")
+	args, _ := json.Marshal(map[string]string{
+		"target_display_name": "slave-b", "path": "out", "source_path": src,
+	})
+	_, err := tool.Call(context.Background(), args)
+	require.NoError(t, err)
+	var slavePrompt map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(captured.Prompt), &slavePrompt))
+	decoded, _ := base64.StdEncoding.DecodeString(slavePrompt["content"].(string))
+	require.Equal(t, []byte("EXT"), decoded)
 }
 
 func TestWriteSlaveFile_RejectsMissingFileSkill(t *testing.T) {

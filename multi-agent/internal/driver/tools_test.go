@@ -93,6 +93,7 @@ func newTestToolsWithObserver(t *testing.T, sdk SDKClient, obs ObserverSink) *To
 	cfg.Credentials.SandboxID = "sbx-driver"
 	cfg.DriverDefaults.TaskTimeoutSec = 600
 	cfg.DriverDefaults.AuditLogDir = dir // expose so cache root and audit log path are predictable
+	cfg.DriverDefaults.WorkDir = dir     // §1.4 #17: tests place source_path inputs here
 	tools := NewTools(NewFileRegistry(50000), a, sdk, cfg, obs)
 	tools.SetTaskJournal(j)
 	return tools

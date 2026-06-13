@@ -312,6 +312,14 @@ func (w *writeSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (jso
 		slaveEncoding = "base64"
 		sourceLabel = "source_blob:" + args.SourceBlob
 	case args.SourcePath != "":
+		// §1.4 #17: source_path is LLM-controlled; without a jail an LLM
+		// can ask the driver to base64-upload /etc/shadow / SSH keys / etc.
+		// to any slave it can reach. Validate before touching the file.
+		if err := AssertReadableSource(args.SourcePath,
+			w.t.cfg.DriverDefaults.WorkDir,
+			w.t.cfg.DriverDefaults.SourcePathReadRoots); err != nil {
+			return nil, &MCPToolError{Message: err.Error()}
+		}
 		body, err := os.ReadFile(args.SourcePath)
 		if err != nil {
 			return nil, &MCPToolError{Message: "read source_path: " + err.Error()}
