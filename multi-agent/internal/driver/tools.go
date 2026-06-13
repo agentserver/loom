@@ -588,6 +588,9 @@ func (g *getTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMe
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return nil, &MCPToolError{Message: err.Error()}
 	}
+	if strings.TrimSpace(args.TaskID) == "" {
+		return nil, &MCPToolError{Message: "task_id is required"}
+	}
 	info, err := g.t.sdk.GetTask(ctx, args.TaskID, true)
 	if err != nil {
 		return nil, &MCPToolError{Message: err.Error()}
@@ -688,6 +691,9 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return nil, &MCPToolError{Message: err.Error()}
 	}
+	if strings.TrimSpace(args.TaskID) == "" {
+		return nil, &MCPToolError{Message: "task_id is required"}
+	}
 	if args.PollIntervalSec == 0 {
 		args.PollIntervalSec = 3
 	}
@@ -746,7 +752,7 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 				Status: info.Status,
 			})
 			if w.t.useObserverRelay() {
-				if _, err := w.t.observerRelay().SyncWrites(ctx, taskID, w.t.cfg.DriverDefaults.DisableUIDCheck, w.t.reg); err != nil {
+				if _, err := w.t.observerRelay().SyncWrites(ctx, args.TaskID, w.t.cfg.DriverDefaults.DisableUIDCheck, w.t.reg); err != nil {
 					return nil, &MCPToolError{Message: "observer sync writes: " + err.Error()}
 				}
 			}

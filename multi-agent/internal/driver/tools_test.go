@@ -2044,3 +2044,77 @@ func TestSubmitTask_DegradesUpdateWriteTaskFailureToWarning(t *testing.T) {
 	written := tools.reg.WrittenFiles("task-77")
 	require.NotNil(t, written, "TrackTask should have been called even after warning")
 }
+
+// TestWaitTask_RejectsEmptyTaskID prevents WrittenFiles("")+ForgetTask("")
+// from silently nuking an unrelated zero-key registry entry.
+// Fixes §1.1 #4 of docs/review-2026-06-13.md.
+func TestWaitTask_RejectsEmptyTaskID(t *testing.T) {
+	tools := newTestTools(t, &fakeSDK{})
+	_, err := toolByName(t, tools, "wait_task").Call(context.Background(),
+		json.RawMessage(`{"task_id":""}`))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "task_id is required")
+}
+
+func TestGetTask_RejectsEmptyTaskID(t *testing.T) {
+	tools := newTestTools(t, &fakeSDK{})
+	_, err := toolByName(t, tools, "get_task").Call(context.Background(),
+		json.RawMessage(`{"task_id":""}`))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "task_id is required")
+}
+
+// TestWaitTask_UsesArgsTaskIDForRegistry verifies the registry key is the
+// task_id the caller submitted (= the same id we stored in reg.TrackTask),
+// even when the SDK echoes a different info.TaskID. The emit event still
+// uses info.TaskID for human-facing display.
+func TestWaitTask_UsesArgsTaskIDForRegistry(t *testing.T) {
+	tmp := t.TempDir()
+	target := tmp + "/out.txt"
+	if err := os.WriteFile(target, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	sdk := &fakeSDK{
+		getTaskFunc: func(id string, _ bool) (*agentsdk.TaskInfo, error) {
+			// Server returns DIFFERENT TaskID (an alias) — registry must
+			// still use the args.TaskID we originally tracked.
+			return &agentsdk.TaskInfo{
+				TaskID: "server-alias-99",
+				Status: "completed",
+			}, nil
+		},
+	}
+	obs := &fakeObserver{}
+	tools := newTestToolsWithObserver(t, sdk, obs)
+
+	// Manually populate registry as if submit_task had been called with id=client-1.
+	tok := tools.reg.RegisterWrite(target, true, "")
+	tools.reg.RebindWriteTokenTaskID(tok, "client-1")
+	tools.reg.RecordWritten("client-1", WrittenFile{Path: target, Bytes: 5, SHA256: "abc"})
+	tools.reg.TrackTask("client-1", []string{tok})
+
+	out, err := toolByName(t, tools, "wait_task").Call(context.Background(),
+		json.RawMessage(`{"task_id":"client-1","poll_interval_sec":1,"timeout_sec":5}`))
+	require.NoError(t, err)
+	require.Contains(t, string(out), `"written_files"`)
+	require.Contains(t, string(out), target,
+		"wait_task should have looked up writes under args.TaskID=client-1, not server-alias-99")
+
+	// emit should have been called with info.TaskID for display.
+	var sawAlias bool
+	for _, ev := range obs.events {
+		if ev.TaskID == "server-alias-99" {
+			sawAlias = true
+		}
+	}
+	require.True(t, sawAlias, "emit should still surface server-side alias for display")
+
+	// Subsequent wait_task with the same client-1 must find empty
+	// written_files because ForgetTask("client-1") cleared the entry.
+	out2, err := toolByName(t, tools, "wait_task").Call(context.Background(),
+		json.RawMessage(`{"task_id":"client-1","poll_interval_sec":1,"timeout_sec":5}`))
+	require.NoError(t, err)
+	require.NotContains(t, string(out2), target,
+		"after wait_task, ForgetTask(args.TaskID) should have cleared the entry")
+}
