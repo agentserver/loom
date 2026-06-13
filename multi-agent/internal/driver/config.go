@@ -146,6 +146,14 @@ func LoadConfig(path string) (*Config, error) {
 	if c.Codex.WorkDir == "" {
 		c.Codex.WorkDir = c.Claude.WorkDir
 	}
+	if c.DriverDefaults.WorkDir == "" {
+		// Default to the agent's own workdir so source_path validation passes
+		// for project-internal files out of the box. Falls back to process cwd
+		// if neither agent set one (driver invoked without YAML workdir).
+		// Operators with stricter requirements override DriverDefaults.workdir
+		// or add SourcePathReadRoots. See §1.4 #17 review follow-up P1.
+		c.DriverDefaults.WorkDir = driverDefaultWorkDir(&c)
+	}
 	if c.Planner.Bin == "" {
 		switch c.Agent.Kind {
 		case "codex":
@@ -229,4 +237,33 @@ func SaveConfig(path string, c *Config) error {
 		return err
 	}
 	return os.WriteFile(path, b, 0o600)
+}
+
+// driverDefaultWorkDir picks the most natural default for
+// DriverDefaults.WorkDir: the agent kind's configured workdir, then the
+// other agent kind's workdir, then the process cwd. Returns "" only if
+// all three are unavailable (rare; downstream AssertReadableSource then
+// treats it as "no implicit root" and the SourcePathReadRoots list is
+// the sole source of permissions).
+func driverDefaultWorkDir(c *Config) string {
+	switch c.Agent.Kind {
+	case "codex":
+		if c.Codex.WorkDir != "" {
+			return c.Codex.WorkDir
+		}
+		if c.Claude.WorkDir != "" {
+			return c.Claude.WorkDir
+		}
+	default: // "claude" or any other
+		if c.Claude.WorkDir != "" {
+			return c.Claude.WorkDir
+		}
+		if c.Codex.WorkDir != "" {
+			return c.Codex.WorkDir
+		}
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		return cwd
+	}
+	return ""
 }

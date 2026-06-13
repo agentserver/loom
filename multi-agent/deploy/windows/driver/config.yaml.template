@@ -46,6 +46,7 @@ driver_defaults:
   target_display_name: ""
   task_timeout_sec: 600
   audit_log_dir: "./logs"
+  workdir: __PROJECT_DIR__
   disable_uid_check: true
   max_dir_cache_entries: 50000
   artifact_transport: "peer_proxy"
