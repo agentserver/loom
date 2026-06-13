@@ -3,7 +3,6 @@ package driver
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
@@ -409,9 +408,10 @@ func TestSlaveClaudePermissionsRejectsMissingPermissionSkill(t *testing.T) {
 // the §1.1 #1 invariant for delegateShellTask's wait=false path: when
 // DelegateTask succeeds but the local task journal append fails, the tool
 // must still return task_id (slave is already running) and only log the
-// failure via logRelayErr — never surface it as an error. There is no
+// failure via logHelperErr under the driver_journal category — never surface
+// it as an error, and never misfile it under observer_relay. There is no
 // warnings field on this response shape, so the only visible signal is the
-// stderr/audit log entry written by logRelayErr.
+// stderr/audit log entry written by logHelperErr.
 func TestDelegateShellTask_DegradesRecordDelegatedTaskFailureToWarning(t *testing.T) {
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
@@ -441,8 +441,10 @@ func TestDelegateShellTask_DegradesRecordDelegatedTaskFailureToWarning(t *testin
 	})
 	require.NoError(t, callErr, "run_slave_bash must NOT return error; DelegateTask already succeeded")
 	require.Contains(t, string(out), `"task_id":"task-shell-77"`)
-	require.True(t,
-		strings.Contains(stderr, "record_delegated_task") ||
-			strings.Contains(stderr, "task journal"),
-		"logRelayErr should have emitted a stderr message about the record_delegated_task failure; got: %q", stderr)
+	require.Contains(t, stderr, "driver_journal record_delegated_task",
+		"logHelperErr must emit under the driver_journal category, not observer relay; got: %q", stderr)
+	require.NotContains(t, stderr, "observer relay",
+		"journal failure must not be misclassified as observer_relay; got: %q", stderr)
+	require.NotContains(t, stderr, "observer_relay",
+		"journal failure must not be misclassified as observer_relay; got: %q", stderr)
 }

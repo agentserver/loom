@@ -119,7 +119,7 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 		TimeoutSec:        timeout,
 	}); err != nil {
 		warnings = append(warnings, "record delegated task: "+err.Error())
-		s.t.logRelayErr("record_delegated_task", err)
+		s.t.logHelperErr("driver_journal", "record_delegated_task", err)
 	}
 
 	contractBody, err := json.Marshal(tc)

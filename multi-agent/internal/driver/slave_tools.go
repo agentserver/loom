@@ -172,7 +172,7 @@ func (t *Tools) delegateShellTask(ctx context.Context, card agentsdk.AgentCard, 
 		Wait:              wait,
 		TimeoutSec:        args.TimeoutSec,
 	}); err != nil {
-		t.logRelayErr("record_delegated_task", err)
+		t.logHelperErr("driver_journal", "record_delegated_task", err)
 	}
 	if !wait {
 		return json.Marshal(map[string]interface{}{
@@ -295,7 +295,7 @@ func (t *Tools) delegatePermissionTask(ctx context.Context, toolName, targetAgen
 		Skill:             skill,
 		Wait:              true,
 	}); err != nil {
-		t.logRelayErr("record_delegated_task", err)
+		t.logHelperErr("driver_journal", "record_delegated_task", err)
 	}
 	return t.waitDelegatedTask(ctx, resp.TaskID, 0)
 }
