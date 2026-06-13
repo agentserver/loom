@@ -270,3 +270,77 @@ for line in sys.stdin:
 	require.NoError(t, err)
 	require.Equal(t, "foobar", res.Summary)
 }
+
+// TestMCPExecutor_HTTPTimeoutFiresWithinExpectedWindow pins §1.4 #15
+// timeout invariant: a server that never replies must not hang the
+// dispatcher. Default 30s; we wait up to 35s and assert error.
+func TestMCPExecutor_HTTPTimeoutFiresWithinExpectedWindow(t *testing.T) {
+	stop := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done(): // client closed (timeout fired)
+		case <-stop: // test teardown
+		}
+	}))
+	defer func() {
+		close(stop)
+		srv.Close()
+	}()
+
+	cfg := map[string]MCPServerCfg{
+		"slow": {Transport: "http", URL: srv.URL},
+	}
+	e := NewMCPExecutor(cfg)
+	defer e.Close()
+
+	prompt := mcpPrompt{Server: "slow", Tool: "anything", Args: map[string]interface{}{}}
+	promptBytes, _ := json.Marshal(prompt)
+
+	start := time.Now()
+	_, err := e.Run(context.Background(), Task{
+		ID: "t", Skill: "mcp", Prompt: string(promptBytes),
+	}, &captureSink{})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("slow server must time out")
+	}
+	if elapsed > 35*time.Second {
+		t.Fatalf("timeout did not fire; elapsed=%v", elapsed)
+	}
+}
+
+// TestMCPExecutor_HTTPResponseSizeCapEnforced: server returns body > cap;
+// must error rather than OOM.
+func TestMCPExecutor_HTTPResponseSizeCapEnforced(t *testing.T) {
+	huge := make([]byte, 17*1024*1024) // 17 MiB > 16 MiB cap
+	for i := range huge {
+		huge[i] = 'A'
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write(huge)
+	}))
+	defer srv.Close()
+
+	cfg := map[string]MCPServerCfg{
+		"huge": {Transport: "http", URL: srv.URL},
+	}
+	e := NewMCPExecutor(cfg)
+	defer e.Close()
+
+	prompt := mcpPrompt{Server: "huge", Tool: "anything", Args: map[string]interface{}{}}
+	promptBytes, _ := json.Marshal(prompt)
+
+	_, err := e.Run(context.Background(), Task{
+		ID: "t", Skill: "mcp", Prompt: string(promptBytes),
+	}, &captureSink{})
+	if err == nil {
+		t.Fatal("oversized response must be rejected")
+	}
+	// Look for "exceeds" or "response" in the message.
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "exceeds") && !strings.Contains(msg, "response") {
+		t.Fatalf("expected size-cap error, got %v", err)
+	}
+}
