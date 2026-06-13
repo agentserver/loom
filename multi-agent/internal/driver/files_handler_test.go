@@ -217,6 +217,37 @@ func TestFilesHandler_Put_TokenSingleUse(t *testing.T) {
 	}
 }
 
+// TestFilesHandler_Put_BodyOverMaxBytesRejected pins §1.4 #18: a caller
+// streaming more than maxPutBytes is rejected with 413 and neither the
+// target nor the tmp file survives on disk.
+func TestFilesHandler_Put_BodyOverMaxBytesRejected(t *testing.T) {
+	h, r, _ := newTestHandler(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "out.txt")
+	tok := r.RegisterWrite(target, true, "task-1")
+
+	// Shrink the cap so we can exercise overflow with a tiny body
+	// (avoids allocating gigabytes in the test).
+	h.maxPutBytes = 64
+
+	// 100 bytes — strictly greater than the 64-byte cap.
+	body := strings.Repeat("A", 100)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, reqWithPeer("PUT", "/files/put/"+tok, strings.NewReader(body)))
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized PUT: want 413, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Errorf("target file should not exist after rejected PUT: err=%v", err)
+	}
+	// Scan parent for leftover *.tmp.* siblings.
+	matches, _ := filepath.Glob(filepath.Join(dir, "out.txt.tmp.*"))
+	if len(matches) != 0 {
+		t.Errorf("tmp leftovers after rejected PUT: %v", matches)
+	}
+}
+
 func TestFilesHandler_Put_MissingParent(t *testing.T) {
 	h, r, _ := newTestHandler(t)
 	target := "/nonexistent/dir/out.txt"
