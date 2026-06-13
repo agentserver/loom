@@ -165,6 +165,7 @@ func runServe(args []string) {
 		APIKey:                cfg.Observer.APIKey,
 		AgentserverProxyToken: cfg.Credentials.ProxyToken,
 		TokenStatePath:        cfg.Observer.TokenStatePath,
+		ForceRegister:         cfg.Observer.ForceRegister,
 	})
 	if errObs != nil {
 		log.Fatalf("observerclient: %v", errObs)
