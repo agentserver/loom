@@ -131,8 +131,17 @@ func Load(path string) (*Config, error) {
 	if c.Codex.Bin == "" {
 		c.Codex.Bin = "codex"
 	}
+	// Mirror workdir in BOTH directions. The Linux --agent codex install
+	// (deploy/linux/slave/install.sh) generates a config with only
+	// codex.workdir; cmd/slave-agent's file-executor wiring otherwise
+	// reads cfg.Claude.WorkDir as the file-jail root, falls back to
+	// os.Getwd(), and on foreground startup (no systemd WorkingDirectory)
+	// that's the process cwd — possibly "/". See PR #14 P1 follow-up.
 	if c.Codex.WorkDir == "" {
 		c.Codex.WorkDir = c.Claude.WorkDir
+	}
+	if c.Claude.WorkDir == "" {
+		c.Claude.WorkDir = c.Codex.WorkDir
 	}
 	if c.Planner.Bin == "" {
 		switch c.Agent.Kind {
