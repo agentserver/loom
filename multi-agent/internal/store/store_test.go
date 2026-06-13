@@ -186,3 +186,35 @@ func TestRecover_CancelsInflightSubTasks(t *testing.T) {
 	require.Equal(t, "cancelled", statuses["n2"])
 	require.Equal(t, "completed", statuses["n3"])
 }
+
+func TestStore_InsertIfAbsent_FirstInsertReturnsTrue(t *testing.T) {
+	s, _ := Open(filepath.Join(t.TempDir(), "x.db"))
+	inserted, err := s.InsertIfAbsent(Task{ID: "t-1", Skill: "chat", Prompt: "hi"})
+	if err != nil {
+		t.Fatalf("InsertIfAbsent: %v", err)
+	}
+	if !inserted {
+		t.Fatalf("expected inserted=true for fresh row")
+	}
+}
+
+func TestStore_InsertIfAbsent_DuplicateReturnsFalse(t *testing.T) {
+	s, _ := Open(filepath.Join(t.TempDir(), "x.db"))
+	if _, err := s.InsertIfAbsent(Task{ID: "t-1", Skill: "chat", Prompt: "hi"}); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	inserted, err := s.InsertIfAbsent(Task{ID: "t-1", Skill: "chat", Prompt: "hi-different"})
+	if err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	if inserted {
+		t.Fatalf("expected inserted=false for duplicate id")
+	}
+	row, _, err := s.GetTaskWithChunks("t-1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if row.Prompt != "hi" {
+		t.Fatalf("prompt overwritten on duplicate: %q", row.Prompt)
+	}
+}

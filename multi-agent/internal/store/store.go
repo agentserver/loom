@@ -73,6 +73,24 @@ func (s *Store) Insert(t Task) error {
 	return err
 }
 
+// InsertIfAbsent inserts a task row if no row with this ID exists, returning
+// (true, nil). On primary-key conflict returns (false, nil) — the caller can
+// then look up the existing row to decide whether to replay (completed) or
+// silently skip (running/assigned). Used by master + slave dispatch entrypoints
+// to make task delivery idempotent: a re-delivered task ID never spawns a
+// second executor.
+func (s *Store) InsertIfAbsent(t Task) (bool, error) {
+	res, err := s.db.Exec(
+		`INSERT OR IGNORE INTO tasks(id,skill,prompt,status,created_at) VALUES(?,?,?,?,?)`,
+		t.ID, t.Skill, t.Prompt, "assigned", nowUTC(),
+	)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 func (s *Store) MarkRunning(id string) error {
 	res, err := s.db.Exec(
 		`UPDATE tasks SET status='running', started_at=? WHERE id=? AND status='assigned'`,
