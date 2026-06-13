@@ -233,18 +233,38 @@ func (s *Scheduler) AllFinished() []FinishedNode {
 // shares an id with an existing one. depends_on may reference either
 // already-appended ids or pre-existing ids (including completed ones).
 func (s *Scheduler) Append(nodes []planner.Node) error {
+	// Phase 1: duplicate-id check + collect this batch's ids
+	appended := make(map[string]bool, len(nodes))
 	for _, n := range nodes {
 		if _, exists := s.nodeByID[n.ID]; exists {
 			return fmt.Errorf("Scheduler.Append: duplicate id %q", n.ID)
 		}
+		appended[n.ID] = true
 	}
+	// Phase 2: every depends_on must reference either an existing scheduler
+	// node (including completed/skipped) or another node in this same Append
+	// batch. Unknown deps used to silently keep the node out of pending
+	// forever, surfacing 60s later as 'scheduler stuck' with no signal.
+	for _, n := range nodes {
+		for _, dep := range n.DependsOn {
+			if dep == n.ID {
+				return fmt.Errorf("Scheduler.Append: node %q depends on itself", n.ID)
+			}
+			if appended[dep] {
+				continue
+			}
+			if _, known := s.nodeByID[dep]; !known {
+				return fmt.Errorf("Scheduler.Append: node %q depends on unknown %q", n.ID, dep)
+			}
+		}
+	}
+	// Phase 3: commit
 	for _, n := range nodes {
 		s.nodes = append(s.nodes, n)
 		s.nodeByID[n.ID] = n
 		for _, d := range n.DependsOn {
 			s.rev[d] = append(s.rev[d], n.ID)
 		}
-		// Only add to pending if all dependencies are already complete
 		ready := true
 		for _, dep := range n.DependsOn {
 			f, ok := s.finished[dep]
