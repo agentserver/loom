@@ -2118,3 +2118,56 @@ func TestWaitTask_UsesArgsTaskIDForRegistry(t *testing.T) {
 	require.NotContains(t, string(out2), target,
 		"after wait_task, ForgetTask(args.TaskID) should have cleared the entry")
 }
+
+// TestSubmitContractTask_DegradesRecordDelegatedTaskFailureToWarning verifies
+// the §1.1 #1 invariant for submit_contract_task: when DelegateTask succeeds
+// (the slave is already running) but the local task journal append fails,
+// the tool must still return task_id and surface the failure as a warning
+// instead of pretending dispatch failed. Mirrors the pattern from
+// TestSubmitTask_DegradesUpdateWriteTaskFailureToWarning.
+func TestSubmitContractTask_DegradesRecordDelegatedTaskFailureToWarning(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{{
+				AgentID: "slave-a", DisplayName: "slave-a", Status: "available",
+				Card: json.RawMessage(`{"skills":["chat"]}`),
+			}}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-77", SessionID: "sess-77", Status: "assigned"}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	// Close the journal file underneath so the next Append fails with
+	// "file already closed". recordDelegatedTask propagates that error,
+	// which the tool must degrade to a warning rather than returning.
+	require.NoError(t, tools.taskJournal.Close())
+
+	args, _ := json.Marshal(map[string]any{
+		"contract": map[string]any{
+			"version":         1,
+			"conversation_id": "conv-77",
+			"intent": map[string]any{
+				"goal":             "do work",
+				"success_criteria": []string{"finishes"},
+			},
+			"data_contract": map[string]any{
+				"write_targets": []map[string]any{
+					{"type": "artifact", "kind": "summary", "name": "out.md"},
+				},
+			},
+			"execution_policy": map[string]any{
+				"routing": "direct_first",
+			},
+		},
+		"prompt":              "do work",
+		"skill":               "chat",
+		"target_display_name": "slave-a",
+	})
+
+	out, err := toolByName(t, tools, "submit_contract_task").Call(context.Background(), args)
+	require.NoError(t, err, "submit_contract_task must NOT return error; DelegateTask already succeeded")
+	require.Contains(t, string(out), `"task_id":"task-77"`)
+	// existing warnings field must include a record-delegated-task entry
+	require.Regexp(t, `record[ _]delegated[ _]task`, string(out))
+}

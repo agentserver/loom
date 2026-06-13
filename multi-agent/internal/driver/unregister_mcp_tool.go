@@ -60,6 +60,8 @@ func (u *unregisterSlaveMCPTool) Call(ctx context.Context, raw json.RawMessage) 
 	if err != nil {
 		return nil, &MCPToolError{Message: "delegate unregister_mcp task: " + err.Error()}
 	}
+	// DelegateTask succeeded — degrade journal append failure to a log entry
+	// so we still wait on the slave task. See §1.1 #1 of the 2026-06-13 review.
 	if err := u.t.recordDelegatedTask(delegatedTaskRecord{
 		Tool:              u.Name(),
 		Response:          resp,
@@ -69,7 +71,7 @@ func (u *unregisterSlaveMCPTool) Call(ctx context.Context, raw json.RawMessage) 
 		Wait:              true,
 		TimeoutSec:        args.TimeoutSec,
 	}); err != nil {
-		return nil, err
+		u.t.logRelayErr("record_delegated_task", err)
 	}
 	return u.t.waitDelegatedTask(ctx, resp.TaskID, args.TimeoutSec)
 }

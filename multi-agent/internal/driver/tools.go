@@ -1129,6 +1129,8 @@ func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	if err != nil {
 		return nil, &MCPToolError{Message: "delegate chat_resume: " + err.Error()}
 	}
+	// DelegateTask succeeded — degrade journal append failure to a log entry
+	// so we still wait on the resume. See §1.1 #1 of the 2026-06-13 review.
 	if err := r.t.recordDelegatedTask(delegatedTaskRecord{
 		Tool:       r.Name(),
 		Response:   resp,
@@ -1137,7 +1139,7 @@ func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		Wait:       true,
 		TimeoutSec: timeout,
 	}); err != nil {
-		return nil, err
+		r.t.logRelayErr("record_delegated_task", err)
 	}
 
 	return r.t.waitDelegatedTask(ctx, resp.TaskID, timeout)

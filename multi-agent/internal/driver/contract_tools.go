@@ -106,6 +106,9 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 	if err != nil {
 		return nil, &MCPToolError{Message: "delegate: " + err.Error()}
 	}
+	// DelegateTask succeeded — slave is already running. From here on, any
+	// helper failure degrades to a warning rather than an error so Claude
+	// always learns the task_id. See §1.1 #1 of docs/review-2026-06-13.md.
 	if err := s.t.recordDelegatedTask(delegatedTaskRecord{
 		Tool:              s.Name(),
 		Response:          resp,
@@ -115,7 +118,8 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 		Wait:              false,
 		TimeoutSec:        timeout,
 	}); err != nil {
-		return nil, err
+		warnings = append(warnings, "record delegated task: "+err.Error())
+		s.t.logRelayErr("record_delegated_task", err)
 	}
 
 	contractBody, err := json.Marshal(tc)

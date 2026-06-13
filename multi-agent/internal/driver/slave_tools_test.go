@@ -3,6 +3,7 @@ package driver
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
@@ -402,4 +403,46 @@ func TestSlaveClaudePermissionsRejectsMissingPermissionSkill(t *testing.T) {
 	_, err := tool.Call(context.Background(), json.RawMessage(`{"target_display_name":"slave-a"}`))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "does not advertise permissions or claude_permissions")
+}
+
+// TestDelegateShellTask_DegradesRecordDelegatedTaskFailureToWarning verifies
+// the §1.1 #1 invariant for delegateShellTask's wait=false path: when
+// DelegateTask succeeds but the local task journal append fails, the tool
+// must still return task_id (slave is already running) and only log the
+// failure via logRelayErr — never surface it as an error. There is no
+// warnings field on this response shape, so the only visible signal is the
+// stderr/audit log entry written by logRelayErr.
+func TestDelegateShellTask_DegradesRecordDelegatedTaskFailureToWarning(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available",
+					Card: json.RawMessage(`{"skills":["bash"],"command_interfaces":[{"skill":"bash","kind":"bash","command":"/bin/bash","default":true}]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-shell-77", Status: "submitted"}, nil
+		},
+		getTaskFunc: func(id string, includeOutput bool) (*agentsdk.TaskInfo, error) {
+			t.Fatalf("wait=false must not poll GetTask")
+			return nil, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	// Close the journal file so the next Append fails. The tool must still
+	// return task_id rather than propagating that failure.
+	require.NoError(t, tools.taskJournal.Close())
+
+	var out json.RawMessage
+	var callErr error
+	stderr := captureStderr(t, func() {
+		out, callErr = toolByName(t, tools, "run_slave_bash").Call(context.Background(),
+			json.RawMessage(`{"target_display_name":"slave-a","script":"echo ok","wait":false}`))
+	})
+	require.NoError(t, callErr, "run_slave_bash must NOT return error; DelegateTask already succeeded")
+	require.Contains(t, string(out), `"task_id":"task-shell-77"`)
+	require.True(t,
+		strings.Contains(stderr, "record_delegated_task") ||
+			strings.Contains(stderr, "task journal"),
+		"logRelayErr should have emitted a stderr message about the record_delegated_task failure; got: %q", stderr)
 }

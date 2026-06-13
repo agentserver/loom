@@ -131,6 +131,9 @@ func (r *readSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (json
 	if err != nil {
 		return nil, &MCPToolError{Message: "delegate file read: " + err.Error()}
 	}
+	// DelegateTask succeeded — degrade journal append failure to a log entry
+	// so we still wait on the slave file read. See §1.1 #1 of the
+	// 2026-06-13 review.
 	if err := r.t.recordDelegatedTask(delegatedTaskRecord{
 		Tool:              r.Name(),
 		Response:          resp,
@@ -139,7 +142,7 @@ func (r *readSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (json
 		Skill:             "file",
 		Wait:              true,
 	}); err != nil {
-		return nil, err
+		r.t.logRelayErr("record_delegated_task", err)
 	}
 	waitOut, err := r.t.waitDelegatedTask(ctx, resp.TaskID, 0)
 	if err != nil {
@@ -341,6 +344,9 @@ func (w *writeSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (jso
 	if err != nil {
 		return nil, &MCPToolError{Message: "delegate file write: " + err.Error()}
 	}
+	// DelegateTask succeeded — degrade journal append failure to a log entry
+	// so we still wait on the slave file write. See §1.1 #1 of the
+	// 2026-06-13 review.
 	if err := w.t.recordDelegatedTask(delegatedTaskRecord{
 		Tool:              w.Name(),
 		Response:          resp,
@@ -349,7 +355,7 @@ func (w *writeSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (jso
 		Skill:             "file",
 		Wait:              true,
 	}); err != nil {
-		return nil, err
+		w.t.logRelayErr("record_delegated_task", err)
 	}
 	waitOut, err := w.t.waitDelegatedTask(ctx, resp.TaskID, 0)
 	if err != nil {
@@ -420,6 +426,9 @@ func (s *statSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (json
 	if err != nil {
 		return nil, &MCPToolError{Message: "delegate file stat: " + err.Error()}
 	}
+	// DelegateTask succeeded — degrade journal append failure to a log entry
+	// so we still wait on the slave file stat. See §1.1 #1 of the
+	// 2026-06-13 review.
 	if err := s.t.recordDelegatedTask(delegatedTaskRecord{
 		Tool:              s.Name(),
 		Response:          resp,
@@ -428,7 +437,7 @@ func (s *statSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (json
 		Skill:             "file",
 		Wait:              true,
 	}); err != nil {
-		return nil, err
+		s.t.logRelayErr("record_delegated_task", err)
 	}
 	waitOut, err := s.t.waitDelegatedTask(ctx, resp.TaskID, 0)
 	if err != nil {
