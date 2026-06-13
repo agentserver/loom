@@ -39,6 +39,11 @@ type Config struct {
 	// Client (enabled=true, token="") so the process starts up; the first
 	// Emit hits 401 and handle401 acquires a token when observer recovers.
 	BootstrapTimeout time.Duration
+	// ForceRegister tells the observer to rotate the token of an agent_id
+	// that's still active. Default false → observer 409s on same-id within
+	// 5min. Set true when the caller knows the prior process is dead /
+	// intentionally being replaced.
+	ForceRegister bool
 }
 
 type Client struct {
