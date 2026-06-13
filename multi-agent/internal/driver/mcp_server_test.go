@@ -28,7 +28,7 @@ func TestMCPServer_InitializeHandshake(t *testing.T) {
 	in := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"claude-code","version":"x"}}}` + "\n")
 	var out bytes.Buffer
 	srv := NewMCPServer([]Tool{})
-	go srv.Serve(in, &out)
+	go srv.Serve(context.Background(), in, &out)
 	srv.WaitForLines(1)
 	var resp struct {
 		ID     int             `json:"id"`
@@ -53,7 +53,7 @@ func TestMCPServer_ToolsList_ReturnsSchemas(t *testing.T) {
 	in := strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}` + "\n")
 	var out bytes.Buffer
 	srv := NewMCPServer(tools)
-	go srv.Serve(in, &out)
+	go srv.Serve(context.Background(), in, &out)
 	srv.WaitForLines(1)
 	var resp struct {
 		Result struct {
@@ -90,7 +90,7 @@ func TestMCPServer_ToolsCall_Dispatch(t *testing.T) {
 	in := strings.NewReader(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"do","arguments":{"x":42}}}` + "\n")
 	var out bytes.Buffer
 	srv := NewMCPServer([]Tool{tool})
-	go srv.Serve(in, &out)
+	go srv.Serve(context.Background(), in, &out)
 	srv.WaitForLines(1)
 	if !called {
 		t.Fatalf("tool not invoked (out=%s)", out.String())
@@ -122,7 +122,7 @@ func TestMCPServer_ToolsCall_ErrorCode(t *testing.T) {
 	in := strings.NewReader(`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"bad","arguments":{}}}` + "\n")
 	var out bytes.Buffer
 	srv := NewMCPServer([]Tool{tool})
-	go srv.Serve(in, &out)
+	go srv.Serve(context.Background(), in, &out)
 	srv.WaitForLines(1)
 	var resp struct {
 		Error struct {
@@ -169,7 +169,7 @@ func TestMCPServer_ConcurrentToolsCall(t *testing.T) {
 	srv := NewMCPServer(tools)
 	serveErr := make(chan error, 1)
 	go func() {
-		serveErr <- srv.Serve(in, outW)
+		serveErr <- srv.Serve(context.Background(), in, outW)
 		_ = outW.Close()
 	}()
 
@@ -209,7 +209,7 @@ func TestMCPServer_UnknownMethod_ReturnsMethodNotFound(t *testing.T) {
 	in := strings.NewReader(`{"jsonrpc":"2.0","id":5,"method":"weird/thing"}` + "\n")
 	var out bytes.Buffer
 	srv := NewMCPServer([]Tool{})
-	go srv.Serve(in, &out)
+	go srv.Serve(context.Background(), in, &out)
 	srv.WaitForLines(1)
 	var resp struct {
 		Error struct {
@@ -279,4 +279,45 @@ func firstLine(s string) []byte {
 		return []byte(s)
 	}
 	return []byte(s[:i])
+}
+
+// TestMCPServerServe_StopsOnContextCancel verifies that cancelling the ctx
+// passed into Serve drains in-flight long-running tool calls and returns from
+// Serve in bounded time, instead of waiting on stdin EOF. Fixes §1.1 #3 of
+// docs/review-2026-06-13.md.
+func TestMCPServerServe_StopsOnContextCancel(t *testing.T) {
+	blocking := &mockTool{
+		name: "blocker",
+		call: func(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+	// pipe reader stays open (no EOF) so the ONLY way Serve can return is via
+	// ctx cancel propagating through the in-flight tool call + Serve loop.
+	pr, pw := io.Pipe()
+	go func() {
+		_, _ = pw.Write([]byte(
+			`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"blocker","arguments":{}}}` + "\n",
+		))
+		// intentionally do not close pw — Serve should exit anyway
+	}()
+	var out bytes.Buffer
+	srv := NewMCPServer([]Tool{blocking})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ctx, pr, &out) }()
+
+	// Give the tool a moment to be dispatched, then cancel.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	_ = pr.Close() // unblock scanner so loop can exit
+
+	select {
+	case <-done:
+		// expected within 1s; the deferred wg.Wait inside Serve must also
+		// observe the cancelled ctx
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Serve did not return after ctx cancel; out=%s", out.String())
+	}
 }

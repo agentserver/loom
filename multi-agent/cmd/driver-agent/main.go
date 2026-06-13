@@ -203,7 +203,7 @@ func runServe(args []string) {
 		})
 	}()
 
-	if err := mcpSrv.Serve(os.Stdin, os.Stdout); err != nil {
+	if err := mcpSrv.Serve(ctx, os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "mcp serve:", err)
 	}
 	cancel()
