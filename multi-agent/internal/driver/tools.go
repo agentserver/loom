@@ -756,9 +756,19 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 				TaskID: taskID,
 				Status: info.Status,
 			})
+			// SyncWrites pulls PUT-back files from the observer; failure here
+			// (e.g. observer 401 from a botched bootstrap) used to abort the
+			// whole wait_task and surface as error to Claude — even though
+			// the remote task is already completed and the user's actual
+			// output is right there in `unwrappedOutput`. Degrade to warning
+			// instead, matching the §1.1 #1 invariant ("helper failure does
+			// not destroy the main response"). The PR #11 e2e re-run found
+			// this gap.
+			var warnings []string
 			if w.t.useObserverRelay() {
 				if _, err := w.t.observerRelay().SyncWrites(ctx, args.TaskID, w.t.cfg.DriverDefaults.DisableUIDCheck, w.t.reg); err != nil {
-					return nil, &MCPToolError{Message: "observer sync writes: " + err.Error()}
+					warnings = append(warnings, "observer sync writes: "+err.Error())
+					w.t.logHelperErr("observer_relay", "sync_writes", err)
 				}
 			}
 			written := w.t.reg.WrittenFiles(args.TaskID)
@@ -774,6 +784,7 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 				FinalOutput         string        `json:"final_output"`
 				IsFinal             bool          `json:"is_final"`
 				WrittenFiles        []WrittenFile `json:"written_files"`
+				Warnings            []string      `json:"warnings,omitempty"`
 			}{
 				Status:              info.Status,
 				Output:              output,
@@ -784,6 +795,7 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 				FinalOutput:         firstNonEmpty(progress.FinalOutput, output),
 				IsFinal:             true,
 				WrittenFiles:        written,
+				Warnings:            warnings,
 			})
 		}
 		if time.Now().After(deadline) {
