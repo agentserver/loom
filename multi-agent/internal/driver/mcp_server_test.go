@@ -321,3 +321,39 @@ func TestMCPServerServe_StopsOnContextCancel(t *testing.T) {
 		t.Fatalf("Serve did not return after ctx cancel; out=%s", out.String())
 	}
 }
+
+// TestMCPServerWriteLine_EPIPETriggersStop verifies that when stdout is
+// closed (e.g. parent Claude Code process died), Serve detects the broken
+// pipe on the next write and exits instead of silently looping on a dead
+// channel. Fixes §1.1 #3 (second half) of docs/review-2026-06-13.md.
+func TestMCPServerWriteLine_EPIPETriggersStop(t *testing.T) {
+	tool := &mockTool{
+		name: "ping",
+		call: func(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+			return json.RawMessage(`{"ok":true}`), nil
+		},
+	}
+	// reader side closed → any Write returns ErrClosedPipe
+	pr, pw := io.Pipe()
+	_ = pr.Close()
+
+	in := strings.NewReader(
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ping","arguments":{}}}` + "\n" +
+			`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ping","arguments":{}}}` + "\n",
+	)
+	srv := NewMCPServer([]Tool{tool})
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(context.Background(), in, pw) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Serve returned nil; expected broken-pipe error")
+		}
+		if !strings.Contains(err.Error(), "broken") && !strings.Contains(err.Error(), "closed pipe") {
+			t.Fatalf("Serve err = %v; expected broken-pipe", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not exit on broken pipe")
+	}
+}
