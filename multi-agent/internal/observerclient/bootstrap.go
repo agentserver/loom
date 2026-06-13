@@ -158,6 +158,11 @@ func (c *Client) handle401(ctx context.Context) {
 	c.lastReRegister = now
 	c.tokenMu.Unlock()
 
+	// Pause run()'s dequeue while we re-register; otherwise queued events
+	// get popped, hit 401 again, fall under the per-process cooldown
+	// check above, and silently drop. Fixes §1.3 #12.
+	c.setCooldown(reRegisterCoolDur)
+
 	regCtx, cancel := context.WithTimeout(ctx, registerTimeout)
 	defer cancel()
 
@@ -178,4 +183,7 @@ func (c *Client) handle401(ctx context.Context) {
 			"observerclient: token rotated in-memory but file write failed: %v\n", writeErr)
 	}
 	fmt.Fprintln(os.Stderr, "observerclient: ingest 401 → re-registered successfully")
+	// Re-register succeeded — resume dequeue immediately rather than
+	// waiting out the full cooldown window.
+	c.clearCooldown()
 }
