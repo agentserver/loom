@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"time"
 
+	"github.com/yourorg/multi-agent/internal/dispatch"
 	"github.com/yourorg/multi-agent/internal/executor"
 	"github.com/yourorg/multi-agent/internal/store"
 )
@@ -156,6 +159,12 @@ func (p *Poller) execute(ctx context.Context, t pollTask) {
 		SystemContext: t.SystemContext, TimeoutSec: t.TimeoutSeconds,
 	})
 	if err != nil {
+		if errors.Is(err, dispatch.ErrDuplicateTaskRunning) {
+			// Original run still in flight; let it publish terminal state.
+			// (Do not PUT here — would clobber the in-flight state.)
+			fmt.Fprintf(os.Stderr, "poller: skipping duplicate delivery for task %s (already running)\n", t.TaskID)
+			return
+		}
 		if !p.putStatusRetry(ctx, t.TaskID, map[string]interface{}{
 			"status": "failed", "failure_reason": err.Error(),
 		}) {
