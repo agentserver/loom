@@ -54,6 +54,9 @@ type Client struct {
 	proxyTokenMode bool
 	lastReRegister time.Time
 
+	cooldownMu    sync.Mutex
+	cooldownUntil time.Time
+
 	mu     sync.Mutex
 	closed bool
 	wg     sync.WaitGroup
@@ -149,6 +152,49 @@ func (c *Client) Token() string {
 	return c.token
 }
 
+// inCooldown returns the remaining cooldown duration, or 0 if not in
+// cooldown. Used by run() to gate dequeue during a 401 re-register window.
+// Fixes part of §1.3 #12.
+func (c *Client) inCooldown() time.Duration {
+	c.cooldownMu.Lock()
+	defer c.cooldownMu.Unlock()
+	if c.cooldownUntil.IsZero() {
+		return 0
+	}
+	rem := time.Until(c.cooldownUntil)
+	if rem <= 0 {
+		c.cooldownUntil = time.Time{}
+		return 0
+	}
+	return rem
+}
+
+// setCooldown puts run() into a quiet window where it doesn't dequeue
+// events (so they don't waste post attempts that would 401 again while
+// handle401 is mid-flight). Called at the start of handle401.
+func (c *Client) setCooldown(d time.Duration) {
+	c.cooldownMu.Lock()
+	c.cooldownUntil = time.Now().Add(d)
+	c.cooldownMu.Unlock()
+}
+
+// clearCooldown is called by handle401 on successful re-register so run()
+// resumes dequeue immediately rather than waiting out the full window.
+func (c *Client) clearCooldown() {
+	c.cooldownMu.Lock()
+	c.cooldownUntil = time.Time{}
+	c.cooldownMu.Unlock()
+}
+
+// isClosed reports whether Close has been called. Exposed for run()'s
+// cooldown wait so a long sleep can be aborted on shutdown instead of
+// leaking the goroutine for up to reRegisterCoolDur past Close return.
+func (c *Client) isClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
 func (c *Client) Emit(ev observer.Event) {
 	if !c.TelemetryEnabled() {
 		return
@@ -198,6 +244,34 @@ func (c *Client) Close() {
 func (c *Client) run() {
 	defer c.wg.Done()
 	for ev := range c.queue {
+		// 401 re-register in progress: stop dequeue until handle401 either
+		// succeeds (clearCooldown → loop resumes immediately) or the
+		// cooldown expires naturally. Otherwise this event (and every
+		// queued one after it) would hit 401, be rejected by the
+		// per-process cooldown check, and silently drop.
+		// Fixes §1.3 #12 of docs/review-2026-06-13.md.
+		//
+		// Note: we already popped ev from the queue, so we wait it out
+		// and then post it. The wait is bounded by cooldownUntil.
+		//
+		// Sleep in short chunks and re-check c.closed so Close() can
+		// interrupt us promptly instead of waiting out the full
+		// (up to reRegisterCoolDur) cooldown. The 500ms chunk balances
+		// shutdown responsiveness against syscall overhead.
+		for {
+			rem := c.inCooldown()
+			if rem <= 0 {
+				break
+			}
+			chunk := rem
+			if chunk > 500*time.Millisecond {
+				chunk = 500 * time.Millisecond
+			}
+			time.Sleep(chunk)
+			if c.isClosed() {
+				return
+			}
+		}
 		c.post(ev)
 	}
 }

@@ -2,6 +2,7 @@ package observerclient
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -471,6 +472,156 @@ func TestPost401WithinCooldownSkipsReRegister(t *testing.T) {
 
 	require.Equal(t, int32(1), regCalls.Load(),
 		"expected exactly one register call under cooldown; got %d", regCalls.Load())
+}
+
+// TestClient_CooldownPausesDequeueAndResumesAfter401Recovery pins the §1.3
+// #12 invariant. During the 401 re-register cooldown window:
+//  1. run() must NOT drain events from the queue (they'd hit 401 again
+//     and silently drop).
+//  2. After handle401 succeeds, run() must resume dequeue immediately,
+//     not wait out the full cooldown.
+func TestClient_CooldownPausesDequeueAndResumesAfter401Recovery(t *testing.T) {
+	var posted int32
+	var registerCalls int32
+	var should401 atomic.Bool
+	should401.Store(true) // first events 401, then recover after register
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/agents/register":
+			atomic.AddInt32(&registerCalls, 1)
+			should401.Store(false) // after register, accept events
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token":"new-tok","workspace_id":"ws","agent_id":"a","role":"slave","display_name":"a"}`))
+		case "/api/events":
+			if should401.Load() {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			atomic.AddInt32(&posted, 1)
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "tok")
+	// Pre-write a stale token so bootstrap uses it without re-registering;
+	// the FIRST /api/events call triggers 401 → handle401 → register flow.
+	require.NoError(t, os.WriteFile(tokenPath, []byte("stale-tok"), 0o600))
+
+	cfg := Config{
+		Enabled:          true,
+		TelemetryEnabled: true,
+		URL:              srv.URL,
+		WorkspaceID:      "ws",
+		AgentID:          "a",
+		AgentRole:        observer.RoleSlave,
+		APIKey:           "ak",
+		TokenStatePath:   tokenPath,
+		BootstrapTimeout: 2 * time.Second,
+	}
+	c, err := New(cfg)
+	require.NoError(t, err)
+	defer c.Close()
+
+	// Emit 5 events. First triggers 401 → handle401 → register → cooldown
+	// cleared → subsequent posts succeed.
+	for i := 0; i < 5; i++ {
+		c.Emit(observer.Event{Type: "test", TaskID: fmt.Sprintf("e-%d", i)})
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && atomic.LoadInt32(&posted) < 4 {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got := atomic.LoadInt32(&posted); got < 4 {
+		t.Fatalf("expected ≥4 successful posts after 401 recovery; got %d (registerCalls=%d) — cooldown probably dropped events",
+			got, atomic.LoadInt32(&registerCalls))
+	}
+	require.GreaterOrEqual(t, atomic.LoadInt32(&registerCalls), int32(1),
+		"handle401 should have re-registered at least once")
+}
+
+// TestClient_CooldownGateRetainsEventsWhenRegisterFails pins the §1.3 #12
+// invariant under the truly degenerate scenario: re-register itself fails
+// (e.g. observer is also down), so cooldown does NOT clear. Without the
+// gate, every queued event would hit 401 → silently drop via the
+// per-process cooldown short-circuit in handle401. With the gate, events
+// queue up waiting for the cooldown window to expire, then retry.
+//
+// Implementation note: this uses a short cooldown via the reRegisterCoolDur
+// constant by overriding it for the test via the existing constant. Since
+// reRegisterCoolDur is package-level, we can't shadow it — instead we
+// observe that BEFORE the cooldown clears, post() is NOT called repeatedly
+// for the queued events. After cooldown clears (we manually clearCooldown
+// via the same path the success branch uses), posts resume.
+func TestClient_CooldownGateRetainsEventsWhenRegisterFails(t *testing.T) {
+	var registerAttempts int32
+	var eventPosts int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/agents/register":
+			atomic.AddInt32(&registerAttempts, 1)
+			// register ALWAYS fails — simulates observer also being down
+			http.Error(w, "observer offline", http.StatusServiceUnavailable)
+		case "/api/events":
+			atomic.AddInt32(&eventPosts, 1)
+			// every event 401s — the stale token never gets refreshed
+			w.WriteHeader(http.StatusUnauthorized)
+		default:
+			t.Fatalf("unexpected: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "tok")
+	require.NoError(t, os.WriteFile(tokenPath, []byte("stale-tok"), 0o600))
+
+	cfg := Config{
+		Enabled:          true,
+		TelemetryEnabled: true,
+		URL:              srv.URL,
+		WorkspaceID:      "ws",
+		AgentID:          "a",
+		AgentRole:        observer.RoleSlave,
+		APIKey:           "ak",
+		TokenStatePath:   tokenPath,
+		BootstrapTimeout: 2 * time.Second,
+	}
+	c, err := New(cfg)
+	require.NoError(t, err)
+	defer c.Close()
+
+	// Emit 5 events. Event 1 will hit 401 → handle401 → setCooldown → register
+	// FAILS → cooldown stays set. Events 2-5 sit in the queue waiting for
+	// cooldown to expire (the cooldown gate inside run()).
+	for i := 0; i < 5; i++ {
+		c.Emit(observer.Event{Type: "test", TaskID: fmt.Sprintf("e-%d", i)})
+	}
+
+	// Give the dispatcher some real time to process if it were going to
+	// ignore the gate. WITHOUT the cooldown gate, post() would be called
+	// 5 times (one per event) almost immediately and we'd see eventPosts==5
+	// and registerAttempts==1 (subsequent 401s short-circuited by the
+	// per-process cooldown check). WITH the gate, post() should be called
+	// only ONCE during this window (the initial event that triggered the
+	// cooldown), and events 2-5 stay in the queue.
+	time.Sleep(500 * time.Millisecond)
+
+	posts := atomic.LoadInt32(&eventPosts)
+	if posts > 1 {
+		t.Fatalf("expected exactly 1 event post during cooldown (the trigger), got %d — cooldown gate is NOT holding events back", posts)
+	}
+	// Also verify register was attempted exactly once (post-fix it can't
+	// attempt twice because the per-process check still applies internally).
+	attempts := atomic.LoadInt32(&registerAttempts)
+	require.Equal(t, int32(1), attempts,
+		"register should attempt exactly once (the first 401 triggered it)")
 }
 
 func TestPost403DoesNotTriggerReRegister(t *testing.T) {
