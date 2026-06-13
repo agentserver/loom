@@ -95,17 +95,22 @@ func (t *Tools) emit(ev observer.Event) {
 	}
 }
 
-// logRelayErr surfaces an observer-relay operation error in two places:
-// stderr (so it shows up in driver-agent's log) and the audit log
-// (so it's queryable later). Used by callers that intentionally degrade
-// relay failures to warnings instead of aborting the request.
-func (t *Tools) logRelayErr(op string, err error) {
+// logHelperErr surfaces a helper-step failure (one the caller intentionally
+// degraded to a warning instead of returning as error) in two places:
+//   - stderr, formatted as "driver: <category> <op>: <err>"
+//   - audit log, with Event "<category>_error", Op, and Error fields
+//
+// category names the subsystem (e.g. "observer_relay", "driver_journal") so
+// operators can grep the right namespace; mixing them was the PR #10 P2 bug.
+// op is a stable short identifier for the failing operation
+// (e.g. "update_write_task", "record_delegated_task").
+func (t *Tools) logHelperErr(category, op string, err error) {
 	if err == nil {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "driver: observer relay %s: %v\n", op, err)
+	fmt.Fprintf(os.Stderr, "driver: %s %s: %v\n", category, op, err)
 	if t.audit != nil {
-		t.audit.Log(AuditEvent{Event: "observer_relay_error", Op: op, Error: err.Error()})
+		t.audit.Log(AuditEvent{Event: category + "_error", Op: op, Error: err.Error()})
 	}
 }
 
@@ -530,7 +535,7 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		TimeoutSec:        timeout,
 	}); err != nil {
 		warnings = append(warnings, "record delegated task: "+err.Error())
-		s.t.logRelayErr("record_delegated_task", err)
+		s.t.logHelperErr("driver_journal", "record_delegated_task", err)
 	}
 
 	s.t.emit(observer.Event{
@@ -548,7 +553,7 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	for _, writeID := range observerWriteIDs {
 		if err := s.t.observerRelay().UpdateWriteTask(ctx, writeID, resp.TaskID); err != nil {
 			warnings = append(warnings, fmt.Sprintf("observer update_write_task %s: %v", writeID, err))
-			s.t.logRelayErr("update_write_task", err)
+			s.t.logHelperErr("observer_relay", "update_write_task", err)
 		}
 	}
 	s.t.reg.TrackTask(resp.TaskID, writeTokens)
@@ -1139,7 +1144,7 @@ func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		Wait:       true,
 		TimeoutSec: timeout,
 	}); err != nil {
-		r.t.logRelayErr("record_delegated_task", err)
+		r.t.logHelperErr("driver_journal", "record_delegated_task", err)
 	}
 
 	return r.t.waitDelegatedTask(ctx, resp.TaskID, timeout)

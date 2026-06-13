@@ -71,7 +71,7 @@ func (u *unregisterSlaveMCPTool) Call(ctx context.Context, raw json.RawMessage) 
 		Wait:              true,
 		TimeoutSec:        args.TimeoutSec,
 	}); err != nil {
-		u.t.logRelayErr("record_delegated_task", err)
+		u.t.logHelperErr("driver_journal", "record_delegated_task", err)
 	}
 	return u.t.waitDelegatedTask(ctx, resp.TaskID, args.TimeoutSec)
 }

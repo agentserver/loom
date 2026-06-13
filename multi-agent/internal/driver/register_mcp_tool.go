@@ -76,7 +76,7 @@ func (r *registerSlaveMCPTool) Call(ctx context.Context, raw json.RawMessage) (j
 		Wait:              true,
 		TimeoutSec:        args.TimeoutSec,
 	}); err != nil {
-		r.t.logRelayErr("record_delegated_task", err)
+		r.t.logHelperErr("driver_journal", "record_delegated_task", err)
 	}
 	return r.t.waitDelegatedTask(ctx, resp.TaskID, args.TimeoutSec)
 }

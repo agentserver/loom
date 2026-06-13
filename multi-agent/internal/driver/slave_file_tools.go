@@ -142,7 +142,7 @@ func (r *readSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (json
 		Skill:             "file",
 		Wait:              true,
 	}); err != nil {
-		r.t.logRelayErr("record_delegated_task", err)
+		r.t.logHelperErr("driver_journal", "record_delegated_task", err)
 	}
 	waitOut, err := r.t.waitDelegatedTask(ctx, resp.TaskID, 0)
 	if err != nil {
@@ -355,7 +355,7 @@ func (w *writeSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (jso
 		Skill:             "file",
 		Wait:              true,
 	}); err != nil {
-		w.t.logRelayErr("record_delegated_task", err)
+		w.t.logHelperErr("driver_journal", "record_delegated_task", err)
 	}
 	waitOut, err := w.t.waitDelegatedTask(ctx, resp.TaskID, 0)
 	if err != nil {
@@ -437,7 +437,7 @@ func (s *statSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (json
 		Skill:             "file",
 		Wait:              true,
 	}); err != nil {
-		s.t.logRelayErr("record_delegated_task", err)
+		s.t.logHelperErr("driver_journal", "record_delegated_task", err)
 	}
 	waitOut, err := s.t.waitDelegatedTask(ctx, resp.TaskID, 0)
 	if err != nil {
