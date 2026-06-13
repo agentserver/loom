@@ -188,6 +188,29 @@ func (s *Scheduler) MarkDownstreamSkipped(failedID string) {
 	}
 }
 
+// MarkOrphaned marks a known scheduler node as finished:skipped without any
+// transitive walk. Used by runFanout after a MarkSuperseded → Append sequence
+// when a freshly-appended node deps on the just-superseded id: Append accepts
+// the dep (it's a known node), but the readiness check correctly keeps the
+// node out of pending (its dep is finished:skipped, not 'completed'). Without
+// an explicit signal the node would be invisible to AllFinished()/reducer/
+// observer — a silent-orphan regression. Returns the FinishedNode and true
+// if the node was previously known and not already finished; otherwise the
+// zero value and false.
+func (s *Scheduler) MarkOrphaned(nodeID, reason string) (FinishedNode, bool) {
+	if _, known := s.nodeByID[nodeID]; !known {
+		return FinishedNode{}, false
+	}
+	if _, done := s.finished[nodeID]; done {
+		return FinishedNode{}, false
+	}
+	delete(s.pending, nodeID)
+	delete(s.inFlight, nodeID)
+	fn := FinishedNode{NodeID: nodeID, Status: "skipped", Error: reason}
+	s.finished[nodeID] = fn
+	return fn, true
+}
+
 func (s *Scheduler) MarkSuperseded(nodeID, reason string) []FinishedNode {
 	var out []FinishedNode
 	mark := func(id string) {

@@ -576,6 +576,27 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 					return executor.Result{}, fmt.Errorf("invalid mcp validation replan: %w", err)
 				}
 				emitPlanningCompleted(newPlan)
+				// Supersede the old node FIRST, BEFORE appending the new plan.
+				// If we Append first, Append's commit phase registers an
+				// s.rev[n.ID] edge for any new node that depends_on n.ID;
+				// MarkSuperseded(n.ID) then walks that edge and transitively
+				// marks the new node skipped. That conflates "the original
+				// is being replaced" with "the new node is being cancelled"
+				// based on call ordering rather than planner intent. By
+				// superseding first, MarkSuperseded only sees n.ID's
+				// pre-replan reverse-deps; the new node is then appended
+				// cleanly. Append's readiness check (Task 3) sees n.ID as
+				// finished:skipped (not 'completed') so a new node that
+				// depends on n.ID stays out of pending — better than the
+				// previous order's silent-orphan-or-transitive-skip
+				// behavior whose outcome depended on call sequence.
+				// See §1.2 #8 (part 2) of docs/review-2026-06-13.md.
+				supersededByID := map[string]bool{}
+				for _, skipped := range sched.MarkSuperseded(n.ID, "superseded by mcp validation replan") {
+					optionalByID[skipped.NodeID] = true
+					recordSkippedDone(skipped)
+					supersededByID[skipped.NodeID] = true
+				}
 				if err := sched.Append(newPlan); err != nil {
 					cancelAll()
 					return executor.Result{}, fmt.Errorf("append mcp validation replan: %w", err)
@@ -585,9 +606,27 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 					optionalByID[appended.ID] = appended.Optional
 				}
 				appendSubTaskRows(o.store, t.ID, newPlan)
-				for _, skipped := range sched.MarkSuperseded(n.ID, "superseded by mcp validation replan") {
-					optionalByID[skipped.NodeID] = true
-					recordSkippedDone(skipped)
+				// A replan node that depends on the just-superseded id is
+				// accepted by Append (the dep is a known scheduler node) but
+				// the readiness check correctly keeps it out of pending
+				// (dep is finished:skipped, not 'completed'). Without an
+				// explicit signal, the node would be invisible to the
+				// reducer + observer — a silent-orphan regression. Mark each
+				// such node as skipped so the reducer sees it via
+				// AllFinished() and the observer sees an explicit done
+				// event. See §1.2 #8 (part 2) of docs/review-2026-06-13.md.
+				for _, np := range newPlan {
+					for _, dep := range np.DependsOn {
+						if !supersededByID[dep] {
+							continue
+						}
+						reason := fmt.Sprintf("orphaned: depends on superseded %s", dep)
+						if fn, ok := sched.MarkOrphaned(np.ID, reason); ok {
+							optionalByID[fn.NodeID] = true
+							recordSkippedDone(fn)
+						}
+						break
+					}
 				}
 				continue
 			}
