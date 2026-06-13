@@ -12,8 +12,14 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/yourorg/multi-agent/internal/capability"
+)
+
+const (
+	mcpHTTPTimeout      = 30 * time.Second
+	mcpMaxResponseBytes = 16 * 1024 * 1024 // 16 MiB
 )
 
 type MCPServerCfg struct {
@@ -38,7 +44,7 @@ func NewMCPExecutor(cfg map[string]MCPServerCfg) *MCPExecutor {
 	return &MCPExecutor{
 		cfg:     cfg,
 		stdios:  make(map[string]*stdioConn),
-		httpCli: &http.Client{},
+		httpCli: &http.Client{Timeout: mcpHTTPTimeout},
 	}
 }
 
@@ -267,9 +273,12 @@ func (e *MCPExecutor) callHTTP(ctx context.Context, cfg MCPServerCfg, tool strin
 		return nil, fmt.Errorf("mcp http: %w", err)
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, mcpMaxResponseBytes+1))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read mcp http response: %w", err)
+	}
+	if int64(len(raw)) > mcpMaxResponseBytes {
+		return nil, fmt.Errorf("mcp http response exceeds %d bytes; refusing to buffer", mcpMaxResponseBytes)
 	}
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("mcp http %d: %s", resp.StatusCode, string(raw))
