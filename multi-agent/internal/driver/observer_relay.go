@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -16,6 +17,13 @@ import (
 	"strings"
 	"time"
 )
+
+// defaultObserverWritesMaxBytes caps the JSON response from
+// GET /api/writes. Mirrors FilesHandler.maxPutBytes (1 GiB) so that
+// driver_defaults.artifact_transport=observer_lazy can't be exploited as
+// an OOM channel — Bug #18 hardening applied to /files/put; this is the
+// PR #14 P1 follow-up for the observer_lazy path.
+const defaultObserverWritesMaxBytes int64 = 1 << 30
 
 // TokenSource exposes a live observer Bearer token. *observerclient.Client
 // satisfies this; the driver test suite supplies a stub implementation.
@@ -27,6 +35,10 @@ type ObserverRelay struct {
 	baseURL string
 	src     TokenSource
 	http    *http.Client
+	// maxWriteBytes caps the JSON response from GET /api/writes that
+	// SyncWrites decodes. Default defaultObserverWritesMaxBytes. Field on
+	// struct so tests can lower it without allocating gigabytes.
+	maxWriteBytes int64
 }
 
 func NewObserverRelay(cfg *Config, src TokenSource) *ObserverRelay {
@@ -34,9 +46,10 @@ func NewObserverRelay(cfg *Config, src TokenSource) *ObserverRelay {
 		return nil
 	}
 	return &ObserverRelay{
-		baseURL: strings.TrimRight(cfg.Observer.URL, "/"),
-		src:     src,
-		http:    http.DefaultClient,
+		baseURL:       strings.TrimRight(cfg.Observer.URL, "/"),
+		src:           src,
+		http:          http.DefaultClient,
+		maxWriteBytes: defaultObserverWritesMaxBytes,
 	}
 }
 
@@ -356,8 +369,24 @@ func (r *ObserverRelay) SyncWrites(ctx context.Context, taskID string, disableUI
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("list writes status %d", resp.StatusCode)
 	}
+	// Cap the JSON response so encoding/json doesn't allocate gigabytes
+	// of base64-decoded Content into memory. Mirrors Bug #18's body cap on
+	// /files/put — same threat (driver-side OOM via attacker-controlled
+	// payload), same threshold. Read one byte past the cap so we can tell
+	// "exactly at limit" from "over limit".
+	max := r.maxWriteBytes
+	if max <= 0 {
+		max = defaultObserverWritesMaxBytes
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
+	if err != nil {
+		return nil, fmt.Errorf("read writes response: %w", err)
+	}
+	if int64(len(body)) > max {
+		return nil, fmt.Errorf("observer writes response exceeds %d bytes", max)
+	}
 	var listed observerWritesResponse
-	if err := json.NewDecoder(resp.Body).Decode(&listed); err != nil {
+	if err := json.Unmarshal(body, &listed); err != nil {
 		return nil, err
 	}
 	written := make([]WrittenFile, 0, len(listed.Writes))
@@ -371,12 +400,7 @@ func (r *ObserverRelay) SyncWrites(ctx context.Context, taskID string, disableUI
 		if err := os.MkdirAll(filepath.Dir(item.Path), 0o755); err != nil {
 			return nil, err
 		}
-		tmp := fmt.Sprintf("%s.tmp.%d", item.Path, time.Now().UnixNano())
-		if err := os.WriteFile(tmp, item.Content, 0o644); err != nil {
-			return nil, err
-		}
-		if err := os.Rename(tmp, item.Path); err != nil {
-			_ = os.Remove(tmp)
+		if err := placeObserverBlob(item.Path, item.Content, item.Overwrite); err != nil {
 			return nil, err
 		}
 		sha := item.SHA256
@@ -394,6 +418,69 @@ func (r *ObserverRelay) SyncWrites(ctx context.Context, taskID string, disableUI
 		}
 	}
 	return written, nil
+}
+
+// placeObserverBlob writes content to target with the same crash- and
+// race-safety invariants as FilesHandler.handlePut:
+//
+//   - tmp opened O_CREATE|O_WRONLY|O_EXCL, mode 0o600 (no partial file
+//     visible world-readable, no clobber of a stale .tmp from a prior run);
+//   - Sync + Close before placement;
+//   - overwrite=true: os.Rename atomically clobbers target;
+//   - overwrite=false: os.Link gives O_EXCL-on-destination — concurrent
+//     SyncWrites against the same path can't both win, and fs.ErrExist is
+//     surfaced as a 409-equivalent error;
+//   - tmp removed on every error path (no leaked partials);
+//   - parent dir best-effort fsync so the new dirent survives a crash
+//     between rename/link and dir flush.
+//
+// Mirrors /files/put hardening from Bug #18 / PR #14 review P2+P3 — the
+// observer_lazy artifact transport used to bypass all of this. See PR #14
+// P1 follow-up review.
+func placeObserverBlob(target string, content []byte, overwrite bool) error {
+	parent := filepath.Dir(target)
+	tmp := fmt.Sprintf("%s.tmp.%d", target, time.Now().UnixNano())
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := out.Write(content); err != nil {
+		out.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if overwrite {
+		if err := os.Rename(tmp, target); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+	} else {
+		if err := os.Link(tmp, target); err != nil {
+			_ = os.Remove(tmp)
+			if errors.Is(err, fs.ErrExist) {
+				return fmt.Errorf("target exists and overwrite=false")
+			}
+			return err
+		}
+		// Link leaves tmp visible at the tmp name too; remove the tmp
+		// alias now that target is durably linked. Same inode either way.
+		_ = os.Remove(tmp)
+	}
+	// Best-effort parent dir fsync — tmpfs ignores it; ignore errors.
+	if pf, err := os.Open(parent); err == nil {
+		_ = pf.Sync()
+		pf.Close()
+	}
+	return nil
 }
 
 func mimeForPath(path string) string {
