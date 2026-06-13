@@ -314,7 +314,7 @@ func (r *ObserverRelay) ServePendingLoop(ctx context.Context, reg *FileRegistry,
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		if err := r.ServePendingOnce(ctx, reg, audit); err != nil {
+		if err := r.ServePendingOnce(ctx, reg, audit); err != nil && !errors.Is(err, context.Canceled) && ctx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "driver: observer relay serve pending: %v\n", err)
 			if audit != nil {
 				audit.Log(AuditEvent{Event: "observer_relay_error", Op: "serve_pending", Error: err.Error()})

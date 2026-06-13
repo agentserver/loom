@@ -128,3 +128,57 @@ func TestServePendingLoop_LogsErrorsToStderrAndAudit(t *testing.T) {
 		t.Fatalf("audit missing: %s", body)
 	}
 }
+
+// TestServePendingLoop_SuppressesShutdownNoise verifies that errors caused by
+// ctx cancellation during shutdown are NOT logged (would be spammy noise that
+// looks like real failures during clean driver shutdowns).
+func TestServePendingLoop_SuppressesShutdownNoise(t *testing.T) {
+	// server blocks until ctx-cancel of the in-flight request returns ctx.Canceled
+	hold := make(chan struct{})
+	defer close(hold)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-hold:
+		case <-r.Context().Done():
+		}
+	}))
+	defer server.Close()
+
+	cfg := &Config{}
+	cfg.Observer.Enabled = true
+	cfg.Observer.URL = server.URL
+	relay := NewObserverRelay(cfg, stubTokenSource("t"))
+
+	dir := t.TempDir()
+	audit, err := NewAuditLog(dir + "/audit.log")
+	if err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	defer audit.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan string, 1)
+	go func() {
+		stderr := captureStderr(t, func() {
+			relay.ServePendingLoop(ctx, NewFileRegistry(16), audit, 20*time.Millisecond)
+		})
+		done <- stderr
+	}()
+	// Let the first tick fire and block on the server, then cancel.
+	time.Sleep(80 * time.Millisecond)
+	cancel()
+
+	var stderr string
+	select {
+	case stderr = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServePendingLoop did not exit after ctx cancel")
+	}
+	if strings.Contains(stderr, "driver: observer relay serve pending:") {
+		t.Fatalf("shutdown noise leaked to stderr: %q", stderr)
+	}
+	body, _ := os.ReadFile(dir + "/audit.log")
+	if strings.Contains(string(body), `"event":"observer_relay_error"`) {
+		t.Fatalf("shutdown noise leaked to audit: %s", body)
+	}
+}
