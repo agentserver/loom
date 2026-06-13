@@ -4,10 +4,42 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/yourorg/multi-agent/internal/executor"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
+
+// validatePermissionsPatch enforces value-level sanitation on
+// agentbackend.Patch list fields before reaching store.Patch. Rejects
+// '*' wildcards (would broaden allow or narrow deny silently) and
+// empty/whitespace entries (ambiguous). Unknown JSON top-level fields
+// are silently ignored at unmarshal time (typed struct), so no need to
+// validate them here.
+// Fixes §1.4 #16 of docs/review-2026-06-13.md.
+func validatePermissionsPatch(p agentbackend.Patch) error {
+	lists := []struct {
+		name string
+		list []string
+	}{
+		{"presets", p.Presets},
+		{"allow_add", p.AllowAdd},
+		{"allow_remove", p.AllowRemove},
+		{"deny_add", p.DenyAdd},
+		{"deny_remove", p.DenyRemove},
+	}
+	for _, l := range lists {
+		for _, item := range l.list {
+			if item == "*" {
+				return fmt.Errorf("permissions patch %s contains '*' wildcard; reject", l.name)
+			}
+			if strings.TrimSpace(item) == "" {
+				return fmt.Errorf("permissions patch %s contains empty entry; reject", l.name)
+			}
+		}
+	}
+	return nil
+}
 
 type permissionsExecutor struct {
 	store   agentbackend.PermissionsStore
@@ -37,6 +69,9 @@ func (e *permissionsExecutor) Run(ctx context.Context, t executor.Task, sink exe
 	case "get":
 		state, err = e.store.Get(ctx)
 	case "patch":
+		if vErr := validatePermissionsPatch(req.Patch); vErr != nil {
+			return executor.Result{}, vErr
+		}
 		state, err = e.store.Patch(ctx, req.Patch)
 		if err == nil && e.refresh != nil {
 			err = e.refresh(ctx, "permission update")
