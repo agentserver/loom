@@ -15,6 +15,47 @@ import (
 
 const fileMaxReadBytes = 8 * 1024 * 1024 // 8 MiB hard cap per read.
 
+// resolveExistingPrefix returns filepath.EvalSymlinks(p) if p exists.
+// If p doesn't exist, it evaluates the longest existing prefix and
+// rejoins the non-existent tail unchanged. This lets jail checks work
+// even when the caller is about to *create* a file at p.
+func resolveExistingPrefix(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	cur := abs
+	var tail []string
+	for {
+		real, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			if len(tail) == 0 {
+				return real, nil
+			}
+			parts := append([]string{real}, reverse(tail)...)
+			return filepath.Join(parts...), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent, leaf := filepath.Split(cur)
+		parent = filepath.Clean(parent)
+		if parent == cur {
+			return abs, nil
+		}
+		tail = append(tail, leaf)
+		cur = parent
+	}
+}
+
+func reverse(s []string) []string {
+	out := make([]string, len(s))
+	for i, v := range s {
+		out[len(s)-1-i] = v
+	}
+	return out
+}
+
 type FileConfig struct {
 	WorkDir string
 }
