@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -60,9 +61,52 @@ type FileConfig struct {
 	WorkDir string
 }
 
-type FileExecutor struct{ cfg FileConfig }
+type FileExecutor struct {
+	cfg     FileConfig
+	workDir string
+}
 
-func NewFileExecutor(cfg FileConfig) *FileExecutor { return &FileExecutor{cfg: cfg} }
+func NewFileExecutor(cfg FileConfig) *FileExecutor {
+	wd := cfg.WorkDir
+	if wd == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			wd = cwd
+		}
+	}
+	if abs, err := filepath.Abs(wd); err == nil {
+		wd = abs
+	}
+	// EvalSymlinks so the jail comparison in assertInJail (which compares
+	// against symlink-resolved candidate paths via resolveExistingPrefix)
+	// has matching realpaths on both sides. Without this, a WorkDir that
+	// goes through any symlinked ancestor (macOS /tmp→/private/tmp;
+	// Linux /bin→/usr/bin, /var/run→/run; etc.) would reject every
+	// legitimate inside-jail read. Best-effort: if WorkDir doesn't exist
+	// yet, keep the abs result so write-with-mkdir still works.
+	if resolved, err := filepath.EvalSymlinks(wd); err == nil {
+		wd = resolved
+	}
+	return &FileExecutor{cfg: cfg, workDir: wd}
+}
+
+// assertInJail rejects paths that resolve (after symlinks) outside e.workDir.
+// LLM-driven file ops can't escape the configured jail via absolute paths,
+// '..' traversal, or symlinks pointing out of WorkDir.
+// Fixes §1.4 #14 of docs/review-2026-06-13.md.
+func (e *FileExecutor) assertInJail(abs string) error {
+	real, err := resolveExistingPrefix(abs)
+	if err != nil {
+		return fmt.Errorf("resolve %s: %w", abs, err)
+	}
+	rel, err := filepath.Rel(e.workDir, real)
+	if err != nil {
+		return fmt.Errorf("path %s outside jail %s: %w", abs, e.workDir, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("path %s escapes jail %s (rel=%s)", abs, e.workDir, rel)
+	}
+	return nil
+}
 
 type fileRequest struct {
 	Op       string `json:"op"`
@@ -109,6 +153,9 @@ func (e *FileExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, erro
 		return Result{}, errors.New("file path is required")
 	}
 	abs := e.resolvePath(req.Path)
+	if err := e.assertInJail(abs); err != nil {
+		return Result{}, err
+	}
 	switch req.Op {
 	case "read":
 		return e.doRead(req, abs, sink)
@@ -121,15 +168,16 @@ func (e *FileExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, erro
 	}
 }
 
+// resolvePath joins a relative caller path against e.workDir (the absolute,
+// symlink-resolved jail root computed in NewFileExecutor). Using e.workDir
+// rather than re-reading e.cfg.WorkDir / os.Getwd keeps a single source of
+// truth and prevents split-brain between the path the jail check sees and
+// the path the filesystem op uses.
 func (e *FileExecutor) resolvePath(p string) string {
 	if filepath.IsAbs(p) {
 		return p
 	}
-	base := e.cfg.WorkDir
-	if base == "" {
-		base, _ = os.Getwd()
-	}
-	return filepath.Join(base, p)
+	return filepath.Join(e.workDir, p)
 }
 
 func (e *FileExecutor) doRead(req fileRequest, abs string, sink Sink) (Result, error) {

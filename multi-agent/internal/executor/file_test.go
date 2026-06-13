@@ -121,12 +121,14 @@ func TestFileExecutor_ReadFileNotFound(t *testing.T) {
 }
 
 func TestFileExecutor_ReadAbsolutePath(t *testing.T) {
-	dir := t.TempDir()
-	abs := filepath.Join(dir, "abs.txt")
+	// Absolute paths that resolve inside the configured WorkDir are allowed;
+	// abs paths outside the jail are rejected by TestFileExecutor_RejectsAbsolutePathOutsideJail.
+	workdir := t.TempDir()
+	abs := filepath.Join(workdir, "abs.txt")
 	if err := os.WriteFile(abs, []byte("xyz"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	exec := NewFileExecutor(FileConfig{WorkDir: "/tmp/elsewhere"})
+	exec := NewFileExecutor(FileConfig{WorkDir: workdir})
 	res, err := exec.Run(context.Background(), Task{
 		Prompt: fmt.Sprintf(`{"op":"read","path":%q}`, abs),
 	}, noopSink{})
@@ -139,6 +141,104 @@ func TestFileExecutor_ReadAbsolutePath(t *testing.T) {
 	}
 	if got.Path != abs || got.Content != "xyz" {
 		t.Fatalf("got %+v", got)
+	}
+}
+
+// TestFileExecutor_RejectsAbsolutePathOutsideJail pins §1.4 #14:
+// LLM cannot read /etc/passwd / /root/.ssh/authorized_keys via abs path.
+func TestFileExecutor_RejectsAbsolutePathOutsideJail(t *testing.T) {
+	workdir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	exec := NewFileExecutor(FileConfig{WorkDir: workdir})
+	_, err := exec.Run(context.Background(), Task{
+		ID: "t", Skill: "file",
+		Prompt: fmt.Sprintf(`{"op":"read","path":%q}`, outsideFile),
+	}, noopSink{})
+	if err == nil {
+		t.Fatal("expected error reading outside-jail abs path via FileExecutor; got nil")
+	}
+	if !strings.Contains(err.Error(), "jail") && !strings.Contains(err.Error(), "escape") {
+		t.Fatalf("expected jail-related error, got %v", err)
+	}
+}
+
+// TestFileExecutor_RejectsSymlinkLeapingOutOfJail: a symlink inside the
+// jail that points outside must be rejected when read through.
+func TestFileExecutor_RejectsSymlinkLeapingOutOfJail(t *testing.T) {
+	workdir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(workdir, "link")
+	if err := os.Symlink(outsideFile, linkPath); err != nil {
+		t.Fatal(err)
+	}
+	exec := NewFileExecutor(FileConfig{WorkDir: workdir})
+	_, err := exec.Run(context.Background(), Task{
+		ID: "t", Skill: "file",
+		Prompt: `{"op":"read","path":"link"}`,
+	}, noopSink{})
+	if err == nil {
+		t.Fatal("expected error reading symlink that leaps out of jail; got nil")
+	}
+	if !strings.Contains(err.Error(), "jail") && !strings.Contains(err.Error(), "escape") {
+		t.Fatalf("expected jail error, got %v", err)
+	}
+}
+
+// TestFileExecutor_AcceptsAbsolutePathInsideJail (positive): an absolute
+// path that resolves under WorkDir is OK.
+func TestFileExecutor_AcceptsAbsolutePathInsideJail(t *testing.T) {
+	workdir := t.TempDir()
+	abs := filepath.Join(workdir, "inside.txt")
+	if err := os.WriteFile(abs, []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	exec := NewFileExecutor(FileConfig{WorkDir: workdir})
+	res, err := exec.Run(context.Background(), Task{
+		ID: "t", Skill: "file",
+		Prompt: fmt.Sprintf(`{"op":"read","path":%q}`, abs),
+	}, noopSink{})
+	if err != nil {
+		t.Fatalf("absolute path under jail should be allowed: %v", err)
+	}
+	if !strings.Contains(res.Summary, "ok") {
+		t.Fatalf("read result: %q", res.Summary)
+	}
+}
+
+// TestFileExecutor_AcceptsReadWhenWorkDirIsSymlink pins the Critical fix
+// from PR #14 review: WorkDir that resolves through a symlink (common:
+// macOS /tmp→/private/tmp; Linux /bin→/usr/bin etc.) must not reject
+// legitimate inside-jail reads.
+func TestFileExecutor_AcceptsReadWhenWorkDirIsSymlink(t *testing.T) {
+	realDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(realDir, "inside.txt"), []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Create a symlink elsewhere pointing AT realDir; pass the symlink
+	// path as WorkDir.
+	linkParent := t.TempDir()
+	linkDir := filepath.Join(linkParent, "workdir-link")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Fatal(err)
+	}
+	exec := NewFileExecutor(FileConfig{WorkDir: linkDir})
+	res, err := exec.Run(context.Background(), Task{
+		ID: "t", Skill: "file",
+		Prompt: `{"op":"read","path":"inside.txt"}`,
+	}, noopSink{})
+	if err != nil {
+		t.Fatalf("read via symlinked WorkDir should succeed: %v", err)
+	}
+	if !strings.Contains(res.Summary, "ok") {
+		t.Fatalf("read result: %q", res.Summary)
 	}
 }
 
