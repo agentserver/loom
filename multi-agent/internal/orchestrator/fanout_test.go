@@ -606,6 +606,75 @@ func TestMCPValidationReplanContext_IncludesJSONFieldPathGuidance(t *testing.T) 
 	require.Contains(t, ctx, "Do not replace a direct MCP call with an ordinary chat node")
 }
 
+// TestFanout_ReplanSupersedeBeforeAppend pins the ordering contract of the
+// mcp validation replan path: MarkSuperseded must run BEFORE Append, AND
+// any replan node whose dep is the just-superseded id must be surfaced as
+// an explicit skipped done event (visible to reducer + observer) rather
+// than silently dropped.
+//
+// Setup: round-0 plan = a single mcp node "n0" whose args fail validation;
+// round-1 (replan) plan = a single node "v2" that depends_on "n0". After
+// renamePlanIDs, the new node id is "n0_v2" with dep "n0".
+//
+// With NEW order (MarkSuperseded → Append → MarkOrphaned scan):
+// MarkSuperseded marks ONLY n0 (s.rev[n0] is empty, n0_v2 not yet appended).
+// Append then accepts n0_v2 (dep n0 is known) but leaves it out of pending
+// (n0 is finished:skipped, not 'completed'). The post-Append orphan scan
+// detects n0_v2 deps on a superseded id and marks it skipped explicitly —
+// the reducer sees it via AllFinished() and the observer sees an explicit
+// done event.
+//
+// With OLD order (Append → MarkSuperseded): Append registers n0_v2 in
+// s.rev[n0], so MarkSuperseded(n0) transitively skipped n0_v2 too — same
+// observable effect (skipped event) but for the wrong reason (transitive
+// walk via rev edges instead of explicit orphan detection), and the
+// outcome depended on call ordering rather than planner intent.
+//
+// With INTERMEDIATE (post-Task-4) order (MarkSuperseded → Append, no
+// orphan scan): n0_v2 was orphaned and silently invisible — no done
+// event, no reducer entry — a silent-orphan regression. This test pins
+// the FIX for that regression.
+//
+// Fixes §1.2 #8 (part 2) of docs/review-2026-06-13.md.
+func TestFanout_ReplanSupersedeBeforeAppend(t *testing.T) {
+	rf := filepath.Join(t.TempDir(), "round")
+	t.Setenv("FAKE_PLANNER_ROUND_FILE", rf)
+
+	sdk := &fakeSDKQueue{
+		agents: []agentsdk.AgentCard{agentWithRenderTool(t)},
+	}
+	obs := &fakeObserver{}
+	o := newOrchWithObserver(t, sdk, "plan_mcp_validation_replan_dep_old", obs)
+
+	_, err := o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: "do"})
+
+	// Fanout completes without the 60s scheduler-stuck timeout. n0_v2 is
+	// orphaned (never ready), so no real work runs — but it must be
+	// explicitly reported as skipped so the reducer + observer see it.
+	require.NoError(t, err)
+	require.Empty(t, sdk.dispatched, "n0_v2 must not be dispatched (dep n0 is finished:skipped, not completed)")
+
+	done := eventsOfType(obs.events, observer.EventMasterSubtaskDone)
+	statusByNode := map[string]string{}
+	errByNode := map[string]string{}
+	for _, ev := range done {
+		statusByNode[ev.SubtaskID] = ev.Status
+		var payload map[string]string
+		_ = json.Unmarshal(ev.Payload, &payload)
+		errByNode[ev.SubtaskID] = payload["error"]
+	}
+	require.Equal(t, "skipped", statusByNode["n0"],
+		"original node must be reported as skipped via MarkSuperseded")
+	require.Equal(t, "skipped", statusByNode["n0_v2"],
+		"orphan node n0_v2 must be explicitly reported as skipped via MarkOrphaned — "+
+			"without this it would be invisible to AllFinished()/reducer/observer, "+
+			"and the task would silently 'succeed' with the real work missing. got=%v", statusByNode)
+	require.Contains(t, errByNode["n0_v2"], "orphaned",
+		"orphan event must include a reason explaining the cause")
+	require.Contains(t, errByNode["n0_v2"], "n0",
+		"orphan event must name the superseded dep")
+}
+
 func TestFanout_MCPValidationReplanRejectsDisallowedContractTarget(t *testing.T) {
 	dir := t.TempDir()
 	roundFile := filepath.Join(dir, "round")

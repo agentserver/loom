@@ -72,6 +72,30 @@ EOF
     esac
     echo $((r+1)) > "$rf"
     ;;
+  plan_mcp_validation_replan_dep_old)
+    # Replan path where the new plan node DEPENDS on the original
+    # (about-to-be-superseded) node id. This is a planner design error,
+    # but it's the scenario where MarkSuperseded ordering observably
+    # differs from Append ordering. See TestFanout_ReplanSupersedeBeforeAppend.
+    rf="${FAKE_PLANNER_ROUND_FILE:-/tmp/_fpround}"
+    r=$(cat "$rf" 2>/dev/null || echo 0)
+    case "$r" in
+      0) cat <<'EOF'
+[
+  {"id":"n0","target_id":"agent-a","skill":"mcp","prompt":"{\"server\":\"srv\",\"tool\":\"render\",\"args\":{\"n\":7,\"put_url_128\":\"http://x\"}}"}
+]
+EOF
+         ;;
+      1) cat <<'EOF'
+[
+  {"id":"v2","target_id":"agent-a","prompt":"after","depends_on":["n0"]}
+]
+EOF
+         ;;
+      *) echo "REDUCED";;
+    esac
+    echo $((r+1)) > "$rf"
+    ;;
   plan_optional_failure)
     cat <<'EOF'
 [

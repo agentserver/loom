@@ -255,3 +255,107 @@ func TestScheduler_Append_RejectsSelfDep(t *testing.T) {
 	require.True(t, strings.Contains(err.Error(), "depends on itself"),
 		"error must reference self-dep: %v", err)
 }
+
+// TestScheduler_MarkSupersededBeforeAppend pins the contract that fanout's
+// mcp validation replan relies on: when the original node is superseded
+// BEFORE the new plan is appended, MarkSuperseded only marks the original
+// (its reverse-deps list is still empty for the not-yet-appended new node).
+// The new node then enters Append cleanly — it's known the original is
+// finished:skipped, so the new node never becomes ready (correct: a replan
+// that depends on the superseded id is a planner design error; better to
+// leave the new node orphaned than to silently propagate skipped status
+// through a transient rev[] edge that depends on call order).
+// Fixes §1.2 #8 (part 2) of docs/review-2026-06-13.md.
+func TestScheduler_MarkSupersededBeforeAppend(t *testing.T) {
+	s := NewScheduler([]planner.Node{{ID: "n0", TargetID: "a", Prompt: "p"}}, 4)
+
+	skipped := s.MarkSuperseded("n0", "superseded by replan")
+	require.Len(t, skipped, 1, "only n0 should be skipped; new node not yet appended")
+	require.Equal(t, "n0", skipped[0].NodeID)
+
+	// New node depends on the now-superseded n0. Append must accept (dep is
+	// a known scheduler node) but the new node must NOT become ready (n0 is
+	// finished:skipped, not 'completed').
+	err := s.Append([]planner.Node{
+		{ID: "n0_v2", TargetID: "a", Prompt: "p", DependsOn: []string{"n0"}},
+	})
+	require.NoError(t, err, "dep on superseded (still known) node must be allowed")
+	require.Empty(t, s.Ready(), "new node depending on superseded n0 must not become ready")
+	require.True(t, s.Done(), "with nothing pending and nothing inFlight, scheduler is done")
+}
+
+// TestScheduler_MarkOrphaned_Basics pins MarkOrphaned semantics: returns
+// FinishedNode+true on first call, marks the node finished:skipped, removes
+// it from pending/inFlight. Idempotent: returns false on second call.
+func TestScheduler_MarkOrphaned_Basics(t *testing.T) {
+	s := NewScheduler([]planner.Node{{ID: "a", TargetID: "x", Prompt: "p"}}, 4)
+
+	fn, ok := s.MarkOrphaned("a", "depends on superseded n0")
+	require.True(t, ok)
+	require.Equal(t, "skipped", fn.Status)
+	require.Equal(t, "a", fn.NodeID)
+	require.Contains(t, fn.Error, "depends on superseded")
+
+	// Idempotent
+	_, ok = s.MarkOrphaned("a", "again")
+	require.False(t, ok, "already finished")
+
+	// Unknown node returns false
+	_, ok = s.MarkOrphaned("nope", "x")
+	require.False(t, ok)
+
+	// Appears in AllFinished as skipped
+	all := s.AllFinished()
+	require.Len(t, all, 1)
+	require.Equal(t, "skipped", all[0].Status)
+}
+
+// TestScheduler_MarkOrphaned_AfterAppendSupersededDep is the exact runtime
+// shape fanout uses: Append a new node whose dep is finished:skipped, then
+// MarkOrphaned it so the reducer/observer see it as explicitly skipped
+// rather than silently absent.
+func TestScheduler_MarkOrphaned_AfterAppendSupersededDep(t *testing.T) {
+	s := NewScheduler([]planner.Node{{ID: "n0", TargetID: "a", Prompt: "p"}}, 4)
+	s.MarkSuperseded("n0", "superseded")
+	require.NoError(t, s.Append([]planner.Node{
+		{ID: "n0_v2", TargetID: "a", Prompt: "p", DependsOn: []string{"n0"}},
+	}))
+	require.Empty(t, s.Ready(), "orphan must not be pending")
+
+	fn, ok := s.MarkOrphaned("n0_v2", "depends on superseded n0")
+	require.True(t, ok)
+	require.Equal(t, "skipped", fn.Status)
+
+	require.True(t, s.Done())
+	ids := map[string]string{}
+	for _, f := range s.AllFinished() {
+		ids[f.NodeID] = f.Status
+	}
+	require.Equal(t, "skipped", ids["n0"])
+	require.Equal(t, "skipped", ids["n0_v2"])
+}
+
+// TestScheduler_AppendBeforeMarkSuperseded documents the OPPOSITE order's
+// side-effect: appending the new (dep-on-n0) node BEFORE supersede causes
+// MarkSuperseded(n0) to transitively skip the new node via s.rev[n0].
+// This is the OLD fanout behavior we are moving away from — it conflates
+// "the original node is being replaced" with "the new node is being
+// cancelled", and the conflation depends on call ordering rather than on
+// the planner's intent. Documented here so the difference is explicit and
+// any future regression that re-introduces transitive skipping shows up.
+func TestScheduler_AppendBeforeMarkSuperseded(t *testing.T) {
+	s := NewScheduler([]planner.Node{{ID: "n0", TargetID: "a", Prompt: "p"}}, 4)
+
+	err := s.Append([]planner.Node{
+		{ID: "n0_v2", TargetID: "a", Prompt: "p", DependsOn: []string{"n0"}},
+	})
+	require.NoError(t, err)
+
+	skipped := s.MarkSuperseded("n0", "superseded by replan")
+	ids := make([]string, len(skipped))
+	for i, fn := range skipped {
+		ids[i] = fn.NodeID
+	}
+	require.ElementsMatch(t, []string{"n0", "n0_v2"}, ids,
+		"appending dep-on-n0 BEFORE supersede causes MarkSuperseded to transitively skip the new node")
+}
