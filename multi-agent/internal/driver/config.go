@@ -70,6 +70,15 @@ type DriverDefaults struct {
 	DisableUIDCheck    bool   `yaml:"disable_uid_check"`
 	MaxDirCacheEntries int    `yaml:"max_dir_cache_entries"`
 	ArtifactTransport  string `yaml:"artifact_transport"`
+	// WorkDir is the driver's local working directory. write_slave_file
+	// source_path inputs must resolve inside this directory (or
+	// SourcePathReadRoots) so an LLM-controlled source_path cannot read
+	// arbitrary driver files (e.g. /etc/shadow). See §1.4 #17.
+	WorkDir string `yaml:"workdir,omitempty"`
+	// SourcePathReadRoots adds extra directories (beyond WorkDir) from
+	// which write_slave_file's source_path may read driver-local files.
+	// Operator opt-in. See §1.4 #17.
+	SourcePathReadRoots []string `yaml:"source_path_read_roots,omitempty"`
 }
 
 const (

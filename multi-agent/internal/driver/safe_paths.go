@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -59,6 +60,42 @@ func AssertNoSymlinkLeaf(absPath string) error {
 		return fmt.Errorf("symlinks not allowed: %s", absPath)
 	}
 	return nil
+}
+
+// AssertReadableSource enforces that a driver-local source_path resolves
+// (after symlinks) inside workDir or one of allowedRoots. LLM-supplied
+// source_paths can otherwise turn write_slave_file into a "read any driver
+// file → push to any slave" channel.
+// Fixes §1.4 #17 of docs/review-2026-06-13.md.
+func AssertReadableSource(p, workDir string, allowedRoots []string) error {
+	if p == "" {
+		return errors.New("source_path must not be empty")
+	}
+	real, err := resolveExistingPrefix(p)
+	if err != nil {
+		return fmt.Errorf("resolve source_path %s: %w", p, err)
+	}
+	for _, root := range append([]string{workDir}, allowedRoots...) {
+		if root == "" {
+			continue
+		}
+		rootAbs, err := filepath.Abs(root)
+		if err != nil {
+			continue
+		}
+		// Resolve symlinks on the root too so /var/run vs /run etc. align.
+		if resolved, err := filepath.EvalSymlinks(rootAbs); err == nil {
+			rootAbs = resolved
+		}
+		rel, err := filepath.Rel(rootAbs, real)
+		if err != nil {
+			continue
+		}
+		if rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
+			return nil
+		}
+	}
+	return fmt.Errorf("source_path %s outside driver workdir and allowed roots", p)
 }
 
 // AssertSafeRelPath rejects paths that are absolute or escape their root via "..".
