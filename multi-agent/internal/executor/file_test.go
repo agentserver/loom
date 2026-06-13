@@ -32,8 +32,16 @@ func TestFileExecutor_ReadWholeFile_UTF8(t *testing.T) {
 	if got.Bytes != 6 || got.Content != "hello\n" || got.Encoding != "utf-8" || !got.EOF {
 		t.Fatalf("unexpected result: %+v", got)
 	}
-	if got.Path != filepath.Join(workdir, "in.txt") {
-		t.Fatalf("path = %q, want %q", got.Path, filepath.Join(workdir, "in.txt"))
+	// e.workDir is filepath.EvalSymlinks-resolved at constructor time so
+	// the jail check and the candidate path share a reference frame. On
+	// Windows runners workdir is often an 8.3 short name like RUNNER~1
+	// that resolves to RUNNERADMIN; resolve the same way for comparison.
+	wantWorkDir, err := filepath.EvalSymlinks(workdir)
+	if err != nil {
+		wantWorkDir = workdir
+	}
+	if got.Path != filepath.Join(wantWorkDir, "in.txt") {
+		t.Fatalf("path = %q, want %q", got.Path, filepath.Join(wantWorkDir, "in.txt"))
 	}
 }
 
@@ -139,8 +147,14 @@ func TestFileExecutor_ReadAbsolutePath(t *testing.T) {
 	if err := json.Unmarshal([]byte(res.Summary), &got); err != nil {
 		t.Fatalf("summary not FileReadResult JSON: %v\n%s", err, res.Summary)
 	}
-	if got.Path != abs || got.Content != "xyz" {
-		t.Fatalf("got %+v", got)
+	// Same EvalSymlinks normalization as TestFileExecutor_ReadWholeFile_UTF8;
+	// got.Path is reported in the symlink-resolved frame (e.workDir).
+	wantPath := abs
+	if resolved, err := filepath.EvalSymlinks(workdir); err == nil {
+		wantPath = filepath.Join(resolved, "abs.txt")
+	}
+	if got.Path != wantPath || got.Content != "xyz" {
+		t.Fatalf("got %+v want path %q", got, wantPath)
 	}
 }
 
