@@ -146,3 +146,67 @@ kill $(cut -d= -f2 observer.pid slave.pid 2>/dev/null) 2>/dev/null
 ## 结论
 
 E2E 验证**通过**，满足 memory `e2e_required_for_features_and_fixes` 的 finishing 前置条件。可以进 `finishing-a-development-branch` 流程。
+
+---
+
+## Re-run 2026-06-13 16:28 — 验证 PR #10 reviewer 的 P1 + P2 修复
+
+PR #10 reviewer 在评审中提出 3 个问题（P1 scanner 阻塞、P2 logRelayErr 误分类、P3 wait=true 工具契约不明），P1/P2 改了代码、P3 改了 spec。重跑 e2e 验证两条修复的真实效果。
+
+### P1 验证 — 独立 SIGTERM 测试
+
+`scanner.Scan()` 之前阻塞在 stdin、ctx cancel 不响应；新版用 reader goroutine + buffered channel + 主 loop select ctx。真实路径：spawn `driver-agent serve-mcp`，stdin 接 FIFO（held-open 模拟 codex 不关 stdin），3 秒后 `kill -TERM`：
+
+```
+DRIVER_PID=68686
+--- driver alive? --- yes
+--- sending SIGTERM at 1781339262.212736687 ---
+PASS: driver exited s after SIGTERM    (≤0.2s)
+--- driver stderr ---
+2026/06/13 16:27:39 agentsdk: tunnel connected (sandbox: 4220eca2-...)
+driver: tunnel connected
+driver: observer relay serve pending: artifact requests status 401
+mcp serve: context canceled        ← Serve 通过 ctx.Done() 退出，证明 scanner 不再阻塞
+```
+
+修复前同样的 spawn+SIGTERM 会让 driver 永远挂在 stdin 上，要 SIGKILL 才掉。**修复后立刻通过 ctx 退出。**
+
+### P2 验证 — codex exec 4 步 + audit 分类核对
+
+重跑同一份 e2e-prompt.txt（list_agents / wait_task task_id="" / get_task task_id="" / submit_task），4/4 仍 PASS（不回归）：
+
+```
+Step 1: ok. Discovered slave-codex-local.
+Step 2: ok. Error contains task_id is required.
+Step 3: ok. Error contains task_id is required.
+Step 4: ok. task_id: task_8be8a100-56ce-4a87-9aa8-a74c2d886bce. Warnings: none.
+E2E DONE
+```
+
+关键的 audit 分类断言：
+
+| grep | 期望 | 实际 |
+|---|---|---|
+| `grep -c observer_relay_error logs/audit.log` | >0（serve_pending 401 仍存在） | **10** ✅ |
+| `grep -c driver_journal_error logs/audit.log` | 0（happy path journal 没失败） | **0** ✅ |
+| `grep observer_relay_error logs/audit.log \| grep -c record_delegated_task` | 0（不再误分类） | **0** ✅ |
+
+**修复前**：record_delegated_task 失败会被记成 observer_relay_error，污染"observer relay 故障"查询。本次 happy path 没触发 journal 失败，所以没 driver_journal_error 行；但 unit test (`TestLogHelperErr_DriverJournalCategory` 与 `TestDelegateShellTask_DegradesRecordDelegatedTaskFailureToWarning`) 已覆盖"journal 真失败时分类正确"。
+
+### 覆盖矩阵（再 run）
+
+| Fix | Plan task | 前次 e2e | 本次 re-run |
+|---|---|---|---|
+| §1.1 #1 submit_task warnings | Task 2 | ✅ | ✅（Step 4 task_id 返回正常） |
+| §1.1 #2 observer relay 错误可见 | Task 3 | ✅ | ✅（10 条 serve_pending audit） |
+| §1.1 #3 Serve ctx — wait_task 长轮询 | Task 4 | unit | ✅（SIGTERM 独立验证） |
+| §1.1 #3 Serve ctx — **idle stdin** | Task 4 | ❌ 旧测试 pr.Close 绕过 | ✅ P1 修复 + SIGTERM 真实验证 |
+| §1.1 #3 EPIPE | Task 5 | unit | unit（生产 codex 不触发） |
+| §1.1 #4 task_id 守卫 | Task 6 | ✅ | ✅（Step 2 + Step 3） |
+| Follow-up: SIGTERM 处理 | f9eb258 | build | ✅（本次 SIGTERM 真测） |
+| Follow-up: ctx.Canceled 过滤 | f4c1f75 | 未触发 | 未触发（happy path 关停 stdin 即可） |
+| Follow-up: 8 站点 sweep | 1c28e18 | 未触发 | 未触发（journal happy path） |
+| **PR #10 P1**: scanner 不响应 ctx | 8b75659 | — | ✅（SIGTERM 独立测） |
+| **PR #10 P2**: logRelayErr 误分类 | 6d0c4df | — | ✅（audit 0 误分类） |
+| **PR #10 P3**: spec 明文契约 | 76ce1bb | — | docs only |
+
