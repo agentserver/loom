@@ -327,6 +327,72 @@ func TestRunChatResumeWrapsResult(t *testing.T) {
 	}
 }
 
+// TestDispatch_DuplicateInsertSkipsExecutor verifies that when the same task
+// is delivered twice (poller ack lost → re-delivery), only ONE executor.Run
+// is invoked. Fixes §1.2 #6 of docs/review-2026-06-13.md.
+func TestDispatch_DuplicateInsertSkipsExecutor(t *testing.T) {
+	def := &stubExec{res: executor.Result{Summary: "ok"}}
+	d := New(map[string]executor.Executor{"chat": def}, &stubJournal{}, newStore(t), nil)
+
+	task := executor.Task{ID: "task-dup", Skill: "chat", Prompt: "hello"}
+
+	res1, err1 := d.Run(context.Background(), task)
+	require.NoError(t, err1)
+	require.Equal(t, "ok", res1.Summary)
+	require.True(t, def.called)
+
+	// Reset called so we can detect a second Run.
+	def.called = false
+
+	res2, err2 := d.Run(context.Background(), task)
+	require.NoError(t, err2, "re-delivery must not error")
+	require.False(t, def.called, "executor.Run must NOT be invoked a second time (would spawn a 2nd claude subprocess for chat skill)")
+
+	// For chat skill, store.Output holds a kind:final JSON wrapper.
+	// replayExistingTask must surface it so the caller still sees the result.
+	require.NotEmpty(t, res2.Summary, "second Run must replay stored output, not return empty")
+	require.Contains(t, res2.Summary, "ok", "replayed summary must contain original output")
+}
+
+// TestDispatch_DuplicateInsertOnFailedTaskReplaysError verifies that a
+// re-delivered task whose first run failed returns the stored error, not nil.
+func TestDispatch_DuplicateInsertOnFailedTaskReplaysError(t *testing.T) {
+	def := &stubExec{err: errors.New("kaboom")}
+	d := New(map[string]executor.Executor{"chat": def}, &stubJournal{}, newStore(t), nil)
+	task := executor.Task{ID: "task-fail-dup", Skill: "chat", Prompt: "hi"}
+
+	_, err1 := d.Run(context.Background(), task)
+	require.Error(t, err1)
+
+	def.called = false
+	_, err2 := d.Run(context.Background(), task)
+	require.Error(t, err2, "re-delivery of failed task must surface stored error")
+	require.False(t, def.called)
+	require.Contains(t, err2.Error(), "kaboom")
+}
+
+// TestDispatch_DuplicateInsertRunningReturnsSentinel verifies that when a
+// duplicate task is delivered while the original is still running, Run
+// returns ErrDuplicateTaskRunning (not nil) so the poller can no-op
+// instead of clobbering server-side state with an empty completed PUT.
+func TestDispatch_DuplicateInsertRunningReturnsSentinel(t *testing.T) {
+	s := newStore(t)
+	// Seed a row in 'running' state directly (simulating an in-flight executor)
+	inserted, err := s.InsertIfAbsent(store.Task{ID: "task-running", Skill: "chat", Prompt: "x"})
+	require.NoError(t, err)
+	require.True(t, inserted)
+	require.NoError(t, s.MarkRunning("task-running"))
+
+	def := &stubExec{res: executor.Result{Summary: "would-run-but-shouldnt"}}
+	d := New(map[string]executor.Executor{"chat": def}, &stubJournal{}, s, nil)
+
+	res, err := d.Run(context.Background(), executor.Task{ID: "task-running", Skill: "chat", Prompt: "x"})
+	require.False(t, def.called, "executor.Run must NOT be invoked")
+	require.Equal(t, executor.Result{}, res)
+	require.ErrorIs(t, err, ErrDuplicateTaskRunning,
+		"running-branch must return sentinel error so poller can no-op (else it PUTs empty completed and clobbers in-flight state)")
+}
+
 // TestRespectsTaskTimeout verifies that a per-task TimeoutSec is enforced: the
 // executor's context must be cancelled within the deadline even though the
 // parent context has no deadline of its own.

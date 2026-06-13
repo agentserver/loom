@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -11,6 +12,13 @@ import (
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/store"
 )
+
+// ErrDuplicateTaskRunning is returned by Run when the same task ID is
+// delivered while another executor is still running it. Pollers should
+// treat this as "do not PUT status; the original Run will publish its
+// own terminal state when it finishes". Callers MUST check for this
+// before treating a nil-Result/nil-error as a successful completion.
+var ErrDuplicateTaskRunning = errors.New("dispatch: duplicate task delivery; original run still in progress")
 
 type JournalRecorder interface {
 	Record(ctx context.Context, t executor.Task, r executor.Result) error
@@ -49,8 +57,12 @@ func observerPayload(v interface{}) json.RawMessage {
 
 func (d *Dispatcher) Run(ctx context.Context, t executor.Task) (executor.Result, error) {
 	summary := observer.SummarizePrompt(t.Prompt, 80)
-	if err := d.store.Insert(store.Task{ID: t.ID, Skill: t.Skill, Prompt: t.Prompt}); err != nil {
+	inserted, err := d.store.InsertIfAbsent(store.Task{ID: t.ID, Skill: t.Skill, Prompt: t.Prompt})
+	if err != nil {
 		return executor.Result{}, err
+	}
+	if !inserted {
+		return d.replayExistingTask(t)
 	}
 	if err := d.store.MarkRunning(t.ID); err != nil {
 		return executor.Result{}, err
@@ -160,4 +172,37 @@ func (d *Dispatcher) Run(ctx context.Context, t executor.Task) (executor.Result,
 		}
 	}
 	return res, nil
+}
+
+// replayExistingTask is called when InsertIfAbsent sees a duplicate task ID.
+// The caller (poller re-delivery, driver restart) must get a sensible result
+// without spawning a second executor (otherwise chat skills launch a 2nd
+// claude subprocess — see MEMORY jetson_outage_modes mode B beyond the
+// acquireInstanceLock fix).
+//
+// Semantics:
+//   - completed → surface stored output (chat skill output is a JSON wrapper;
+//     forward as-is — the driver-side wait_task already unwraps it via
+//     unwrapKindMarker).
+//   - failed    → surface stored error.
+//   - other (running/assigned) → another executor is still running; return
+//     ErrDuplicateTaskRunning so the poller no-ops instead of PUTting an
+//     empty completed status that would clobber the in-flight executor's
+//     real result.
+func (d *Dispatcher) replayExistingTask(t executor.Task) (executor.Result, error) {
+	row, _, err := d.store.GetTaskWithChunks(t.ID)
+	if err != nil {
+		return executor.Result{}, fmt.Errorf("replay task %s: %w", t.ID, err)
+	}
+	switch row.Status {
+	case "completed":
+		return executor.Result{Summary: row.Output}, nil
+	case "failed":
+		if row.Error == "" {
+			return executor.Result{}, fmt.Errorf("task %s previously failed", t.ID)
+		}
+		return executor.Result{}, errors.New(row.Error)
+	default: // assigned, running
+		return executor.Result{}, ErrDuplicateTaskRunning
+	}
 }
