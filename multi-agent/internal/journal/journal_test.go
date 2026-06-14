@@ -2,27 +2,33 @@ package journal
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/yourorg/multi-agent/internal/executor"
 )
 
-func fakeTextClaude(t *testing.T) string {
-	t.Helper()
-	_, file, _, _ := runtime.Caller(0)
-	p, err := filepath.Abs(filepath.Join(filepath.Dir(file), "../../testdata/fake-claude-text.sh"))
-	require.NoError(t, err)
-	return p
+// fakeLLM implements LLMRunner inline so the journal tests don't have
+// to shell out. Two modes: an "ok" mode that returns a deterministic
+// merged doc, and a "fail" mode that returns an error to exercise the
+// merge-failure degradation path.
+type fakeLLM struct {
+	fail bool
+}
+
+func (f fakeLLM) Run(_ context.Context, _ string) (string, error) {
+	if f.fail {
+		return "", fmt.Errorf("merge failed")
+	}
+	return "## Tools\n- updated by fake merge\n\n## MCP Servers\n- (none)\n", nil
 }
 
 func TestRecord_FirstWriteCreatesFile(t *testing.T) {
 	dir := t.TempDir()
-	j, err := New(Config{Dir: dir, AgentBin: fakeTextClaude(t)})
+	j, err := New(Config{Dir: dir, LLM: fakeLLM{}})
 	require.NoError(t, err)
 	err = j.Record(context.Background(), executor.Task{ID: "t1", Skill: "mcp"}, executor.Result{CapabilityChange: "did x"})
 	require.NoError(t, err)
@@ -39,7 +45,7 @@ func TestRecord_FirstWriteCreatesFile(t *testing.T) {
 
 func TestRecord_MergeFailureStillAppendsHistory(t *testing.T) {
 	dir := t.TempDir()
-	j, _ := New(Config{Dir: dir, AgentBin: fakeTextClaude(t), Env: []string{"FAKE_CLAUDE_TEXT_MODE=fail"}})
+	j, _ := New(Config{Dir: dir, LLM: fakeLLM{fail: true}})
 	err := j.Record(context.Background(), executor.Task{ID: "t2", Skill: "chat"}, executor.Result{CapabilityChange: "tried"})
 	require.NoError(t, err) // journal.Record never errors out: it logs and degrades
 
@@ -50,6 +56,3 @@ func TestRecord_MergeFailureStillAppendsHistory(t *testing.T) {
 	require.Contains(t, string(hist), "[merge failed:")
 	require.Contains(t, string(hist), "tried")
 }
-
-// helper to silence imports
-var _ = strings.HasPrefix
