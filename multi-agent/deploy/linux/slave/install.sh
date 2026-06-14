@@ -134,18 +134,12 @@ TAG_LINES=""
 for t in "${TAGS[@]:-linux}"; do TAG_LINES+="    - $t"$'\n'; done
 [[ -z "$TAG_LINES" ]] && TAG_LINES="    - linux"$'\n'
 
-# Build agent block for template substitution
-if [[ "$AGENT" == "claude" ]]; then
-  AGENT_BLOCK="agent:\n  kind: claude\n\nclaude:\n  bin: claude\n  workdir: $LOOM_HOME\n  extra_args: []"
-else
-  AGENT_BLOCK="agent:\n  kind: codex\n\ncodex:\n  bin: codex\n  workdir: $LOOM_HOME\n  extra_args: []"
-fi
-
 # Render config
 CONFIG_OUT="$(mktemp)"
 sed \
   -e "s|__AGENT_NAME__|$NAME|g" \
   -e "s|__AGENT_KIND__|$AGENT|g" \
+  -e "s|__AGENT_BIN__|$AGENT|g" \
   -e "s|__LOOM_HOME__|$LOOM_HOME|g" \
   -e "s|__DESCRIPTION__|$DESC|g" \
   -e "s|__CPU_CORES__|$CPU_CORES|g" \
@@ -155,15 +149,13 @@ sed \
   -e "s|__WORKSPACE_ID__|$WORKSPACE_ID|g" \
   "$HERE/config.yaml.template" > "$CONFIG_OUT"
 
-# Replace multiline placeholders and tag block via python3
-python3 - "$CONFIG_OUT" "$TAG_LINES" "$AGENT_BLOCK" <<'PY'
+# Replace the multiline tag block via python3 (sed can't easily insert a
+# multiline replacement for the placeholder line).
+python3 - "$CONFIG_OUT" "$TAG_LINES" <<'PY'
 import sys, pathlib
 p = pathlib.Path(sys.argv[1])
 text = p.read_text()
 text = text.replace("    - __TAG__                       # add more tags as needed\n", sys.argv[2])
-# Expand the __AGENT_BLOCK__ placeholder (escape sequences from bash \n)
-agent_block = sys.argv[3].replace("\\n", "\n")
-text = text.replace("__AGENT_BLOCK__", agent_block)
 p.write_text(text)
 PY
 

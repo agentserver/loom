@@ -148,29 +148,14 @@ tag_lines=""
 for t in "${TAGS[@]}"; do tag_lines+="    - $t"$'\n'; done
 
 echo "==> writing config.yaml"
-if [[ "$AGENT" == "claude" ]]; then
-  AGENT_BLOCK=$(cat <<YAML
+AGENT_BLOCK=$(cat <<YAML
 agent:
-  kind: claude
-
-claude:
-  bin: claude
+  kind: $AGENT
+  bin: $AGENT
   workdir: $LOOM_HOME
   extra_args: []
 YAML
 )
-else
-  AGENT_BLOCK=$(cat <<YAML
-agent:
-  kind: codex
-
-codex:
-  bin: codex
-  workdir: $LOOM_HOME
-  extra_args: []
-YAML
-)
-fi
 
 cat > "$LOOM_HOME/config.yaml" <<EOF
 server:
