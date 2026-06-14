@@ -164,10 +164,6 @@ func run(cfgPath string) error {
 	}
 
 	journalDir, _ := filepath.Abs("journal")
-	j, err := journal.New(journal.Config{Dir: journalDir, AgentBin: cfg.Agent.Bin})
-	if err != nil {
-		return err
-	}
 	capDoc := capabilitydoc.NewStore(journalDir)
 	workdir, _ := os.Getwd()
 	dynamicMCPPath := filepath.Join(workdir, "dynamic_mcp.yaml")
@@ -196,6 +192,11 @@ func run(cfgPath string) error {
 	}, nil)
 	if err != nil {
 		log.Fatalf("agentbackend: %v", err)
+	}
+
+	j, err := journal.New(journal.Config{Dir: journalDir, LLM: backend.LLM()})
+	if err != nil {
+		return err
 	}
 
 	ui := webui.NewHandler(s, journalDir, cfg)
