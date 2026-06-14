@@ -27,11 +27,25 @@ func registerRuntimeShellRoutes(routes map[string]executor.Executor, cfg *config
 		return
 	}
 	if hasSkill(caps.Skills, "bash") {
-		routes["bash"] = executor.NewBashExecutor(bashConfigForRuntime(cfg.Agent.WorkDir, caps.CommandInterfaces))
+		routes["bash"] = executor.NewBashExecutor(bashConfigForRuntime(bashExecutorWorkDir(cfg), caps.CommandInterfaces))
 	}
 	if hasSkill(caps.Skills, "powershell") {
-		routes["powershell"] = executor.NewPowerShellExecutor(executor.PowerShellConfig{WorkDir: cfg.Agent.WorkDir})
+		routes["powershell"] = executor.NewPowerShellExecutor(executor.PowerShellConfig{WorkDir: powerShellExecutorWorkDir(cfg)})
 	}
+}
+
+// bashExecutorWorkDir returns the working directory for the bash
+// executor. Reads cfg.Agent.WorkDir — previously hardcoded
+// cfg.Claude.WorkDir, which was wrong on codex slaves where
+// cfg.Claude.WorkDir was empty and the executor silently ran from
+// process cwd. Fixes one of the bugs surfaced by issue #15.
+func bashExecutorWorkDir(cfg *config.Config) string {
+	return cfg.Agent.WorkDir
+}
+
+// powerShellExecutorWorkDir same as bash, for the PowerShell capability.
+func powerShellExecutorWorkDir(cfg *config.Config) string {
+	return cfg.Agent.WorkDir
 }
 
 func bashConfigForRuntime(workDir string, interfaces []commandiface.CommandInterface) executor.BashConfig {
