@@ -17,7 +17,7 @@ cat > "$work/config.yaml" <<EOF
 server:
   url: $AGENTSERVER_URL
   name: master-e2e
-claude: { bin: claude }
+agent: { kind: claude, bin: claude, workdir: $work }
 planner: { bin: claude, timeout_sec: 60 }
 fanout:
   max_concurrency: 4

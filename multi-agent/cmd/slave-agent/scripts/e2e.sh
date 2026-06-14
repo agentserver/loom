@@ -18,8 +18,10 @@ cat > "$work/config.yaml" <<EOF
 server:
   url: $AGENTSERVER_URL
   name: slave-e2e
-claude:
+agent:
+  kind: claude
   bin: claude
+  workdir: $work
 mcp_servers:
   everything:
     transport: stdio

@@ -17,6 +17,12 @@ discovery:
 
 listen_addr: "127.0.0.1:0"
 
+agent:
+  kind: claude
+  bin: claude
+  workdir: /tmp/driver-workdir   # jail root for write_slave_file source_path
+  extra_args: []
+
 planner:
   bin: claude
   timeout_sec: 300
