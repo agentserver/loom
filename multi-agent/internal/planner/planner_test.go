@@ -441,10 +441,23 @@ func TestValidatePlanNodes_RejectsHostileNodeID(t *testing.T) {
 // TestValidatePlanNodes_AcceptsSafeNodeIDs (positive)
 func TestValidatePlanNodes_AcceptsSafeNodeIDs(t *testing.T) {
 	permitted := agentIDSet(demoAgents)
-	for _, id := range []string{"n1", "node_42", "step-3", "v1.2.3", "abc"} {
+	for _, id := range []string{"n1", "node_42", "step-3", "abc"} {
 		err := validatePlanNodes([]Node{{ID: id, TargetID: "agent-a"}}, permitted)
 		require.NoError(t, err, "node id %q should be accepted", id)
 	}
+}
+
+// TestValidatePlanNodes_RejectsDotInNodeID pins the §1.5 P2 follow-up:
+// '.' is intentionally absent from nodeIDPattern because the upstream
+// template renderer (internal/orchestration/dag.go renderRe) accepts
+// only [A-Za-z0-9_-]+ for the node-id segment of {{X.output}}, so an
+// id like "v1.2.3" would planner-pass but downstream-silently-fail to
+// substitute. Reject at planner so the LLM retries with a renderable id.
+func TestValidatePlanNodes_RejectsDotInNodeID(t *testing.T) {
+	permitted := agentIDSet(demoAgents)
+	err := validatePlanNodes([]Node{{ID: "v1.2.3", TargetID: "agent-a"}}, permitted)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "charset")
 }
 
 // TestRoute_RetriesOnMissingTargetIDField pins §1.5 P2 follow-up:
