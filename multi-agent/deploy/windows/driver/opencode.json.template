@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "driver": {
+      "type": "local",
+      "command": ["__DRIVER_AGENT__", "serve-mcp", "--config", "__CONFIG__"],
+      "enabled": true
+    }
+  }
+}

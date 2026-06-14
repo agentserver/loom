@@ -10,7 +10,7 @@ param(
 
     [string]$Workspace = "ws-default",
 
-    [ValidateSet("claude", "codex")]
+    [ValidateSet("claude", "codex", "opencode")]
     [string]$Agent = "codex",
 
     [string]$ApiKey = "",
@@ -105,21 +105,49 @@ $config = $config.Replace("__API_KEY__", (ConvertTo-YamlQuoted $ApiKey))
 $config = $config.Replace("__TOKEN_STATE_PATH__", (ConvertTo-YamlQuoted $tokenStatePath))
 Set-Content -LiteralPath $configPath -Value $config -Encoding utf8
 
-if ($Agent -eq "codex") {
-    $codexDir = Join-Path $projectDir ".codex"
-    New-Item -ItemType Directory -Force -Path $codexDir | Out-Null
-    $toml = Get-Content -LiteralPath (Join-Path $here "codex-mcp.toml.template") -Raw
-    $toml = $toml.Replace("__DRIVER_AGENT__", (ConvertTo-TomlString $driverExe))
-    $toml = $toml.Replace("__CONFIG__", (ConvertTo-TomlString $configPath))
-    Set-Content -LiteralPath (Join-Path $codexDir "config.toml") -Value $toml -Encoding utf8
-} else {
-    $json = Get-Content -LiteralPath (Join-Path $here "mcp.json.template") -Raw
-    $json = $json.Replace("__DRIVER_AGENT__", (ConvertTo-JsonString $driverExe))
-    $json = $json.Replace("__CONFIG__", (ConvertTo-JsonString $configPath))
-    Set-Content -LiteralPath (Join-Path $projectDir ".mcp.json") -Value $json -Encoding utf8
+switch ($Agent) {
+    "claude" {
+        $json = Get-Content -LiteralPath (Join-Path $here "mcp.json.template") -Raw
+        $json = $json.Replace("__DRIVER_AGENT__", (ConvertTo-JsonString $driverExe))
+        $json = $json.Replace("__CONFIG__", (ConvertTo-JsonString $configPath))
+        Set-Content -LiteralPath (Join-Path $projectDir ".mcp.json") -Value $json -Encoding utf8
+    }
+    "codex" {
+        $codexDir = Join-Path $projectDir ".codex"
+        New-Item -ItemType Directory -Force -Path $codexDir | Out-Null
+        $toml = Get-Content -LiteralPath (Join-Path $here "codex-mcp.toml.template") -Raw
+        $toml = $toml.Replace("__DRIVER_AGENT__", (ConvertTo-TomlString $driverExe))
+        $toml = $toml.Replace("__CONFIG__", (ConvertTo-TomlString $configPath))
+        Set-Content -LiteralPath (Join-Path $codexDir "config.toml") -Value $toml -Encoding utf8
+    }
+    "opencode" {
+        # opencode CLI + desktop share %APPDATA%\opencode\opencode.json on
+        # Windows. Writing here means both consume the driver server. If a
+        # config already exists, back it up rather than merge JSON (merge is
+        # a follow-up if anyone actually maintains a custom opencode.json
+        # alongside loom).
+        $opencodeDir = Join-Path $env:APPDATA "opencode"
+        $opencodeCfg = Join-Path $opencodeDir "opencode.json"
+        New-Item -ItemType Directory -Force -Path $opencodeDir | Out-Null
+        if (Test-Path -LiteralPath $opencodeCfg -PathType Leaf) {
+            $ts = Get-Date -Format "yyyyMMdd-HHmmss"
+            Copy-Item -LiteralPath $opencodeCfg -Destination "$opencodeCfg.bak.$ts" -Force
+            Write-Host "==> backed up existing opencode.json (loom install will overwrite)"
+        }
+        $tmpl = Get-Content -LiteralPath (Join-Path $here "opencode.json.template") -Raw
+        $tmpl = $tmpl.Replace("__DRIVER_AGENT__", (ConvertTo-JsonString $driverExe))
+        $tmpl = $tmpl.Replace("__CONFIG__", (ConvertTo-JsonString $configPath))
+        Set-Content -LiteralPath $opencodeCfg -Value $tmpl -Encoding utf8
+        Write-Host "==> wrote $opencodeCfg (consumed by both opencode CLI and desktop)"
+    }
+    default {
+        throw "unsupported agent: $Agent (expected claude|codex|opencode)"
+    }
 }
 
-if ($Agent -eq "codex") {
+# codex and opencode both read project-root AGENTS.md, so reuse the codex
+# prompts bundle for opencode as well.
+if (($Agent -eq "codex") -or ($Agent -eq "opencode")) {
     $codexBundle = Join-Path $here "prompts-codex"
     $linuxCodexBundle = Resolve-FullPath (Join-Path $here "..\..\linux\driver\prompts-codex")
     if (Test-Path -LiteralPath (Join-Path $codexBundle "AGENTS.md") -PathType Leaf) {
@@ -131,7 +159,7 @@ if ($Agent -eq "codex") {
 
 $repoRoot = Resolve-FullPath (Join-Path $here "..\..\..\..")
 $repoSkills = Join-Path $repoRoot "skills"
-if (($Agent -eq "codex") -and (Test-Path -LiteralPath $repoSkills -PathType Container)) {
+if ((($Agent -eq "codex") -or ($Agent -eq "opencode")) -and (Test-Path -LiteralPath $repoSkills -PathType Container)) {
     Copy-DirectoryContents -Source $repoSkills -Destination (Join-Path $projectDir ".agents\skills")
 }
 
