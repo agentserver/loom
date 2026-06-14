@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -13,6 +14,12 @@ import (
 	"github.com/yourorg/multi-agent/internal/config"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
+
+// nodeIDPattern restricts plan node ids to a safe charset so they can
+// be safely embedded in the reducer's XML-like boundary tags and
+// header lines without escaping. We don't need {", >, <, \n, etc.}
+// in node ids for any legitimate use case.
+var nodeIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 
 type ProgressFunc func(ctx context.Context, phase, message string, elapsed time.Duration)
 
@@ -81,6 +88,10 @@ func agentIDSet(agents []agentsdk.AgentCard) map[string]struct{} {
 func validatePlanNodes(nodes []Node, permitted map[string]struct{}) error {
 	var bad []string
 	for _, n := range nodes {
+		if !nodeIDPattern.MatchString(n.ID) {
+			bad = append(bad, fmt.Sprintf(`%q (id charset: must match %s)`, n.ID, nodeIDPattern))
+			continue // don't double-report below
+		}
 		if _, ok := permitted[n.TargetID]; !ok {
 			bad = append(bad, fmt.Sprintf(`%s→%q`, n.ID, n.TargetID))
 		}
