@@ -76,7 +76,7 @@ done
 [[ -n "$PROJECT"      ]] || { echo "ERROR: --project is required" >&2; exit 2; }
 [[ -n "$NAME"         ]] || { echo "ERROR: --name is required" >&2; exit 2; }
 [[ -n "$OBSERVER_URL" ]] || { echo "ERROR: --observer-url is required (e.g. http://observer.example.com:8090)" >&2; exit 2; }
-case "$AGENT" in claude|codex) ;; *) echo "ERROR: --agent must be claude or codex" >&2; exit 2 ;; esac
+case "$AGENT" in claude|codex|opencode) ;; *) echo "ERROR: --agent must be claude, codex, or opencode" >&2; exit 2 ;; esac
 
 arch="$(uname -m)"
 case "$arch" in
@@ -102,17 +102,20 @@ PROJECT_ABS="$(mkdir -p "$PROJECT" && cd "$PROJECT" && pwd)"
 
 # Auto-detect default skill/prompts bundle
 if [[ -z "$SKILL_BUNDLE" ]]; then
-  if [[ "$AGENT" == "claude" ]]; then
-    # Default: the multiagent skill shipped with the prod_test driver
-    if [[ -d "$HERE/../../../tests/prod_test/driver/.claude/skills/multiagent" ]]; then
-      SKILL_BUNDLE="$HERE/../../../tests/prod_test/driver/.claude/skills/multiagent"
-    fi
-  else
-    # Default: repo skills, copied to Codex's project-scoped .agents/skills.
-    if [[ -d "$REPO_ROOT/skills" ]]; then
-      SKILL_BUNDLE="$REPO_ROOT/skills"
-    fi
-  fi
+  case "$AGENT" in
+    claude)
+      # Default: the multiagent skill shipped with the prod_test driver
+      if [[ -d "$HERE/../../../tests/prod_test/driver/.claude/skills/multiagent" ]]; then
+        SKILL_BUNDLE="$HERE/../../../tests/prod_test/driver/.claude/skills/multiagent"
+      fi
+      ;;
+    codex|opencode)
+      # Default: repo skills, copied to Codex/opencode's project-scoped .agents/skills.
+      if [[ -d "$REPO_ROOT/skills" ]]; then
+        SKILL_BUNDLE="$REPO_ROOT/skills"
+      fi
+      ;;
+  esac
 fi
 
 echo "==> staging into $PROJECT_ABS"
@@ -140,58 +143,89 @@ if [[ -n "$API_KEY" ]]; then
 fi
 
 # Write MCP registration
-if [[ "$AGENT" == "claude" ]]; then
-  sed \
-    -e "s|__PROJECT_DIR__|$PROJECT_ABS|g" \
-    "$HERE/.mcp.json.template" > "$PROJECT_ABS/.mcp.json"
-else
-  mkdir -p "$PROJECT_ABS/.codex"
-  sed \
-    -e "s|__PROJECT_DIR__|$PROJECT_ABS|g" \
-    "$HERE/codex-mcp.toml.template" > "$PROJECT_ABS/.codex/config.toml"
-fi
+case "$AGENT" in
+  claude)
+    sed \
+      -e "s|__PROJECT_DIR__|$PROJECT_ABS|g" \
+      "$HERE/.mcp.json.template" > "$PROJECT_ABS/.mcp.json"
+    ;;
+  codex)
+    mkdir -p "$PROJECT_ABS/.codex"
+    sed \
+      -e "s|__PROJECT_DIR__|$PROJECT_ABS|g" \
+      "$HERE/codex-mcp.toml.template" > "$PROJECT_ABS/.codex/config.toml"
+    ;;
+  opencode)
+    # opencode CLI + desktop share the same MCP config file
+    # (~/.config/opencode/opencode.json on Linux). Writing here means
+    # both consume the driver server. If a config already exists, back
+    # it up rather than merge JSON (merge is a follow-up if anyone
+    # actually maintains a custom opencode.json alongside loom).
+    OPENCODE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+    OPENCODE_CFG="$OPENCODE_DIR/opencode.json"
+    mkdir -p "$OPENCODE_DIR"
+    if [[ -f "$OPENCODE_CFG" ]]; then
+      cp -f "$OPENCODE_CFG" "$OPENCODE_CFG.bak.$(date +%Y%m%d-%H%M%S)"
+      echo "==> backed up existing opencode.json (loom install will overwrite)"
+    fi
+    sed \
+      -e "s|__DRIVER_AGENT__|$PROJECT_ABS/driver-agent|g" \
+      -e "s|__CONFIG__|$PROJECT_ABS/config.yaml|g" \
+      "$HERE/opencode.json.template" > "$OPENCODE_CFG"
+    echo "==> wrote $OPENCODE_CFG (consumed by both opencode CLI and desktop)"
+    ;;
+  *)
+    echo "unsupported agent: $AGENT (expected claude|codex|opencode)" >&2
+    exit 1
+    ;;
+esac
 
 # Copy skill / prompts bundle
-if [[ "$AGENT" == "claude" ]]; then
-  if [[ -n "$SKILL_BUNDLE" && -d "$SKILL_BUNDLE" ]]; then
-    echo "==> copying skill bundle from $SKILL_BUNDLE"
-    mkdir -p "$PROJECT_ABS/.claude/skills"
-    cp -r "$SKILL_BUNDLE" "$PROJECT_ABS/.claude/skills/"
-  fi
-else
-  # codex: copy AGENTS.md plus repo-scoped skills that AGENTS.md routes to.
-  if [[ -f "$HERE/prompts-codex/AGENTS.md" ]]; then
-    echo "==> copying AGENTS.md from $HERE/prompts-codex"
-    cp "$HERE/prompts-codex/AGENTS.md" "$PROJECT_ABS/AGENTS.md"
-  elif [[ -n "$SKILL_BUNDLE" && -f "$SKILL_BUNDLE/AGENTS.md" ]]; then
-    echo "==> copying AGENTS.md from $SKILL_BUNDLE"
-    cp "$SKILL_BUNDLE/AGENTS.md" "$PROJECT_ABS/AGENTS.md"
-  fi
-
-  if [[ -n "$SKILL_BUNDLE" ]]; then
-    CODEX_SKILL_BUNDLE="$SKILL_BUNDLE"
-    if [[ -f "$SKILL_BUNDLE/AGENTS.md" && -d "$REPO_ROOT/skills" ]]; then
-      CODEX_SKILL_BUNDLE="$REPO_ROOT/skills"
+case "$AGENT" in
+  claude)
+    if [[ -n "$SKILL_BUNDLE" && -d "$SKILL_BUNDLE" ]]; then
+      echo "==> copying skill bundle from $SKILL_BUNDLE"
+      mkdir -p "$PROJECT_ABS/.claude/skills"
+      cp -r "$SKILL_BUNDLE" "$PROJECT_ABS/.claude/skills/"
+    fi
+    ;;
+  codex|opencode)
+    # codex / opencode: copy AGENTS.md plus repo-scoped skills that AGENTS.md routes to.
+    # opencode also reads project-root AGENTS.md (same convention as codex).
+    if [[ -f "$HERE/prompts-codex/AGENTS.md" ]]; then
+      echo "==> copying AGENTS.md from $HERE/prompts-codex"
+      cp "$HERE/prompts-codex/AGENTS.md" "$PROJECT_ABS/AGENTS.md"
+    elif [[ -n "$SKILL_BUNDLE" && -f "$SKILL_BUNDLE/AGENTS.md" ]]; then
+      echo "==> copying AGENTS.md from $SKILL_BUNDLE"
+      cp "$SKILL_BUNDLE/AGENTS.md" "$PROJECT_ABS/AGENTS.md"
     fi
 
-    if [[ -d "$CODEX_SKILL_BUNDLE" && ! -f "$CODEX_SKILL_BUNDLE/AGENTS.md" ]]; then
-      echo "==> copying Codex skills from $CODEX_SKILL_BUNDLE"
-      mkdir -p "$PROJECT_ABS/.agents/skills"
-      if [[ -f "$CODEX_SKILL_BUNDLE/SKILL.md" ]]; then
-        cp -r "$CODEX_SKILL_BUNDLE" "$PROJECT_ABS/.agents/skills/"
-      else
-        cp -r "$CODEX_SKILL_BUNDLE/." "$PROJECT_ABS/.agents/skills/"
+    if [[ -n "$SKILL_BUNDLE" ]]; then
+      CODEX_SKILL_BUNDLE="$SKILL_BUNDLE"
+      if [[ -f "$SKILL_BUNDLE/AGENTS.md" && -d "$REPO_ROOT/skills" ]]; then
+        CODEX_SKILL_BUNDLE="$REPO_ROOT/skills"
+      fi
+
+      if [[ -d "$CODEX_SKILL_BUNDLE" && ! -f "$CODEX_SKILL_BUNDLE/AGENTS.md" ]]; then
+        echo "==> copying $AGENT skills from $CODEX_SKILL_BUNDLE"
+        mkdir -p "$PROJECT_ABS/.agents/skills"
+        if [[ -f "$CODEX_SKILL_BUNDLE/SKILL.md" ]]; then
+          cp -r "$CODEX_SKILL_BUNDLE" "$PROJECT_ABS/.agents/skills/"
+        else
+          cp -r "$CODEX_SKILL_BUNDLE/." "$PROJECT_ABS/.agents/skills/"
+        fi
       fi
     fi
-  fi
-fi
+    ;;
+esac
 
 mkdir -p "$TOKEN_DIR"
 chmod 0700 "$TOKEN_DIR"
 mkdir -p "$PROJECT_ABS/logs"
 
-if [[ "$AGENT" == "claude" ]]; then
-  cat <<EOF
+case "$AGENT" in
+  claude)
+    cat <<EOF
 
 ==> project ready at $PROJECT_ABS
     Files:
@@ -208,21 +242,22 @@ if [[ "$AGENT" == "claude" ]]; then
 
 EOF
 
-  if [[ -z "$API_KEY" ]]; then
-    echo "==> WARN: observer.api_key is empty in config.yaml — fill it in before launching Claude Code."
-    echo
-  fi
+    if [[ -z "$API_KEY" ]]; then
+      echo "==> WARN: observer.api_key is empty in config.yaml — fill it in before launching Claude Code."
+      echo
+    fi
 
-  cat <<EOF
+    cat <<EOF
 ==> launch:
       cd $PROJECT_ABS
       claude                   # Claude Code will start the driver MCP server on demand
     Then in the Claude prompt:
       mcp__driver__list_agents
 EOF
+    ;;
 
-else
-  cat <<EOF
+  codex)
+    cat <<EOF
 
 ==> project ready at $PROJECT_ABS
     Files:
@@ -240,12 +275,12 @@ else
 
 EOF
 
-  if [[ -z "$API_KEY" ]]; then
-    echo "==> WARN: observer.api_key is empty in config.yaml — fill it in before launching Codex."
-    echo
-  fi
+    if [[ -z "$API_KEY" ]]; then
+      echo "==> WARN: observer.api_key is empty in config.yaml — fill it in before launching Codex."
+      echo
+    fi
 
-  cat <<EOF
+    cat <<EOF
 ==> launch (Codex):
       cd $PROJECT_ABS
       codex                   # first run will prompt to trust this directory
@@ -253,4 +288,40 @@ EOF
       # then inside codex:    mcp__driver__list_agents
       # auth: \`codex login\` (chat subscription) or export OPENAI_API_KEY
 EOF
-fi
+    ;;
+
+  opencode)
+    OPENCODE_DIR_DISPLAY="${XDG_CONFIG_HOME:-\$HOME/.config}/opencode"
+    cat <<EOF
+
+==> project ready at $PROJECT_ABS
+    Files:
+      driver-agent             # binary ($CPU_ARCH)
+      config.yaml              # 0600 — paste observer.api_key if you didn't pass --api-key
+      AGENTS.md                # opencode project notes (auto-read by opencode)
+      .agents/skills/...       # opencode skills used by AGENTS.md
+      logs/                    # audit logs land here
+    Plus user-scoped:
+      $OPENCODE_DIR_DISPLAY/opencode.json
+                               # MCP registration (shared by opencode CLI + desktop)
+
+==> one-time agentserver registration (device-code OAuth):
+      $PROJECT_ABS/driver-agent register --config $PROJECT_ABS/config.yaml
+    Open the printed verification URL in a browser; creds get written back into
+    config.yaml.
+
+EOF
+
+    if [[ -z "$API_KEY" ]]; then
+      echo "==> WARN: observer.api_key is empty in config.yaml — fill it in before launching opencode."
+      echo
+    fi
+
+    cat <<EOF
+==> launch (opencode):
+      cd $PROJECT_ABS
+      opencode                # picks up driver MCP server via ~/.config/opencode/opencode.json
+      # then inside opencode: mcp__driver__list_agents
+EOF
+    ;;
+esac
