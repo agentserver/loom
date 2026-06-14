@@ -10,11 +10,11 @@ import (
 )
 
 type llmRunner struct {
-	cfg agentbackend.CodexConfig
+	cfg agentbackend.Config
 	env []string
 }
 
-func newLLM(cfg agentbackend.CodexConfig, env []string) *llmRunner {
+func newLLM(cfg agentbackend.Config, env []string) *llmRunner {
 	return &llmRunner{cfg: cfg, env: env}
 }
 

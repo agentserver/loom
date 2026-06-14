@@ -14,11 +14,11 @@ import (
 const llmIdleTimeout = 90 * time.Second
 
 type llmRunner struct {
-	cfg agentbackend.ClaudeConfig
+	cfg agentbackend.Config
 	env []string
 }
 
-func newLLM(cfg agentbackend.ClaudeConfig, env []string) *llmRunner {
+func newLLM(cfg agentbackend.Config, env []string) *llmRunner {
 	return &llmRunner{cfg: cfg, env: env}
 }
 

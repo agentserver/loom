@@ -188,11 +188,19 @@ func run(cfgPath string) error {
 	}
 	mcpExec := executor.NewMCPExecutor(mcpCfg)
 	defer mcpExec.Close()
-	backend, err := agentbackend.New(agentbackend.Config{
-		Kind:   agentbackend.Kind(cfg.Agent.Kind),
-		Claude: agentbackend.ClaudeConfig{Bin: cfg.Claude.Bin, WorkDir: cfg.Claude.WorkDir, ExtraArgs: cfg.Claude.Args},
-		Codex:  agentbackend.CodexConfig{Bin: cfg.Codex.Bin, WorkDir: cfg.Codex.WorkDir, ExtraArgs: cfg.Codex.Args},
-	}, nil)
+	agentCfg := agentbackend.Config{Kind: agentbackend.Kind(cfg.Agent.Kind)}
+	switch cfg.Agent.Kind {
+	case "claude":
+		agentCfg.Bin = cfg.Claude.Bin
+		agentCfg.WorkDir = cfg.Claude.WorkDir
+		agentCfg.ExtraArgs = cfg.Claude.Args
+	case "codex":
+		agentCfg.Bin = cfg.Codex.Bin
+		agentCfg.WorkDir = cfg.Codex.WorkDir
+		agentCfg.ExtraArgs = cfg.Codex.Args
+	}
+	// TODO(issue-15 Task 4): replace switch with direct cfg.Agent.{Bin,WorkDir,ExtraArgs}
+	backend, err := agentbackend.New(agentCfg, nil)
 	if err != nil {
 		log.Fatalf("agentbackend: %v", err)
 	}

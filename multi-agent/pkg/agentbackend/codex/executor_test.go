@@ -52,7 +52,7 @@ func main() {
 	fmt.Println()
 }
 `, framesPath))
-	b := New(agentbackend.CodexConfig{Bin: fakeBin, WorkDir: dir}, nil)
+	b := New(agentbackend.Config{Bin: fakeBin, WorkDir: dir}, nil)
 	sink := &captureSink{}
 	res, err := b.Run(context.Background(), agentbackend.Task{Prompt: "ignored"}, sink)
 	if err != nil {
@@ -111,7 +111,7 @@ func TestCodexExecutorCapturesThreadID(t *testing.T) {
 		`{"type":"thread.started","thread_id":"thr-abc"}`,
 		`{"type":"item.completed","item":{"type":"agent_message","text":"hi"}}`,
 	})
-	ex := newExecutor(agentbackend.CodexConfig{Bin: bin, WorkDir: t.TempDir()}, nil)
+	ex := newExecutor(agentbackend.Config{Bin: bin, WorkDir: t.TempDir()}, nil)
 	res, err := ex.Run(context.Background(), agentbackend.Task{Prompt: "hi"}, &captureSink{})
 	if err != nil {
 		t.Fatal(err)
@@ -141,7 +141,7 @@ func TestCodexExecutorPausesOnHumanloopIPC(t *testing.T) {
 		defer c.Close()
 		_ = c.Send(humanloop.Payload{Kind: "request_permission", Intent: "run_bash", Target: "rm -rf /tmp/x"})
 	}
-	ex := newExecutorWithSocketHook(agentbackend.CodexConfig{Bin: bin, WorkDir: t.TempDir()}, nil, sockHook)
+	ex := newExecutorWithSocketHook(agentbackend.Config{Bin: bin, WorkDir: t.TempDir()}, nil, sockHook)
 	res, err := ex.Run(context.Background(), agentbackend.Task{Prompt: "hi"}, &captureSink{})
 	if err != nil {
 		t.Fatal(err)
@@ -184,7 +184,7 @@ func main() {
 		defer c.Close()
 		_ = c.Send(humanloop.Payload{Kind: "ask_user", Question: "doomed"})
 	}
-	ex := newExecutorWithSocketHook(agentbackend.CodexConfig{Bin: script, WorkDir: t.TempDir()}, nil, sockHook)
+	ex := newExecutorWithSocketHook(agentbackend.Config{Bin: script, WorkDir: t.TempDir()}, nil, sockHook)
 	ex.shutdownGraceSec = 1
 	_, err := ex.Run(context.Background(), agentbackend.Task{Prompt: "hi"}, &captureSink{})
 	if err == nil {
@@ -224,7 +224,7 @@ func main() {
 		defer c.Close()
 		_ = c.Send(humanloop.Payload{Kind: "ask_user", Question: "stuck"})
 	}
-	ex := newExecutorWithSocketHook(agentbackend.CodexConfig{Bin: script, WorkDir: t.TempDir()}, nil, sockHook)
+	ex := newExecutorWithSocketHook(agentbackend.Config{Bin: script, WorkDir: t.TempDir()}, nil, sockHook)
 	ex.shutdownGraceSec = 1
 	start := time.Now()
 	_, err := ex.Run(context.Background(), agentbackend.Task{Prompt: "hi"}, &captureSink{})
@@ -263,7 +263,7 @@ func main() {
 }
 `, sentinel, `{"type":"thread.started","thread_id":"thr-1-resumed"}`))
 
-	ex := newExecutor(agentbackend.CodexConfig{Bin: script, WorkDir: t.TempDir()}, nil)
+	ex := newExecutor(agentbackend.Config{Bin: script, WorkDir: t.TempDir()}, nil)
 	res, err := ex.RunResume(context.Background(), "thr-1", "the user's answer", &captureSink{})
 	if err != nil {
 		t.Fatal(err)

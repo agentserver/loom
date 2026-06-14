@@ -18,7 +18,7 @@ func main() {
 	os.Stdout.Write([]byte("   pong   \n\n"))
 }
 `)
-	llm := newLLM(agentbackend.CodexConfig{Bin: fakeBin}, nil)
+	llm := newLLM(agentbackend.Config{Bin: fakeBin}, nil)
 	out, err := llm.Run(context.Background(), "ping")
 	if err != nil {
 		t.Fatal(err)
