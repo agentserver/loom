@@ -15,9 +15,15 @@ import (
 )
 
 type Config struct {
-	Dir       string
-	ClaudeBin string
-	Env       []string
+	Dir string
+	// AgentBin is the path to the agent CLI binary used to merge
+	// capability-change events into CURRENT_STATE.md. Renamed from
+	// ClaudeBin in issue #15 — on codex slaves the field used to
+	// silently point at a non-existent 'claude' binary because the
+	// caller hardcoded cfg.Claude.Bin. Caller now passes
+	// cfg.Agent.Bin so it matches whichever backend is configured.
+	AgentBin string
+	Env      []string
 }
 
 type Journal struct {
@@ -57,7 +63,7 @@ func (j *Journal) callClaude(ctx context.Context, currentDoc string, t executor.
 		"Current CURRENT_STATE.md:\n%s\n\nJust executed task %s (skill=%s) with capability impact:\n%s\n\nOutput the updated CURRENT_STATE.md in full. Group with H2 (## Tools, ## MCP Servers, ## Mounted Resources, ## Credentials). Only modify affected sections. Be terse.",
 		currentDoc, t.ID, t.Skill, change,
 	)
-	cmd := exec.CommandContext(ctx, j.cfg.ClaudeBin, "--print")
+	cmd := exec.CommandContext(ctx, j.cfg.AgentBin, "--print")
 	cmd.Env = append(cmd.Environ(), j.cfg.Env...)
 	cmd.Stdin = strings.NewReader(prompt)
 	out, err := cmd.Output()

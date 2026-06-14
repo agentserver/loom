@@ -164,7 +164,15 @@ func run(cfgPath string) error {
 	}
 
 	journalDir, _ := filepath.Abs("journal")
-	j, err := journal.New(journal.Config{Dir: journalDir, ClaudeBin: cfg.Claude.Bin})
+	// Interim: pick the right bin by kind until Task 5 unifies
+	// cfg.Agent.Bin as the single source. Fixes the bug where codex
+	// slaves silently called a non-existent claude binary for journal
+	// capability-event merges. See issue #15.
+	journalBin := cfg.Claude.Bin
+	if cfg.Agent.Kind == "codex" {
+		journalBin = cfg.Codex.Bin
+	}
+	j, err := journal.New(journal.Config{Dir: journalDir, AgentBin: journalBin})
 	if err != nil {
 		return err
 	}
