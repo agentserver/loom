@@ -16,10 +16,14 @@ import (
 )
 
 // nodeIDPattern restricts plan node ids to a safe charset so they can
-// be safely embedded in the reducer's XML-like boundary tags and
-// header lines without escaping. We don't need {", >, <, \n, etc.}
-// in node ids for any legitimate use case.
-var nodeIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
+// be (a) safely embedded in the reducer's XML-like boundary tags and
+// header lines without escaping, and (b) referenced by the upstream
+// template renderer in internal/orchestration/dag.go (renderRe),
+// which only accepts [A-Za-z0-9_-]+. Including '.' here was a foot-
+// gun: ids like "v1.2.3" would planner-validate fine but then
+// silently fail to substitute in {{v1.2.3.output}}, leaving the
+// raw placeholder in the downstream prompt.
+var nodeIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 type ProgressFunc func(ctx context.Context, phase, message string, elapsed time.Duration)
 
