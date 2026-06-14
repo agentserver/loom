@@ -7,6 +7,10 @@ import (
 
 	agentconfig "github.com/yourorg/multi-agent/internal/config"
 	"github.com/yourorg/multi-agent/internal/driver"
+	// Register backend kinds so driver.LoadConfig's whitelist
+	// recognises "claude"/"codex" when validating the example yaml.
+	_ "github.com/yourorg/multi-agent/pkg/agentbackend/claude"
+	_ "github.com/yourorg/multi-agent/pkg/agentbackend/codex"
 )
 
 func TestDistributedComposeScaffold(t *testing.T) {

@@ -47,6 +47,10 @@ credentials:
   proxy_token: "ptok"
   workspace_id: "ws-smoke"
   short_id: "smoke"
+agent:
+  kind: claude
+  bin: claude
+  workdir: "` + filepath.Dir(path) + `"
 discovery:
   display_name: smoke-driver
   description: "smoke test"

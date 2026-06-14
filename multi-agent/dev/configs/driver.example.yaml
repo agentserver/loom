@@ -9,6 +9,11 @@ credentials:
   workspace_id: ""
   short_id: ""
 
+agent:
+  kind: claude
+  bin: claude
+  workdir: /workspace/multi-agent
+
 driver_defaults:
   target_display_name: master-dev
   task_timeout_sec: 600

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	agentconfig "github.com/yourorg/multi-agent/internal/config"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 	"gopkg.in/yaml.v3"
 )
 
@@ -18,8 +19,6 @@ type Config struct {
 	Server         ServerConfig        `yaml:"server"`
 	Credentials    Credentials         `yaml:"credentials"`
 	Agent          AgentConfig         `yaml:"agent"`
-	Claude         ClaudeConfig        `yaml:"claude"`
-	Codex          CodexConfig         `yaml:"codex"`
 	Discovery      Discovery           `yaml:"discovery"`
 	ListenAddr     string              `yaml:"listen_addr"`
 	Planner        agentconfig.Planner `yaml:"planner"`
@@ -28,20 +27,16 @@ type Config struct {
 	Observer       Observer            `yaml:"observer,omitempty"`
 }
 
+// AgentConfig is the single per-backend descriptor consumed by both
+// the agent runtime (agentbackend.New) and the driver-only paths
+// (jail roots, planner bin default). Previously this was split
+// across claude:/codex: top-level YAML blocks plus a tiny
+// AgentConfig{Kind} stub; collapsed in issue #15.
 type AgentConfig struct {
-	Kind string `yaml:"kind"` // "claude" | "codex"; default claude
-}
-
-type ClaudeConfig struct {
-	Bin     string   `yaml:"bin"`
-	WorkDir string   `yaml:"workdir"`
-	Args    []string `yaml:"extra_args"`
-}
-
-type CodexConfig struct {
-	Bin     string   `yaml:"bin"`
-	WorkDir string   `yaml:"workdir"`
-	Args    []string `yaml:"extra_args"`
+	Kind      string   `yaml:"kind"`
+	Bin       string   `yaml:"bin"`
+	WorkDir   string   `yaml:"workdir"`
+	ExtraArgs []string `yaml:"extra_args"`
 }
 
 type ServerConfig struct {
@@ -110,6 +105,32 @@ func LoadConfig(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
+	// Legacy-key peek: produce a friendly migration error before the
+	// unknown-fields decoder buries it as a generic "unknown field"
+	// message. Probe without DisallowUnknownFields so we can recognise
+	// the old shape regardless of agent.kind validity.
+	// Using yaml.Node (not `any`) so we detect bare `claude:` /
+	// `claude: null` — both unmarshal to a `nil` interface but to a
+	// node with Kind != 0 (absent keys leave Kind=0).
+	type legacyProbe struct {
+		Claude yaml.Node `yaml:"claude"`
+		Codex  yaml.Node `yaml:"codex"`
+	}
+	var probe legacyProbe
+	_ = yaml.Unmarshal(b, &probe)
+	var legacy []string
+	if probe.Claude.Kind != 0 {
+		legacy = append(legacy, "claude")
+	}
+	if probe.Codex.Kind != 0 {
+		legacy = append(legacy, "codex")
+	}
+	if len(legacy) > 0 {
+		// Note: include agent.workdir in message so operators have an
+		// actionable pointer for the most common migration footgun.
+		return nil, fmt.Errorf("config %s: legacy top-level key(s) %v are no longer supported; consolidate into agent: { kind, bin, workdir (agent.workdir), extra_args }. See docs/migration/2026-06-agent-config.md", path, legacy)
+	}
+
 	dec := yaml.NewDecoder(bytes.NewReader(b))
 	dec.KnownFields(true)
 	var c Config
@@ -125,6 +146,23 @@ func LoadConfig(path string) (*Config, error) {
 	if c.Discovery.DisplayName == "" {
 		return nil, fmt.Errorf("config missing discovery.display_name")
 	}
+
+	// Required-field validation (no implicit defaults — see issue #15).
+	if c.Agent.Kind == "" {
+		return nil, fmt.Errorf("config %s: agent.kind is required (one of %v)", path, agentbackend.RegisteredKinds())
+	}
+	if c.Agent.WorkDir == "" {
+		return nil, fmt.Errorf("config %s: agent.workdir is required", path)
+	}
+	if !isRegisteredKind(c.Agent.Kind) {
+		return nil, fmt.Errorf("config %s: unknown agent.kind %q; registered: %v", path, c.Agent.Kind, agentbackend.RegisteredKinds())
+	}
+	// Defaults from the registered factory (Bin only — WorkDir is
+	// required, ExtraArgs default-empty).
+	if c.Agent.Bin == "" {
+		c.Agent.Bin = c.Agent.Kind // factory will recognise "" too, but explicit is clearer
+	}
+
 	if c.DriverDefaults.TaskTimeoutSec == 0 {
 		c.DriverDefaults.TaskTimeoutSec = 600
 	}
@@ -134,33 +172,8 @@ func LoadConfig(path string) (*Config, error) {
 	if c.DriverDefaults.ArtifactTransport == "" {
 		c.DriverDefaults.ArtifactTransport = ArtifactTransportPeerProxy
 	}
-	if c.Agent.Kind == "" {
-		c.Agent.Kind = "claude"
-	}
-	if c.Claude.Bin == "" {
-		c.Claude.Bin = "claude"
-	}
-	if c.Codex.Bin == "" {
-		c.Codex.Bin = "codex"
-	}
-	if c.Codex.WorkDir == "" {
-		c.Codex.WorkDir = c.Claude.WorkDir
-	}
-	if c.DriverDefaults.WorkDir == "" {
-		// Default to the agent's own workdir so source_path validation passes
-		// for project-internal files out of the box. Falls back to process cwd
-		// if neither agent set one (driver invoked without YAML workdir).
-		// Operators with stricter requirements override DriverDefaults.workdir
-		// or add SourcePathReadRoots. See §1.4 #17 review follow-up P1.
-		c.DriverDefaults.WorkDir = driverDefaultWorkDir(&c)
-	}
 	if c.Planner.Bin == "" {
-		switch c.Agent.Kind {
-		case "codex":
-			c.Planner.Bin = c.Codex.Bin
-		default:
-			c.Planner.Bin = c.Claude.Bin
-		}
+		c.Planner.Bin = c.Agent.Bin
 	}
 	if c.Planner.TimeoutSec == 0 {
 		c.Planner.TimeoutSec = 60
@@ -170,6 +183,10 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if c.Fanout.SubTaskDefaults.TimeoutSec == 0 {
 		c.Fanout.SubTaskDefaults.TimeoutSec = c.DriverDefaults.TaskTimeoutSec
+	}
+	// driver_defaults.workdir defaults to agent.workdir (jail root).
+	if c.DriverDefaults.WorkDir == "" {
+		c.DriverDefaults.WorkDir = c.Agent.WorkDir
 	}
 	observerLegacyConfigured := c.Observer.APIKey != "" || c.Observer.TokenStatePath != ""
 	observerProxyReady := c.Credentials.ProxyToken != ""
@@ -239,31 +256,13 @@ func SaveConfig(path string, c *Config) error {
 	return os.WriteFile(path, b, 0o600)
 }
 
-// driverDefaultWorkDir picks the most natural default for
-// DriverDefaults.WorkDir: the agent kind's configured workdir, then the
-// other agent kind's workdir, then the process cwd. Returns "" only if
-// all three are unavailable (rare; downstream AssertReadableSource then
-// treats it as "no implicit root" and the SourcePathReadRoots list is
-// the sole source of permissions).
-func driverDefaultWorkDir(c *Config) string {
-	switch c.Agent.Kind {
-	case "codex":
-		if c.Codex.WorkDir != "" {
-			return c.Codex.WorkDir
-		}
-		if c.Claude.WorkDir != "" {
-			return c.Claude.WorkDir
-		}
-	default: // "claude" or any other
-		if c.Claude.WorkDir != "" {
-			return c.Claude.WorkDir
-		}
-		if c.Codex.WorkDir != "" {
-			return c.Codex.WorkDir
+// isRegisteredKind asks the agentbackend registry whether kind is
+// claimed by some imported backend package.
+func isRegisteredKind(kind string) bool {
+	for _, k := range agentbackend.RegisteredKinds() {
+		if k == kind {
+			return true
 		}
 	}
-	if cwd, err := os.Getwd(); err == nil {
-		return cwd
-	}
-	return ""
+	return false
 }
