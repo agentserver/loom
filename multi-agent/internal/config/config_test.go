@@ -14,6 +14,7 @@ import (
 	// register these in cmd/{driver,master,slave}-agent/main.go.
 	_ "github.com/yourorg/multi-agent/pkg/agentbackend/claude"
 	_ "github.com/yourorg/multi-agent/pkg/agentbackend/codex"
+	_ "github.com/yourorg/multi-agent/pkg/agentbackend/opencode"
 )
 
 // loadFromString writes body to a temp file and Loads it. Helper for
@@ -537,9 +538,9 @@ func TestSlaveLoad_RejectsUnknownAgentKind(t *testing.T) {
   url: https://example.invalid
   name: x
 agent:
-  kind: opencode
+  kind: gemini
   workdir: /tmp/proj
-  bin: opencode
+  bin: gemini
 discovery:
   display_name: x
 `
@@ -547,7 +548,7 @@ discovery:
 	if err == nil {
 		t.Fatal("expected error for unknown agent.kind")
 	}
-	for _, want := range []string{"opencode", "claude", "codex"} {
+	for _, want := range []string{"gemini", "claude", "codex"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("err missing %q: %v", want, err)
 		}
@@ -657,5 +658,25 @@ discovery:
 	}
 	if c.Planner.Bin != "codex" {
 		t.Errorf("planner.bin=%q want codex (should follow agent.bin)", c.Planner.Bin)
+	}
+}
+
+// TestSlaveLoad_AcceptsOpencodeKind — mirror of the driver-side test.
+func TestSlaveLoad_AcceptsOpencodeKind(t *testing.T) {
+	yaml := `server:
+  url: https://example.invalid
+  name: x
+agent:
+  kind: opencode
+  workdir: /tmp/proj
+discovery:
+  display_name: x
+`
+	c, err := loadFromString(t, yaml)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Agent.Kind != "opencode" {
+		t.Fatalf("Agent.Kind=%q want opencode", c.Agent.Kind)
 	}
 }

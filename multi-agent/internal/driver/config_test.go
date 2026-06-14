@@ -11,6 +11,7 @@ import (
 	// register these in cmd/{driver,master,slave}-agent/main.go.
 	_ "github.com/yourorg/multi-agent/pkg/agentbackend/claude"
 	_ "github.com/yourorg/multi-agent/pkg/agentbackend/codex"
+	_ "github.com/yourorg/multi-agent/pkg/agentbackend/opencode"
 )
 
 func TestLoadConfig_FullRoundTrip(t *testing.T) {
@@ -568,9 +569,9 @@ func TestLoadConfig_RejectsUnknownAgentKind(t *testing.T) {
   url: https://example.invalid
   name: x
 agent:
-  kind: opencode
+  kind: gemini
   workdir: /tmp/proj
-  bin: opencode
+  bin: gemini
 discovery:
   display_name: x
 `
@@ -579,7 +580,7 @@ discovery:
 	if err == nil {
 		t.Fatal("expected error for unknown agent.kind")
 	}
-	for _, want := range []string{"opencode", "claude", "codex"} {
+	for _, want := range []string{"gemini", "claude", "codex"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("err missing %q: %v", want, err)
 		}
@@ -703,4 +704,32 @@ func writeTempYAML(t *testing.T, body string) string {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// TestLoadConfig_AcceptsOpencodeKind pins issue-15's "add backend
+// only via import" promise: agent.kind: opencode loads after the
+// driver-agent main imports pkg/agentbackend/opencode for side
+// effects. The test relies on the side-effect imports config_test.go
+// already has for claude+codex; add opencode to that block too.
+func TestLoadConfig_AcceptsOpencodeKind(t *testing.T) {
+	yaml := `server:
+  url: https://example.invalid
+  name: x
+agent:
+  kind: opencode
+  workdir: /tmp/proj
+discovery:
+  display_name: x
+`
+	path := writeTempYAML(t, yaml)
+	c, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Agent.Kind != "opencode" {
+		t.Fatalf("Agent.Kind=%q want opencode", c.Agent.Kind)
+	}
+	if c.Agent.Bin != "opencode" {
+		t.Fatalf("Agent.Bin=%q want opencode (factory default)", c.Agent.Bin)
+	}
 }
