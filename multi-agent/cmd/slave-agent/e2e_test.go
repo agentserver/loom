@@ -66,8 +66,10 @@ credentials:
   proxy_token: proxy-e2e
   workspace_id: ws-e2e
   short_id: short-e2e
-claude:
+agent:
+  kind: claude
   bin: claude
+  workdir: %s
 mcp_servers:
   static_e2e:
     transport: stdio
@@ -82,7 +84,7 @@ discovery:
 resources:
   memory_gb: 12
   tags: [e2e, capability-doc]
-`, server.URL, os.Args[0])
+`, server.URL, work, os.Args[0])
 	cfgPath := filepath.Join(work, "config.yaml")
 	require.NoError(t, os.WriteFile(cfgPath, []byte(cfg), 0o600))
 

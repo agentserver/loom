@@ -14,6 +14,11 @@ import (
 	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/commandiface"
 	"github.com/yourorg/multi-agent/internal/config"
+
+	// Register backend kinds so config.Load's isRegisteredKind whitelist
+	// accepts "claude" in unit tests (issue #15 Task 4).
+	_ "github.com/yourorg/multi-agent/pkg/agentbackend/claude"
+	_ "github.com/yourorg/multi-agent/pkg/agentbackend/codex"
 )
 
 func TestEnsureRegistered_PersistsCredentials(t *testing.T) {
@@ -60,7 +65,10 @@ func TestEnsureRegistered_PersistsCredentials(t *testing.T) {
 	defer srv.Close()
 
 	cfgPath := filepath.Join(t.TempDir(), "c.yaml")
-	c := &config.Config{Server: config.Server{URL: srv.URL, Name: "n"}}
+	c := &config.Config{
+		Server: config.Server{URL: srv.URL, Name: "n"},
+		Agent:  config.Agent{Kind: "claude", Bin: "claude", WorkDir: t.TempDir()},
+	}
 	require.NoError(t, c.Save(cfgPath))
 
 	tn := NewWithDeps(c, cfgPath, http.DefaultServeMux, Deps{

@@ -9,6 +9,11 @@ credentials:
   workspace_id: ""
   short_id: ""
 
+agent:
+  kind: claude
+  bin: claude
+  workdir: /tmp/slave-a-dev
+
 discovery:
   display_name: slave-a-dev
   skills:

@@ -72,22 +72,15 @@ func run(cfgPath string) error {
 	if sdk == nil {
 		return fmt.Errorf("tunnel.SDKClient returned nil after EnsureRegistered")
 	}
-	// Interim cascade from agentbackend.Config flatten (issue #15).
-	// Master config still has split Claude/Codex blocks because cfg
-	// shape is on the master-path freeze list. Promote per-kind fields
-	// into the unified Config until master gets its own follow-up PR.
-	agentCfg := agentbackend.Config{Kind: agentbackend.Kind(cfg.Agent.Kind)}
-	switch cfg.Agent.Kind {
-	case "claude":
-		agentCfg.Bin = cfg.Claude.Bin
-		agentCfg.WorkDir = cfg.Claude.WorkDir
-		agentCfg.ExtraArgs = cfg.Claude.Args
-	case "codex":
-		agentCfg.Bin = cfg.Codex.Bin
-		agentCfg.WorkDir = cfg.Codex.WorkDir
-		agentCfg.ExtraArgs = cfg.Codex.Args
-	}
-	backend, err := agentbackend.New(agentCfg, nil)
+	// Cascade from internal/config flatten (issue #15 Task 4).
+	// internal/config no longer has split Claude/Codex blocks; the
+	// unified Agent struct now carries Bin/WorkDir/ExtraArgs.
+	backend, err := agentbackend.New(agentbackend.Config{
+		Kind:      agentbackend.Kind(cfg.Agent.Kind),
+		Bin:       cfg.Agent.Bin,
+		WorkDir:   cfg.Agent.WorkDir,
+		ExtraArgs: cfg.Agent.ExtraArgs,
+	}, nil)
 	if err != nil {
 		return fmt.Errorf("agentbackend: %w", err)
 	}

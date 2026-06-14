@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 	"gopkg.in/yaml.v3"
 )
 
@@ -13,8 +14,6 @@ type Config struct {
 	Server      Server               `yaml:"server"`
 	Credentials Credentials          `yaml:"credentials"`
 	Agent       Agent                `yaml:"agent"`
-	Claude      Claude               `yaml:"claude"`
-	Codex       Codex                `yaml:"codex"`
 	MCPServers  map[string]MCPServer `yaml:"mcp_servers"`
 	Discovery   Discovery            `yaml:"discovery"`
 	Planner     Planner              `yaml:"planner"`
@@ -29,14 +28,16 @@ type HumanloopConfig struct {
 	MaxQuestionsPerTask int `yaml:"max_questions_per_task"`
 }
 
+// Agent is the single per-backend descriptor consumed by both the
+// agent runtime (agentbackend.New) and slave-local paths (executor
+// jail roots, planner bin default). Previously this was split across
+// claude:/codex: top-level YAML blocks plus a tiny Agent{Kind} stub;
+// collapsed in issue #15.
 type Agent struct {
-	Kind string `yaml:"kind"` // "claude" | "codex"; default claude
-}
-
-type Codex struct {
-	Bin     string   `yaml:"bin"`
-	WorkDir string   `yaml:"workdir"`
-	Args    []string `yaml:"extra_args"`
+	Kind      string   `yaml:"kind"`
+	Bin       string   `yaml:"bin"`
+	WorkDir   string   `yaml:"workdir"`
+	ExtraArgs []string `yaml:"extra_args"`
 }
 
 type Server struct {
@@ -50,12 +51,6 @@ type Credentials struct {
 	ProxyToken  string `yaml:"proxy_token"`
 	WorkspaceID string `yaml:"workspace_id"`
 	ShortID     string `yaml:"short_id"`
-}
-
-type Claude struct {
-	Bin     string   `yaml:"bin"`
-	WorkDir string   `yaml:"workdir"`
-	Args    []string `yaml:"extra_args"`
 }
 
 type MCPServer struct {
@@ -113,6 +108,30 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
+	// Legacy-key peek: produce a friendly migration error before the
+	// unknown-fields decoder buries it as a generic "unknown field"
+	// message. Probe without DisallowUnknownFields so we can recognise
+	// the old shape regardless of agent.kind validity.
+	// Using yaml.Node (not `any`) so we detect bare `claude:` /
+	// `claude: null` — both unmarshal to a `nil` interface but to a
+	// node with Kind != 0 (absent keys leave Kind=0).
+	type legacyProbe struct {
+		Claude yaml.Node `yaml:"claude"`
+		Codex  yaml.Node `yaml:"codex"`
+	}
+	var probe legacyProbe
+	_ = yaml.Unmarshal(data, &probe)
+	var legacy []string
+	if probe.Claude.Kind != 0 {
+		legacy = append(legacy, "claude")
+	}
+	if probe.Codex.Kind != 0 {
+		legacy = append(legacy, "codex")
+	}
+	if len(legacy) > 0 {
+		return nil, fmt.Errorf("config %s: legacy top-level key(s) %v are no longer supported; consolidate into agent: { kind, bin, workdir (agent.workdir), extra_args }. See docs/migration/2026-06-agent-config.md", path, legacy)
+	}
+
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	var c Config
@@ -122,34 +141,25 @@ func Load(path string) (*Config, error) {
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
-	if c.Claude.Bin == "" {
-		c.Claude.Bin = "claude"
-	}
+
+	// Required-field validation (no implicit defaults — see issue #15).
 	if c.Agent.Kind == "" {
-		c.Agent.Kind = "claude"
+		return nil, fmt.Errorf("config %s: agent.kind is required (one of %v)", path, agentbackend.RegisteredKinds())
 	}
-	if c.Codex.Bin == "" {
-		c.Codex.Bin = "codex"
+	if c.Agent.WorkDir == "" {
+		return nil, fmt.Errorf("config %s: agent.workdir is required", path)
 	}
-	// Mirror workdir in BOTH directions. The Linux --agent codex install
-	// (deploy/linux/slave/install.sh) generates a config with only
-	// codex.workdir; cmd/slave-agent's file-executor wiring otherwise
-	// reads cfg.Claude.WorkDir as the file-jail root, falls back to
-	// os.Getwd(), and on foreground startup (no systemd WorkingDirectory)
-	// that's the process cwd — possibly "/". See PR #14 P1 follow-up.
-	if c.Codex.WorkDir == "" {
-		c.Codex.WorkDir = c.Claude.WorkDir
+	if !isRegisteredKind(c.Agent.Kind) {
+		return nil, fmt.Errorf("config %s: unknown agent.kind %q; registered: %v", path, c.Agent.Kind, agentbackend.RegisteredKinds())
 	}
-	if c.Claude.WorkDir == "" {
-		c.Claude.WorkDir = c.Codex.WorkDir
+	// Defaults from the registered factory (Bin only — WorkDir is
+	// required, ExtraArgs default-empty).
+	if c.Agent.Bin == "" {
+		c.Agent.Bin = c.Agent.Kind
 	}
+
 	if c.Planner.Bin == "" {
-		switch c.Agent.Kind {
-		case "codex":
-			c.Planner.Bin = c.Codex.Bin
-		default:
-			c.Planner.Bin = c.Claude.Bin
-		}
+		c.Planner.Bin = c.Agent.Bin
 	}
 	if c.Planner.TimeoutSec == 0 {
 		c.Planner.TimeoutSec = 60
@@ -248,6 +258,17 @@ func (c *Config) Save(path string) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// isRegisteredKind asks the agentbackend registry whether kind is
+// claimed by some imported backend package.
+func isRegisteredKind(kind string) bool {
+	for _, k := range agentbackend.RegisteredKinds() {
+		if k == kind {
+			return true
+		}
+	}
+	return false
 }
 
 type Resources struct {

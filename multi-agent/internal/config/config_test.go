@@ -8,7 +8,26 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	// Register backend kinds so Load's isRegisteredKind whitelist
+	// recognises "claude"/"codex" in unit tests. Production binaries
+	// register these in cmd/{driver,master,slave}-agent/main.go.
+	_ "github.com/yourorg/multi-agent/pkg/agentbackend/claude"
+	_ "github.com/yourorg/multi-agent/pkg/agentbackend/codex"
 )
+
+// loadFromString writes body to a temp file and Loads it. Helper for
+// the issue #15 schema validation tests that don't need any other
+// per-test scaffolding beyond a yaml fixture.
+func loadFromString(t *testing.T, body string) (*Config, error) {
+	t.Helper()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return Load(p)
+}
 
 func TestLoad_ValidYAML(t *testing.T) {
 	dir := t.TempDir()
@@ -17,8 +36,10 @@ func TestLoad_ValidYAML(t *testing.T) {
 server:
   url: https://example.com
   name: agent-1
-claude:
+agent:
+  kind: claude
   bin: claude
+  workdir: /tmp/proj
 mcp_servers:
   echo:
     transport: stdio
@@ -39,7 +60,7 @@ discovery:
 func TestLoad_MissingURL(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "c.yaml")
-	require.NoError(t, os.WriteFile(path, []byte("server:\n  name: x\n"), 0o600))
+	require.NoError(t, os.WriteFile(path, []byte("server:\n  name: x\nagent: {kind: claude, bin: claude, workdir: /tmp/proj}\n"), 0o600))
 
 	_, err := Load(path)
 	require.ErrorContains(t, err, "server.url")
@@ -50,6 +71,7 @@ func TestSaveLoad_Roundtrip(t *testing.T) {
 	path := filepath.Join(dir, "c.yaml")
 	c := &Config{
 		Server:    Server{URL: "https://x", Name: "n"},
+		Agent:     Agent{Kind: "claude", Bin: "claude", WorkDir: "/tmp/proj"},
 		Discovery: Discovery{DisplayName: "D", Skills: []string{"chat"}},
 	}
 	c.Credentials.SandboxID = "sb-1"
@@ -79,6 +101,7 @@ credentials:
   proxy_token: pt
   workspace_id: ws-1
   short_id: short
+agent: {kind: claude, bin: claude, workdir: /tmp/proj}
 discovery:
   display_name: agent
   skills: [chat]
@@ -102,6 +125,7 @@ func TestLoad_MasterFields(t *testing.T) {
 server:
   url: https://example.com
   name: m
+agent: {kind: claude, bin: claude, workdir: /tmp/proj}
 discovery:
   display_name: M
   skills: [route, fanout]
@@ -130,7 +154,7 @@ fanout:
 func TestLoad_MasterDefaults(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "c.yaml")
-	require.NoError(t, os.WriteFile(path, []byte("server:\n  url: x\n"), 0o600))
+	require.NoError(t, os.WriteFile(path, []byte("server:\n  url: x\nagent: {kind: claude, bin: claude, workdir: /tmp/proj}\n"), 0o600))
 	c, err := Load(path)
 	require.NoError(t, err)
 	require.Equal(t, 60, c.Planner.TimeoutSec)
@@ -146,6 +170,7 @@ func TestLoad_ObserverURLWithEnabledFalseKeepsDisabledAndDefaultsAgentID(t *test
 server:
   url: https://example.com
   name: m
+agent: {kind: claude, bin: claude, workdir: /tmp/proj}
 discovery:
   display_name: master-display
 observer:
@@ -167,6 +192,7 @@ func TestLoad_ObserverTelemetryDefaultsDisabled(t *testing.T) {
 server:
   url: https://example.com
   name: m
+agent: {kind: claude, bin: claude, workdir: /tmp/proj}
 discovery:
   display_name: slave-display
 observer:
@@ -191,6 +217,7 @@ func TestLoad_ObserverTelemetryCanBeEnabled(t *testing.T) {
 server:
   url: https://example.com
   name: m
+agent: {kind: claude, bin: claude, workdir: /tmp/proj}
 discovery:
   display_name: slave-display
 observer:
@@ -220,6 +247,7 @@ credentials:
   proxy_token: proxy-token
   workspace_id: ws-agentserver
   short_id: master-short
+agent: {kind: claude, bin: claude, workdir: /tmp/proj}
 discovery:
   display_name: master-display
 observer:
@@ -244,6 +272,7 @@ func TestLoad_ObserverAllowsPendingAgentserverRegistration(t *testing.T) {
 server:
   url: https://example.com
   name: m
+agent: {kind: claude, bin: claude, workdir: /tmp/proj}
 discovery:
   display_name: master-display
 observer:
@@ -267,6 +296,7 @@ func TestLoad_ObserverTelemetryEnabledRequiresAPIKey(t *testing.T) {
 server:
   url: https://example.com
   name: m
+agent: {kind: claude, bin: claude, workdir: /tmp/proj}
 discovery:
   display_name: master-display
 observer:
@@ -289,6 +319,7 @@ func TestLoad_ResourcesRoundTrip(t *testing.T) {
 	path := filepath.Join(dir, "c.yaml")
 	src := `
 server: {url: "http://x", name: "s"}
+agent: {kind: claude, bin: claude, workdir: /tmp/proj}
 resources:
   cpu:
     cores: 8
@@ -331,7 +362,7 @@ resources:
 func TestLoad_ResourcesAbsentIsNil(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "c.yaml")
-	if err := os.WriteFile(path, []byte(`server: {url: "u", name: "n"}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`server: {url: "u", name: "n"}`+"\n"+`agent: {kind: claude, bin: claude, workdir: /tmp/proj}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	c, err := Load(path)
@@ -376,7 +407,7 @@ func TestLoad_ObserverEnabledRequiresAPIKeyAndTokenStatePath(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "c.yaml")
-			body := "server:\n  url: https://example.com\n  name: m\ndiscovery:\n  display_name: a\nobserver:\n  enabled: true\n  url: https://observer.example\n  workspace_id: ws\n  agent_id: a\n" + tc.extra
+			body := "server:\n  url: https://example.com\n  name: m\nagent: {kind: claude, bin: claude, workdir: /tmp/proj}\ndiscovery:\n  display_name: a\nobserver:\n  enabled: true\n  url: https://observer.example\n  workspace_id: ws\n  agent_id: a\n" + tc.extra
 			require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
 			_, err := Load(path)
 			require.Error(t, err)
@@ -393,6 +424,7 @@ func TestLoad_ObserverRejectsObsoleteTokenField(t *testing.T) {
 server:
   url: https://example.com
   name: m
+agent: {kind: claude, bin: claude, workdir: /tmp/proj}
 discovery:
   display_name: a
 observer:
@@ -408,57 +440,13 @@ observer:
 		"strict yaml decoder should reject the obsolete token field")
 }
 
-func TestLoadDefaultsAgentKindToClaude(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "c.yaml")
-	os.WriteFile(path, []byte(`
-server: { url: x, name: y }
-credentials: {}
-claude: { bin: claude }
-discovery: { display_name: a }
-`), 0o600)
-	c, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.Agent.Kind != "claude" {
-		t.Fatalf("Agent.Kind=%q want claude", c.Agent.Kind)
-	}
-	if c.Codex.Bin != "codex" {
-		t.Fatalf("Codex.Bin default=%q want codex", c.Codex.Bin)
-	}
-}
-
-func TestLoadAgentKindCodexFillsCodexDefaults(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "c.yaml")
-	os.WriteFile(path, []byte(`
-server: { url: x, name: y }
-credentials: {}
-agent: { kind: codex }
-codex: { workdir: /tmp/cx }
-discovery: { display_name: a }
-`), 0o600)
-	c, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.Agent.Kind != "codex" {
-		t.Fatalf("kind=%q", c.Agent.Kind)
-	}
-	if c.Codex.Bin != "codex" {
-		t.Fatalf("bin=%q", c.Codex.Bin)
-	}
-	if c.Planner.Bin != "codex" {
-		t.Fatalf("planner.bin=%q (should follow codex)", c.Planner.Bin)
-	}
-}
-
 func TestLoad_ObserverSuccessWithAPIKeyAndPath(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "state")
 	require.NoError(t, os.Mkdir(stateDir, 0o755))
 	tokenPath := filepath.Join(stateDir, "observer.token")
 
 	path := filepath.Join(t.TempDir(), "c.yaml")
-	body := "server:\n  url: https://example.com\n  name: m\ndiscovery:\n  display_name: a\nobserver:\n  enabled: true\n  url: https://observer.example\n  workspace_id: ws\n  agent_id: a\n  api_key: ak_x\n  token_state_path: " + tokenPath + "\n"
+	body := "server:\n  url: https://example.com\n  name: m\nagent: {kind: claude, bin: claude, workdir: /tmp/proj}\ndiscovery:\n  display_name: a\nobserver:\n  enabled: true\n  url: https://observer.example\n  workspace_id: ws\n  agent_id: a\n  api_key: ak_x\n  token_state_path: " + tokenPath + "\n"
 	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
 	c, err := Load(path)
 	require.NoError(t, err)
@@ -469,7 +457,7 @@ func TestLoad_ObserverSuccessWithAPIKeyAndPath(t *testing.T) {
 func TestLoadHumanloopDefaults(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(p, []byte("server:\n  url: \"http://x\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(p, []byte("server:\n  url: \"http://x\"\nagent: {kind: claude, bin: claude, workdir: /tmp/proj}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load(p)
@@ -487,7 +475,7 @@ func TestLoadHumanloopDefaults(t *testing.T) {
 func TestLoadHumanloopOverrides(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "config.yaml")
-	yaml := "server:\n  url: \"http://x\"\nhumanloop:\n  shutdown_grace_sec: 3\n  max_questions_per_task: 99\n"
+	yaml := "server:\n  url: \"http://x\"\nagent: {kind: claude, bin: claude, workdir: /tmp/proj}\nhumanloop:\n  shutdown_grace_sec: 3\n  max_questions_per_task: 99\n"
 	if err := os.WriteFile(p, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -500,59 +488,174 @@ func TestLoadHumanloopOverrides(t *testing.T) {
 	}
 }
 
-// TestLoad_CodexWorkDirMirrorsToClaude pins the PR #14 P1 follow-up:
-// Linux --agent codex install generates config with only codex.workdir
-// set; cmd/slave-agent.NewFileExecutor used to read cfg.Claude.WorkDir
-// unconditionally, falling back to os.Getwd() on codex slaves (process
-// cwd → "/" in foreground startup). The loader now mirrors workdir in
-// BOTH directions so callers reading either field see the populated
-// value.
-func TestLoad_CodexWorkDirMirrorsToClaude(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "c.yaml")
-	body := `
-server: { url: x, name: y }
-credentials: {}
-agent: { kind: codex }
-codex: { workdir: /var/lib/loom/codex }
-discovery: { display_name: a }
+// TestSlaveLoad_RequiresAgentKind pins issue #15: agent.kind is
+// mandatory; no implicit default.
+func TestSlaveLoad_RequiresAgentKind(t *testing.T) {
+	yaml := `server:
+  url: https://example.invalid
+  name: x
+agent:
+  workdir: /tmp/proj
+  bin: claude
+discovery:
+  display_name: x
 `
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
+	c, err := loadFromString(t, yaml)
+	if err == nil {
+		t.Fatalf("expected error; got %+v", c)
 	}
-	c, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.Codex.WorkDir != "/var/lib/loom/codex" {
-		t.Fatalf("Codex.WorkDir=%q want /var/lib/loom/codex", c.Codex.WorkDir)
-	}
-	if c.Claude.WorkDir != "/var/lib/loom/codex" {
-		t.Fatalf("Claude.WorkDir=%q want mirror of codex.workdir", c.Claude.WorkDir)
+	if !strings.Contains(err.Error(), "agent.kind") {
+		t.Fatalf("err should mention agent.kind; got %v", err)
 	}
 }
 
-// TestLoad_ClaudeWorkDirMirrorsToCodex is the pre-existing direction
-// (kept for explicitness alongside the reverse mirror above): when only
-// claude.workdir is set, Codex.WorkDir inherits it.
-func TestLoad_ClaudeWorkDirMirrorsToCodex(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "c.yaml")
-	body := `
-server: { url: x, name: y }
-credentials: {}
-claude: { workdir: /var/lib/loom/claude }
-discovery: { display_name: a }
+// TestSlaveLoad_RequiresAgentWorkDir pins issue #15: agent.workdir is
+// mandatory; no fallback to cwd (PR #14 P1 band-aid removed).
+func TestSlaveLoad_RequiresAgentWorkDir(t *testing.T) {
+	yaml := `server:
+  url: https://example.invalid
+  name: x
+agent:
+  kind: claude
+  bin: claude
+discovery:
+  display_name: x
 `
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
+	c, err := loadFromString(t, yaml)
+	if err == nil {
+		t.Fatalf("expected error; got %+v", c)
 	}
-	c, err := Load(path)
+	if !strings.Contains(err.Error(), "agent.workdir") {
+		t.Fatalf("err should mention agent.workdir; got %v", err)
+	}
+}
+
+// TestSlaveLoad_RejectsUnknownAgentKind names the registered set so
+// operators can see what import they're missing.
+func TestSlaveLoad_RejectsUnknownAgentKind(t *testing.T) {
+	yaml := `server:
+  url: https://example.invalid
+  name: x
+agent:
+  kind: opencode
+  workdir: /tmp/proj
+  bin: opencode
+discovery:
+  display_name: x
+`
+	_, err := loadFromString(t, yaml)
+	if err == nil {
+		t.Fatal("expected error for unknown agent.kind")
+	}
+	for _, want := range []string{"opencode", "claude", "codex"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err missing %q: %v", want, err)
+		}
+	}
+}
+
+// TestSlaveLoad_RejectsLegacyClaudeKey gives operators an actionable
+// migration error instead of yaml's generic "unknown field" noise.
+func TestSlaveLoad_RejectsLegacyClaudeKey(t *testing.T) {
+	yaml := `server:
+  url: https://example.invalid
+  name: x
+agent:
+  kind: claude
+  workdir: /tmp/proj
+  bin: claude
+claude:
+  workdir: /tmp/old
+discovery:
+  display_name: x
+`
+	_, err := loadFromString(t, yaml)
+	if err == nil {
+		t.Fatal("expected error for legacy claude: key")
+	}
+	if !strings.Contains(err.Error(), "claude") || !strings.Contains(err.Error(), "agent.workdir") {
+		t.Fatalf("err should name 'claude' legacy key and point at agent.workdir; got %v", err)
+	}
+}
+
+// TestSlaveLoad_RejectsBareLegacyClaudeKey pins the §issue-15 P3
+// reviewer concern: bare `claude:` (no value) or `claude: null` also
+// triggers the friendly migration error.
+func TestSlaveLoad_RejectsBareLegacyClaudeKey(t *testing.T) {
+	yaml := `server:
+  url: https://example.invalid
+  name: x
+agent:
+  kind: claude
+  workdir: /tmp/proj
+  bin: claude
+claude:
+discovery:
+  display_name: x
+`
+	_, err := loadFromString(t, yaml)
+	if err == nil {
+		t.Fatal("expected error for bare legacy claude: key")
+	}
+	if !strings.Contains(err.Error(), "claude") || !strings.Contains(err.Error(), "agent.workdir") {
+		t.Fatalf("err should name 'claude' legacy key and point at agent.workdir; got %v", err)
+	}
+}
+
+// TestSlaveLoad_RejectsLegacyCodexKey same for codex.
+func TestSlaveLoad_RejectsLegacyCodexKey(t *testing.T) {
+	yaml := `server:
+  url: https://example.invalid
+  name: x
+agent:
+  kind: codex
+  workdir: /tmp/proj
+  bin: codex
+codex:
+  workdir: /tmp/old
+discovery:
+  display_name: x
+`
+	_, err := loadFromString(t, yaml)
+	if err == nil {
+		t.Fatal("expected error for legacy codex: key")
+	}
+	if !strings.Contains(err.Error(), "codex") {
+		t.Fatalf("err should name 'codex' legacy key; got %v", err)
+	}
+}
+
+// TestSlaveLoad_HappyPathCodex pins the new YAML shape.
+func TestSlaveLoad_HappyPathCodex(t *testing.T) {
+	yaml := `server:
+  url: https://example.invalid
+  name: x
+agent:
+  kind: codex
+  workdir: /tmp/proj
+  bin: codex
+  extra_args:
+    - --foo
+discovery:
+  display_name: x
+`
+	c, err := loadFromString(t, yaml)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Claude.WorkDir != "/var/lib/loom/claude" {
-		t.Fatalf("Claude.WorkDir=%q", c.Claude.WorkDir)
+	if c.Agent.Kind != "codex" {
+		t.Errorf("kind=%q", c.Agent.Kind)
 	}
-	if c.Codex.WorkDir != "/var/lib/loom/claude" {
-		t.Fatalf("Codex.WorkDir=%q want mirror of claude.workdir", c.Codex.WorkDir)
+	if c.Agent.WorkDir != "/tmp/proj" {
+		t.Errorf("workdir=%q", c.Agent.WorkDir)
+	}
+	if c.Agent.Bin != "codex" {
+		t.Errorf("bin=%q", c.Agent.Bin)
+	}
+	if len(c.Agent.ExtraArgs) != 1 || c.Agent.ExtraArgs[0] != "--foo" {
+		t.Errorf("extra_args=%v", c.Agent.ExtraArgs)
+	}
+	if c.Planner.Bin != "codex" {
+		t.Errorf("planner.bin=%q want codex (should follow agent.bin)", c.Planner.Bin)
 	}
 }

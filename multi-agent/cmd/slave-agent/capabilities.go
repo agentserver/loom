@@ -27,10 +27,10 @@ func registerRuntimeShellRoutes(routes map[string]executor.Executor, cfg *config
 		return
 	}
 	if hasSkill(caps.Skills, "bash") {
-		routes["bash"] = executor.NewBashExecutor(bashConfigForRuntime(cfg.Claude.WorkDir, caps.CommandInterfaces))
+		routes["bash"] = executor.NewBashExecutor(bashConfigForRuntime(cfg.Agent.WorkDir, caps.CommandInterfaces))
 	}
 	if hasSkill(caps.Skills, "powershell") {
-		routes["powershell"] = executor.NewPowerShellExecutor(executor.PowerShellConfig{WorkDir: cfg.Claude.WorkDir})
+		routes["powershell"] = executor.NewPowerShellExecutor(executor.PowerShellConfig{WorkDir: cfg.Agent.WorkDir})
 	}
 }
 
