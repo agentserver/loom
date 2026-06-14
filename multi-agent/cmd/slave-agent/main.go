@@ -164,15 +164,7 @@ func run(cfgPath string) error {
 	}
 
 	journalDir, _ := filepath.Abs("journal")
-	// Interim: pick the right bin by kind until Task 5 unifies
-	// cfg.Agent.Bin as the single source. Fixes the bug where codex
-	// slaves silently called a non-existent claude binary for journal
-	// capability-event merges. See issue #15.
-	journalBin := cfg.Claude.Bin
-	if cfg.Agent.Kind == "codex" {
-		journalBin = cfg.Codex.Bin
-	}
-	j, err := journal.New(journal.Config{Dir: journalDir, AgentBin: journalBin})
+	j, err := journal.New(journal.Config{Dir: journalDir, AgentBin: cfg.Agent.Bin})
 	if err != nil {
 		return err
 	}
@@ -196,19 +188,12 @@ func run(cfgPath string) error {
 	}
 	mcpExec := executor.NewMCPExecutor(mcpCfg)
 	defer mcpExec.Close()
-	agentCfg := agentbackend.Config{Kind: agentbackend.Kind(cfg.Agent.Kind)}
-	switch cfg.Agent.Kind {
-	case "claude":
-		agentCfg.Bin = cfg.Claude.Bin
-		agentCfg.WorkDir = cfg.Claude.WorkDir
-		agentCfg.ExtraArgs = cfg.Claude.Args
-	case "codex":
-		agentCfg.Bin = cfg.Codex.Bin
-		agentCfg.WorkDir = cfg.Codex.WorkDir
-		agentCfg.ExtraArgs = cfg.Codex.Args
-	}
-	// TODO(issue-15 Task 4): replace switch with direct cfg.Agent.{Bin,WorkDir,ExtraArgs}
-	backend, err := agentbackend.New(agentCfg, nil)
+	backend, err := agentbackend.New(agentbackend.Config{
+		Kind:      agentbackend.Kind(cfg.Agent.Kind),
+		Bin:       cfg.Agent.Bin,
+		WorkDir:   cfg.Agent.WorkDir,
+		ExtraArgs: cfg.Agent.ExtraArgs,
+	}, nil)
 	if err != nil {
 		log.Fatalf("agentbackend: %v", err)
 	}
@@ -262,16 +247,9 @@ func run(cfgPath string) error {
 	})
 	registerRuntimeShellRoutes(routes, cfg, caps)
 	if hasSkill(cfg.Discovery.Skills, "file") {
-		// Select the file-jail root by agent kind so codex slaves
-		// don't fall back to os.Getwd() when only codex.workdir is
-		// populated (config.Load now reverse-mirrors the field, but
-		// pin intent here too — codex slave reads codex.workdir).
-		// See PR #14 P1 follow-up.
-		fileWorkDir := cfg.Claude.WorkDir
-		if cfg.Agent.Kind == "codex" {
-			fileWorkDir = cfg.Codex.WorkDir
-		}
-		routes["file"] = executor.NewFileExecutor(executor.FileConfig{WorkDir: fileWorkDir})
+		// File-jail root comes from the unified agent.workdir
+		// (issue #15). PR #14 P1 reverse-mirror band-aid removed.
+		routes["file"] = executor.NewFileExecutor(executor.FileConfig{WorkDir: cfg.Agent.WorkDir})
 	}
 	enumerateMCPTools := func(ctx context.Context) []capability.MCPToolDescriptor {
 		allDesc := []capability.MCPToolDescriptor{}

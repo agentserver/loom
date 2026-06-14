@@ -65,7 +65,7 @@ func TestNormalizeDiscoveryForRuntimeWindowsRemovesUnavailableBashAndKeepsPowerS
 func TestRegisterRuntimeShellRoutesUsesNormalizedSkills(t *testing.T) {
 	cfg := &config.Config{
 		Discovery: config.Discovery{Skills: []string{"chat", "powershell"}},
-		Claude:    config.Claude{WorkDir: t.TempDir()},
+		Agent:     config.Agent{Kind: "claude", Bin: "claude", WorkDir: t.TempDir()},
 	}
 	caps := commandiface.Capabilities{Skills: []string{"chat", "powershell"}}
 	routes := map[string]executor.Executor{}
@@ -83,7 +83,7 @@ func TestRegisterRuntimeShellRoutesUsesNormalizedSkills(t *testing.T) {
 func TestRegisterRuntimeShellRoutesUsesDetectedBashCommand(t *testing.T) {
 	workdir := t.TempDir()
 	fakeBash := buildFakeBashCommand(t)
-	cfg := &config.Config{Claude: config.Claude{WorkDir: workdir}}
+	cfg := &config.Config{Agent: config.Agent{Kind: "claude", Bin: "claude", WorkDir: workdir}}
 	caps := commandiface.Capabilities{
 		Skills: []string{"bash"},
 		CommandInterfaces: []commandiface.CommandInterface{{

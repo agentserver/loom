@@ -8,8 +8,10 @@ credentials:
   proxy_token: ""
   short_id: ""
 
-claude:
+agent:
+  kind: claude
   bin: claude
+  workdir: /var/lib/loom/master-local
 
 planner:
   bin: claude

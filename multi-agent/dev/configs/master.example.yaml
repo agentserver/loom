@@ -9,8 +9,10 @@ credentials:
   workspace_id: ""
   short_id: ""
 
-claude:
+agent:
+  kind: claude
   bin: claude
+  workdir: /tmp/master-dev
 
 planner:
   bin: claude

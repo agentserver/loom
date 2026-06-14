@@ -413,17 +413,15 @@ func upsertTool(tools []capability.MCPToolDescriptor, tool capability.MCPToolDes
 func scanCommands(cfg *config.Config) []commandPresence {
 	names := []string{"python3", "node", "npm", "go", "docker", "powershell.exe", "powershell", "pwsh", "bash"}
 	if cfg != nil {
-		switch cfg.Agent.Kind {
-		case "codex":
-			names = append(names, "codex")
-			if cfg.Codex.Bin != "" && cfg.Codex.Bin != "codex" {
-				names = append(names, cfg.Codex.Bin)
-			}
-		default:
-			names = append(names, "claude")
-			if cfg.Claude.Bin != "" && cfg.Claude.Bin != "claude" {
-				names = append(names, cfg.Claude.Bin)
-			}
+		// Unified per issue #15: the agent kind itself is always
+		// added, and any explicit Agent.Bin override is appended too.
+		// Task 6 will refactor scanCommands to remove the kind switch
+		// entirely; for now this Task 4 cascade restores compilation.
+		if cfg.Agent.Kind != "" {
+			names = append(names, cfg.Agent.Kind)
+		}
+		if cfg.Agent.Bin != "" && cfg.Agent.Bin != cfg.Agent.Kind {
+			names = append(names, cfg.Agent.Bin)
 		}
 	}
 	seen := map[string]bool{}
