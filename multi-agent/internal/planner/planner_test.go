@@ -447,6 +447,48 @@ func TestValidatePlanNodes_AcceptsSafeNodeIDs(t *testing.T) {
 	}
 }
 
+// TestRoute_RetriesOnMissingTargetIDField pins §1.5 P2 follow-up:
+// {} / {"target_id":null} / {"target":"agent-a"} (typo) must NOT
+// silently return ""; they should trigger schema-validate retry.
+func TestRoute_RetriesOnMissingTargetIDField(t *testing.T) {
+	cases := []struct {
+		name string
+		bad  string
+	}{
+		{"empty object", `{}`},
+		{"null value", `{"target_id":null}`},
+		{"typo field name", `{"target":"agent-a"}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p, llm := newScriptedPlanner(t,
+				c.bad,
+				`{"target_id":"agent-a"}`,
+			)
+			target, err := p.Route(context.Background(), "task", demoAgents)
+			require.NoError(t, err)
+			require.Equal(t, "agent-a", target)
+			require.Equal(t, 2, llm.calls,
+				"%s should trigger retry, not silent empty return", c.name)
+			require.Contains(t, llm.prompts[1], "target_id",
+				"retry feedback should mention missing target_id")
+		})
+	}
+}
+
+// TestRoute_AcceptsExplicitEmptyTargetID is the positive contract:
+// {"target_id":""} (explicit empty) is the documented "no suitable"
+// response and must succeed on first attempt without retry.
+// (This pins the boundary against P2's tightening — we MUST still
+// accept the legitimate empty contract.)
+func TestRoute_AcceptsExplicitEmptyTargetID(t *testing.T) {
+	p, llm := newScriptedPlanner(t, `{"target_id":""}`)
+	target, err := p.Route(context.Background(), "task", demoAgents)
+	require.NoError(t, err)
+	require.Equal(t, "", target)
+	require.Equal(t, 1, llm.calls)
+}
+
 // TestRoute_NoLongerFallsBackToRawTrim is a regression test pinning
 // §1.5 #21: the old fallback `strings.TrimSpace(out)` would have
 // returned "Sure, here is the answer:" as a literal agent id. The

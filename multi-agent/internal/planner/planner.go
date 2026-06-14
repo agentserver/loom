@@ -125,8 +125,13 @@ func (p *Planner) Route(ctx context.Context, prompt string, agents []agentsdk.Ag
 		if err != nil {
 			return "", err
 		}
+		// *string so we can distinguish missing/null (LLM didn't answer)
+		// from explicit "" (legitimate "no suitable agent" contract).
+		// {"target":"x"} (typo) and {} both leave TargetID nil, so they
+		// trip the retry path instead of being silently treated as "no
+		// suitable agent". §1.5 PR #17 P2 follow-up.
 		var r struct {
-			TargetID string `json:"target_id"`
+			TargetID *string `json:"target_id"`
 		}
 		if err := json.Unmarshal([]byte(out), &r); err != nil {
 			// Route output is a one-liner ({"target_id":"..."}); 256 bytes
@@ -138,18 +143,29 @@ func (p *Planner) Route(ctx context.Context, prompt string, agents []agentsdk.Ag
 			)
 			continue
 		}
-		if r.TargetID == "" {
-			return "", nil // "no suitable agent" — legitimate contract
-		}
-		if _, ok := permitted[r.TargetID]; !ok {
-			lastErr = fmt.Errorf(`%w: target_id %q not in available agents`, errPlanValidate, r.TargetID)
+		if r.TargetID == nil {
+			// Missing field, null, or wrong field name (e.g. {"target":"x"}).
+			// LLM didn't actually answer; ask again.
+			lastErr = fmt.Errorf(`%w: response missing "target_id" field; output: %s`, errPlanParse, truncate(out, 256))
 			feedback = fmt.Sprintf(
-				`Your previous response chose target_id %q which is not in the available agents list. Pick one of the listed agent_id values or use "" if none is suitable.`,
-				r.TargetID,
+				`Your previous response did not contain a "target_id" field. The output was:`+"\n"+`%s`+"\n"+`Return EXACTLY one line of JSON: {"target_id":"<agent_id>"} or {"target_id":""}.`,
+				truncate(out, 256),
 			)
 			continue
 		}
-		return r.TargetID, nil
+		target := *r.TargetID
+		if target == "" {
+			return "", nil // explicit empty = "no suitable agent"
+		}
+		if _, ok := permitted[target]; !ok {
+			lastErr = fmt.Errorf(`%w: target_id %q not in available agents`, errPlanValidate, target)
+			feedback = fmt.Sprintf(
+				`Your previous response chose target_id %q which is not in the available agents list. Pick one of the listed agent_id values or use "" if none is suitable.`,
+				target,
+			)
+			continue
+		}
+		return target, nil
 	}
 	return "", fmt.Errorf("planner: route rejected after %d attempts; last error: %w", planMaxAttempts, lastErr)
 }
