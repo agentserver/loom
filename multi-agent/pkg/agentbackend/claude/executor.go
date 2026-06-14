@@ -20,7 +20,7 @@ import (
 )
 
 type executor struct {
-	cfg agentbackend.ClaudeConfig
+	cfg agentbackend.Config
 	env []string
 
 	// Tunables; defaults set by newExecutor.
@@ -33,7 +33,7 @@ type executor struct {
 	socketHookForTest func(string)
 }
 
-func newExecutor(cfg agentbackend.ClaudeConfig, env []string) *executor {
+func newExecutor(cfg agentbackend.Config, env []string) *executor {
 	return &executor{
 		cfg:              cfg,
 		env:              env,
@@ -43,7 +43,7 @@ func newExecutor(cfg agentbackend.ClaudeConfig, env []string) *executor {
 	}
 }
 
-func newExecutorWithSocketHook(cfg agentbackend.ClaudeConfig, env []string, hook func(string)) *executor {
+func newExecutorWithSocketHook(cfg agentbackend.Config, env []string, hook func(string)) *executor {
 	e := newExecutor(cfg, env)
 	e.socketHookForTest = hook
 	return e

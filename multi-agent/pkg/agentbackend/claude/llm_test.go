@@ -19,7 +19,7 @@ func main() {
 	fmt.Print(line)
 }
 `)
-	cfg := agentbackend.ClaudeConfig{Bin: fakeBin, ExtraArgs: nil}
+	cfg := agentbackend.Config{Bin: fakeBin, ExtraArgs: nil}
 	llm := newLLM(cfg, nil)
 	out, err := llm.Run(context.Background(), "ping")
 	if err != nil {

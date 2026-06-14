@@ -83,7 +83,7 @@ func main() {
 }
 
 func TestExecutorParsesAssistantText(t *testing.T) {
-	b := New(agentbackend.ClaudeConfig{
+	b := New(agentbackend.Config{
 		Bin:     fakeClaudePath(t),
 		WorkDir: t.TempDir(),
 	}, []string{"FAKE_CLAUDE_MODE=normal"})
@@ -107,7 +107,7 @@ func TestExecutorParsesAssistantText(t *testing.T) {
 }
 
 func TestExecutor_CapabilityParsed(t *testing.T) {
-	b := New(agentbackend.ClaudeConfig{
+	b := New(agentbackend.Config{
 		Bin:     fakeClaudePath(t),
 		WorkDir: t.TempDir(),
 	}, []string{"FAKE_CLAUDE_MODE=capability"})
@@ -127,7 +127,7 @@ func TestExecutor_CapabilityParsed(t *testing.T) {
 }
 
 func TestExecutor_NoCapabilityChange(t *testing.T) {
-	b := New(agentbackend.ClaudeConfig{
+	b := New(agentbackend.Config{
 		Bin:     fakeClaudePath(t),
 		WorkDir: t.TempDir(),
 	}, []string{"FAKE_CLAUDE_MODE=nochange"})
@@ -139,7 +139,7 @@ func TestExecutor_NoCapabilityChange(t *testing.T) {
 }
 
 func TestExecutor_Exit1(t *testing.T) {
-	b := New(agentbackend.ClaudeConfig{
+	b := New(agentbackend.Config{
 		Bin:     fakeClaudePath(t),
 		WorkDir: t.TempDir(),
 	}, []string{"FAKE_CLAUDE_MODE=exit1"})
@@ -150,7 +150,7 @@ func TestExecutor_Exit1(t *testing.T) {
 }
 
 func TestExecutor_Timeout(t *testing.T) {
-	b := New(agentbackend.ClaudeConfig{
+	b := New(agentbackend.Config{
 		Bin:     fakeClaudePath(t),
 		WorkDir: t.TempDir(),
 	}, []string{"FAKE_CLAUDE_MODE=sleep", "FAKE_CLAUDE_SLEEP=10"})
@@ -163,7 +163,7 @@ func TestExecutor_Timeout(t *testing.T) {
 }
 
 func TestExecutor_GarbageLines_StillCompletes(t *testing.T) {
-	b := New(agentbackend.ClaudeConfig{
+	b := New(agentbackend.Config{
 		Bin:     fakeClaudePath(t),
 		WorkDir: t.TempDir(),
 	}, []string{"FAKE_CLAUDE_MODE=garbage"})
@@ -215,7 +215,7 @@ func TestExecutorCapturesSessionID(t *testing.T) {
 		`{"type":"system","session_id":"sess-abc"}`,
 		`{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}`,
 	})
-	ex := newExecutor(agentbackend.ClaudeConfig{Bin: bin, WorkDir: t.TempDir()}, nil)
+	ex := newExecutor(agentbackend.Config{Bin: bin, WorkDir: t.TempDir()}, nil)
 	res, err := ex.Run(context.Background(), agentbackend.Task{Prompt: "hi"}, &captureSink{})
 	require.NoError(t, err)
 	require.Equal(t, "sess-abc", res.SessionID)
@@ -242,7 +242,7 @@ func TestExecutorPausesOnHumanloopIPC(t *testing.T) {
 		defer c.Close()
 		_ = c.Send(humanloop.Payload{Kind: "ask_user", Question: "approve?"})
 	}
-	ex := newExecutorWithSocketHook(agentbackend.ClaudeConfig{Bin: bin, WorkDir: t.TempDir()}, nil, sockHook)
+	ex := newExecutorWithSocketHook(agentbackend.Config{Bin: bin, WorkDir: t.TempDir()}, nil, sockHook)
 	res, err := ex.Run(context.Background(), agentbackend.Task{Prompt: "hi"}, &captureSink{})
 	require.NoError(t, err)
 	require.NotNil(t, res.AwaitingUser)
@@ -283,7 +283,7 @@ func main() {
 		defer c.Close()
 		_ = c.Send(humanloop.Payload{Kind: "ask_user", Question: "doomed"})
 	}
-	ex := newExecutorWithSocketHook(agentbackend.ClaudeConfig{Bin: script, WorkDir: t.TempDir()}, nil, sockHook)
+	ex := newExecutorWithSocketHook(agentbackend.Config{Bin: script, WorkDir: t.TempDir()}, nil, sockHook)
 	_, err := ex.Run(context.Background(), agentbackend.Task{Prompt: "hi"}, &captureSink{})
 	if err == nil {
 		t.Fatal("expected error when AwaitingUser set but SessionID empty")
@@ -325,7 +325,7 @@ func main() {
 		defer c.Close()
 		_ = c.Send(humanloop.Payload{Kind: "ask_user", Question: "stuck"})
 	}
-	ex := newExecutorWithSocketHook(agentbackend.ClaudeConfig{Bin: script, WorkDir: t.TempDir()}, nil, sockHook)
+	ex := newExecutorWithSocketHook(agentbackend.Config{Bin: script, WorkDir: t.TempDir()}, nil, sockHook)
 	ex.shutdownGraceSec = 1 // shrink to 1s for fast test
 
 	start := time.Now()
@@ -369,7 +369,7 @@ func main() {
 }
 `, sentinel, `{"type":"system","session_id":"sess-1-resumed"}`))
 
-	ex := newExecutor(agentbackend.ClaudeConfig{Bin: script, WorkDir: t.TempDir()}, nil)
+	ex := newExecutor(agentbackend.Config{Bin: script, WorkDir: t.TempDir()}, nil)
 	res, err := ex.RunResume(context.Background(), "sess-1", "the user's answer", &captureSink{})
 	if err != nil {
 		t.Fatal(err)

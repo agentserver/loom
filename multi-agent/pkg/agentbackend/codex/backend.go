@@ -8,7 +8,7 @@ import (
 
 // Backend is the Codex implementation of agentbackend.Backend.
 type Backend struct {
-	cfg  agentbackend.CodexConfig
+	cfg  agentbackend.Config
 	exec *executor
 	perm *Store
 	llm  *llmRunner
@@ -19,7 +19,10 @@ type Backend struct {
 // still resolve to this new symbol because the signature returns a type
 // that implements agentbackend.Backend; the test only calls .Run on it,
 // which both types satisfy with the same shape.)
-func New(cfg agentbackend.CodexConfig, env []string) *Backend {
+func New(cfg agentbackend.Config, env []string) *Backend {
+	if cfg.Bin == "" {
+		cfg.Bin = "codex"
+	}
 	return &Backend{
 		cfg:  cfg,
 		exec: newExecutor(cfg, env),
@@ -35,12 +38,12 @@ func (b *Backend) Run(ctx context.Context, t agentbackend.Task, s agentbackend.S
 func (b *Backend) RunResume(ctx context.Context, sessionID, answer string, s agentbackend.Sink) (agentbackend.Result, error) {
 	return b.exec.RunResume(ctx, sessionID, answer, s)
 }
-func (b *Backend) LLM() agentbackend.LLMRunner          { return b.llm }
+func (b *Backend) LLM() agentbackend.LLMRunner               { return b.llm }
 func (b *Backend) Permissions() agentbackend.PermissionsStore { return b.perm }
-func (b *Backend) Detect(ctx context.Context) error      { return detect(ctx, b.cfg.Bin) }
+func (b *Backend) Detect(ctx context.Context) error           { return detect(ctx, b.cfg.Bin) }
 
 func init() {
 	agentbackend.RegisterBuilder(agentbackend.KindCodex, func(cfg agentbackend.Config, env []string) (agentbackend.Backend, error) {
-		return New(cfg.Codex, env), nil
+		return New(cfg, env), nil
 	})
 }

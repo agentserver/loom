@@ -8,7 +8,7 @@ import (
 
 // Backend is the Claude implementation of agentbackend.Backend.
 type Backend struct {
-	cfg  agentbackend.ClaudeConfig
+	cfg  agentbackend.Config
 	env  []string
 	exec *executor
 	perm *Store
@@ -16,7 +16,10 @@ type Backend struct {
 }
 
 // New creates a Backend wired with an executor, permissions store, and LLM runner.
-func New(cfg agentbackend.ClaudeConfig, env []string) *Backend {
+func New(cfg agentbackend.Config, env []string) *Backend {
+	if cfg.Bin == "" {
+		cfg.Bin = "claude"
+	}
 	return &Backend{
 		cfg:  cfg,
 		env:  env,
@@ -53,6 +56,6 @@ type Kind = agentbackend.Kind
 
 func init() {
 	agentbackend.RegisterBuilder(agentbackend.KindClaude, func(cfg agentbackend.Config, env []string) (agentbackend.Backend, error) {
-		return New(cfg.Claude, env), nil
+		return New(cfg, env), nil
 	})
 }
