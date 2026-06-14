@@ -9,8 +9,9 @@ import (
 type Kind string
 
 const (
-	KindClaude Kind = "claude"
-	KindCodex  Kind = "codex"
+	KindClaude   Kind = "claude"
+	KindCodex    Kind = "codex"
+	KindOpencode Kind = "opencode"
 )
 
 // Re-exports so callers can depend on agentbackend only.
