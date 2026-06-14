@@ -27,6 +27,7 @@ import (
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 	_ "github.com/yourorg/multi-agent/pkg/agentbackend/claude"
 	_ "github.com/yourorg/multi-agent/pkg/agentbackend/codex"
+	_ "github.com/yourorg/multi-agent/pkg/agentbackend/opencode"
 )
 
 const usage = `driver-agent — bridges Claude Code to the multi-agent workspace.
