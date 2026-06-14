@@ -11,14 +11,7 @@ credentials:
 
 agent:
   kind: __AGENT_KIND__
-
-claude:
-  bin: "claude"
-  workdir: __LOOM_HOME__
-  extra_args: []
-
-codex:
-  bin: "codex"
+  bin: __AGENT_BIN__
   workdir: __LOOM_HOME__
   extra_args: []
 

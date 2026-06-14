@@ -12,7 +12,11 @@ credentials:
   proxy_token: ""
   short_id: ""
 
-__AGENT_BLOCK__
+agent:
+  kind: __AGENT_KIND__
+  bin: __AGENT_BIN__
+  workdir: __LOOM_HOME__
+  extra_args: []
 
 mcp_servers: {}
 

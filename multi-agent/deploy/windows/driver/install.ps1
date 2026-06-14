@@ -96,6 +96,7 @@ $tokenStatePath = Join-Path $tokenParent "observer.token"
 $config = Get-Content -LiteralPath (Join-Path $here "config.yaml.template") -Raw
 $config = $config.Replace("__AGENT_NAME__", (ConvertTo-YamlQuoted $Name))
 $config = $config.Replace("__AGENT_KIND__", (ConvertTo-YamlQuoted $Agent))
+$config = $config.Replace("__AGENT_BIN__", (ConvertTo-YamlQuoted $Agent))
 $config = $config.Replace("__DESCRIPTION__", (ConvertTo-YamlQuoted $description))
 $config = $config.Replace("__PROJECT_DIR__", (ConvertTo-YamlQuoted $projectDir))
 $config = $config.Replace("__OBSERVER_URL__", (ConvertTo-YamlQuoted $ObserverUrl))

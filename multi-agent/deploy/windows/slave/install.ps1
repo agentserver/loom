@@ -119,6 +119,7 @@ $tokenStatePath = Join-Path $installDir "observer.token"
 $config = Get-Content -LiteralPath (Join-Path $here "config.yaml.template") -Raw
 $config = $config.Replace("__AGENT_NAME__", (ConvertTo-YamlQuoted $Name))
 $config = $config.Replace("__AGENT_KIND__", (ConvertTo-YamlQuoted $Agent))
+$config = $config.Replace("__AGENT_BIN__", (ConvertTo-YamlQuoted $Agent))
 $config = $config.Replace("__DESCRIPTION__", (ConvertTo-YamlQuoted $description))
 $config = $config.Replace("__LOOM_HOME__", (ConvertTo-YamlQuoted $installDir))
 $config = $config.Replace("__OBSERVER_URL__", (ConvertTo-YamlQuoted $ObserverUrl))

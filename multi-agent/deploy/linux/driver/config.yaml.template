@@ -19,7 +19,11 @@ discovery:
 
 listen_addr: 127.0.0.1:0
 
-__AGENT_BLOCK__
+agent:
+  kind: __AGENT_KIND__
+  bin: __AGENT_BIN__
+  workdir: __PROJECT_DIR__
+  extra_args: []
 
 planner:
   bin: ""

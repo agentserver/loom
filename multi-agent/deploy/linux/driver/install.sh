@@ -115,20 +115,13 @@ if [[ -z "$SKILL_BUNDLE" ]]; then
   fi
 fi
 
-# Build the agent block for config.yaml template substitution
-if [[ "$AGENT" == "claude" ]]; then
-  AGENT_BLOCK="agent:\n  kind: claude\n\nclaude:\n  bin: claude\n  workdir: $PROJECT_ABS\n  extra_args: []"
-else
-  AGENT_BLOCK="agent:\n  kind: codex\n\ncodex:\n  bin: codex\n  workdir: $PROJECT_ABS\n  extra_args: []"
-fi
-
 echo "==> staging into $PROJECT_ABS"
 install -m 0755 "$BIN" "$PROJECT_ABS/driver-agent"
 
 # Render config.yaml from template. __PROJECT_DIR__ is substituted here
-# so driver_defaults.workdir (and any future placeholder) gets the real
-# absolute path; the MCP templates below also substitute it because they
-# are rendered from a different template file.
+# so driver_defaults.workdir + agent.workdir (and any future placeholder)
+# get the real absolute path; the MCP templates below also substitute it
+# because they are rendered from a different template file.
 sed \
   -e "s|__AGENT_NAME__|$NAME|g" \
   -e "s|__DESCRIPTION__|$DESC|g" \
@@ -136,17 +129,9 @@ sed \
   -e "s|__OBSERVER_URL__|$OBSERVER_URL|g" \
   -e "s|__WORKSPACE_ID__|$WORKSPACE_ID|g" \
   -e "s|__PROJECT_DIR__|$PROJECT_ABS|g" \
+  -e "s|__AGENT_KIND__|$AGENT|g" \
+  -e "s|__AGENT_BIN__|$AGENT|g" \
   "$HERE/config.yaml.template" > "$PROJECT_ABS/config.yaml"
-
-# Replace the multiline __AGENT_BLOCK__ placeholder via python3
-python3 - "$PROJECT_ABS/config.yaml" "$AGENT_BLOCK" <<'PY'
-import sys, pathlib
-p = pathlib.Path(sys.argv[1])
-text = p.read_text()
-agent_block = sys.argv[2].replace("\\n", "\n")
-text = text.replace("__AGENT_BLOCK__", agent_block)
-p.write_text(text)
-PY
 
 chmod 0600 "$PROJECT_ABS/config.yaml"
 

@@ -156,23 +156,11 @@ else
 fi
 
 echo "==> writing config.yaml"
-if [[ "$AGENT" == "claude" ]]; then
-  AGENT_BLOCK="agent:
-  kind: claude
-
-claude:
-  bin: claude
+AGENT_BLOCK="agent:
+  kind: $AGENT
+  bin: $AGENT
   workdir: $PROJECT
   extra_args: []"
-else
-  AGENT_BLOCK="agent:
-  kind: codex
-
-codex:
-  bin: codex
-  workdir: $PROJECT
-  extra_args: []"
-fi
 
 cat > "$PROJECT/config.yaml" <<EOF
 server:
