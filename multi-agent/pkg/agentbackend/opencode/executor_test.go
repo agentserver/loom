@@ -194,3 +194,143 @@ func main() {
 		t.Errorf("stdin missing user-answered prompt: %s", stdinBody)
 	}
 }
+
+// TestExecutor_PreservesUserOpencodeConfig pins the opencode-specific
+// merge-on-inject contract: opencode's only MCP injection mechanism is
+// OPENCODE_CONFIG, which is full-file override. If our humanloop temp
+// file replaces user provider config the slave's spawned opencode can't
+// find any model. Fix: writeOpencodeHumanloopConfig must read the
+// user's existing config (OPENCODE_CONFIG env if set, else XDG
+// default) and merge loom_humanloop into the existing mcp map.
+func TestExecutor_PreservesUserOpencodeConfig(t *testing.T) {
+	dir := t.TempDir()
+
+	// User's existing opencode.json with a provider block.
+	userCfgPath := filepath.Join(dir, "user-opencode.json")
+	userCfg := []byte(`{
+		"$schema": "https://opencode.ai/config.json",
+		"model": "modelserver/gpt-5.5",
+		"provider": {
+			"modelserver": {
+				"npm": "@ai-sdk/openai",
+				"name": "modelserver",
+				"options": {
+					"baseURL": "https://code.ai.cs.ac.cn/v1",
+					"apiKey": "ms-test-key"
+				},
+				"models": {"gpt-5.5": {"name": "gpt-5.5"}}
+			}
+		},
+		"mcp": {
+			"existing_user_server": {
+				"type": "local",
+				"command": ["/some/other/bin"],
+				"enabled": true
+			}
+		}
+	}`)
+	if err := os.WriteFile(userCfgPath, userCfg, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fake opencode that captures its OPENCODE_CONFIG file into sentinel.
+	sentinel := filepath.Join(dir, "captured-cfg.json")
+	fakeBin := goBuildFake(t, fmt.Sprintf(`package main
+import (
+	"io"
+	"os"
+)
+func main() {
+	_, _ = io.Copy(io.Discard, os.Stdin)
+	cfgPath := os.Getenv("OPENCODE_CONFIG")
+	data, _ := os.ReadFile(cfgPath)
+	_ = os.WriteFile(%q, data, 0o600)
+}
+`, sentinel), "opencode")
+
+	// Point our slave at the user's opencode.json via OPENCODE_CONFIG in
+	// the env passed to newExecutor (mirrors how an operator running
+	// slave with `OPENCODE_CONFIG=/.../opencode.json slave-agent ...`
+	// would set it).
+	b := New(
+		agentbackend.Config{Bin: fakeBin, WorkDir: dir},
+		[]string{"OPENCODE_CONFIG=" + userCfgPath},
+	)
+	sink := &captureSink{}
+	_, _ = b.Run(context.Background(), agentbackend.Task{Prompt: "ignored"}, sink)
+
+	data, err := os.ReadFile(sentinel)
+	if err != nil {
+		t.Fatalf("fake opencode never wrote sentinel: %v", err)
+	}
+	var merged map[string]any
+	if err := json.Unmarshal(data, &merged); err != nil {
+		t.Fatalf("merged config not JSON: %v\n%s", err, data)
+	}
+
+	// Preserved: user provider config
+	prov, _ := merged["provider"].(map[string]any)
+	if _, ok := prov["modelserver"]; !ok {
+		t.Errorf("provider.modelserver lost in merge; merged=%v", merged)
+	}
+	if model, _ := merged["model"].(string); model != "modelserver/gpt-5.5" {
+		t.Errorf("model lost in merge; got %q", model)
+	}
+
+	// Preserved: user existing mcp server
+	mcp, _ := merged["mcp"].(map[string]any)
+	if _, ok := mcp["existing_user_server"]; !ok {
+		t.Errorf("existing user mcp server lost in merge; mcp=%v", mcp)
+	}
+
+	// Injected: loom_humanloop server
+	hl, ok := mcp["loom_humanloop"].(map[string]any)
+	if !ok {
+		t.Errorf("loom_humanloop not injected into merged mcp; mcp=%v", mcp)
+	} else if typ, _ := hl["type"].(string); typ != "local" {
+		t.Errorf("loom_humanloop.type=%q want local", typ)
+	}
+}
+
+// TestExecutor_EmptyUserConfigStillWritesHumanloop pins that an
+// operator with no opencode.json at all still gets humanloop —
+// the merge function tolerates missing files.
+func TestExecutor_EmptyUserConfigStillWritesHumanloop(t *testing.T) {
+	dir := t.TempDir()
+	// No OPENCODE_CONFIG env; no XDG default file exists either
+	// (HOME redirected to ensure none is read).
+	t.Setenv("HOME", dir)                         // ensure XDG default $HOME/.config/opencode/opencode.json doesn't exist
+	t.Setenv("XDG_CONFIG_HOME", dir+"/no-such")   // redirect XDG too
+	t.Setenv("OPENCODE_CONFIG", "")               // make sure no stray parent env leaks in
+
+	sentinel := filepath.Join(dir, "captured-cfg.json")
+	fakeBin := goBuildFake(t, fmt.Sprintf(`package main
+import (
+	"io"
+	"os"
+)
+func main() {
+	_, _ = io.Copy(io.Discard, os.Stdin)
+	cfgPath := os.Getenv("OPENCODE_CONFIG")
+	data, _ := os.ReadFile(cfgPath)
+	_ = os.WriteFile(%q, data, 0o600)
+}
+`, sentinel), "opencode")
+
+	b := New(agentbackend.Config{Bin: fakeBin, WorkDir: dir}, nil)
+	sink := &captureSink{}
+	_, _ = b.Run(context.Background(), agentbackend.Task{Prompt: "ignored"}, sink)
+
+	data, err := os.ReadFile(sentinel)
+	if err != nil {
+		t.Fatalf("sentinel missing: %v", err)
+	}
+	var merged map[string]any
+	if err := json.Unmarshal(data, &merged); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, data)
+	}
+	mcp, _ := merged["mcp"].(map[string]any)
+	if _, ok := mcp["loom_humanloop"]; !ok {
+		t.Errorf("loom_humanloop missing in empty-user-config case; merged=%v", merged)
+	}
+}

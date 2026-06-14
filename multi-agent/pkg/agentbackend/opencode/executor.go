@@ -143,7 +143,7 @@ func (e *executor) runWithArgv(ctx context.Context, argvHead []string, prompt st
 	}
 
 	cfgPath := filepath.Join(sockDir, "opencode.json")
-	if err := writeOpencodeHumanloopConfig(cfgPath, e.binSelf, ep, e.maxQuestions); err != nil {
+	if err := writeOpencodeHumanloopConfig(cfgPath, e.binSelf, ep, e.maxQuestions, e.env); err != nil {
 		return agentbackend.Result{}, err
 	}
 
@@ -314,32 +314,101 @@ func extractAssistantText(ev opencodeEvent) string {
 	return ev.Part.Text
 }
 
-// writeOpencodeHumanloopConfig writes a temp opencode.json with a single
-// loom_humanloop MCP server. opencode reads MCP config from
-// OPENCODE_CONFIG env (see https://opencode.ai/docs/mcp-servers/).
-// type="local" means opencode spawns the command as a subprocess; we
-// point command[0] at binSelf (slave-agent) with the humanloop-mcp
-// subcommand + endpoint args — slave-agent already knows how to serve
-// that path (see internal/humanloop/server.go).
+// writeOpencodeHumanloopConfig writes the opencode config the slave's
+// child opencode will read. It MERGES the user's existing config
+// (OPENCODE_CONFIG env wins; else $XDG_CONFIG_HOME/opencode/opencode.json
+// or $HOME/.config/opencode/opencode.json) with our loom_humanloop MCP
+// server entry — opencode's OPENCODE_CONFIG mechanism is full-file
+// override, so without merging we'd lose the user's provider config
+// (custom OpenAI-compatible endpoint, etc.) the moment slave-agent
+// spawns opencode.
 //
-// Why a config file (and not a CLI flag like claude/codex): opencode
-// doesn't expose CLI overrides for MCP — only the config file and the
-// OPENCODE_CONFIG env. A temp file per Run() is self-contained and
-// doesn't pollute the user's ~/.config/opencode/opencode.json.
-func writeOpencodeHumanloopConfig(path, binSelf string, ep humanloop.Endpoint, max int) error {
-	cfg := map[string]any{
-		"$schema": "https://opencode.ai/config.json",
-		"mcp": map[string]any{
-			"loom_humanloop": map[string]any{
-				"type":    "local",
-				"command": []string{binSelf, "humanloop-mcp", humanloop.EndpointArg(ep), strconv.Itoa(max)},
-				"enabled": true,
-			},
-		},
+// Why a merge (not a flag like claude --mcp-config): opencode does not
+// expose any CLI flag for MCP injection — only the config file plus
+// OPENCODE_CONFIG env. Among the three supported agents this is the
+// only one that needs a read-merge-write step.
+func writeOpencodeHumanloopConfig(path, binSelf string, ep humanloop.Endpoint, max int, env []string) error {
+	merged := loadUserOpencodeConfig(env)
+	mcp, _ := merged["mcp"].(map[string]any)
+	if mcp == nil {
+		mcp = map[string]any{}
 	}
-	b, err := json.Marshal(cfg)
+	mcp["loom_humanloop"] = map[string]any{
+		"type":    "local",
+		"command": []string{binSelf, "humanloop-mcp", humanloop.EndpointArg(ep), strconv.Itoa(max)},
+		"enabled": true,
+	}
+	merged["mcp"] = mcp
+	// Ensure $schema is set so the file looks well-formed even when the
+	// user had no prior config.
+	if _, ok := merged["$schema"]; !ok {
+		merged["$schema"] = "https://opencode.ai/config.json"
+	}
+	b, err := json.Marshal(merged)
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(path, b, 0o600)
+}
+
+// loadUserOpencodeConfig returns the user's existing opencode config as a
+// map, or an empty map if no file is found / readable. Resolution order
+// matches opencode's own — OPENCODE_CONFIG env takes priority over the
+// XDG default. Errors reading / parsing fall through to empty map (a
+// best-effort merge — if the user's file is malformed, slave still
+// boots with at least the humanloop server injected so operators can
+// see and react via the agentserver UI).
+func loadUserOpencodeConfig(env []string) map[string]any {
+	path := userConfigPathFromEnv(env)
+	if path == "" {
+		return map[string]any{}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return map[string]any{}
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		return map[string]any{}
+	}
+	if m == nil {
+		return map[string]any{}
+	}
+	return m
+}
+
+// userConfigPathFromEnv resolves where opencode would read its config
+// (in order: OPENCODE_CONFIG, $XDG_CONFIG_HOME/opencode/opencode.json,
+// $HOME/.config/opencode/opencode.json). Returns "" if none of those
+// point at an existing readable file.
+//
+// env is the env slice we're about to pass to opencode (so we read
+// from the same lookup the child will use). We also fall back to the
+// process env (os.Getenv) because operators may set OPENCODE_CONFIG
+// in the slave-agent's environment without explicitly threading it
+// through agentbackend.Config.
+func userConfigPathFromEnv(env []string) string {
+	get := func(key string) string {
+		prefix := key + "="
+		for i := len(env) - 1; i >= 0; i-- { // last wins, mirrors exec.Cmd
+			if strings.HasPrefix(env[i], prefix) {
+				return strings.TrimPrefix(env[i], prefix)
+			}
+		}
+		return os.Getenv(key)
+	}
+	if p := get("OPENCODE_CONFIG"); p != "" {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	xdg := get("XDG_CONFIG_HOME")
+	if xdg == "" {
+		xdg = filepath.Join(get("HOME"), ".config")
+	}
+	p := filepath.Join(xdg, "opencode", "opencode.json")
+	if _, err := os.Stat(p); err == nil {
+		return p
+	}
+	return ""
 }
