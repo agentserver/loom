@@ -175,18 +175,12 @@ func runServe(args []string) {
 	sdkClient := driver.NewAgentSDKClient(cli, cfg.Server.URL, cfg.Credentials.ProxyToken)
 	tools := driver.NewTools(reg, audit, sdkClient, cfg, obs)
 	tools.SetTaskJournal(taskJournal)
-	agentCfg := agentbackend.Config{Kind: agentbackend.Kind(cfg.Agent.Kind)}
-	switch cfg.Agent.Kind {
-	case "claude":
-		agentCfg.Bin = cfg.Claude.Bin
-		agentCfg.WorkDir = cfg.Claude.WorkDir
-		agentCfg.ExtraArgs = cfg.Claude.Args
-	case "codex":
-		agentCfg.Bin = cfg.Codex.Bin
-		agentCfg.WorkDir = cfg.Codex.WorkDir
-		agentCfg.ExtraArgs = cfg.Codex.Args
+	agentCfg := agentbackend.Config{
+		Kind:      agentbackend.Kind(cfg.Agent.Kind),
+		Bin:       cfg.Agent.Bin,
+		WorkDir:   cfg.Agent.WorkDir,
+		ExtraArgs: cfg.Agent.ExtraArgs,
 	}
-	// TODO(issue-15 Task 3): replace switch with direct cfg.Agent.{Bin,WorkDir,ExtraArgs}
 	backend, err := agentbackend.New(agentCfg, nil)
 	if err != nil {
 		log.Fatalf("agentbackend: %v", err)

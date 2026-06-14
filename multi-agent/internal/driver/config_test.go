@@ -5,6 +5,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	// Register backend kinds so LoadConfig's isRegisteredKind whitelist
+	// recognises "claude"/"codex" in unit tests. Production binaries
+	// register these in cmd/{driver,master,slave}-agent/main.go.
+	_ "github.com/yourorg/multi-agent/pkg/agentbackend/claude"
+	_ "github.com/yourorg/multi-agent/pkg/agentbackend/codex"
 )
 
 func TestLoadConfig_FullRoundTrip(t *testing.T) {
@@ -20,6 +26,10 @@ credentials:
   proxy_token: ptok
   workspace_id: ws1
   short_id: drv-001
+agent:
+  kind: claude
+  bin: claude
+  workdir: /tmp/proj
 discovery:
   display_name: driver-yuzishu
   description: "Local driver agent."
@@ -63,6 +73,7 @@ func TestLoadConfig_DefaultsApplied(t *testing.T) {
 	path := filepath.Join(dir, "driver.yaml")
 	if err := os.WriteFile(path, []byte(`
 server: {url: https://x, name: drv}
+agent: {kind: claude, bin: claude, workdir: /tmp/proj}
 discovery: {display_name: drv}
 `), 0o600); err != nil {
 		t.Fatal(err)
@@ -101,6 +112,7 @@ func TestDriverConfig_ObserverForceRegisterRoundTrip(t *testing.T) {
 	path := filepath.Join(dir, "driver.yaml")
 	if err := os.WriteFile(path, []byte(`
 server: {url: https://x, name: drv}
+agent: {kind: claude, bin: claude, workdir: /tmp/proj}
 discovery: {display_name: driver-display}
 observer:
   enabled: true
@@ -125,6 +137,7 @@ observer:
 	path2 := filepath.Join(dir, "driver2.yaml")
 	if err := os.WriteFile(path2, []byte(`
 server: {url: https://x, name: drv}
+agent: {kind: claude, bin: claude, workdir: /tmp/proj}
 discovery: {display_name: driver-display}
 observer:
   enabled: true
@@ -150,6 +163,7 @@ func TestLoadConfig_ObserverURLWithEnabledFalseKeepsDisabledAndDefaultsAgentID(t
 	path := filepath.Join(dir, "driver.yaml")
 	if err := os.WriteFile(path, []byte(`
 server: {url: https://x, name: drv}
+agent: {kind: claude, bin: claude, workdir: /tmp/proj}
 discovery: {display_name: driver-display}
 observer:
   url: https://observer.example
@@ -175,6 +189,7 @@ func TestLoadConfig_ObserverTelemetryDefaultsDisabled(t *testing.T) {
 	path := filepath.Join(dir, "driver.yaml")
 	if err := os.WriteFile(path, []byte(`
 server: {url: https://x, name: drv}
+agent: {kind: claude, bin: claude, workdir: /tmp/proj}
 discovery: {display_name: driver-display}
 observer:
   enabled: true
@@ -202,6 +217,7 @@ func TestLoadConfig_ObserverTelemetryCanBeEnabled(t *testing.T) {
 	path := filepath.Join(dir, "driver.yaml")
 	if err := os.WriteFile(path, []byte(`
 server: {url: https://x, name: drv}
+agent: {kind: claude, bin: claude, workdir: /tmp/proj}
 discovery: {display_name: driver-display}
 observer:
   enabled: true
@@ -234,6 +250,7 @@ credentials:
   proxy_token: proxy-token
   workspace_id: ws-agentserver
   short_id: driver-short
+agent: {kind: claude, bin: claude, workdir: /tmp/proj}
 discovery: {display_name: driver-display}
 observer:
   enabled: true
@@ -267,6 +284,7 @@ func TestLoadConfig_ObserverAllowsPendingAgentserverRegistration(t *testing.T) {
 	path := filepath.Join(dir, "driver.yaml")
 	if err := os.WriteFile(path, []byte(`
 server: {url: https://x, name: drv}
+agent: {kind: claude, bin: claude, workdir: /tmp/proj}
 discovery: {display_name: driver-display}
 observer:
   enabled: true
@@ -292,6 +310,7 @@ func TestLoadConfig_ObserverTelemetryEnabledRequiresAPIKey(t *testing.T) {
 	tokenPath := filepath.Join(dir, "observer.token")
 	if err := os.WriteFile(path, []byte(`
 server: {url: https://x, name: drv}
+agent: {kind: claude, bin: claude, workdir: /tmp/proj}
 discovery: {display_name: driver-display}
 observer:
   enabled: true
@@ -328,6 +347,9 @@ func TestSaveConfig_RoundTrip(t *testing.T) {
 	c.Server.Name = "n"
 	c.Discovery.DisplayName = "n"
 	c.Credentials.ProxyToken = "secret"
+	c.Agent.Kind = "claude"
+	c.Agent.Bin = "claude"
+	c.Agent.WorkDir = "/tmp/proj"
 	dir := t.TempDir()
 	path := filepath.Join(dir, "out.yaml")
 	if err := SaveConfig(path, c); err != nil {
@@ -376,34 +398,13 @@ observer:
 	}
 }
 
-func TestDriverLoadDefaultsAgentKindToClaude(t *testing.T) {
+// TestDriverLoadAgentKindCodex pins Planner.Bin defaulting to Agent.Bin for codex.
+func TestDriverLoadAgentKindCodex(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "c.yaml")
 	os.WriteFile(path, []byte(`
 server: { url: x, name: y }
 credentials: {}
-discovery: { display_name: a }
-`), 0o600)
-	c, err := LoadConfig(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.Agent.Kind != "claude" {
-		t.Fatalf("Agent.Kind=%q want claude", c.Agent.Kind)
-	}
-	if c.Codex.Bin != "codex" {
-		t.Fatalf("Codex.Bin default=%q want codex", c.Codex.Bin)
-	}
-	if c.Planner.Bin != "claude" {
-		t.Fatalf("Planner.Bin default=%q want claude", c.Planner.Bin)
-	}
-}
-
-func TestDriverLoadAgentKindCodexFillsCodexDefaults(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "c.yaml")
-	os.WriteFile(path, []byte(`
-server: { url: x, name: y }
-credentials: {}
-agent: { kind: codex }
+agent: { kind: codex, bin: codex, workdir: /tmp/proj }
 discovery: { display_name: a }
 `), 0o600)
 	c, err := LoadConfig(path)
@@ -414,7 +415,7 @@ discovery: { display_name: a }
 		t.Fatalf("kind=%q", c.Agent.Kind)
 	}
 	if c.Planner.Bin != "codex" {
-		t.Fatalf("planner.bin=%q (should follow codex)", c.Planner.Bin)
+		t.Fatalf("planner.bin=%q (should follow agent.bin)", c.Planner.Bin)
 	}
 }
 
@@ -450,7 +451,7 @@ func TestLoadConfig_ObserverEnabledRequiresAPIKeyAndTokenStatePath(t *testing.T)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "c.yaml")
-			body := "server:\n  url: https://example.com\n  name: m\ndiscovery:\n  display_name: driver-display\nobserver:\n  enabled: true\n  url: https://observer.example\n  workspace_id: ws\n  agent_id: a\n" + tc.extra
+			body := "server:\n  url: https://example.com\n  name: m\nagent:\n  kind: claude\n  bin: claude\n  workdir: /tmp/proj\ndiscovery:\n  display_name: driver-display\nobserver:\n  enabled: true\n  url: https://observer.example\n  workspace_id: ws\n  agent_id: a\n" + tc.extra
 			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -465,16 +466,17 @@ func TestLoadConfig_ObserverEnabledRequiresAPIKeyAndTokenStatePath(t *testing.T)
 	}
 }
 
-// TestLoadConfig_DriverDefaultsWorkDirDefaultsToClaudeWorkdir pins §1.4 #17 P1:
-// out of the box, DriverDefaults.WorkDir falls back to claude.workdir so the
-// source_path validation accepts project-internal files.
-func TestLoadConfig_DriverDefaultsWorkDirDefaultsToClaudeWorkdir(t *testing.T) {
+// TestLoadConfig_DriverDefaultsWorkDirDefaultsToAgentWorkdir pins issue #15:
+// DriverDefaults.WorkDir defaults to agent.workdir (the jail root).
+func TestLoadConfig_DriverDefaultsWorkDirDefaultsToAgentWorkdir(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "driver.yaml")
 	if err := os.WriteFile(path, []byte(`
 server: {url: https://x, name: drv}
 discovery: {display_name: drv}
-claude:
+agent:
+  kind: claude
+  bin: claude
   workdir: /opt/project/claude
 `), 0o600); err != nil {
 		t.Fatal(err)
@@ -488,71 +490,18 @@ claude:
 	}
 }
 
-// TestLoadConfig_DriverDefaultsWorkDirCodexAgentUsesCodexWorkdir pins §1.4 #17 P1
-// for the codex variant: agent.kind=codex picks codex.workdir, not claude.workdir.
-func TestLoadConfig_DriverDefaultsWorkDirCodexAgentUsesCodexWorkdir(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "driver.yaml")
-	if err := os.WriteFile(path, []byte(`
-server: {url: https://x, name: drv}
-discovery: {display_name: drv}
-agent:
-  kind: codex
-codex:
-  workdir: /opt/project/a
-claude:
-  workdir: /opt/project/b
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	c, err := LoadConfig(path)
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	if c.DriverDefaults.WorkDir != "/opt/project/a" {
-		t.Errorf("DriverDefaults.WorkDir: want /opt/project/a (codex.workdir), got %q", c.DriverDefaults.WorkDir)
-	}
-}
-
-// TestLoadConfig_DriverDefaultsWorkDirCwdFallback covers the no-agent-workdir
-// case: when neither claude.workdir nor codex.workdir is set, the default is
-// the process cwd so source_path validation still has SOME root rather than
-// rejecting every path.
-func TestLoadConfig_DriverDefaultsWorkDirCwdFallback(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "driver.yaml")
-	if err := os.WriteFile(path, []byte(`
-server: {url: https://x, name: drv}
-discovery: {display_name: drv}
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	c, err := LoadConfig(path)
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	if c.DriverDefaults.WorkDir == "" {
-		t.Fatalf("DriverDefaults.WorkDir must not be empty after fallback")
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd: %v", err)
-	}
-	if c.DriverDefaults.WorkDir != cwd {
-		t.Errorf("DriverDefaults.WorkDir: want cwd %q, got %q", cwd, c.DriverDefaults.WorkDir)
-	}
-}
-
 // TestLoadConfig_DriverDefaultsWorkDirExplicitWins covers operator override:
 // an explicit driver_defaults.workdir is preserved, not clobbered by the
-// fallback chain.
+// agent.workdir default.
 func TestLoadConfig_DriverDefaultsWorkDirExplicitWins(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "driver.yaml")
 	if err := os.WriteFile(path, []byte(`
 server: {url: https://x, name: drv}
 discovery: {display_name: drv}
-claude:
+agent:
+  kind: claude
+  bin: claude
   workdir: /opt/project/claude
 driver_defaults:
   workdir: /opt/explicit
@@ -566,4 +515,192 @@ driver_defaults:
 	if c.DriverDefaults.WorkDir != "/opt/explicit" {
 		t.Errorf("explicit driver_defaults.workdir should win: got %q", c.DriverDefaults.WorkDir)
 	}
+}
+
+// TestLoadConfig_RequiresAgentKind pins issue #15: agent.kind is
+// mandatory; no implicit default.
+func TestLoadConfig_RequiresAgentKind(t *testing.T) {
+	yaml := `server:
+  url: https://example.invalid
+  name: x
+agent:
+  workdir: /tmp/proj
+  bin: claude
+discovery:
+  display_name: x
+`
+	path := writeTempYAML(t, yaml)
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error for missing agent.kind")
+	}
+	if !strings.Contains(err.Error(), "agent.kind") {
+		t.Fatalf("err should mention agent.kind; got %v", err)
+	}
+}
+
+// TestLoadConfig_RequiresAgentWorkDir pins issue #15: agent.workdir
+// is mandatory; no fallback to cwd (PR #14 P1 band-aid removed).
+func TestLoadConfig_RequiresAgentWorkDir(t *testing.T) {
+	yaml := `server:
+  url: https://example.invalid
+  name: x
+agent:
+  kind: claude
+  bin: claude
+discovery:
+  display_name: x
+`
+	path := writeTempYAML(t, yaml)
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error for missing agent.workdir")
+	}
+	if !strings.Contains(err.Error(), "agent.workdir") {
+		t.Fatalf("err should mention agent.workdir; got %v", err)
+	}
+}
+
+// TestLoadConfig_RejectsUnknownAgentKind names the registered set so
+// operators can see what import they're missing.
+func TestLoadConfig_RejectsUnknownAgentKind(t *testing.T) {
+	yaml := `server:
+  url: https://example.invalid
+  name: x
+agent:
+  kind: opencode
+  workdir: /tmp/proj
+  bin: opencode
+discovery:
+  display_name: x
+`
+	path := writeTempYAML(t, yaml)
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error for unknown agent.kind")
+	}
+	for _, want := range []string{"opencode", "claude", "codex"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err missing %q: %v", want, err)
+		}
+	}
+}
+
+// TestLoadConfig_RejectsLegacyClaudeKey gives operators an actionable
+// migration error instead of yaml's generic "unknown field" noise.
+func TestLoadConfig_RejectsLegacyClaudeKey(t *testing.T) {
+	yaml := `server:
+  url: https://example.invalid
+  name: x
+agent:
+  kind: claude
+  workdir: /tmp/proj
+  bin: claude
+claude:
+  workdir: /tmp/old
+discovery:
+  display_name: x
+`
+	path := writeTempYAML(t, yaml)
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error for legacy claude: key")
+	}
+	if !strings.Contains(err.Error(), "claude") || !strings.Contains(err.Error(), "agent.workdir") {
+		t.Fatalf("err should name 'claude' legacy key and point at agent.workdir; got %v", err)
+	}
+}
+
+// TestLoadConfig_RejectsBareLegacyClaudeKey pins the §issue-15 P3
+// reviewer concern: bare `claude:` (no value) or `claude: null` also
+// triggers the friendly migration error, not the generic
+// "unknown field" message from the strict decoder.
+func TestLoadConfig_RejectsBareLegacyClaudeKey(t *testing.T) {
+	yaml := `server:
+  url: https://example.invalid
+  name: x
+agent:
+  kind: claude
+  workdir: /tmp/proj
+  bin: claude
+claude:
+discovery:
+  display_name: x
+`
+	path := writeTempYAML(t, yaml)
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error for bare legacy claude: key")
+	}
+	if !strings.Contains(err.Error(), "claude") || !strings.Contains(err.Error(), "agent.workdir") {
+		t.Fatalf("err should name 'claude' legacy key and point at agent.workdir; got %v", err)
+	}
+}
+
+// TestLoadConfig_RejectsLegacyCodexKey same for codex.
+func TestLoadConfig_RejectsLegacyCodexKey(t *testing.T) {
+	yaml := `server:
+  url: https://example.invalid
+  name: x
+agent:
+  kind: codex
+  workdir: /tmp/proj
+  bin: codex
+codex:
+  workdir: /tmp/old
+discovery:
+  display_name: x
+`
+	path := writeTempYAML(t, yaml)
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error for legacy codex: key")
+	}
+	if !strings.Contains(err.Error(), "codex") {
+		t.Fatalf("err should name 'codex' legacy key; got %v", err)
+	}
+}
+
+// TestLoadConfig_HappyPathClaude pins the new YAML shape.
+func TestLoadConfig_HappyPathClaude(t *testing.T) {
+	yaml := `server:
+  url: https://example.invalid
+  name: x
+agent:
+  kind: claude
+  workdir: /tmp/proj
+  bin: claude
+  extra_args:
+    - --foo
+discovery:
+  display_name: x
+`
+	path := writeTempYAML(t, yaml)
+	c, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Agent.Kind != "claude" {
+		t.Errorf("kind=%q", c.Agent.Kind)
+	}
+	if c.Agent.WorkDir != "/tmp/proj" {
+		t.Errorf("workdir=%q", c.Agent.WorkDir)
+	}
+	if c.Agent.Bin != "claude" {
+		t.Errorf("bin=%q", c.Agent.Bin)
+	}
+	if len(c.Agent.ExtraArgs) != 1 || c.Agent.ExtraArgs[0] != "--foo" {
+		t.Errorf("extra_args=%v", c.Agent.ExtraArgs)
+	}
+}
+
+// writeTempYAML is a tiny helper for tests that need a yaml file on disk.
+func writeTempYAML(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
