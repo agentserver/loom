@@ -68,3 +68,28 @@ and will be unified in a follow-up PR.
 `deploy/linux/{driver,slave}/bootstrap.sh` already render the new
 schema — operators using these scripts next time will get the new
 YAML automatically.
+
+## opencode (added later)
+
+opencode is the 3rd supported kind. Config is identical in shape:
+
+```yaml
+agent:
+  kind: opencode
+  bin: opencode        # optional; factory default
+  workdir: /loom/proj
+  extra_args: []
+```
+
+Driver-side install writes `~/.config/opencode/opencode.json` (Linux)
+or `%APPDATA%\opencode\opencode.json` (Windows). opencode CLI and
+desktop share this file — both will see the driver MCP server.
+
+Operators must authenticate their opencode provider separately:
+
+```bash
+opencode auth login
+```
+
+The slave-agent does not pass credentials through; it just spawns
+the opencode binary which reads its own auth.json.
