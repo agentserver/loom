@@ -6,7 +6,7 @@ import (
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
-// stubs.go holds placeholder types so backend.go compiles before Tasks 2-4
+// stubs.go holds placeholder types so backend.go compiles before Tasks 3-4
 // land the real implementations. Deleted at the end of Task 4.
 
 type executor struct{}
@@ -17,13 +17,6 @@ func (e *executor) Run(context.Context, agentbackend.Task, agentbackend.Sink) (a
 }
 func (e *executor) RunResume(context.Context, string, string, agentbackend.Sink) (agentbackend.Result, error) {
 	panic("opencode executor.RunResume not implemented (Task 5)")
-}
-
-type llmRunner struct{}
-
-func newLLM(_ agentbackend.Config, _ []string) *llmRunner { return &llmRunner{} }
-func (r *llmRunner) Run(context.Context, string) (string, error) {
-	panic("opencode llmRunner.Run not implemented (Task 2)")
 }
 
 type Store struct{}
