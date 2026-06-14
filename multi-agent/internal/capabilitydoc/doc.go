@@ -413,10 +413,10 @@ func upsertTool(tools []capability.MCPToolDescriptor, tool capability.MCPToolDes
 func scanCommands(cfg *config.Config) []commandPresence {
 	names := []string{"python3", "node", "npm", "go", "docker", "powershell.exe", "powershell", "pwsh", "bash"}
 	if cfg != nil {
-		// Unified per issue #15: the agent kind itself is always
-		// added, and any explicit Agent.Bin override is appended too.
-		// Task 6 will refactor scanCommands to remove the kind switch
-		// entirely; for now this Task 4 cascade restores compilation.
+		// Probe the configured agent kind's bin (kind name is also the
+		// conventional default binary name) plus any operator-overridden
+		// bin path. Unified per issue #15 — no more per-kind switch
+		// because cfg.Agent.Bin is the single source.
 		if cfg.Agent.Kind != "" {
 			names = append(names, cfg.Agent.Kind)
 		}

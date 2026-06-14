@@ -146,6 +146,33 @@ func main() {
 	return exe
 }
 
+// TestBashExecutorUsesAgentWorkDir pins the issue #15 surfacing
+// bug: bash executor previously hardcoded cfg.Claude.WorkDir, which
+// is missing on codex slaves. Now it reads cfg.Agent.WorkDir.
+func TestBashExecutorUsesAgentWorkDir(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Agent.Kind = "codex"
+	cfg.Agent.WorkDir = "/expected/agent/workdir"
+
+	wd := bashExecutorWorkDir(cfg)
+	if wd != "/expected/agent/workdir" {
+		t.Errorf("bash workdir=%q want /expected/agent/workdir", wd)
+	}
+}
+
+// TestPowerShellExecutorUsesAgentWorkDir same defence for the
+// powershell capability path.
+func TestPowerShellExecutorUsesAgentWorkDir(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Agent.Kind = "codex"
+	cfg.Agent.WorkDir = "/expected/agent/workdir"
+
+	wd := powerShellExecutorWorkDir(cfg)
+	if wd != "/expected/agent/workdir" {
+		t.Errorf("powershell workdir=%q want /expected/agent/workdir", wd)
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
