@@ -1,0 +1,36 @@
+# Captured 2026-06-14 via:
+#   opencode run --format json --dangerously-skip-permissions "say hi"
+#
+# Pre-flight result: the real opencode bin (v1.17.6) DID emit JSON on
+# stdout — see /tmp/opencode-run.ndjson in the build host's filesystem
+# at the time of capture. The only frame it produced before exiting was
+# a {"type":"error",...} frame because the provider keys in this
+# environment (OPENAI_API_KEY / ANTHROPIC_API_KEY both start with
+# "ms-", pointing at a relay proxy whose route returns 401/404). One
+# real captured error frame is reproduced at the end of this file.
+#
+# Schema verified against opencode source:
+# https://raw.githubusercontent.com/sst/opencode/dev/packages/opencode/src/cli/cmd/run.ts
+# The emit() helper unconditionally merges three top-level fields onto
+# every event:
+#     { "type": <name>, "timestamp": <ms>, "sessionID": <sess.id>, ...data }
+# Event type names (from the run.ts switch arms): step_start,
+# step_finish, tool_use, text, reasoning, error.
+#
+# Final assistant text event:    type="text"
+#     text JSON path:            .part.text
+#     (only emitted for finalised parts, i.e. once part.time.end is set)
+# Session id field:              .sessionID (top-level, camelCase, on
+#     EVERY event line including errors). Distinct from snake_case
+#     session_id used by codex.
+#
+# Because the real capture only got the error frame (no provider auth
+# to drive the full loop), three synthesized happy-path frames below
+# exercise the parser end-to-end: a step_start, the finalised text
+# event, and a step_finish. These are byte-shape identical to what
+# real opencode emits (verified by reading run.ts at the link above)
+# — only the bodies are stand-ins.
+{"type":"step_start","timestamp":1781442200000,"sessionID":"ses_synth01","part":{"type":"step-start","id":"prt_step01"}}
+{"type":"text","timestamp":1781442200100,"sessionID":"ses_synth01","part":{"type":"text","id":"prt_txt01","text":"Hi! How can I help you today?","time":{"start":1781442200050,"end":1781442200100}}}
+{"type":"step_finish","timestamp":1781442200200,"sessionID":"ses_synth01","part":{"type":"step-finish","id":"prt_step01","tokens":{"input":12,"output":9,"reasoning":0,"cache":{"read":0,"write":0}},"cost":0.00012}}
+{"type":"error","timestamp":1781442127952,"sessionID":"ses_139c65c48ffe53chodpG4RNUgp","error":{"name":"APIError","data":{"message":"Not Found: 404 page not found","statusCode":404,"isRetryable":false}}}
