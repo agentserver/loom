@@ -61,6 +61,23 @@ func escapeBoundaryTags(tag, body string) string {
 	return body
 }
 
+// escapeAttr escapes a string for safe use inside an XML/HTML-like
+// attribute value: ", <, >, & become entities, and newline is encoded
+// so it can't break the single-line attribute syntax. Planner already
+// restricts node ids to a safe charset via nodeIDPattern (see
+// planner.go), but we apply attribute escaping here as defense in
+// depth so a future agent_id loosening or a leaked malicious id
+// still can't break the reducer boundary structure.
+func escapeAttr(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;") // must be first
+	s = strings.ReplaceAll(s, `"`, "&quot;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	s = strings.ReplaceAll(s, "\n", "&#10;")
+	s = strings.ReplaceAll(s, "\r", "&#13;")
+	return s
+}
+
 // wrapUserContent wraps untrusted text in <tag>...</tag> for use
 // inside an LLM prompt. It (a) escapes both opening and closing forms
 // of tag's element name in the body so injected boundary tags can't
@@ -179,16 +196,25 @@ func reducePrompt(originalPrompt string, results []SubResult) string {
 	var sb strings.Builder
 	sb.WriteString("Sub-tasks (with status and output):\n\n")
 	for _, r := range results {
-		sb.WriteString(fmt.Sprintf("--- node %s [target=%s status=%s] ---\n", r.NodeID, r.TargetID, r.Status))
-		sb.WriteString(wrapUserContent(fmt.Sprintf(`sub_prompt node="%s"`, r.NodeID), r.Prompt))
+		nodeAttr := escapeAttr(r.NodeID)
+		targetAttr := escapeAttr(r.TargetID)
+		statusAttr := escapeAttr(r.Status)
+		sb.WriteString(wrapUserContent(
+			fmt.Sprintf(`sub_prompt node="%s" status="%s"`, nodeAttr, statusAttr),
+			r.Prompt,
+		))
 		if r.Status == "completed" {
 			sb.WriteString(wrapUserContent(
-				fmt.Sprintf(`sub_output node="%s" target="%s"`, r.NodeID, r.TargetID),
+				fmt.Sprintf(`sub_output node="%s" target="%s"`, nodeAttr, targetAttr),
 				r.Output,
 			))
 		} else if r.Error != "" {
-			sb.WriteString(wrapUserContent(fmt.Sprintf(`sub_error node="%s"`, r.NodeID), r.Error))
+			sb.WriteString(wrapUserContent(
+				fmt.Sprintf(`sub_error node="%s" target="%s"`, nodeAttr, targetAttr),
+				r.Error,
+			))
 		}
+		sb.WriteString("\n") // keep visual separator between sub-tasks
 	}
 	writeGuidance := ""
 	if strings.Contains(originalPrompt, "<USER_FILES_MANIFEST") && strings.Contains(originalPrompt, `"writes"`) {
