@@ -8,8 +8,11 @@ credentials:
   proxy_token: ""
   short_id: ""
 
-claude:
+agent:
+  kind: claude
   bin: claude
+  workdir: ./
+  extra_args: []
 
 mcp_servers: {}
 

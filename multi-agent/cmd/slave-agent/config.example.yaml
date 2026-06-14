@@ -8,9 +8,10 @@ credentials:
   proxy_token: ""
   short_id: ""
 
-claude:
+agent:
+  kind: claude
   bin: claude
-  workdir: ""
+  workdir: ./   # slave-agent workdir; required since issue #15
   extra_args: []
 
 mcp_servers:
