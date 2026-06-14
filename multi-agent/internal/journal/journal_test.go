@@ -22,7 +22,7 @@ func fakeTextClaude(t *testing.T) string {
 
 func TestRecord_FirstWriteCreatesFile(t *testing.T) {
 	dir := t.TempDir()
-	j, err := New(Config{Dir: dir, ClaudeBin: fakeTextClaude(t)})
+	j, err := New(Config{Dir: dir, AgentBin: fakeTextClaude(t)})
 	require.NoError(t, err)
 	err = j.Record(context.Background(), executor.Task{ID: "t1", Skill: "mcp"}, executor.Result{CapabilityChange: "did x"})
 	require.NoError(t, err)
@@ -39,7 +39,7 @@ func TestRecord_FirstWriteCreatesFile(t *testing.T) {
 
 func TestRecord_MergeFailureStillAppendsHistory(t *testing.T) {
 	dir := t.TempDir()
-	j, _ := New(Config{Dir: dir, ClaudeBin: fakeTextClaude(t), Env: []string{"FAKE_CLAUDE_TEXT_MODE=fail"}})
+	j, _ := New(Config{Dir: dir, AgentBin: fakeTextClaude(t), Env: []string{"FAKE_CLAUDE_TEXT_MODE=fail"}})
 	err := j.Record(context.Background(), executor.Task{ID: "t2", Skill: "chat"}, executor.Result{CapabilityChange: "tried"})
 	require.NoError(t, err) // journal.Record never errors out: it logs and degrades
 
