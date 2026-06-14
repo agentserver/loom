@@ -188,16 +188,30 @@ func TestFanout_BestEffortPartialFailure(t *testing.T) {
 }
 
 func TestFanout_EmitsPlanningCompleted(t *testing.T) {
+	// §1.5 added a planner-level target_id whitelist with 3-attempt retry.
+	// plan_chain returns a 2-node plan referencing agent-a + agent-b; both
+	// must be registered so the planner accepts the plan and the orchestrator
+	// emits EventMasterPlanningCompleted. (Pre-§1.5 only agent-a was
+	// registered and dispatch failed later, but the event still fired; post-
+	// §1.5 the planner rejects the unknown target_id up front, so the event
+	// never fires.) The test's intent is to verify the event is emitted on
+	// successful planning — not to exercise dispatch-of-unknown-agent.
 	sdk := &fakeSDKQueue{
-		agents: []agentsdk.AgentCard{{AgentID: "agent-a", Status: "available"}},
-		queue:  []agentsdk.TaskInfo{{Status: "completed", Output: "ok"}},
+		agents: []agentsdk.AgentCard{
+			{AgentID: "agent-a", Status: "available"},
+			{AgentID: "agent-b", Status: "available"},
+		},
+		queue: []agentsdk.TaskInfo{
+			{Status: "completed", Output: "ok"},
+			{Status: "completed", Output: "ok"},
+		},
 	}
 	obs := &fakeObserver{}
 	o := newOrchWithObserver(t, sdk, "plan_chain", obs)
 
 	_, err := o.Run(context.Background(), executor.Task{ID: "p", Skill: "fanout", Prompt: "do"})
 
-	require.Error(t, err)
+	require.NoError(t, err)
 	require.NotEmpty(t, eventsOfType(obs.events, observer.EventMasterPlanningCompleted))
 }
 
@@ -735,9 +749,19 @@ echo $((round+1)) > "$ROUND_FILE"
 	require.NoError(t, err)
 	t.Setenv("ROUND_FILE", roundFile)
 
+	// §1.5 added a planner-level target_id whitelist with 3-attempt retry that
+	// runs *before* contract-policy validation. To exercise the contract-policy
+	// rejection path (the actual subject under test), agent-b must be a known
+	// SDK agent (so the planner accepts the replan) but excluded from the
+	// contract's AllowedTargets (so contract policy rejects it).
+	// fanoutContractPrompt already sets AllowedTargets = []string{"agent-a"},
+	// so we just need to register agent-b in the SDK snapshot.
 	sdk := &fakeSDKQueue{
-		agents: []agentsdk.AgentCard{agentWithRenderTool(t)},
-		queue:  []agentsdk.TaskInfo{{Status: "completed", Output: "bypass"}},
+		agents: []agentsdk.AgentCard{
+			agentWithRenderTool(t),
+			{AgentID: "agent-b", Status: "available"},
+		},
+		queue: []agentsdk.TaskInfo{{Status: "completed", Output: "bypass"}},
 	}
 	p := planner.New(config.Planner{TimeoutSec: 5}, claudebe.New(agentbackend.ClaudeConfig{Bin: bin}, nil).LLM())
 	s, err := store.Open(filepath.Join(t.TempDir(), "x.db"))
