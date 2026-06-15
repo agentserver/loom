@@ -48,6 +48,15 @@ func (b *Backend) LLM() agentbackend.LLMRunner                { return b.llm }
 func (b *Backend) Permissions() agentbackend.PermissionsStore { return b.perm }
 func (b *Backend) Detect(ctx context.Context) error           { return detect(ctx, b.cfg.Bin) }
 
+// ListSessions / GetSession stubs are replaced by sessions.go in Task 5.
+func (b *Backend) ListSessions(_ context.Context) ([]agentbackend.Session, error) {
+	panic("opencode.ListSessions not implemented")
+}
+
+func (b *Backend) GetSession(_ context.Context, _ string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+	panic("opencode.GetSession not implemented")
+}
+
 // init registers the opencode builder with the agentbackend registry. The
 // builder runs only when this package is imported; CLI mains
 // (cmd/{driver,slave}-agent/main.go) add the side-effect import.
