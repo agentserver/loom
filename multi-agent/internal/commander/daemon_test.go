@@ -49,7 +49,9 @@ func TestDaemon_BothTransportsServeListSessions(t *testing.T) {
 	waitFor(t, func() bool { return d.HTTPAddr() != "" }, 2*time.Second)
 	waitFor(t, func() bool { return fo.registerCount() >= 1 }, 2*time.Second)
 
-	httpResp, err := http.Get("http://" + d.HTTPAddr() + "/sessions")
+	req, _ := http.NewRequest(http.MethodGet, "http://"+d.HTTPAddr()+"/sessions", nil)
+	req.Header.Set("Authorization", "Bearer t")
+	httpResp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

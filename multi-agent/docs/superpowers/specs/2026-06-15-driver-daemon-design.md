@@ -208,6 +208,15 @@ Daemon 收到 `ping` 立刻回 `heartbeat`（用于观测端检测 daemon RTT；
 
 ## HTTP API（本机 debug）
 
+所有 HTTP API 请求都必须带：
+
+```
+Authorization: Bearer <cfg.Credentials.ProxyToken>
+```
+
+这不是生产入口，只用于 curl/debug；即便绑定在 `127.0.0.1`，bearer 也用于挡住浏览器 CSRF /
+DNS rebinding 页面和本机其他用户的误用。
+
 | 路径 | 方法 | 响应 |
 |---|---|---|
 | `/healthz` | GET | `200 OK\nlinked: true|false\nuptime: ...` |
@@ -231,6 +240,9 @@ data: {"text": "..."}
 
 event: done
 data: {"result": {...}}
+
+event: error
+data: {"code": "session_not_found" | "backend_unavailable" | "internal", "message": "..."}
 ```
 
 HTTP handlers 和 WS handlers 共用 `internal/commander/handler.go` 里的同一组函数；transport 适配只在 envelope 转换 + sink 写出层。

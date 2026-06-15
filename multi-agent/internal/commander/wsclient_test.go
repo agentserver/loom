@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,10 +22,12 @@ type fakeObserver struct {
 	t          *testing.T
 	upgrader   websocket.Upgrader
 	mu         sync.Mutex
+	writeMu    sync.Mutex
 	conns      []*websocket.Conn
 	received   []Envelope
 	bearer     string
 	rejectAuth bool
+	sendAck    bool
 }
 
 func newFakeObserver(t *testing.T) *fakeObserver {
@@ -55,7 +58,13 @@ func (f *fakeObserver) handler() http.Handler {
 			}
 			f.mu.Lock()
 			f.received = append(f.received, env)
+			sendAck := f.sendAck && env.Type == "register"
 			f.mu.Unlock()
+			if sendAck {
+				f.writeMu.Lock()
+				_ = conn.WriteJSON(Envelope{Type: "ack"})
+				f.writeMu.Unlock()
+			}
 		}
 	})
 }
@@ -68,6 +77,8 @@ func (f *fakeObserver) Send(env Envelope) error {
 	}
 	conn := f.conns[len(f.conns)-1]
 	f.mu.Unlock()
+	f.writeMu.Lock()
+	defer f.writeMu.Unlock()
 	return conn.WriteJSON(env)
 }
 
@@ -133,6 +144,57 @@ func TestWSClient_DialsAndRegisters(t *testing.T) {
 	if frames[0].Type != "register" {
 		t.Fatalf("first frame=%+v", frames[0])
 	}
+	cancel()
+	fo.closeAll()
+	if err := <-errCh; err != nil {
+		t.Fatalf("Run returned %v", err)
+	}
+}
+
+func TestWSClient_LinkedRequiresObserverAck(t *testing.T) {
+	fo := newFakeObserver(t)
+	srv := httptest.NewServer(fo.handler())
+	defer srv.Close()
+	c := NewWSClient(WSConfig{
+		URL:            observerWSURL(srv),
+		ProxyToken:     "token-abc",
+		Register:       RegisterPayload{SchemaVersion: SchemaVersion, Kind: "claude"},
+		Handler:        &Handler{Backend: &fakeBackend{}},
+		HeartbeatInt:   10 * time.Second,
+		InitialBackoff: 10 * time.Millisecond,
+		MaxBackoff:     50 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- c.Run(ctx) }()
+
+	waitFor(t, func() bool { return fo.registerCount() >= 1 }, time.Second)
+	if c.Linked() {
+		t.Fatal("Linked should remain false until observer ack")
+	}
+	cancel()
+	fo.closeAll()
+	if err := <-errCh; err != nil {
+		t.Fatalf("Run returned %v", err)
+	}
+
+	fo = newFakeObserver(t)
+	fo.sendAck = true
+	srv = httptest.NewServer(fo.handler())
+	defer srv.Close()
+	c = NewWSClient(WSConfig{
+		URL:            observerWSURL(srv),
+		ProxyToken:     "token-abc",
+		Register:       RegisterPayload{SchemaVersion: SchemaVersion, Kind: "claude"},
+		Handler:        &Handler{Backend: &fakeBackend{}},
+		HeartbeatInt:   10 * time.Second,
+		InitialBackoff: 10 * time.Millisecond,
+		MaxBackoff:     50 * time.Millisecond,
+	})
+	ctx, cancel = context.WithCancel(context.Background())
+	errCh = make(chan error, 1)
+	go func() { errCh <- c.Run(ctx) }()
+	waitFor(t, c.Linked, time.Second)
 	cancel()
 	fo.closeAll()
 	if err := <-errCh; err != nil {
@@ -255,6 +317,148 @@ func TestWSClient_TurnCommandStreamsEventsAndResult(t *testing.T) {
 	}, 2*time.Second)
 }
 
+func TestWSClient_CancelsTurnWhenConnectionDrops(t *testing.T) {
+	turnStarted := make(chan struct{})
+	turnCanceled := make(chan struct{})
+	fo := newFakeObserver(t)
+	srv := httptest.NewServer(fo.handler())
+	defer srv.Close()
+	c := NewWSClient(WSConfig{
+		URL:        observerWSURL(srv),
+		ProxyToken: "t",
+		Register:   RegisterPayload{SchemaVersion: SchemaVersion, Kind: "claude"},
+		Handler: &Handler{Backend: &fakeBackend{
+			resumeFn: func(ctx context.Context, _, _ string, _ executor.Sink) (executor.Result, error) {
+				close(turnStarted)
+				<-ctx.Done()
+				close(turnCanceled)
+				return executor.Result{}, ctx.Err()
+			},
+		}},
+		HeartbeatInt:   10 * time.Second,
+		InitialBackoff: 10 * time.Millisecond,
+		MaxBackoff:     50 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- c.Run(ctx) }()
+	defer func() {
+		cancel()
+		fo.closeAll()
+		<-errCh
+	}()
+
+	waitFor(t, func() bool { return fo.registerCount() >= 1 }, time.Second)
+	if err := fo.Send(Envelope{
+		Type: "command",
+		ID:   "turn-cancel",
+		Payload: jsonRaw(t, CommandPayload{
+			Command: "session_turn",
+			Args:    jsonRaw(t, SessionTurnArgs{ID: "s1", Prompt: "do"}),
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		select {
+		case <-turnStarted:
+			return true
+		default:
+			return false
+		}
+	}, time.Second)
+	fo.closeAll()
+	waitFor(t, func() bool {
+		select {
+		case <-turnCanceled:
+			return true
+		default:
+			return false
+		}
+	}, time.Second)
+}
+
+func TestWSClient_SessionTurnSameSessionSerialized(t *testing.T) {
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondStarted := make(chan struct{})
+	var calls atomic.Int32
+
+	fo := newFakeObserver(t)
+	srv := httptest.NewServer(fo.handler())
+	defer srv.Close()
+	c := NewWSClient(WSConfig{
+		URL:        observerWSURL(srv),
+		ProxyToken: "t",
+		Register:   RegisterPayload{SchemaVersion: SchemaVersion, Kind: "claude"},
+		Handler: &Handler{Backend: &fakeBackend{
+			resumeFn: func(_ context.Context, id, _ string, _ executor.Sink) (executor.Result, error) {
+				if id != "same-session" {
+					t.Errorf("id=%q", id)
+				}
+				switch calls.Add(1) {
+				case 1:
+					close(firstStarted)
+					<-releaseFirst
+				case 2:
+					close(secondStarted)
+				default:
+					t.Errorf("unexpected extra call")
+				}
+				return executor.Result{Summary: "ok", SessionID: id}, nil
+			},
+		}},
+		HeartbeatInt:   10 * time.Second,
+		InitialBackoff: 10 * time.Millisecond,
+		MaxBackoff:     50 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- c.Run(ctx) }()
+	defer func() {
+		cancel()
+		fo.closeAll()
+		<-errCh
+	}()
+
+	waitFor(t, func() bool { return fo.registerCount() >= 1 }, time.Second)
+	for _, id := range []string{"turn-1", "turn-2"} {
+		if err := fo.Send(Envelope{
+			Type: "command",
+			ID:   id,
+			Payload: jsonRaw(t, CommandPayload{
+				Command: "session_turn",
+				Args:    jsonRaw(t, SessionTurnArgs{ID: "same-session", Prompt: id}),
+			}),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, func() bool {
+			select {
+			case <-firstStarted:
+				return true
+			default:
+				return false
+			}
+		}, time.Second)
+	}
+
+	select {
+	case <-secondStarted:
+		t.Fatal("second turn started before first same-session turn completed")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseFirst)
+	waitFor(t, func() bool {
+		select {
+		case <-secondStarted:
+			return true
+		default:
+			return false
+		}
+	}, time.Second)
+}
+
 func TestWSClient_Heartbeat(t *testing.T) {
 	fo := newFakeObserver(t)
 	srv := httptest.NewServer(fo.handler())
@@ -329,13 +533,27 @@ func TestWSClient_RejectsUnauthorized(t *testing.T) {
 		MaxBackoff:     50 * time.Millisecond,
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	_ = c.Run(ctx)
+	err := c.Run(ctx)
+	if !errors.Is(err, ErrObserverUnauthorized) {
+		t.Fatalf("err=%v want ErrObserverUnauthorized", err)
+	}
 	for _, env := range fo.frames() {
 		if env.Type == "register" {
 			t.Fatalf("registered despite 401")
 		}
+	}
+}
+
+func TestReconnectBackoffResetsAfterStableConnection(t *testing.T) {
+	got := nextReconnectBackoff(200*time.Millisecond, 10*time.Millisecond, 200*time.Millisecond, 2*time.Second, time.Second)
+	if got != 10*time.Millisecond {
+		t.Fatalf("stable connection backoff=%v want 10ms", got)
+	}
+	got = nextReconnectBackoff(10*time.Millisecond, 10*time.Millisecond, 200*time.Millisecond, 100*time.Millisecond, time.Second)
+	if got != 20*time.Millisecond {
+		t.Fatalf("short connection backoff=%v want 20ms", got)
 	}
 }
 

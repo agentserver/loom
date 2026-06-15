@@ -11,9 +11,10 @@ import (
 
 // DaemonConfig wires the HTTP listener, WS client, and shared Handler.
 type DaemonConfig struct {
-	Handler    *Handler
-	ListenAddr string
-	WS         WSConfig
+	Handler       *Handler
+	ListenAddr    string
+	HTTPAuthToken string
+	WS            WSConfig
 }
 
 // Daemon orchestrates the local HTTP debug API and outbound observer WS link.
@@ -62,7 +63,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	d.setHTTPAddr(ln.Addr().String())
 
-	srv := &http.Server{Handler: NewHTTPHandler(d.handler, LinkStatusFunc(d.wsClient.Linked))}
+	httpAuthToken := d.cfg.HTTPAuthToken
+	if httpAuthToken == "" {
+		httpAuthToken = d.cfg.WS.ProxyToken
+	}
+	srv := &http.Server{Handler: NewHTTPHandler(d.handler, LinkStatusFunc(d.wsClient.Linked), httpAuthToken)}
 
 	errCh := make(chan error, 2)
 	var wg sync.WaitGroup
