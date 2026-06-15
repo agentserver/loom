@@ -106,9 +106,3 @@ func (r *registry) daemons(o owner) []DaemonInfo {
 	}
 	return out
 }
-
-// Hub is the owner-keyed WebSocket hub that owns the registry and drives the
-// daemon read loops. This is a minimal stub so Task 1 (the registry) compiles
-// in isolation; Task 2 (hub.go) replaces/expands it with the real fields and
-// methods (upgrade handler, register/remove lifecycle, broadcast, etc.).
-type Hub struct{}
