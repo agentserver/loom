@@ -18,15 +18,20 @@ import (
 // protocol version. It is terminal: reconnecting cannot repair a schema split.
 var ErrSchemaVersionMismatch = errors.New("commander: schema version mismatch")
 
+// ErrObserverUnauthorized is returned when observer rejects the WebSocket
+// handshake with 401 or 403. Retrying cannot repair an invalid token.
+var ErrObserverUnauthorized = errors.New("commander: observer unauthorized")
+
 // WSConfig is the dial and behavior config for WSClient.
 type WSConfig struct {
-	URL            string
-	ProxyToken     string
-	Register       RegisterPayload
-	Handler        *Handler
-	HeartbeatInt   time.Duration
-	InitialBackoff time.Duration
-	MaxBackoff     time.Duration
+	URL               string
+	ProxyToken        string
+	Register          RegisterPayload
+	Handler           *Handler
+	HeartbeatInt      time.Duration
+	InitialBackoff    time.Duration
+	MaxBackoff        time.Duration
+	BackoffResetAfter time.Duration
 }
 
 // WSClient owns the outbound WebSocket link to observer.
@@ -35,6 +40,9 @@ type WSClient struct {
 
 	mu     sync.Mutex
 	linked bool
+
+	turnMu    sync.Mutex
+	turnLocks map[string]*sync.Mutex
 }
 
 func NewWSClient(cfg WSConfig) *WSClient {
@@ -47,7 +55,10 @@ func NewWSClient(cfg WSConfig) *WSClient {
 	if cfg.MaxBackoff == 0 {
 		cfg.MaxBackoff = 30 * time.Second
 	}
-	return &WSClient{cfg: cfg}
+	if cfg.BackoffResetAfter == 0 {
+		cfg.BackoffResetAfter = time.Minute
+	}
+	return &WSClient{cfg: cfg, turnLocks: make(map[string]*sync.Mutex)}
 }
 
 func (c *WSClient) Linked() bool {
@@ -67,12 +78,12 @@ func (c *WSClient) setLinked(v bool) {
 func (c *WSClient) Run(ctx context.Context) error {
 	backoff := c.cfg.InitialBackoff
 	for ctx.Err() == nil {
-		err := c.runOnce(ctx)
+		connectedFor, err := c.runOnce(ctx)
 		c.setLinked(false)
 		if ctx.Err() != nil {
 			return nil
 		}
-		if errors.Is(err, ErrSchemaVersionMismatch) {
+		if errors.Is(err, ErrSchemaVersionMismatch) || errors.Is(err, ErrObserverUnauthorized) {
 			return err
 		}
 		select {
@@ -80,30 +91,33 @@ func (c *WSClient) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		}
-		backoff *= 2
-		if backoff > c.cfg.MaxBackoff {
-			backoff = c.cfg.MaxBackoff
-		}
+		backoff = nextReconnectBackoff(backoff, c.cfg.InitialBackoff, c.cfg.MaxBackoff, connectedFor, c.cfg.BackoffResetAfter)
 	}
 	return nil
 }
 
-func (c *WSClient) runOnce(ctx context.Context) error {
+func (c *WSClient) runOnce(ctx context.Context) (time.Duration, error) {
 	hdr := http.Header{}
 	hdr.Set("Authorization", "Bearer "+c.cfg.ProxyToken)
 
 	dialer := *websocket.DefaultDialer
-	conn, _, err := dialer.DialContext(ctx, c.cfg.URL, hdr)
+	conn, resp, err := dialer.DialContext(ctx, c.cfg.URL, hdr)
 	if err != nil {
-		return err
+		if resp != nil && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+			return 0, fmt.Errorf("%w: status %d", ErrObserverUnauthorized, resp.StatusCode)
+		}
+		return 0, err
 	}
 	defer conn.Close()
+
+	connCtx, connCancel := context.WithCancel(ctx)
+	defer connCancel()
 
 	connDone := make(chan struct{})
 	defer close(connDone)
 	go func() {
 		select {
-		case <-ctx.Done():
+		case <-connCtx.Done():
 			_ = conn.Close()
 		case <-connDone:
 		}
@@ -113,14 +127,18 @@ func (c *WSClient) runOnce(ctx context.Context) error {
 	write := func(env Envelope) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
-		return conn.WriteJSON(env)
+		err := conn.WriteJSON(env)
+		if err != nil {
+			connCancel()
+		}
+		return err
 	}
 
 	registerPayload, _ := json.Marshal(c.cfg.Register)
 	if err := write(Envelope{Type: "register", Payload: registerPayload}); err != nil {
-		return err
+		return 0, err
 	}
-	c.setLinked(true)
+	connectedAt := time.Now()
 
 	heartbeatDone := make(chan struct{})
 	defer close(heartbeatDone)
@@ -133,7 +151,7 @@ func (c *WSClient) runOnce(ctx context.Context) error {
 				_ = write(Envelope{Type: "heartbeat"})
 			case <-heartbeatDone:
 				return
-			case <-ctx.Done():
+			case <-connCtx.Done():
 				return
 			}
 		}
@@ -142,16 +160,19 @@ func (c *WSClient) runOnce(ctx context.Context) error {
 	for {
 		var env Envelope
 		if err := conn.ReadJSON(&env); err != nil {
-			return err
+			connCancel()
+			return time.Since(connectedAt), err
 		}
 		switch env.Type {
+		case "ack":
+			c.setLinked(true)
 		case "command":
-			go c.dispatchCommand(ctx, env, write)
+			go c.dispatchCommand(connCtx, env, write)
 		case "ping":
 			_ = write(Envelope{Type: "heartbeat"})
 		case "error":
 			if isSchemaMismatch(env.Payload) {
-				return ErrSchemaVersionMismatch
+				return time.Since(connectedAt), ErrSchemaVersionMismatch
 			}
 		}
 	}
@@ -198,6 +219,8 @@ func (c *WSClient) dispatchCommand(ctx context.Context, env Envelope, write func
 			_ = write(errorEnvelope(env.ID, ErrCodeInternal, "bad session_turn args: "+err.Error()))
 			return
 		}
+		unlock := c.lockTurn(args.ID)
+		defer unlock()
 		sink := newWSSink(env.ID, write)
 		result, err := c.cfg.Handler.SessionTurn(ctx, args.ID, args.Prompt, sink)
 		if errors.Is(err, agentbackend.ErrSessionNotFound) {
@@ -208,11 +231,35 @@ func (c *WSClient) dispatchCommand(ctx context.Context, env Envelope, write func
 			_ = write(errorEnvelope(env.ID, ErrCodeBackendUnavailable, err.Error()))
 			return
 		}
-		_ = write(Envelope{Type: "command_result", ID: env.ID, Payload: mustMarshalTurnResult(result)})
+		_ = write(Envelope{Type: "command_result", ID: env.ID, Payload: marshalTurnResult(result)})
 
 	default:
 		_ = write(errorEnvelope(env.ID, ErrCodeInternal, fmt.Sprintf("unknown command: %s", cmd.Command)))
 	}
+}
+
+func (c *WSClient) lockTurn(sessionID string) func() {
+	c.turnMu.Lock()
+	lock := c.turnLocks[sessionID]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		c.turnLocks[sessionID] = lock
+	}
+	c.turnMu.Unlock()
+
+	lock.Lock()
+	return lock.Unlock
+}
+
+func nextReconnectBackoff(current, initial, max, connectedFor, resetAfter time.Duration) time.Duration {
+	if resetAfter > 0 && connectedFor >= resetAfter {
+		return initial
+	}
+	next := current * 2
+	if next > max {
+		return max
+	}
+	return next
 }
 
 func errorEnvelope(id, code, message string) Envelope {

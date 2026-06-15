@@ -2,7 +2,7 @@
 
 - Date: 2026-06-15
 - Branch: worktree-driver-daemon
-- Implementation HEAD before evidence commit: 044c9bb
+- Implementation branch: worktree-driver-daemon
 - Scope: PR-2 of commander-web-entry vision - daemon mode, WS out, HTTP API
 - Out of scope: observer-side hub, web UI, master path
 
@@ -17,9 +17,12 @@ Coverage:
 - WS envelope round-trips for register, command, event, and error constants
 - Handler forwards Backend.ListSessions/GetSession/RunResume and preserves
   ErrSessionNotFound
-- HTTP routes for /healthz, /sessions, /sessions/{id}, and SSE turn streaming
+- HTTP routes for /healthz, /sessions, /sessions/{id}, SSE turn streaming,
+  and bearer-token enforcement
 - WS client dial/register, Bearer auth, command dispatch, stream events,
-  heartbeat, reconnect on drop, 401 retry, and schema mismatch shutdown
+  connection-scoped turn cancellation, per-session turn serialization,
+  heartbeat, reconnect on drop, 401/403 terminal shutdown, backoff reset,
+  observer ack-linked state, and schema mismatch shutdown
 - Daemon serves the same data through HTTP and WS and shuts down cleanly
 - Driver config daemon defaults and explicit override
 - Driver-agent serve-daemon flag parsing

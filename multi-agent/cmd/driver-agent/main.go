@@ -39,6 +39,8 @@ Usage:
   driver-agent serve-daemon  --config /path/to/driver.yaml [--listen host:port]
 `
 
+var driverVersion = "v0.0.0"
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprint(os.Stderr, usage)
@@ -328,8 +330,9 @@ func runServeDaemon(args []string) {
 	wsURL = strings.Replace(wsURL, "https://", "wss://", 1)
 
 	d := commander.NewDaemon(commander.DaemonConfig{
-		Handler:    &commander.Handler{Backend: backend},
-		ListenAddr: listen,
+		Handler:       &commander.Handler{Backend: backend},
+		ListenAddr:    listen,
+		HTTPAuthToken: cfg.Credentials.ProxyToken,
 		WS: commander.WSConfig{
 			URL:        wsURL,
 			ProxyToken: cfg.Credentials.ProxyToken,
@@ -339,7 +342,7 @@ func runServeDaemon(args []string) {
 				AgentBin:      cfg.Agent.Bin,
 				AgentWorkDir:  cfg.Agent.WorkDir,
 				DisplayName:   cfg.Discovery.DisplayName,
-				DriverVersion: "v0.0.0",
+				DriverVersion: driverVersion,
 			},
 			HeartbeatInt:   time.Duration(cfg.Daemon.HeartbeatIntervalSec) * time.Second,
 			InitialBackoff: time.Duration(cfg.Daemon.InitialBackoffMs) * time.Millisecond,

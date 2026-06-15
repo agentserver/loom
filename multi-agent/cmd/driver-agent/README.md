@@ -41,10 +41,21 @@ driver-agent serve-daemon --config ~/.config/multi-agent/driver.yaml [--listen h
 Run `driver-agent register --config ...` first; the daemon uses
 `credentials.proxy_token` as its WebSocket bearer token.
 
+The HTTP API requires `Authorization: Bearer <credentials.proxy_token>` on every
+request. This prevents browser CSRF and DNS-rebinding pages from driving the
+local agent just because they can reach a loopback port.
+
 By default the HTTP debug API binds `127.0.0.1:0` so multiple daemons can run on
-one host without port conflicts. Use `--listen 127.0.0.1:9099` to pin a port.
-Binding `0.0.0.0` prints a warning because the debug API becomes reachable from
-the network.
+one host without port conflicts. Use `--listen 127.0.0.1:9099` only when a
+stable curl/debug port is required:
+
+```
+curl -H "Authorization: Bearer $(yq -r .credentials.proxy_token ~/.config/multi-agent/driver.yaml)" \
+  http://127.0.0.1:9099/sessions
+```
+
+Binding `0.0.0.0` prints a warning because the bearer-protected debug API still
+becomes reachable from the network.
 
 `serve-daemon` coexists with `serve-mcp`: same config file, different transport.
 

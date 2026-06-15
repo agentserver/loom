@@ -15,7 +15,7 @@ import (
 )
 
 func TestHTTP_HealthzOK(t *testing.T) {
-	srv := httptest.NewServer(NewHTTPHandler(&Handler{Backend: &fakeBackend{}}, LinkStatusFunc(func() bool { return true })))
+	srv := httptest.NewServer(NewHTTPHandler(&Handler{Backend: &fakeBackend{}}, LinkStatusFunc(func() bool { return true }), ""))
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/healthz")
 	if err != nil {
@@ -37,7 +37,7 @@ func TestHTTP_GetSessionsReturnsBackendResult(t *testing.T) {
 			return []agentbackend.Session{{ID: "s1"}, {ID: "s2"}}, nil
 		},
 	}}
-	srv := httptest.NewServer(NewHTTPHandler(h, LinkStatusFunc(func() bool { return true })))
+	srv := httptest.NewServer(NewHTTPHandler(h, LinkStatusFunc(func() bool { return true }), ""))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/sessions")
@@ -65,7 +65,7 @@ func TestHTTP_GetSession404OnUnknown(t *testing.T) {
 			return agentbackend.Session{}, nil, agentbackend.ErrSessionNotFound
 		},
 	}}
-	srv := httptest.NewServer(NewHTTPHandler(h, LinkStatusFunc(func() bool { return true })))
+	srv := httptest.NewServer(NewHTTPHandler(h, LinkStatusFunc(func() bool { return true }), ""))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/sessions/missing")
@@ -84,7 +84,7 @@ func TestHTTP_GetSessionOK(t *testing.T) {
 			return agentbackend.Session{ID: id}, []agentbackend.SessionMessage{{Role: "user", Text: "hi"}}, nil
 		},
 	}}
-	srv := httptest.NewServer(NewHTTPHandler(h, LinkStatusFunc(func() bool { return true })))
+	srv := httptest.NewServer(NewHTTPHandler(h, LinkStatusFunc(func() bool { return true }), ""))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/sessions/abc")
@@ -124,7 +124,7 @@ func TestHTTP_PostTurnStreamsSSE(t *testing.T) {
 			return executor.Result{Summary: "done", SessionID: "abc"}, nil
 		},
 	}}
-	srv := httptest.NewServer(NewHTTPHandler(h, LinkStatusFunc(func() bool { return true })))
+	srv := httptest.NewServer(NewHTTPHandler(h, LinkStatusFunc(func() bool { return true }), ""))
 	defer srv.Close()
 
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/sessions/abc/turn",
@@ -168,7 +168,7 @@ func TestHTTP_PostTurnErrSessionNotFound(t *testing.T) {
 			return executor.Result{}, agentbackend.ErrSessionNotFound
 		},
 	}}
-	srv := httptest.NewServer(NewHTTPHandler(h, LinkStatusFunc(func() bool { return true })))
+	srv := httptest.NewServer(NewHTTPHandler(h, LinkStatusFunc(func() bool { return true }), ""))
 	defer srv.Close()
 
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/sessions/x/turn",
@@ -180,5 +180,35 @@ func TestHTTP_PostTurnErrSessionNotFound(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status=%d want 404", resp.StatusCode)
+	}
+}
+
+func TestHTTP_RequiresBearerWhenConfigured(t *testing.T) {
+	h := &Handler{Backend: &fakeBackend{
+		listFn: func(_ context.Context) ([]agentbackend.Session, error) {
+			return []agentbackend.Session{{ID: "s1"}}, nil
+		},
+	}}
+	srv := httptest.NewServer(NewHTTPHandler(h, LinkStatusFunc(func() bool { return true }), "secret-token"))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/sessions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("without auth status=%d want 401", resp.StatusCode)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/sessions", nil)
+	req.Header.Set("Authorization", "Bearer secret-token")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("with auth status=%d want 200", resp.StatusCode)
 	}
 }

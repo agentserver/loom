@@ -1,6 +1,7 @@
 package commander
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,7 +17,9 @@ import (
 type LinkStatusFunc func() bool
 
 // NewHTTPHandler mounts the daemon's local debug API on a fresh ServeMux.
-func NewHTTPHandler(h *Handler, link LinkStatusFunc) http.Handler {
+// When authToken is non-empty every request must provide
+// Authorization: Bearer <authToken>.
+func NewHTTPHandler(h *Handler, link LinkStatusFunc, authToken string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -67,7 +70,10 @@ func NewHTTPHandler(h *Handler, link LinkStatusFunc) http.Handler {
 		}
 		writeJSON(w, map[string]any{"session": sess, "messages": messages})
 	})
-	return mux
+	if authToken == "" {
+		return mux
+	}
+	return requireBearer(authToken, mux)
 }
 
 func handleTurn(h *Handler, w http.ResponseWriter, r *http.Request, id string) {
@@ -105,7 +111,7 @@ func handleTurn(h *Handler, w http.ResponseWriter, r *http.Request, id string) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	sink.EmitDone(mustMarshalTurnResult(res))
+	sink.EmitDone(marshalTurnResult(res))
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -113,8 +119,21 @@ func writeJSON(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func mustMarshalTurnResult(res executor.Result) []byte {
-	body, err := json.Marshal(map[string]any{
+func requireBearer(token string, next http.Handler) http.Handler {
+	want := "Bearer " + token
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := r.Header.Get("Authorization")
+		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func marshalTurnResult(res executor.Result) []byte {
+	body, _ := json.Marshal(map[string]any{
 		"result": map[string]any{
 			"summary":           res.Summary,
 			"capability_change": res.CapabilityChange,
@@ -122,8 +141,5 @@ func mustMarshalTurnResult(res executor.Result) []byte {
 			"awaiting_user":     res.AwaitingUser,
 		},
 	})
-	if err != nil {
-		panic(err)
-	}
 	return body
 }
