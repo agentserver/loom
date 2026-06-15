@@ -1,0 +1,2 @@
+not valid json at all {{{
+{"timestamp":"2026-01-15T11:00:05.000Z","type":"user_input","payload":{"text":"hello after broken first line"}}

@@ -1,0 +1,5 @@
+{"timestamp":"2026-01-15T10:00:00.000Z","type":"session_meta","payload":{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","timestamp":"2026-01-15T10:00:00.000Z","cwd":"/tmp/codex-proj","originator":"codex_exec","cli_version":"0.139.0"}}
+{"timestamp":"2026-01-15T10:00:05.000Z","type":"user_input","payload":{"text":"sum 2 and 3"}}
+{"timestamp":"2026-01-15T10:00:07.000Z","type":"model_output","payload":{"text":"5"}}
+{"timestamp":"2026-01-15T10:00:15.000Z","type":"user_input","payload":{"text":"now divide by 0"}}
+{"timestamp":"2026-01-15T10:00:18.000Z","type":"model_output","payload":{"text":"division by zero is undefined"}}
