@@ -41,6 +41,10 @@ driver-agent serve-daemon --config ~/.config/multi-agent/driver.yaml [--listen h
 Run `driver-agent register --config ...` first; the daemon uses
 `credentials.proxy_token` as its WebSocket bearer token.
 
+Use an `https://` observer URL outside loopback/debug deployments. `http://`
+observer URLs are converted to `ws://`, which sends `credentials.proxy_token`
+without TLS.
+
 The HTTP API requires `Authorization: Bearer <credentials.proxy_token>` on every
 request. This prevents browser CSRF and DNS-rebinding pages from driving the
 local agent just because they can reach a loopback port.
@@ -58,6 +62,9 @@ Binding `0.0.0.0` prints a warning because the bearer-protected debug API still
 becomes reachable from the network.
 
 `serve-daemon` coexists with `serve-mcp`: same config file, different transport.
+Release builds should inject the daemon version with
+`-ldflags "-X main.driverVersion=vX.Y.Z"` so observer can report the actual
+driver build in register payloads.
 
 ## Tools
 
