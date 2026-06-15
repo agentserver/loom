@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yourorg/multi-agent/internal/commanderhub"
 	"github.com/yourorg/multi-agent/internal/identity"
 	"github.com/yourorg/multi-agent/internal/identity/static"
 	"github.com/yourorg/multi-agent/internal/objectstore"
@@ -48,6 +49,7 @@ type Options struct {
 	DisableObjectProxy  bool
 	MaxObjectProxyBytes int64
 	RegisterDisabled    bool
+	AgentserverURL      string // PR-3: enables /commander surface (empty = disabled)
 }
 
 // New constructs the observerweb HTTP handler. If usHandler is non-nil,
@@ -95,6 +97,9 @@ func NewWithResolverOptions(s Store, usHandler *userspace.Handler, resolver iden
 	}
 	mux := http.NewServeMux()
 	mountRoutes(mux, h, usHandler)
+	if opts.AgentserverURL != "" {
+		commanderhub.MountAll(mux, resolver, opts.AgentserverURL)
+	}
 	return mux
 }
 
