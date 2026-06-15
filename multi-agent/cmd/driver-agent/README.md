@@ -28,6 +28,26 @@ Bridges Claude Code (CLI or VS Code extension) to a multi-agent workspace. Runs 
 
 4. Restart Claude Code. The driver's tools appear under the `driver/` namespace.
 
+## serve-daemon
+
+`serve-daemon` is the long-lived commander web entry mode. It reuses the same
+driver config and registration token, dials the observer WebSocket endpoint, and
+serves a loopback HTTP debug API:
+
+```
+driver-agent serve-daemon --config ~/.config/multi-agent/driver.yaml [--listen host:port]
+```
+
+Run `driver-agent register --config ...` first; the daemon uses
+`credentials.proxy_token` as its WebSocket bearer token.
+
+By default the HTTP debug API binds `127.0.0.1:0` so multiple daemons can run on
+one host without port conflicts. Use `--listen 127.0.0.1:9099` to pin a port.
+Binding `0.0.0.0` prints a warning because the debug API becomes reachable from
+the network.
+
+`serve-daemon` coexists with `serve-mcp`: same config file, different transport.
+
 ## Tools
 
 See `docs/superpowers/specs/2026-05-09-generic-driver-agent-design.md` § 1 for full schemas.

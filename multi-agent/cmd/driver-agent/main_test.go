@@ -48,3 +48,32 @@ func TestResolveDriverLocalPathUsesAuditLogDir(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, filepath.Join(cfg.DriverDefaults.AuditLogDir, "driver-tasks.jsonl"), journalPath)
 }
+
+func TestServeDaemon_ParseFlagsConfigRequired(t *testing.T) {
+	if _, err := parseServeDaemonFlags([]string{}); err == nil {
+		t.Fatal("expected error for missing --config")
+	}
+}
+
+func TestServeDaemon_ParseFlagsConfigParsed(t *testing.T) {
+	opts, err := parseServeDaemonFlags([]string{"--config", "/tmp/x.yaml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.ConfigPath != "/tmp/x.yaml" {
+		t.Errorf("ConfigPath=%q", opts.ConfigPath)
+	}
+}
+
+func TestServeDaemon_ParseFlagsListenOverride(t *testing.T) {
+	opts, err := parseServeDaemonFlags([]string{
+		"--config", "/tmp/x.yaml",
+		"--listen", "0.0.0.0:8080",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Listen != "0.0.0.0:8080" {
+		t.Errorf("Listen=%q", opts.Listen)
+	}
+}
