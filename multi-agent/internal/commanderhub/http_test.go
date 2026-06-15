@@ -117,3 +117,33 @@ func TestHTTP_TurnStreamsSSE(t *testing.T) {
 	require.Contains(t, joined, "hello")
 	require.Contains(t, joined, "event: done")
 }
+
+// TestHTTP_SessionListJSONCasing: the session list serializes agentbackend.Session
+// with Go field names (no json tags) — app.js depends on ID/Preview/WorkingDir.
+// This pins the casing so it can't silently regress.
+func TestHTTP_SessionListJSONCasing(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
+	srv, hub, _, o, cookie, cleanup := commanderSetup(t, resolver, "tok-alice", &tbBackend{
+		listFn: func(context.Context) ([]agentbackend.Session, error) {
+			return []agentbackend.Session{{ID: "s1", Kind: agentbackend.KindClaude, WorkingDir: "/p", Preview: "hello"}}, nil
+		},
+	})
+	defer cleanup()
+
+	dis := hub.reg.daemons(o)
+	require.NotEmpty(t, dis)
+	daemonID := dis[0].DaemonID
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/commander/daemons/"+daemonID+"/sessions", nil)
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+	// agentbackend.Session has no json tags → wire shape is Go field names.
+	require.Contains(t, s, `"ID":"s1"`)
+	require.Contains(t, s, `"Preview":"hello"`)
+	require.Contains(t, s, `"WorkingDir":"/p"`)
+}

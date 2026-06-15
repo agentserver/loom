@@ -146,6 +146,10 @@ func (a *Authenticator) putSession(token string, ident identity.Identity) string
 
 // ServeLogin: POST /api/commander/login → starts device flow, returns verify URL.
 func (a *Authenticator) ServeLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	dc, err := a.flow.RequestCode(r.Context())
 	if err != nil {
 		http.Error(w, "device flow: "+err.Error(), http.StatusBadGateway)
@@ -202,6 +206,10 @@ func (a *Authenticator) pollLogin(lid string, dc DeviceCode) {
 // poll gets 404. Abandoned or never-completing entries are reaped lazily once
 // they exceed loginTTL (best-effort; no background sweeper).
 func (a *Authenticator) ServeLoginPoll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	lid := r.URL.Query().Get("id")
 	// Snapshot the entry's state under the lock; pollLogin writes these fields
 	// from its own goroutine, so reading them unlocked would race.
@@ -253,6 +261,10 @@ func (a *Authenticator) ServeLoginPoll(w http.ResponseWriter, r *http.Request) {
 
 // ServeLogout: POST /api/commander/logout.
 func (a *Authenticator) ServeLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	if c, err := r.Cookie(sessionCookieName); err == nil {
 		a.sessMu.Lock()
 		delete(a.sessions, c.Value)
