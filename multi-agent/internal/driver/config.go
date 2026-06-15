@@ -25,6 +25,7 @@ type Config struct {
 	Fanout         agentconfig.Fanout  `yaml:"fanout"`
 	DriverDefaults DriverDefaults      `yaml:"driver_defaults"`
 	Observer       Observer            `yaml:"observer,omitempty"`
+	Daemon         DaemonConfig        `yaml:"daemon,omitempty"`
 }
 
 // AgentConfig is the single per-backend descriptor consumed by both
@@ -97,6 +98,19 @@ type Observer struct {
 	// a within-5-min restart. Defaults to false so accidental takeovers of
 	// a still-live sibling driver remain blocked. See §1.3 #11.
 	ForceRegister bool `yaml:"force_register,omitempty"`
+}
+
+// DaemonConfig configures optional long-lived `driver-agent serve-daemon` mode.
+type DaemonConfig struct {
+	// Listen is the HTTP bind for the daemon's debug API.
+	Listen string `yaml:"listen,omitempty"`
+	// WSPath is appended to Observer.URL when dialing the observer hub.
+	WSPath string `yaml:"ws_path,omitempty"`
+	// HeartbeatIntervalSec is the daemon-to-observer heartbeat cadence.
+	HeartbeatIntervalSec int `yaml:"heartbeat_interval_sec,omitempty"`
+	// InitialBackoffMs and MaxBackoffMs bound WS reconnect backoff.
+	InitialBackoffMs int `yaml:"initial_backoff_ms,omitempty"`
+	MaxBackoffMs     int `yaml:"max_backoff_ms,omitempty"`
 }
 
 // LoadConfig reads + validates the yaml at path and applies DriverDefaults defaults.
@@ -183,6 +197,21 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if c.Fanout.SubTaskDefaults.TimeoutSec == 0 {
 		c.Fanout.SubTaskDefaults.TimeoutSec = c.DriverDefaults.TaskTimeoutSec
+	}
+	if c.Daemon.Listen == "" {
+		c.Daemon.Listen = "127.0.0.1:0"
+	}
+	if c.Daemon.WSPath == "" {
+		c.Daemon.WSPath = "/api/daemon-link"
+	}
+	if c.Daemon.HeartbeatIntervalSec == 0 {
+		c.Daemon.HeartbeatIntervalSec = 30
+	}
+	if c.Daemon.InitialBackoffMs == 0 {
+		c.Daemon.InitialBackoffMs = 1000
+	}
+	if c.Daemon.MaxBackoffMs == 0 {
+		c.Daemon.MaxBackoffMs = 30000
 	}
 	// driver_defaults.workdir defaults to agent.workdir (jail root).
 	if c.DriverDefaults.WorkDir == "" {
