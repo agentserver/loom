@@ -1,0 +1,119 @@
+package commanderhub
+
+import (
+	"bufio"
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/yourorg/multi-agent/internal/commander"
+	"github.com/yourorg/multi-agent/internal/executor"
+	"github.com/yourorg/multi-agent/internal/identity"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
+)
+
+// commanderSetup wires Hub+Auth on a shared mux with one real daemon (WSClient)
+// and returns the server, hub, auth, the daemon's owner, and a ready session
+// cookie for that owner's token.
+func commanderSetup(t *testing.T, resolver *fakeResolver, token string, backend agentbackend.Backend) (*httptest.Server, *Hub, *Authenticator, owner, *http.Cookie, func()) {
+	t.Helper()
+	hub := NewHub(resolver)
+	auth := newAuthenticatorWithFlow(resolver, newFakeDeviceFlow(token))
+	mux := http.NewServeMux()
+	mux.Handle("/api/daemon-link", hub) // hub.ServeHTTP upgrades the daemon WS
+	Mount(mux, hub, auth)
+	srv := httptest.NewServer(mux)
+
+	wsURL := "ws" + srv.URL[len("http"):] + "/api/daemon-link"
+	c := commander.NewWSClient(commander.WSConfig{
+		URL:        wsURL,
+		ProxyToken: token,
+		Register:   commander.RegisterPayload{SchemaVersion: commander.SchemaVersion, Kind: "claude", DisplayName: "tester"},
+		Handler:    &commander.Handler{Backend: backend},
+		HeartbeatInt:   10 * time.Second,
+		InitialBackoff: 50 * time.Millisecond,
+		MaxBackoff:     50 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- c.Run(ctx) }()
+	ident, _ := resolver.Resolve(ctx, token)
+	o := owner{userID: ident.UserID, workspaceID: ident.WorkspaceID}
+	waitFor(t, func() bool { return c.Linked() }, time.Second, "daemon linked")
+
+	sessID := auth.putSession(token, ident)
+	cookie := &http.Cookie{Name: sessionCookieName, Value: sessID}
+	cleanup := func() { cancel(); <-errCh; srv.Close() }
+	return srv, hub, auth, o, cookie, cleanup
+}
+
+// TestHTTP_DaemonsUnauthorizedWithoutCookie: no cookie/bearer → 401.
+func TestHTTP_DaemonsUnauthorizedWithoutCookie(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
+	srv, _, _, _, _, cleanup := commanderSetup(t, resolver, "tok-alice", &tbBackend{})
+	defer cleanup()
+
+	resp, err := http.Get(srv.URL + "/api/commander/daemons")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+}
+
+// TestHTTP_DaemonsReturnsOwn: with the session cookie, /daemons lists this
+// owner's daemon.
+func TestHTTP_DaemonsReturnsOwn(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
+	srv, _, _, _, cookie, cleanup := commanderSetup(t, resolver, "tok-alice", &tbBackend{})
+	defer cleanup()
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/commander/daemons", nil)
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body, _ := io.ReadAll(resp.Body)
+	require.Contains(t, string(body), "tester") // DisplayName from register
+}
+
+// TestHTTP_TurnStreamsSSE: POST .../turn returns text/event-stream with chunk
+// events and a terminal done event. daemonID is read from the hub registry.
+func TestHTTP_TurnStreamsSSE(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
+	srv, hub, _, o, cookie, cleanup := commanderSetup(t, resolver, "tok-alice", &tbBackend{
+		resumeFn: func(_ context.Context, _, _ string, sink executor.Sink) (executor.Result, error) {
+			sink.Write("chunk", "hello")
+			sink.Close()
+			return executor.Result{Summary: "done"}, nil
+		},
+	})
+	defer cleanup()
+
+	dis := hub.reg.daemons(o)
+	require.NotEmpty(t, dis)
+	daemonID := dis[0].DaemonID
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/commander/daemons/"+daemonID+"/sessions/s1/turn", strings.NewReader(`{"prompt":"go"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.True(t, strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream"), resp.Header.Get("Content-Type"))
+
+	var lines []string
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		lines = append(lines, sc.Text())
+	}
+	joined := strings.Join(lines, "\n")
+	require.Contains(t, joined, "event: chunk")
+	require.Contains(t, joined, "hello")
+	require.Contains(t, joined, "event: done")
+}
