@@ -2,13 +2,14 @@
 //
 // Storage captured on this host on 2026-06-15:
 //
-//	$HOME/.local/share/opencode/opencode.db
+//	Unix:    $HOME/.local/share/opencode/opencode.db
+//	Windows: %APPDATA%\opencode\opencode.db
 //
 // Relevant sqlite tables:
 //
 //	session         - id, directory, title, version, time_created, time_updated
-//	message         - id, session_id, time_created, time_updated, data (role JSON)
-//	session_message - older/switch-event schema used by some fixtures
+//	message         - current chat source of truth; data contains role JSON
+//	session_message - older/fallback schema and switch-event rows in current DBs
 //	part            - id, message_id, session_id, time_created, data
 //
 // The reader opens the database read-only and never spawns opencode.
@@ -23,6 +24,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -33,13 +35,25 @@ import (
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
-const sessionPreviewMaxBytes = 256
-
 func sessionsDBPath() string {
-	if xdgData := os.Getenv("XDG_DATA_HOME"); xdgData != "" {
+	home, _ := os.UserHomeDir()
+	return sessionsDBPathFor(runtime.GOOS, os.Getenv, home)
+}
+
+func sessionsDBPathFor(goos string, getenv func(string) string, home string) string {
+	if goos == "windows" {
+		if appData := getenv("APPDATA"); appData != "" {
+			return filepath.Join(appData, "opencode", "opencode.db")
+		}
+		if home != "" {
+			return filepath.Join(home, "AppData", "Roaming", "opencode", "opencode.db")
+		}
+		return ""
+	}
+
+	if xdgData := getenv("XDG_DATA_HOME"); xdgData != "" {
 		return filepath.Join(xdgData, "opencode", "opencode.db")
 	}
-	home, _ := os.UserHomeDir()
 	if home == "" {
 		return ""
 	}
@@ -197,6 +211,9 @@ func loadAggregates(ctx context.Context, db *sql.DB, ids []string) (map[string]i
 
 	seenInMessageTable := map[string]bool{}
 	if tableExists(ctx, db, "message") {
+		// Current opencode DBs store chat turns in message+part. The
+		// session_message table may still exist, but it records switch
+		// events there; sessions seen in message suppress fallback reads.
 		msgCounts, msgLast, seen := loadMessageTableAggregates(ctx, db)
 		for sid, n := range msgCounts {
 			counts[sid] = n
@@ -265,6 +282,8 @@ func loadMessageTableAggregates(ctx context.Context, db *sql.DB) (map[string]int
 }
 
 func loadSessionMessageAggregates(ctx context.Context, db *sql.DB, counts map[string]int, lastAssistant map[string]string, skip map[string]bool) {
+	// Fallback for older/pre-flight schemas where session_message carried
+	// user/assistant turns. Current opencode DBs usually use message+part.
 	rows, err := db.QueryContext(ctx, `
 		SELECT session_id, COUNT(*)
 		FROM session_message
@@ -358,6 +377,8 @@ func loadMessagesFromMessageTable(ctx context.Context, db *sql.DB, id string) ([
 }
 
 func loadMessagesFromSessionMessage(ctx context.Context, db *sql.DB, id string) ([]agentbackend.SessionMessage, error) {
+	// Fallback for older/pre-flight schemas where session_message carried
+	// user/assistant turns. Current opencode DBs usually use message+part.
 	rows, err := db.QueryContext(ctx, `
 		SELECT m.id, m.type, p.data, m.time_created
 		FROM session_message m
@@ -461,10 +482,10 @@ func msToTime(ms int64) time.Time {
 }
 
 func truncatePreview(s string) string {
-	if len(s) <= sessionPreviewMaxBytes {
+	if len(s) <= agentbackend.SessionPreviewMaxBytes {
 		return s
 	}
-	end := sessionPreviewMaxBytes
+	end := agentbackend.SessionPreviewMaxBytes
 	for end > 0 && !utf8.ValidString(s[:end]) {
 		end--
 	}

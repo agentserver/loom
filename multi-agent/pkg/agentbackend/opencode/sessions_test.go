@@ -3,6 +3,7 @@ package opencode
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
@@ -10,8 +11,7 @@ import (
 
 func TestListSessions_EmptyDir(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_DATA_HOME", home+"/.local/share")
+	setTestHome(t, home)
 
 	b := New(agentbackend.Config{Bin: "opencode", WorkDir: t.TempDir()}, nil)
 	got, err := b.ListSessions(context.Background())
@@ -23,10 +23,24 @@ func TestListSessions_EmptyDir(t *testing.T) {
 	}
 }
 
+func TestSessionsDBPath_WindowsUsesAppData(t *testing.T) {
+	appData := filepath.Join(t.TempDir(), "AppData", "Roaming")
+	got := sessionsDBPathFor("windows", func(k string) string {
+		if k == "APPDATA" {
+			return appData
+		}
+		return ""
+	}, filepath.Join(t.TempDir(), "profile"))
+
+	want := filepath.Join(appData, "opencode", "opencode.db")
+	if got != want {
+		t.Fatalf("sessionsDBPathFor(windows)=%q want %q", got, want)
+	}
+}
+
 func TestListSessions_ReturnsKnownSessions(t *testing.T) {
 	home := buildFixtureDB(t)
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_DATA_HOME", home+"/.local/share")
+	setTestHome(t, home)
 
 	b := New(agentbackend.Config{Bin: "opencode", WorkDir: t.TempDir()}, nil)
 	got, err := b.ListSessions(context.Background())
@@ -59,8 +73,7 @@ func TestListSessions_ReturnsKnownSessions(t *testing.T) {
 
 func TestListSessions_ToleratesCorruptParts(t *testing.T) {
 	home := buildFixtureDB(t)
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_DATA_HOME", home+"/.local/share")
+	setTestHome(t, home)
 
 	b := New(agentbackend.Config{Bin: "opencode", WorkDir: t.TempDir()}, nil)
 	got, err := b.ListSessions(context.Background())
@@ -74,8 +87,7 @@ func TestListSessions_ToleratesCorruptParts(t *testing.T) {
 
 func TestGetSession_ReturnsMessages(t *testing.T) {
 	home := buildFixtureDB(t)
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_DATA_HOME", home+"/.local/share")
+	setTestHome(t, home)
 
 	b := New(agentbackend.Config{Bin: "opencode", WorkDir: t.TempDir()}, nil)
 	sess, msgs, err := b.GetSession(context.Background(), "ses_a")
@@ -104,8 +116,7 @@ func TestGetSession_ReturnsMessages(t *testing.T) {
 
 func TestGetSession_UnknownIDReturnsErrSessionNotFound(t *testing.T) {
 	home := buildFixtureDB(t)
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_DATA_HOME", home+"/.local/share")
+	setTestHome(t, home)
 
 	b := New(agentbackend.Config{Bin: "opencode", WorkDir: t.TempDir()}, nil)
 	_, _, err := b.GetSession(context.Background(), "no-such-id")
@@ -116,8 +127,7 @@ func TestGetSession_UnknownIDReturnsErrSessionNotFound(t *testing.T) {
 
 func TestGetSession_RespectsPreviewCap(t *testing.T) {
 	home := buildFixtureDB(t)
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_DATA_HOME", home+"/.local/share")
+	setTestHome(t, home)
 	id := addLongPreviewSession(t, home)
 
 	b := New(agentbackend.Config{Bin: "opencode", WorkDir: t.TempDir()}, nil)
@@ -125,15 +135,14 @@ func TestGetSession_RespectsPreviewCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sess.Preview) > 256 {
-		t.Fatalf("preview length=%d, want <= 256", len(sess.Preview))
+	if len(sess.Preview) > agentbackend.SessionPreviewMaxBytes {
+		t.Fatalf("preview length=%d, want <= %d", len(sess.Preview), agentbackend.SessionPreviewMaxBytes)
 	}
 }
 
 func TestGetSession_MessageTableSchemaReturnsMessages(t *testing.T) {
 	home := buildFixtureDB(t)
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_DATA_HOME", home+"/.local/share")
+	setTestHome(t, home)
 	id := addMessageTableSession(t, home)
 
 	b := New(agentbackend.Config{Bin: "opencode", WorkDir: t.TempDir()}, nil)
@@ -160,8 +169,7 @@ func TestGetSession_MessageTableSchemaReturnsMessages(t *testing.T) {
 
 func TestListSessions_MessageTableSchemaSetsPreview(t *testing.T) {
 	home := buildFixtureDB(t)
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_DATA_HOME", home+"/.local/share")
+	setTestHome(t, home)
 	id := addMessageTableSession(t, home)
 
 	b := New(agentbackend.Config{Bin: "opencode", WorkDir: t.TempDir()}, nil)
@@ -182,4 +190,13 @@ func TestListSessions_MessageTableSchemaSetsPreview(t *testing.T) {
 		return
 	}
 	t.Fatalf("session %s not listed", id)
+}
+
+func setTestHome(t *testing.T, home string) {
+	t.Helper()
+	dataHome := filepath.Join(home, ".local", "share")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("APPDATA", dataHome)
 }

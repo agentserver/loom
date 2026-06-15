@@ -42,8 +42,14 @@ func copyTree(src, dst string) error {
 	})
 }
 
+func setTestHome(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+}
+
 func TestListSessions_EmptyDir(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 
 	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir()}, nil)
 	got, err := b.ListSessions(context.Background())
@@ -57,7 +63,7 @@ func TestListSessions_EmptyDir(t *testing.T) {
 
 func TestListSessions_ReturnsKnownSessions(t *testing.T) {
 	home := copyFixtureToHOME(t)
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 
 	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir()}, nil)
 	got, err := b.ListSessions(context.Background())
@@ -90,7 +96,7 @@ func TestListSessions_ReturnsKnownSessions(t *testing.T) {
 
 func TestListSessions_ToleratesCorruptFile(t *testing.T) {
 	home := copyFixtureToHOME(t)
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 
 	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir()}, nil)
 	got, err := b.ListSessions(context.Background())
@@ -104,7 +110,7 @@ func TestListSessions_ToleratesCorruptFile(t *testing.T) {
 
 func TestGetSession_ReturnsMessages(t *testing.T) {
 	home := copyFixtureToHOME(t)
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 
 	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir()}, nil)
 	sess, msgs, err := b.GetSession(context.Background(), "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
@@ -133,7 +139,7 @@ func TestGetSession_ReturnsMessages(t *testing.T) {
 
 func TestGetSession_UnknownIDReturnsErrSessionNotFound(t *testing.T) {
 	home := copyFixtureToHOME(t)
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 
 	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir()}, nil)
 	_, _, err := b.GetSession(context.Background(), "no-such-id")
@@ -144,7 +150,7 @@ func TestGetSession_UnknownIDReturnsErrSessionNotFound(t *testing.T) {
 
 func TestGetSession_RespectsPreviewCap(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	dir := filepath.Join(home, ".codex", "sessions", "2026", "01", "15")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -161,7 +167,7 @@ func TestGetSession_RespectsPreviewCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sess.Preview) > 256 {
-		t.Fatalf("preview length=%d, want <= 256", len(sess.Preview))
+	if len(sess.Preview) > agentbackend.SessionPreviewMaxBytes {
+		t.Fatalf("preview length=%d, want <= %d", len(sess.Preview), agentbackend.SessionPreviewMaxBytes)
 	}
 }
