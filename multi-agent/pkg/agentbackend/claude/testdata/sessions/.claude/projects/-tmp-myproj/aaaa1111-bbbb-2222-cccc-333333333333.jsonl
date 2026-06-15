@@ -1,0 +1,6 @@
+{"type":"last-prompt","leafUuid":"leaf-1","sessionId":"aaaa1111-bbbb-2222-cccc-333333333333"}
+{"type":"permission-mode","permissionMode":"auto","sessionId":"aaaa1111-bbbb-2222-cccc-333333333333"}
+{"type":"user","timestamp":"2026-06-14T10:00:00Z","sessionId":"aaaa1111-bbbb-2222-cccc-333333333333","message":{"role":"user","content":"hello, claude"}}
+{"type":"assistant","timestamp":"2026-06-14T10:00:01Z","sessionId":"aaaa1111-bbbb-2222-cccc-333333333333","message":{"role":"assistant","content":[{"type":"text","text":"hi! how can I help?"}]}}
+{"type":"user","timestamp":"2026-06-14T10:00:05Z","sessionId":"aaaa1111-bbbb-2222-cccc-333333333333","message":{"role":"user","content":"what is 2+2?"}}
+{"type":"assistant","timestamp":"2026-06-14T10:00:06Z","sessionId":"aaaa1111-bbbb-2222-cccc-333333333333","message":{"role":"assistant","content":[{"type":"text","text":"4"}]}}
