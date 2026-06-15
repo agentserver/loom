@@ -6,9 +6,10 @@
 //
 // Relevant sqlite tables:
 //
-//	session         — id, directory, title, version, time_created, time_updated
-//	session_message — id, session_id, type, seq, time_created, time_updated, data
-//	part            — id, message_id, session_id, time_created, data
+//	session         - id, directory, title, version, time_created, time_updated
+//	message         - id, session_id, time_created, time_updated, data (role JSON)
+//	session_message - older/switch-event schema used by some fixtures
+//	part            - id, message_id, session_id, time_created, data
 //
 // The reader opens the database read-only and never spawns opencode.
 package opencode
