@@ -38,9 +38,18 @@ func (b *Backend) Run(ctx context.Context, t agentbackend.Task, s agentbackend.S
 func (b *Backend) RunResume(ctx context.Context, sessionID, answer string, s agentbackend.Sink) (agentbackend.Result, error) {
 	return b.exec.RunResume(ctx, sessionID, answer, s)
 }
-func (b *Backend) LLM() agentbackend.LLMRunner               { return b.llm }
+func (b *Backend) LLM() agentbackend.LLMRunner                { return b.llm }
 func (b *Backend) Permissions() agentbackend.PermissionsStore { return b.perm }
 func (b *Backend) Detect(ctx context.Context) error           { return detect(ctx, b.cfg.Bin) }
+
+// ListSessions / GetSession stubs are replaced by sessions.go in Task 4.
+func (b *Backend) ListSessions(_ context.Context) ([]agentbackend.Session, error) {
+	panic("codex.ListSessions not implemented")
+}
+
+func (b *Backend) GetSession(_ context.Context, _ string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+	panic("codex.GetSession not implemented")
+}
 
 func init() {
 	agentbackend.RegisterBuilder(agentbackend.KindCodex, func(cfg agentbackend.Config, env []string) (agentbackend.Backend, error) {
