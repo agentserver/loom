@@ -2,6 +2,7 @@ package commander
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -54,5 +55,33 @@ func TestSSESink_FlushedOnEachWrite(t *testing.T) {
 	s.Close()
 	if f.flushed < 2 {
 		t.Errorf("flushed=%d want >=2", f.flushed)
+	}
+}
+
+// TestWSSink_WriteForwardsAsEventEnvelope pins that each sink Write produces
+// an event envelope with the right id and payload.
+func TestWSSink_WriteForwardsAsEventEnvelope(t *testing.T) {
+	var got []Envelope
+	send := func(e Envelope) error {
+		got = append(got, e)
+		return nil
+	}
+	s := newWSSink("cmd-1", send)
+	s.Write("chunk", "hello")
+	s.Write("capability", "added foo")
+	s.Close()
+
+	if len(got) != 2 {
+		t.Fatalf("got %d envelopes", len(got))
+	}
+	if got[0].Type != "event" || got[0].ID != "cmd-1" {
+		t.Errorf("envelope[0]=%+v", got[0])
+	}
+	var p1 EventPayload
+	if err := json.Unmarshal(got[0].Payload, &p1); err != nil {
+		t.Fatal(err)
+	}
+	if p1.EventKind != "chunk" || p1.Text != "hello" {
+		t.Errorf("payload[0]=%+v", p1)
 	}
 }

@@ -58,3 +58,22 @@ func (s *sseSink) EmitError(code, message string) {
 func (s *sseSink) Written() bool { return s.written }
 
 var _ executor.Sink = (*sseSink)(nil)
+
+// wsSink adapts executor.Sink writes to event envelopes sent by WSClient.
+type wsSink struct {
+	cmdID string
+	send  func(Envelope) error
+}
+
+func newWSSink(cmdID string, send func(Envelope) error) *wsSink {
+	return &wsSink{cmdID: cmdID, send: send}
+}
+
+func (s *wsSink) Write(eventType, data string) {
+	payload, _ := json.Marshal(EventPayload{EventKind: eventType, Text: data})
+	_ = s.send(Envelope{Type: "event", ID: s.cmdID, Payload: payload})
+}
+
+func (s *wsSink) Close() {}
+
+var _ executor.Sink = (*wsSink)(nil)
