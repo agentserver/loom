@@ -129,3 +129,57 @@ func TestGetSession_RespectsPreviewCap(t *testing.T) {
 		t.Fatalf("preview length=%d, want <= 256", len(sess.Preview))
 	}
 }
+
+func TestGetSession_MessageTableSchemaReturnsMessages(t *testing.T) {
+	home := buildFixtureDB(t)
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", home+"/.local/share")
+	id := addMessageTableSession(t, home)
+
+	b := New(agentbackend.Config{Bin: "opencode", WorkDir: t.TempDir()}, nil)
+	sess, msgs, err := b.GetSession(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.MessageCount != 2 {
+		t.Errorf("MessageCount=%d want 2", sess.MessageCount)
+	}
+	if sess.Preview != "real assistant" {
+		t.Errorf("Preview=%q want real assistant", sess.Preview)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("len(msgs)=%d want 2", len(msgs))
+	}
+	if msgs[0].Role != "user" || msgs[0].Text != "real user" {
+		t.Errorf("msgs[0]=%+v", msgs[0])
+	}
+	if msgs[1].Role != "assistant" || msgs[1].Text != "real assistant" {
+		t.Errorf("msgs[1]=%+v", msgs[1])
+	}
+}
+
+func TestListSessions_MessageTableSchemaSetsPreview(t *testing.T) {
+	home := buildFixtureDB(t)
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", home+"/.local/share")
+	id := addMessageTableSession(t, home)
+
+	b := New(agentbackend.Config{Bin: "opencode", WorkDir: t.TempDir()}, nil)
+	got, err := b.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range got {
+		if s.ID != id {
+			continue
+		}
+		if s.MessageCount != 2 {
+			t.Errorf("MessageCount=%d want 2", s.MessageCount)
+		}
+		if s.Preview != "real assistant" {
+			t.Errorf("Preview=%q want real assistant", s.Preview)
+		}
+		return
+	}
+	t.Fatalf("session %s not listed", id)
+}
