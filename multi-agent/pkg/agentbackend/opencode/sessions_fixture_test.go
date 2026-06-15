@@ -81,3 +81,28 @@ func addLongPreviewSession(t *testing.T, home string) string {
 	}
 	return id
 }
+
+func addMessageTableSession(t *testing.T, home string) string {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(home, ".local", "share", "opencode", "opencode.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)`,
+		`INSERT INTO session VALUES ('ses_real','/tmp/opencode-real','real-schema','1.17.6',1781442700000,1781442704000)`,
+		`INSERT INTO message VALUES ('msg_real_user','ses_real',1781442701000,1781442701000,'{"role":"user","time":{"created":1781442701000}}')`,
+		`INSERT INTO part VALUES ('prt_real_user','msg_real_user','ses_real',1781442701000,1781442701000,'{"type":"text","text":"real user"}')`,
+		`INSERT INTO message VALUES ('msg_real_assistant','ses_real',1781442702000,1781442704000,'{"role":"assistant","time":{"created":1781442702000}}')`,
+		`INSERT INTO part VALUES ('prt_real_reason','msg_real_assistant','ses_real',1781442702000,1781442702000,'{"type":"reasoning","text":"hidden thought"}')`,
+		`INSERT INTO part VALUES ('prt_real_assistant','msg_real_assistant','ses_real',1781442703000,1781442703000,'{"type":"text","text":"real assistant"}')`,
+	}
+	for _, q := range stmts {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("message-table fixture exec %q: %v", q, err)
+		}
+	}
+	return "ses_real"
+}

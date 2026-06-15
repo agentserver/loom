@@ -141,51 +141,15 @@ func (b *Backend) GetSession(ctx context.Context, id string) (agentbackend.Sessi
 		return agentbackend.Session{}, nil, err
 	}
 
-	rows, err := db.QueryContext(ctx, `
-		SELECT m.id, m.type, p.data, m.time_created
-		FROM session_message m
-		LEFT JOIN part p ON p.message_id = m.id
-		WHERE m.session_id = ?
-		ORDER BY m.seq, p.time_created`, id)
+	msgs, found, err := loadMessagesFromMessageTable(ctx, db, id)
 	if err != nil {
 		return agentbackend.Session{}, nil, err
 	}
-	defer rows.Close()
-
-	var msgs []agentbackend.SessionMessage
-	var current messageAccumulator
-	var lastAssistant string
-	flush := func() {
-		msg, ok := current.message()
-		if !ok {
-			return
+	if !found {
+		msgs, err = loadMessagesFromSessionMessage(ctx, db, id)
+		if err != nil {
+			return agentbackend.Session{}, nil, err
 		}
-		msgs = append(msgs, msg)
-		if msg.Role == "assistant" {
-			lastAssistant = msg.Text
-		}
-	}
-	for rows.Next() {
-		var msgID, role string
-		var partData sql.NullString
-		var createdMS int64
-		if err := rows.Scan(&msgID, &role, &partData, &createdMS); err != nil {
-			continue
-		}
-		if current.id != "" && current.id != msgID {
-			flush()
-			current = messageAccumulator{}
-		}
-		if current.id == "" {
-			current = messageAccumulator{id: msgID, role: normalizeRole(role), ts: msToTime(createdMS)}
-		}
-		if partData.Valid {
-			current.addText(extractPartText(partData.String))
-		}
-	}
-	flush()
-	if err := rows.Err(); err != nil {
-		return agentbackend.Session{}, nil, err
 	}
 
 	sess := agentbackend.Session{
@@ -196,8 +160,8 @@ func (b *Backend) GetSession(ctx context.Context, id string) (agentbackend.Sessi
 		UpdatedAt:    msToTime(updated),
 		MessageCount: len(msgs),
 	}
-	if lastAssistant != "" {
-		sess.Preview = truncatePreview(lastAssistant)
+	if last := lastAssistantText(msgs); last != "" {
+		sess.Preview = truncatePreview(last)
 	}
 	return sess, msgs, nil
 }
@@ -230,6 +194,76 @@ func loadAggregates(ctx context.Context, db *sql.DB, ids []string) (map[string]i
 		return counts, lastAssistant
 	}
 
+	seenInMessageTable := map[string]bool{}
+	if tableExists(ctx, db, "message") {
+		msgCounts, msgLast, seen := loadMessageTableAggregates(ctx, db)
+		for sid, n := range msgCounts {
+			counts[sid] = n
+		}
+		for sid, text := range msgLast {
+			lastAssistant[sid] = text
+		}
+		seenInMessageTable = seen
+	}
+	loadSessionMessageAggregates(ctx, db, counts, lastAssistant, seenInMessageTable)
+	return counts, lastAssistant
+}
+
+func loadMessageTableAggregates(ctx context.Context, db *sql.DB) (map[string]int, map[string]string, map[string]bool) {
+	counts := map[string]int{}
+	lastAssistant := map[string]string{}
+	seen := map[string]bool{}
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT m.session_id, m.id, m.data, m.time_created, p.data
+		FROM message m
+		LEFT JOIN part p ON p.message_id = m.id
+		ORDER BY m.session_id, m.time_created, p.time_created`)
+	if err != nil {
+		return counts, lastAssistant, seen
+	}
+	defer rows.Close()
+
+	var currentSession string
+	var current messageAccumulator
+	flush := func() {
+		if currentSession == "" || current.id == "" {
+			return
+		}
+		seen[currentSession] = true
+		msg, ok := current.message()
+		if !ok {
+			return
+		}
+		counts[currentSession]++
+		if msg.Role == "assistant" {
+			lastAssistant[currentSession] = msg.Text
+		}
+	}
+	for rows.Next() {
+		var sessionID, msgID, msgData string
+		var partData sql.NullString
+		var createdMS int64
+		if err := rows.Scan(&sessionID, &msgID, &msgData, &createdMS, &partData); err != nil {
+			continue
+		}
+		if current.id != "" && (current.id != msgID || currentSession != sessionID) {
+			flush()
+			current = messageAccumulator{}
+		}
+		if current.id == "" {
+			currentSession = sessionID
+			current = messageAccumulator{id: msgID, role: normalizeRole(messageDataRole(msgData)), ts: msToTime(createdMS)}
+		}
+		if partData.Valid {
+			current.addText(extractPartText(partData.String))
+		}
+	}
+	flush()
+	return counts, lastAssistant, seen
+}
+
+func loadSessionMessageAggregates(ctx context.Context, db *sql.DB, counts map[string]int, lastAssistant map[string]string, skip map[string]bool) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT session_id, COUNT(*)
 		FROM session_message
@@ -239,6 +273,9 @@ func loadAggregates(ctx context.Context, db *sql.DB, ids []string) (map[string]i
 			var sid string
 			var n int
 			if err := rows.Scan(&sid, &n); err == nil {
+				if skip[sid] {
+					continue
+				}
 				counts[sid] = n
 			}
 		}
@@ -252,7 +289,7 @@ func loadAggregates(ctx context.Context, db *sql.DB, ids []string) (map[string]i
 		WHERE m.type = 'assistant'
 		ORDER BY m.session_id, m.seq, p.time_created`)
 	if err != nil {
-		return counts, lastAssistant
+		return
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -260,11 +297,136 @@ func loadAggregates(ctx context.Context, db *sql.DB, ids []string) (map[string]i
 		if err := rows.Scan(&sid, &data); err != nil {
 			continue
 		}
+		if skip[sid] {
+			continue
+		}
 		if text := extractPartText(data); text != "" {
 			lastAssistant[sid] = text
 		}
 	}
-	return counts, lastAssistant
+}
+
+func loadMessagesFromMessageTable(ctx context.Context, db *sql.DB, id string) ([]agentbackend.SessionMessage, bool, error) {
+	if !tableExists(ctx, db, "message") {
+		return nil, false, nil
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT m.id, m.data, m.time_created, p.data
+		FROM message m
+		LEFT JOIN part p ON p.message_id = m.id
+		WHERE m.session_id = ?
+		ORDER BY m.time_created, p.time_created`, id)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+
+	var msgs []agentbackend.SessionMessage
+	var current messageAccumulator
+	var foundRows bool
+	flush := func() {
+		msg, ok := current.message()
+		if ok {
+			msgs = append(msgs, msg)
+		}
+	}
+	for rows.Next() {
+		var msgID, msgData string
+		var partData sql.NullString
+		var createdMS int64
+		if err := rows.Scan(&msgID, &msgData, &createdMS, &partData); err != nil {
+			continue
+		}
+		foundRows = true
+		if current.id != "" && current.id != msgID {
+			flush()
+			current = messageAccumulator{}
+		}
+		if current.id == "" {
+			current = messageAccumulator{id: msgID, role: normalizeRole(messageDataRole(msgData)), ts: msToTime(createdMS)}
+		}
+		if partData.Valid {
+			current.addText(extractPartText(partData.String))
+		}
+	}
+	flush()
+	if err := rows.Err(); err != nil {
+		return nil, foundRows, err
+	}
+	return msgs, foundRows, nil
+}
+
+func loadMessagesFromSessionMessage(ctx context.Context, db *sql.DB, id string) ([]agentbackend.SessionMessage, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT m.id, m.type, p.data, m.time_created
+		FROM session_message m
+		LEFT JOIN part p ON p.message_id = m.id
+		WHERE m.session_id = ?
+		ORDER BY m.seq, p.time_created`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []agentbackend.SessionMessage
+	var current messageAccumulator
+	flush := func() {
+		msg, ok := current.message()
+		if ok {
+			msgs = append(msgs, msg)
+		}
+	}
+	for rows.Next() {
+		var msgID, role string
+		var partData sql.NullString
+		var createdMS int64
+		if err := rows.Scan(&msgID, &role, &partData, &createdMS); err != nil {
+			continue
+		}
+		if current.id != "" && current.id != msgID {
+			flush()
+			current = messageAccumulator{}
+		}
+		if current.id == "" {
+			current = messageAccumulator{id: msgID, role: normalizeRole(role), ts: msToTime(createdMS)}
+		}
+		if partData.Valid {
+			current.addText(extractPartText(partData.String))
+		}
+	}
+	flush()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return msgs, nil
+}
+
+func tableExists(ctx context.Context, db *sql.DB, name string) bool {
+	var got string
+	err := db.QueryRowContext(ctx,
+		`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, name).
+		Scan(&got)
+	return err == nil && got == name
+}
+
+func messageDataRole(data string) string {
+	var m struct {
+		Role string `json:"role"`
+	}
+	if json.Unmarshal([]byte(data), &m) != nil {
+		return ""
+	}
+	return m.Role
+}
+
+func lastAssistantText(msgs []agentbackend.SessionMessage) string {
+	var last string
+	for _, msg := range msgs {
+		if msg.Role == "assistant" {
+			last = msg.Text
+		}
+	}
+	return last
 }
 
 func extractPartText(data string) string {
