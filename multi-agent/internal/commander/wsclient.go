@@ -14,6 +14,11 @@ import (
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
+const (
+	wsReadLimitBytes = int64(1 << 20)
+	wsWriteWait      = 5 * time.Second
+)
+
 // ErrSchemaVersionMismatch is returned when observer rejects this daemon's
 // protocol version. It is terminal: reconnecting cannot repair a schema split.
 var ErrSchemaVersionMismatch = errors.New("commander: schema version mismatch")
@@ -42,7 +47,12 @@ type WSClient struct {
 	linked bool
 
 	turnMu    sync.Mutex
-	turnLocks map[string]*sync.Mutex
+	turnLocks map[string]*turnLock
+}
+
+type turnLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
 func NewWSClient(cfg WSConfig) *WSClient {
@@ -58,7 +68,7 @@ func NewWSClient(cfg WSConfig) *WSClient {
 	if cfg.BackoffResetAfter == 0 {
 		cfg.BackoffResetAfter = time.Minute
 	}
-	return &WSClient{cfg: cfg, turnLocks: make(map[string]*sync.Mutex)}
+	return &WSClient{cfg: cfg, turnLocks: make(map[string]*turnLock)}
 }
 
 func (c *WSClient) Linked() bool {
@@ -109,25 +119,53 @@ func (c *WSClient) runOnce(ctx context.Context) (time.Duration, error) {
 		return 0, err
 	}
 	defer conn.Close()
+	conn.SetReadLimit(wsReadLimitBytes)
 
 	connCtx, connCancel := context.WithCancel(ctx)
 	defer connCancel()
 
-	connDone := make(chan struct{})
-	defer close(connDone)
 	go func() {
-		select {
-		case <-connCtx.Done():
-			_ = conn.Close()
-		case <-connDone:
-		}
+		<-connCtx.Done()
+		_ = conn.Close()
 	}()
 
 	var writeMu sync.Mutex
+	readTimeout := wsReadTimeout(c.cfg.HeartbeatInt)
+	refreshReadDeadline := func() error {
+		return conn.SetReadDeadline(time.Now().Add(readTimeout))
+	}
+	if err := refreshReadDeadline(); err != nil {
+		return 0, err
+	}
+	conn.SetPongHandler(func(string) error {
+		return refreshReadDeadline()
+	})
+	conn.SetPingHandler(func(appData string) error {
+		if err := refreshReadDeadline(); err != nil {
+			return err
+		}
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(wsWriteWait))
+	})
+
 	write := func(env Envelope) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
+		if err := conn.SetWriteDeadline(time.Now().Add(wsWriteWait)); err != nil {
+			connCancel()
+			return err
+		}
 		err := conn.WriteJSON(env)
+		if err != nil {
+			connCancel()
+		}
+		return err
+	}
+	writeControl := func(messageType int, data []byte) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		err := conn.WriteControl(messageType, data, time.Now().Add(wsWriteWait))
 		if err != nil {
 			connCancel()
 		}
@@ -140,17 +178,16 @@ func (c *WSClient) runOnce(ctx context.Context) (time.Duration, error) {
 	}
 	connectedAt := time.Now()
 
-	heartbeatDone := make(chan struct{})
-	defer close(heartbeatDone)
 	go func() {
 		ticker := time.NewTicker(c.cfg.HeartbeatInt)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
+				if err := writeControl(websocket.PingMessage, nil); err != nil {
+					return
+				}
 				_ = write(Envelope{Type: "heartbeat"})
-			case <-heartbeatDone:
-				return
 			case <-connCtx.Done():
 				return
 			}
@@ -160,6 +197,10 @@ func (c *WSClient) runOnce(ctx context.Context) (time.Duration, error) {
 	for {
 		var env Envelope
 		if err := conn.ReadJSON(&env); err != nil {
+			connCancel()
+			return time.Since(connectedAt), err
+		}
+		if err := refreshReadDeadline(); err != nil {
 			connCancel()
 			return time.Since(connectedAt), err
 		}
@@ -242,13 +283,29 @@ func (c *WSClient) lockTurn(sessionID string) func() {
 	c.turnMu.Lock()
 	lock := c.turnLocks[sessionID]
 	if lock == nil {
-		lock = &sync.Mutex{}
+		lock = &turnLock{}
 		c.turnLocks[sessionID] = lock
 	}
+	lock.refs++
 	c.turnMu.Unlock()
 
-	lock.Lock()
-	return lock.Unlock
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		c.turnMu.Lock()
+		lock.refs--
+		if lock.refs == 0 && c.turnLocks[sessionID] == lock {
+			delete(c.turnLocks, sessionID)
+		}
+		c.turnMu.Unlock()
+	}
+}
+
+func wsReadTimeout(heartbeat time.Duration) time.Duration {
+	if heartbeat <= 0 {
+		return time.Minute
+	}
+	return 2 * heartbeat
 }
 
 func nextReconnectBackoff(current, initial, max, connectedFor, resetAfter time.Duration) time.Duration {

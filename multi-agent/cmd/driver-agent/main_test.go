@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/yourorg/multi-agent/internal/driver"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
 func TestPublishCardIncludesPlatform(t *testing.T) {
@@ -76,4 +77,36 @@ func TestServeDaemon_ParseFlagsListenOverride(t *testing.T) {
 	if opts.Listen != "0.0.0.0:8080" {
 		t.Errorf("Listen=%q", opts.Listen)
 	}
+}
+
+func TestDaemonWSURLConvertsHTTPToInsecureWS(t *testing.T) {
+	got, insecure := daemonWSURL("http://observer.example/", "/api/daemon-link")
+	require.Equal(t, "ws://observer.example/api/daemon-link", got)
+	require.True(t, insecure)
+}
+
+func TestDaemonWSURLConvertsHTTPSToSecureWSS(t *testing.T) {
+	got, insecure := daemonWSURL("https://observer.example/", "/api/daemon-link")
+	require.Equal(t, "wss://observer.example/api/daemon-link", got)
+	require.False(t, insecure)
+}
+
+func TestNewAgentBackendUsesDriverAgentKind(t *testing.T) {
+	cfg := &driver.Config{}
+	cfg.Agent.Kind = "claude"
+	cfg.Agent.Bin = "custom-claude"
+	cfg.Agent.WorkDir = t.TempDir()
+	cfg.Agent.ExtraArgs = []string{"--debug"}
+
+	backend, err := newAgentBackend(cfg)
+	require.NoError(t, err)
+	require.Equal(t, agentbackend.KindClaude, backend.Kind())
+}
+
+func TestNewAgentBackendReturnsUnknownKindError(t *testing.T) {
+	cfg := &driver.Config{}
+	cfg.Agent.Kind = "missing"
+
+	_, err := newAgentBackend(cfg)
+	require.Error(t, err)
 }

@@ -85,6 +85,56 @@ func TestDaemon_BothTransportsServeListSessions(t *testing.T) {
 	}, 2*time.Second)
 }
 
+func TestDaemon_ReadyClosesAfterHTTPListen(t *testing.T) {
+	fo := newFakeObserver(t)
+	wsSrv := httptest.NewServer(fo.handler())
+	defer wsSrv.Close()
+
+	d := NewDaemon(DaemonConfig{
+		Handler:    &Handler{Backend: &fakeBackend{}},
+		ListenAddr: "127.0.0.1:0",
+		WS: WSConfig{
+			URL:            observerWSURL(wsSrv),
+			ProxyToken:     "t",
+			Register:       RegisterPayload{SchemaVersion: SchemaVersion, Kind: "claude"},
+			InitialBackoff: 10 * time.Millisecond,
+			MaxBackoff:     50 * time.Millisecond,
+			HeartbeatInt:   10 * time.Second,
+		},
+	})
+
+	select {
+	case <-d.Ready():
+		t.Fatal("Ready closed before Run listened")
+	default:
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- d.Run(ctx) }()
+	defer func() {
+		cancel()
+		fo.closeAll()
+		<-errCh
+	}()
+
+	select {
+	case <-d.Ready():
+	case <-time.After(2 * time.Second):
+		t.Fatal("Ready did not close after HTTP listen")
+	}
+	if d.HTTPAddr() == "" {
+		t.Fatal("HTTPAddr empty after Ready closed")
+	}
+}
+
+func TestNewHTTPServerConfiguresReadHeaderTimeout(t *testing.T) {
+	srv := newHTTPServer(&Handler{Backend: &fakeBackend{}}, LinkStatusFunc(func() bool { return true }), "t")
+	if srv.ReadHeaderTimeout != 5*time.Second {
+		t.Fatalf("ReadHeaderTimeout=%v want 5s", srv.ReadHeaderTimeout)
+	}
+}
+
 // TestDaemon_GracefulShutdownClosesBothTransports pins that context cancel
 // stops Run and closes the HTTP listener.
 func TestDaemon_GracefulShutdownClosesBothTransports(t *testing.T) {

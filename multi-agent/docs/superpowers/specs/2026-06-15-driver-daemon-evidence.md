@@ -21,11 +21,14 @@ Coverage:
   and bearer-token enforcement
 - WS client dial/register, Bearer auth, command dispatch, stream events,
   connection-scoped turn cancellation, per-session turn serialization,
-  heartbeat, reconnect on drop, 401/403 terminal shutdown, backoff reset,
-  observer ack-linked state, and schema mismatch shutdown
-- Daemon serves the same data through HTTP and WS and shuts down cleanly
+  heartbeat, WebSocket ping/pong half-open detection, inbound read limit,
+  reconnect on drop, 401/403 terminal shutdown, backoff reset,
+  observer ack-linked state, turn lock cleanup, and schema mismatch shutdown
+- Daemon serves the same data through HTTP and WS, exposes a Ready signal,
+  sets HTTP ReadHeaderTimeout, and shuts down cleanly
 - Driver config daemon defaults and explicit override
-- Driver-agent serve-daemon flag parsing
+- Driver-agent serve-daemon flag parsing, observer URL to WS URL mapping,
+  shared backend construction, and release ldflags version injection smoke
 - Full repository race run
 - CGO=0 binary smoke
 
@@ -36,16 +39,19 @@ the same wire behavior without reading or exposing local credentials.
 ## Verification
 
 ```text
-go test ./... -race -count=1
-=> exit 0
-```
-
-```text
 go vet ./...
 => exit 0
 ```
 
 ```text
+go test ./... -race -count=1
+=> exit 0
+```
+
+```text
+git diff --stat -- cmd/master-agent/** internal/orchestrator/** internal/orchestration/**
+=> empty
+
 git diff --stat master..HEAD -- cmd/master-agent/** internal/orchestrator/** internal/orchestration/**
 => empty
 ```
@@ -57,6 +63,11 @@ CGO_ENABLED=0 go build -o /tmp/bin-smoke-pr2/driver-agent ./cmd/driver-agent
 /tmp/bin-smoke-pr2/driver-agent
 => exit 2, usage includes:
    driver-agent serve-daemon  --config /path/to/driver.yaml [--listen host:port]
+```
+
+```text
+CGO_ENABLED=0 go build -ldflags '-X main.driverVersion=vtest' -o /tmp/bin-smoke-pr2/driver-agent-ldflags ./cmd/driver-agent
+=> exit 0
 ```
 
 ## Commit sequence

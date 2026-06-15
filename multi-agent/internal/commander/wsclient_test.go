@@ -19,15 +19,16 @@ import (
 )
 
 type fakeObserver struct {
-	t          *testing.T
-	upgrader   websocket.Upgrader
-	mu         sync.Mutex
-	writeMu    sync.Mutex
-	conns      []*websocket.Conn
-	received   []Envelope
-	bearer     string
-	rejectAuth bool
-	sendAck    bool
+	t                        *testing.T
+	upgrader                 websocket.Upgrader
+	mu                       sync.Mutex
+	writeMu                  sync.Mutex
+	conns                    []*websocket.Conn
+	received                 []Envelope
+	bearer                   string
+	rejectAuth               bool
+	sendAck                  bool
+	stopReadingAfterRegister bool
 }
 
 func newFakeObserver(t *testing.T) *fakeObserver {
@@ -64,6 +65,9 @@ func (f *fakeObserver) handler() http.Handler {
 				f.writeMu.Lock()
 				_ = conn.WriteJSON(Envelope{Type: "ack"})
 				f.writeMu.Unlock()
+			}
+			if f.stopReadingAfterRegister && env.Type == "register" {
+				return
 			}
 		}
 	})
@@ -518,6 +522,76 @@ func TestWSClient_ReconnectsOnDrop(t *testing.T) {
 	waitFor(t, func() bool { return fo.registerCount() >= 2 }, 2*time.Second)
 }
 
+func TestWSClient_ReconnectsWhenPeerStopsAnsweringControlFrames(t *testing.T) {
+	fo := newFakeObserver(t)
+	fo.sendAck = true
+	fo.stopReadingAfterRegister = true
+	srv := httptest.NewServer(fo.handler())
+	defer srv.Close()
+	c := NewWSClient(WSConfig{
+		URL:            observerWSURL(srv),
+		ProxyToken:     "t",
+		Register:       RegisterPayload{SchemaVersion: SchemaVersion, Kind: "claude"},
+		Handler:        &Handler{Backend: &fakeBackend{}},
+		HeartbeatInt:   20 * time.Millisecond,
+		InitialBackoff: 10 * time.Millisecond,
+		MaxBackoff:     20 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- c.Run(ctx) }()
+	defer func() {
+		cancel()
+		fo.closeAll()
+		<-errCh
+	}()
+
+	waitFor(t, func() bool { return fo.registerCount() >= 2 }, time.Second)
+}
+
+func TestWSClient_ReconnectsAfterOversizedFrame(t *testing.T) {
+	fo := newFakeObserver(t)
+	srv := httptest.NewServer(fo.handler())
+	defer srv.Close()
+	c := NewWSClient(WSConfig{
+		URL:        observerWSURL(srv),
+		ProxyToken: "t",
+		Register:   RegisterPayload{SchemaVersion: SchemaVersion, Kind: "claude"},
+		Handler: &Handler{Backend: &fakeBackend{
+			listFn: func(_ context.Context) ([]agentbackend.Session, error) {
+				return []agentbackend.Session{{ID: "s1"}}, nil
+			},
+		}},
+		HeartbeatInt:   10 * time.Second,
+		InitialBackoff: 10 * time.Millisecond,
+		MaxBackoff:     20 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- c.Run(ctx) }()
+	defer func() {
+		cancel()
+		fo.closeAll()
+		<-errCh
+	}()
+
+	waitFor(t, func() bool { return fo.registerCount() >= 1 }, time.Second)
+	_ = fo.Send(Envelope{
+		Type: "command",
+		ID:   "too-large",
+		Payload: jsonRaw(t, struct {
+			Command string          `json:"command"`
+			Args    json.RawMessage `json:"args"`
+			Padding string          `json:"padding"`
+		}{
+			Command: "list_sessions",
+			Args:    json.RawMessage(`{}`),
+			Padding: strings.Repeat("x", 2*1024*1024),
+		}),
+	})
+	waitFor(t, func() bool { return fo.registerCount() >= 2 }, 2*time.Second)
+}
+
 func TestWSClient_RejectsUnauthorized(t *testing.T) {
 	fo := newFakeObserver(t)
 	fo.rejectAuth = true
@@ -543,6 +617,60 @@ func TestWSClient_RejectsUnauthorized(t *testing.T) {
 		if env.Type == "register" {
 			t.Fatalf("registered despite 401")
 		}
+	}
+}
+
+func TestWSClient_TurnLockReleasedAfterLastWaiter(t *testing.T) {
+	c := NewWSClient(WSConfig{})
+	firstUnlock := c.lockTurn("s1")
+	secondLocked := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	secondDone := make(chan struct{})
+
+	go func() {
+		unlock := c.lockTurn("s1")
+		close(secondLocked)
+		<-releaseSecond
+		unlock()
+		close(secondDone)
+	}()
+
+	select {
+	case <-secondLocked:
+		t.Fatal("second turn acquired lock before first unlock")
+	case <-time.After(50 * time.Millisecond):
+	}
+	firstUnlock()
+	waitFor(t, func() bool {
+		select {
+		case <-secondLocked:
+			return true
+		default:
+			return false
+		}
+	}, time.Second)
+
+	c.turnMu.Lock()
+	during := len(c.turnLocks)
+	c.turnMu.Unlock()
+	if during != 1 {
+		t.Fatalf("turnLocks len while waiter holds lock=%d want 1", during)
+	}
+
+	close(releaseSecond)
+	waitFor(t, func() bool {
+		select {
+		case <-secondDone:
+			return true
+		default:
+			return false
+		}
+	}, time.Second)
+	c.turnMu.Lock()
+	got := len(c.turnLocks)
+	c.turnMu.Unlock()
+	if got != 0 {
+		t.Fatalf("turnLocks len after final unlock=%d want 0", got)
 	}
 }
 

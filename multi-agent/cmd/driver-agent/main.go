@@ -39,6 +39,9 @@ Usage:
   driver-agent serve-daemon  --config /path/to/driver.yaml [--listen host:port]
 `
 
+// driverVersion is injected by release builds with:
+//
+//	go build -ldflags "-X main.driverVersion=vX.Y.Z"
 var driverVersion = "v0.0.0"
 
 func main() {
@@ -182,13 +185,7 @@ func runServe(args []string) {
 	sdkClient := driver.NewAgentSDKClient(cli, cfg.Server.URL, cfg.Credentials.ProxyToken)
 	tools := driver.NewTools(reg, audit, sdkClient, cfg, obs)
 	tools.SetTaskJournal(taskJournal)
-	agentCfg := agentbackend.Config{
-		Kind:      agentbackend.Kind(cfg.Agent.Kind),
-		Bin:       cfg.Agent.Bin,
-		WorkDir:   cfg.Agent.WorkDir,
-		ExtraArgs: cfg.Agent.ExtraArgs,
-	}
-	backend, err := agentbackend.New(agentCfg, nil)
+	backend, err := newAgentBackend(cfg)
 	if err != nil {
 		log.Fatalf("agentbackend: %v", err)
 	}
@@ -270,6 +267,15 @@ func publishCard(cfg *driver.Config) error {
 	return nil
 }
 
+func newAgentBackend(cfg *driver.Config) (agentbackend.Backend, error) {
+	return agentbackend.New(agentbackend.Config{
+		Kind:      agentbackend.Kind(cfg.Agent.Kind),
+		Bin:       cfg.Agent.Bin,
+		WorkDir:   cfg.Agent.WorkDir,
+		ExtraArgs: cfg.Agent.ExtraArgs,
+	}, nil)
+}
+
 type serveDaemonOpts struct {
 	ConfigPath string
 	Listen     string
@@ -315,19 +321,15 @@ func runServeDaemon(args []string) {
 		fmt.Fprintln(os.Stderr, "WARNING: serve-daemon HTTP bound to 0.0.0.0; debug API will be reachable from the network")
 	}
 
-	backend, err := agentbackend.New(agentbackend.Config{
-		Kind:      agentbackend.Kind(cfg.Agent.Kind),
-		Bin:       cfg.Agent.Bin,
-		WorkDir:   cfg.Agent.WorkDir,
-		ExtraArgs: cfg.Agent.ExtraArgs,
-	}, nil)
+	backend, err := newAgentBackend(cfg)
 	if err != nil {
 		die("agentbackend.New: " + err.Error())
 	}
 
-	wsURL := strings.TrimRight(cfg.Observer.URL, "/") + cfg.Daemon.WSPath
-	wsURL = strings.Replace(wsURL, "http://", "ws://", 1)
-	wsURL = strings.Replace(wsURL, "https://", "wss://", 1)
+	wsURL, insecureWS := daemonWSURL(cfg.Observer.URL, cfg.Daemon.WSPath)
+	if insecureWS {
+		fmt.Fprintln(os.Stderr, "WARNING: serve-daemon WS uses ws://; credentials.proxy_token will be sent without TLS. Use https:// observer.url outside loopback/debug deployments.")
+	}
 
 	d := commander.NewDaemon(commander.DaemonConfig{
 		Handler:       &commander.Handler{Backend: backend},
@@ -356,26 +358,36 @@ func runServeDaemon(args []string) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- d.Run(ctx) }()
 
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	for d.HTTPAddr() == "" {
-		select {
-		case err := <-errCh:
-			if err != nil {
-				die("daemon: " + err.Error())
-			}
-			return
-		case <-ticker.C:
-		case <-ctx.Done():
-			if err := <-errCh; err != nil {
-				die("daemon: " + err.Error())
-			}
-			return
+	select {
+	case err := <-errCh:
+		if err != nil {
+			die("daemon: " + err.Error())
 		}
+		return
+	case <-d.Ready():
+	case <-ctx.Done():
+		if err := <-errCh; err != nil {
+			die("daemon: " + err.Error())
+		}
+		return
 	}
 	fmt.Fprintf(os.Stderr, "serve-daemon: ws=%s http=http://%s\n", wsURL, d.HTTPAddr())
 	if err := <-errCh; err != nil {
 		die("daemon: " + err.Error())
+	}
+}
+
+func daemonWSURL(observerURL, wsPath string) (string, bool) {
+	wsURL := strings.TrimRight(observerURL, "/") + wsPath
+	switch {
+	case strings.HasPrefix(wsURL, "http://"):
+		return "ws://" + strings.TrimPrefix(wsURL, "http://"), true
+	case strings.HasPrefix(wsURL, "https://"):
+		return "wss://" + strings.TrimPrefix(wsURL, "https://"), false
+	case strings.HasPrefix(wsURL, "ws://"):
+		return wsURL, true
+	default:
+		return wsURL, false
 	}
 }
 

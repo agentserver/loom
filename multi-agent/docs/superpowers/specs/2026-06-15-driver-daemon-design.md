@@ -135,6 +135,13 @@ Observer 拒绝 schema 不匹配，daemon 收到 `error` envelope 后退出。
 ```
 
 Observer 用 heartbeat 判断 daemon 是否在线；30 s 未收即视为离线。
+Daemon 同时按同一 interval 发送 WebSocket RFC ping control frame，并在收到任意数据帧
+或 pong 后刷新 read deadline；`2 * heartbeat_interval_sec` 内没有入站帧即视为连接死亡，
+关闭旧连接并进入 reconnect loop。这避免 NAT 超时、笔记本休眠、无 FIN 网络分区导致
+`linked` 长时间假阳性。
+
+Daemon 对入站 WS message 设置 1 MiB read limit；超过限制的 frame 触发连接关闭并按
+常规 backoff 重连。
 
 #### `command_result`（响应非流式 command）
 
@@ -282,8 +289,9 @@ driver-agent serve-daemon --config /path/to/driver.yaml
   3. http.Listen(cfg.Daemon.Listen) → 拿实际端口 print to stderr
   4. spawn WS client goroutine:
      - dial cfg.Observer.URL + cfg.Daemon.WSPath with Bearer ProxyToken
+     - 若 observer URL 解析为 `ws://`，stderr 打印明文 bearer 传输 warning；生产应使用 `https://`/`wss://`
      - send register envelope
-     - loop: recv command → dispatch handler → send result/event back
+     - loop: recv command → dispatch handler → send result/event back；WS read limit 1 MiB
      - on disconnect: backoff + redial
   5. block on SIGTERM/SIGINT → graceful shutdown (close WS, drain HTTP, exit 0)
 ```
@@ -319,9 +327,15 @@ type Sink interface {
 
 - in-process `httptest.NewServer` + `gorilla/websocket` upgrader
 - `TestWSClient_DialsAndRegisters`
+- `TestWSClient_DispatchesCommandAndReturnsResult`
+- `TestWSClient_TurnCommandStreamsEventsAndResult`
 - `TestWSClient_ReconnectsOnDrop` —— close server, daemon retries with backoff, eventually re-registers
-- `TestWSClient_HeartbeatEvery30s` —— fake clock or smaller test interval
-- `TestWSClient_RejectsOnSchemaMismatch` —— server replies error envelope, daemon returns from Run
+- `TestWSClient_ReconnectsWhenPeerStopsAnsweringControlFrames` —— peer 不再读 control frame 时 read deadline 触发重连
+- `TestWSClient_ReconnectsAfterOversizedFrame` —— 超过 1 MiB 的入站 WS frame 触发断开重连
+- `TestWSClient_TurnLockReleasedAfterLastWaiter` —— same-session turn lock 最后一个 waiter 释放后从 map 清理
+- `TestWSClient_Heartbeat` —— smaller test interval
+- `TestWSClient_RejectsUnauthorized` —— 401/403 handshake is terminal, not infinite retry
+- `TestWSClient_StopsOnSchemaMismatch` —— server replies error envelope, daemon returns from Run
 
 ### `internal/commander/http_test.go`
 
