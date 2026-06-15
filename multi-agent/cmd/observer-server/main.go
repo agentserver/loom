@@ -306,6 +306,7 @@ func observerWebOptions(cfg *Config, objects objectstore.Store) observerweb.Opti
 		DisableObjectProxy:  !cfg.ObjectStore.Proxy.Enabled,
 		MaxObjectProxyBytes: cfg.ObjectStore.Proxy.MaxBytes,
 		RegisterDisabled:    !cfg.Identity.LegacyAPIKeys.Enabled,
+		AgentserverURL:      strings.TrimSpace(cfg.Identity.Agentserver.URL),
 	}
 }
 
