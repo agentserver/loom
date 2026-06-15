@@ -13,9 +13,7 @@ import (
 
 func TestListSessions_EmptyHomeEveryBackend(t *testing.T) {
 	emptyHome := t.TempDir()
-	t.Setenv("HOME", emptyHome)
-	t.Setenv("XDG_CONFIG_HOME", emptyHome+"/.config")
-	t.Setenv("XDG_DATA_HOME", emptyHome+"/.local/share")
+	setTestHome(t, emptyHome)
 
 	for _, k := range agentbackend.RegisteredKinds() {
 		t.Run(k, func(t *testing.T) {
@@ -41,9 +39,7 @@ func TestListSessions_EmptyHomeEveryBackend(t *testing.T) {
 
 func TestGetSession_UnknownIDEveryBackend(t *testing.T) {
 	emptyHome := t.TempDir()
-	t.Setenv("HOME", emptyHome)
-	t.Setenv("XDG_CONFIG_HOME", emptyHome+"/.config")
-	t.Setenv("XDG_DATA_HOME", emptyHome+"/.local/share")
+	setTestHome(t, emptyHome)
 
 	for _, k := range agentbackend.RegisteredKinds() {
 		t.Run(k, func(t *testing.T) {
@@ -62,4 +58,13 @@ func TestGetSession_UnknownIDEveryBackend(t *testing.T) {
 			}
 		})
 	}
+}
+
+func setTestHome(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", home+"/.config")
+	t.Setenv("XDG_DATA_HOME", home+"/.local/share")
+	t.Setenv("APPDATA", home+"/.local/share")
 }

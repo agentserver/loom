@@ -27,8 +27,6 @@ import (
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
-const sessionPreviewMaxBytes = 256
-
 var filenameUUIDRe = regexp.MustCompile(`-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$`)
 
 func sessionsRoot() string {
@@ -236,10 +234,10 @@ func parseTimestamp(s string) time.Time {
 }
 
 func truncatePreview(s string) string {
-	if len(s) <= sessionPreviewMaxBytes {
+	if len(s) <= agentbackend.SessionPreviewMaxBytes {
 		return s
 	}
-	end := sessionPreviewMaxBytes
+	end := agentbackend.SessionPreviewMaxBytes
 	for end > 0 && !utf8.ValidString(s[:end]) {
 		end--
 	}

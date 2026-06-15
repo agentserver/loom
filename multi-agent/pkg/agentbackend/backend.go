@@ -72,9 +72,9 @@ type Patch struct {
 	Mode        string   `json:"mode,omitempty"`
 }
 
-// sessionPreviewMaxBytes caps Session.Preview so a session-list UI can
+// SessionPreviewMaxBytes caps Session.Preview so a session-list UI can
 // render one line per row without unbounded growth from verbose output.
-const sessionPreviewMaxBytes = 256
+const SessionPreviewMaxBytes = 256
 
 // Session is a backend-agnostic descriptor of a conversation thread
 // persisted by an agent CLI (claude / codex / opencode). Authoritative
@@ -106,7 +106,7 @@ type Session struct {
 	MessageCount int
 
 	// Preview is a short snippet from the most recent assistant message,
-	// capped at sessionPreviewMaxBytes.
+	// capped at SessionPreviewMaxBytes.
 	Preview string
 }
 
