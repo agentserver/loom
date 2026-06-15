@@ -51,15 +51,6 @@ func (b *Backend) Permissions() agentbackend.PermissionsStore { return b.perm }
 // Detect implements agentbackend.Backend.
 func (b *Backend) Detect(ctx context.Context) error { return detect(ctx, b.cfg.Bin) }
 
-// ListSessions / GetSession stubs are replaced by sessions.go in Task 3.
-func (b *Backend) ListSessions(_ context.Context) ([]agentbackend.Session, error) {
-	panic("claude.ListSessions not implemented")
-}
-
-func (b *Backend) GetSession(_ context.Context, _ string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
-	panic("claude.GetSession not implemented")
-}
-
 // Kind is a local alias so package-internal code can reference it without the full path.
 type Kind = agentbackend.Kind
 

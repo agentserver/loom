@@ -1,0 +1,3 @@
+{"type":"last-prompt","sessionId":"bbbb2222-cccc-3333-dddd-444444444444"}
+this line is not valid json {{ broken
+{"type":"user","timestamp":"2026-06-14T11:00:00Z","sessionId":"bbbb2222-cccc-3333-dddd-444444444444","message":{"role":"user","content":"survives"}}
