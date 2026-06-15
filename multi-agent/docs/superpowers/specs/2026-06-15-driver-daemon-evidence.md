@@ -76,6 +76,8 @@ d6384e1 feat(commander): shared backend handler
 ## Open items for PR-3
 
 - Observer must implement WS endpoint at /api/daemon-link.
+- Observer must send `{ "type": "ack" }` after accepting a register frame and
+  validating schema_version so daemon health reports linked: true.
 - Observer must route each user's daemon links by agentserver subject.
 - Observer must validate Bearer ProxyToken via the existing identity.Resolver
   chain.
