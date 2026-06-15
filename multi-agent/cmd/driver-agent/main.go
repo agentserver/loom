@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
+	"github.com/yourorg/multi-agent/internal/commander"
 	"github.com/yourorg/multi-agent/internal/driver"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/observerclient"
@@ -33,8 +34,9 @@ import (
 const usage = `driver-agent — bridges Claude Code to the multi-agent workspace.
 
 Usage:
-  driver-agent register   --config /path/to/driver.yaml
-  driver-agent serve-mcp  --config /path/to/driver.yaml
+  driver-agent register      --config /path/to/driver.yaml
+  driver-agent serve-mcp     --config /path/to/driver.yaml
+  driver-agent serve-daemon  --config /path/to/driver.yaml [--listen host:port]
 `
 
 func main() {
@@ -47,6 +49,8 @@ func main() {
 		runRegister(os.Args[2:])
 	case "serve-mcp":
 		runServe(os.Args[2:])
+	case "serve-daemon":
+		runServeDaemon(os.Args[2:])
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
@@ -262,6 +266,114 @@ func publishCard(cfg *driver.Config) error {
 		return fmt.Errorf("publish card status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+type serveDaemonOpts struct {
+	ConfigPath string
+	Listen     string
+}
+
+func parseServeDaemonFlags(args []string) (serveDaemonOpts, error) {
+	fs := flag.NewFlagSet("serve-daemon", flag.ContinueOnError)
+	cfgPath := fs.String("config", "", "path to driver.yaml (required)")
+	listen := fs.String("listen", "", "HTTP bind override")
+	if err := fs.Parse(args); err != nil {
+		return serveDaemonOpts{}, err
+	}
+	if *cfgPath == "" {
+		return serveDaemonOpts{}, fmt.Errorf("--config is required")
+	}
+	return serveDaemonOpts{ConfigPath: *cfgPath, Listen: *listen}, nil
+}
+
+func runServeDaemon(args []string) {
+	opts, err := parseServeDaemonFlags(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "serve-daemon:", err)
+		fmt.Fprint(os.Stderr, usage)
+		os.Exit(2)
+	}
+
+	cfg, err := driver.LoadConfig(opts.ConfigPath)
+	if err != nil {
+		die("load config: " + err.Error())
+	}
+	if cfg.Credentials.ProxyToken == "" {
+		die("serve-daemon requires credentials.proxy_token; run `driver-agent register --config " + opts.ConfigPath + "` first")
+	}
+	if cfg.Observer.URL == "" {
+		die("serve-daemon requires observer.url")
+	}
+
+	listen := opts.Listen
+	if listen == "" {
+		listen = cfg.Daemon.Listen
+	}
+	if strings.HasPrefix(listen, "0.0.0.0") {
+		fmt.Fprintln(os.Stderr, "WARNING: serve-daemon HTTP bound to 0.0.0.0; debug API will be reachable from the network")
+	}
+
+	backend, err := agentbackend.New(agentbackend.Config{
+		Kind:      agentbackend.Kind(cfg.Agent.Kind),
+		Bin:       cfg.Agent.Bin,
+		WorkDir:   cfg.Agent.WorkDir,
+		ExtraArgs: cfg.Agent.ExtraArgs,
+	}, nil)
+	if err != nil {
+		die("agentbackend.New: " + err.Error())
+	}
+
+	wsURL := strings.TrimRight(cfg.Observer.URL, "/") + cfg.Daemon.WSPath
+	wsURL = strings.Replace(wsURL, "http://", "ws://", 1)
+	wsURL = strings.Replace(wsURL, "https://", "wss://", 1)
+
+	d := commander.NewDaemon(commander.DaemonConfig{
+		Handler:    &commander.Handler{Backend: backend},
+		ListenAddr: listen,
+		WS: commander.WSConfig{
+			URL:        wsURL,
+			ProxyToken: cfg.Credentials.ProxyToken,
+			Register: commander.RegisterPayload{
+				SchemaVersion: commander.SchemaVersion,
+				Kind:          cfg.Agent.Kind,
+				AgentBin:      cfg.Agent.Bin,
+				AgentWorkDir:  cfg.Agent.WorkDir,
+				DisplayName:   cfg.Discovery.DisplayName,
+				DriverVersion: "v0.0.0",
+			},
+			HeartbeatInt:   time.Duration(cfg.Daemon.HeartbeatIntervalSec) * time.Second,
+			InitialBackoff: time.Duration(cfg.Daemon.InitialBackoffMs) * time.Millisecond,
+			MaxBackoff:     time.Duration(cfg.Daemon.MaxBackoffMs) * time.Millisecond,
+		},
+	})
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- d.Run(ctx) }()
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for d.HTTPAddr() == "" {
+		select {
+		case err := <-errCh:
+			if err != nil {
+				die("daemon: " + err.Error())
+			}
+			return
+		case <-ticker.C:
+		case <-ctx.Done():
+			if err := <-errCh; err != nil {
+				die("daemon: " + err.Error())
+			}
+			return
+		}
+	}
+	fmt.Fprintf(os.Stderr, "serve-daemon: ws=%s http=http://%s\n", wsURL, d.HTTPAddr())
+	if err := <-errCh; err != nil {
+		die("daemon: " + err.Error())
+	}
 }
 
 func die(msg string) {
