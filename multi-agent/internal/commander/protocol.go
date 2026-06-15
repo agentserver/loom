@@ -13,7 +13,7 @@ const SchemaVersion = 1
 // Envelope is the JSON shell wrapping every WebSocket frame.
 //
 // Daemon-to-observer types: register, heartbeat, command_result, event, error.
-// Observer-to-daemon types: command, ping.
+// Observer-to-daemon types: ack, command, ping.
 type Envelope struct {
 	// Type names the frame kind; routing dispatches on this.
 	Type string `json:"type"`
