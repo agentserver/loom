@@ -695,6 +695,75 @@ discovery:
 	}
 }
 
+func TestLoadConfig_DaemonDefaults(t *testing.T) {
+	yaml := `server:
+  url: https://example.invalid
+  name: x
+agent:
+  kind: claude
+  workdir: /tmp/proj
+  bin: claude
+discovery:
+  display_name: x
+`
+	path := writeTempYAML(t, yaml)
+	c, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Daemon.Listen != "127.0.0.1:0" {
+		t.Errorf("Daemon.Listen=%q want 127.0.0.1:0", c.Daemon.Listen)
+	}
+	if c.Daemon.WSPath != "/api/daemon-link" {
+		t.Errorf("Daemon.WSPath=%q want /api/daemon-link", c.Daemon.WSPath)
+	}
+	if c.Daemon.HeartbeatIntervalSec != 30 {
+		t.Errorf("Daemon.HeartbeatIntervalSec=%d want 30", c.Daemon.HeartbeatIntervalSec)
+	}
+	if c.Daemon.InitialBackoffMs != 1000 {
+		t.Errorf("Daemon.InitialBackoffMs=%d want 1000", c.Daemon.InitialBackoffMs)
+	}
+	if c.Daemon.MaxBackoffMs != 30000 {
+		t.Errorf("Daemon.MaxBackoffMs=%d want 30000", c.Daemon.MaxBackoffMs)
+	}
+}
+
+func TestLoadConfig_DaemonExplicit(t *testing.T) {
+	yaml := `server:
+  url: https://example.invalid
+  name: x
+agent:
+  kind: claude
+  workdir: /tmp/proj
+  bin: claude
+discovery:
+  display_name: x
+daemon:
+  listen: 127.0.0.1:9099
+  ws_path: /custom/path
+  heartbeat_interval_sec: 60
+  initial_backoff_ms: 500
+  max_backoff_ms: 15000
+`
+	path := writeTempYAML(t, yaml)
+	c, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Daemon.Listen != "127.0.0.1:9099" {
+		t.Errorf("Listen=%q", c.Daemon.Listen)
+	}
+	if c.Daemon.WSPath != "/custom/path" {
+		t.Errorf("WSPath=%q", c.Daemon.WSPath)
+	}
+	if c.Daemon.HeartbeatIntervalSec != 60 {
+		t.Errorf("Heartbeat=%d", c.Daemon.HeartbeatIntervalSec)
+	}
+	if c.Daemon.InitialBackoffMs != 500 || c.Daemon.MaxBackoffMs != 15000 {
+		t.Errorf("backoff=%d,%d", c.Daemon.InitialBackoffMs, c.Daemon.MaxBackoffMs)
+	}
+}
+
 // writeTempYAML is a tiny helper for tests that need a yaml file on disk.
 func writeTempYAML(t *testing.T, body string) string {
 	t.Helper()
