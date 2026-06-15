@@ -69,8 +69,8 @@ async function showSessions(daemonID, name) {
   }
   for (const s of sessions) {
     const li = document.createElement("li");
-    li.textContent = `${s.id}  ${(s.last_user_msg || "").slice(0, 60)}`;
-    li.onclick = () => showChat(daemonID, s.id);
+    li.textContent = `${s.ID}  ${(s.Preview || "").slice(0, 60)}`;
+    li.onclick = () => showChat(daemonID, s.ID);
     ul.appendChild(li);
   }
 }
@@ -78,20 +78,20 @@ async function showSessions(daemonID, name) {
 async function showChat(daemonID, sid) {
   const r = await api(`/api/commander/daemons/${daemonID}/sessions/${sid}`);
   const { session, messages } = await r.json();
-  app.innerHTML = `<h2>${session && session.id || sid}</h2>
+  app.innerHTML = `<h2>${session && session.ID || sid}</h2>
     <button id="back">← sessions</button>
     <div class="chat" id="chat"></div>
     <textarea id="prompt" rows="2" placeholder="发一轮 turn…"></textarea>
     <button id="send">发送</button>`;
-  document.getElementById("back").onclick = () => showSessions(daemonID, session && session.working_dir || "");
+  document.getElementById("back").onclick = () => showSessions(daemonID, session && session.WorkingDir || "");
   const chat = document.getElementById("chat");
   (messages || []).forEach(renderMsg);
   document.getElementById("send").onclick = () => sendTurn(daemonID, sid);
 
   function renderMsg(m) {
     const div = document.createElement("div");
-    div.className = "msg " + (m.role || "");
-    div.textContent = m.text || "";
+    div.className = "msg " + (m.Role || "");
+    div.textContent = m.Text || "";
     chat.appendChild(div);
   }
   chat.scrollTop = chat.scrollHeight;
