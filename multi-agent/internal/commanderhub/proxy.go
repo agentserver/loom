@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 
@@ -15,6 +14,21 @@ var (
 	ErrDaemonNotFound = errors.New("commanderhub: daemon not found for this owner")
 	ErrDaemonGone     = errors.New("commanderhub: daemon disconnected")
 )
+
+// DaemonError carries a daemon-originated error envelope (commander.ErrCode*).
+// SendCommand returns it (instead of a flattened fmt error) so HTTP handlers
+// can map specific codes to statuses — e.g. session_not_found → 404.
+type DaemonError struct {
+	Code    string
+	Message string
+}
+
+func (e *DaemonError) Error() string {
+	if e.Message == "" {
+		return e.Code
+	}
+	return e.Code + ": " + e.Message
+}
 
 const (
 	defaultCmdTimeout  = 10 * time.Second
@@ -51,7 +65,7 @@ func (h *Hub) SendCommand(ctx context.Context, o owner, daemonID, command string
 			}
 			switch env.Type {
 			case "error":
-				return nil, fmt.Errorf("daemon error: %s", errorCode(env.Payload))
+				return nil, &DaemonError{Code: errorCode(env.Payload), Message: errorMessage(env.Payload)}
 			case "command_result":
 				return env.Payload, nil
 			}
@@ -179,4 +193,11 @@ func errorCode(payload []byte) string {
 	var ep commander.ErrorPayload
 	_ = json.Unmarshal(payload, &ep)
 	return ep.Code
+}
+
+// errorMessage decodes commander.ErrorPayload.Message (mirrors errorCode).
+func errorMessage(payload []byte) string {
+	var ep commander.ErrorPayload
+	_ = json.Unmarshal(payload, &ep)
+	return ep.Message
 }

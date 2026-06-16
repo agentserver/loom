@@ -149,3 +149,60 @@ func TestAuth_LogoutClearsSession(t *testing.T) {
 	_, ok := a.CommanderIdentity(req2)
 	require.False(t, ok)
 }
+
+// blockingDeviceFlow is a fakeDeviceFlow whose PollToken blocks until its
+// context is cancelled (simulating a login that is never approved and never
+// polled to terminal). RequestCode hands out a short ExpiresIn so the pollLogin
+// goroutines self-terminate quickly after the test asserts — no goroutine leak.
+type blockingDeviceFlow struct {
+	expiresIn time.Duration
+}
+
+func (f blockingDeviceFlow) RequestCode(context.Context) (DeviceCode, error) {
+	return DeviceCode{
+		Code:                    "dc",
+		VerificationURIComplete: "https://agent/verify?user_code=XX",
+		ExpiresIn:               f.expiresIn,
+	}, nil
+}
+
+func (blockingDeviceFlow) PollToken(ctx context.Context, _ DeviceCode) (string, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+// TestAuth_LoginCapsPendingLogins: hammering the unauthenticated POST /login
+// without ever polling must not grow the logins map without bound. Calls beyond
+// maxPendingLogins return 429, and len(logins) never exceeds the cap.
+func TestAuth_LoginCapsPendingLogins(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{
+		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
+	}}
+	// Short ExpiresIn: pollLogin's PollToken ctx times out → goroutines exit.
+	a := newAuth(t, resolver, blockingDeviceFlow{expiresIn: 50 * time.Millisecond})
+
+	total := maxPendingLogins + 5
+	var four29s int
+	for i := 0; i < total; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/commander/login", nil)
+		rec := httptest.NewRecorder()
+		a.ServeLogin(rec, req)
+		switch rec.Code {
+		case http.StatusOK:
+		case http.StatusTooManyRequests:
+			four29s++
+		default:
+			t.Fatalf("unexpected status %d on call %d", rec.Code, i)
+		}
+		// Map must never exceed the cap at any point.
+		a.loginMu.Lock()
+		got := len(a.logins)
+		a.loginMu.Unlock()
+		require.LessOrEqualf(t, got, maxPendingLogins, "logins map exceeded cap on call %d: %d", i, got)
+	}
+
+	// Exactly the overflow calls beyond the cap were rejected.
+	require.Equal(t, 5, four29s, "calls beyond maxPendingLogins should be rejected with 429")
+	final := len(a.logins)
+	require.Equal(t, maxPendingLogins, final, "map should be exactly at the cap")
+}

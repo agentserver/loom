@@ -3,6 +3,7 @@ package commanderhub
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -146,4 +147,52 @@ func TestHTTP_SessionListJSONCasing(t *testing.T) {
 	require.Contains(t, s, `"ID":"s1"`)
 	require.Contains(t, s, `"Preview":"hello"`)
 	require.Contains(t, s, `"WorkingDir":"/p"`)
+}
+
+// TestHTTP_GetSessionNotFoundMaps404: a daemon get_session that returns
+// agentbackend.ErrSessionNotFound surfaces through SendCommand as a
+// *DaemonError{Code: session_not_found} and the HTTP handler maps it to 404
+// (not the previous generic 502). Matches PR-2's local HTTP behavior.
+func TestHTTP_GetSessionNotFoundMaps404(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
+	srv, hub, _, o, cookie, cleanup := commanderSetup(t, resolver, "tok-alice", &tbBackend{
+		getFn: func(_ context.Context, _ string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+			return agentbackend.Session{}, nil, agentbackend.ErrSessionNotFound
+		},
+	})
+	defer cleanup()
+
+	dis := hub.reg.daemons(o)
+	require.NotEmpty(t, dis)
+	daemonID := dis[0].DaemonID
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/commander/daemons/"+daemonID+"/sessions/stale", nil)
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+// TestHTTP_ListSessionsGenericErrorMaps502: a non-session_not_found daemon
+// error (e.g. a generic backend error on list_sessions) still maps to 502.
+func TestHTTP_ListSessionsGenericErrorMaps502(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
+	srv, hub, _, o, cookie, cleanup := commanderSetup(t, resolver, "tok-alice", &tbBackend{
+		listFn: func(context.Context) ([]agentbackend.Session, error) {
+			return nil, errors.New("backend exploded")
+		},
+	})
+	defer cleanup()
+
+	dis := hub.reg.daemons(o)
+	require.NotEmpty(t, dis)
+	daemonID := dis[0].DaemonID
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/commander/daemons/"+daemonID+"/sessions", nil)
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusBadGateway, resp.StatusCode)
 }
