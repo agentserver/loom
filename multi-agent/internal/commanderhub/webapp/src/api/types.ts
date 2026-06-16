@@ -45,3 +45,31 @@ export interface SessionMessage {
   Ts?: string;
   ts?: string;
 }
+
+export interface SessionDetail {
+  session: Record<string, unknown>;
+  messages: SessionMessage[];
+}
+
+export interface FileEntry {
+  name: string;
+  path: string;
+  kind: 'file' | 'dir' | string;
+  size?: number;
+  mod_time?: string;
+}
+
+export interface FileListResult {
+  root: string;
+  path: string;
+  entries: FileEntry[];
+}
+
+export interface FileReadResult {
+  path: string;
+  size: number;
+  mime?: string;
+  binary?: boolean;
+  too_large?: boolean;
+  content?: string;
+}

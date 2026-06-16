@@ -224,6 +224,63 @@ textarea {
   overflow: auto;
 }
 
+.file-list {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+}
+
+.file-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 42px 1fr;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  border: 1px solid #dce4ef;
+  border-radius: 8px;
+  background: #fff;
+  color: #26364d;
+  padding: 7px 8px;
+  text-align: left;
+}
+
+.file-row:disabled {
+  opacity: 0.65;
+}
+
+.file-kind {
+  color: #69768a;
+  font-size: 11px;
+}
+
+.file-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-error,
+.file-preview-empty {
+  margin: 10px;
+  color: #69768a;
+  font-size: 13px;
+}
+
+.file-error {
+  color: #a33b3b;
+}
+
+.file-preview {
+  margin: 10px;
+  max-height: 50vh;
+  border: 1px solid #dce4ef;
+  border-radius: 8px;
+  background: #fff;
+  padding: 10px;
+}
+
 .composer {
   display: grid;
   grid-template-columns: 1fr auto;
