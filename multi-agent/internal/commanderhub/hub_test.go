@@ -89,6 +89,56 @@ func TestHub_AcksRegisterAndAdmitsDaemon(t *testing.T) {
 	<-errCh
 }
 
+func TestHub_RegisterCapabilitiesAndLastSeenVisibleInRegistry(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{
+		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
+	}}
+	hub := NewHub(resolver)
+	srv := httptest.NewServer(hub)
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/daemon-link"
+	c := commander.NewWSClient(commander.WSConfig{
+		URL:        wsURL,
+		ProxyToken: "tok-alice",
+		Register: commander.RegisterPayload{
+			SchemaVersion: commander.SchemaVersion,
+			Kind:          "codex",
+			DisplayName:   "prod-codex",
+			Capabilities:  []string{"", commander.CapabilityFiles},
+		},
+		Handler:        &commander.Handler{},
+		HeartbeatInt:   10 * time.Second,
+		InitialBackoff: 50 * time.Millisecond,
+		MaxBackoff:     50 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- c.Run(ctx) }()
+
+	var info DaemonInfo
+	waitFor(t, func() bool {
+		infos := hub.reg.daemons(owner{userID: "alice", workspaceID: "W1"})
+		if len(infos) != 1 {
+			return false
+		}
+		info = infos[0]
+		return info.LastSeenAt != "" &&
+			containsString(info.Capabilities, commander.CapabilityFiles) &&
+			containsString(info.Capabilities, commander.CapabilitySessions) &&
+			containsString(info.Capabilities, commander.CapabilityTurn)
+	}, time.Second, "daemon metadata visible")
+
+	require.Equal(t, "prod-codex", info.DisplayName)
+	require.Equal(t, "codex", info.Kind)
+	_, err := time.Parse(time.RFC3339Nano, info.LastSeenAt)
+	require.NoError(t, err)
+
+	cancel()
+	<-errCh
+}
+
 // TestHub_401OnUnknownToken: unknown token → resolver ErrInvalid → 401, no
 // upgrade. WSClient treats 401 as terminal ErrObserverUnauthorized (PR-2).
 func TestHub_401OnUnknownToken(t *testing.T) {
@@ -158,4 +208,13 @@ func wsDialHeader(token string) http.Header {
 	h := http.Header{}
 	h.Set("Authorization", "Bearer "+token)
 	return h
+}
+
+func containsString(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
