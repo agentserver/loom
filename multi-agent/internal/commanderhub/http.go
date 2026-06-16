@@ -177,6 +177,11 @@ func (ch *commanderHandlers) turn(w http.ResponseWriter, r *http.Request, daemon
 		http.NotFound(w, r)
 		return
 	}
+	if errors.Is(err, ErrDaemonGone) {
+		ch.hub.turns.finish(key, turnStateDisconnected)
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
 	if err != nil {
 		ch.hub.turns.fail(key, err.Error())
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -192,15 +197,23 @@ func (ch *commanderHandlers) turn(w http.ResponseWriter, r *http.Request, daemon
 		}
 	}
 	if !terminal {
-		// stream closed without a terminal frame: timeout vs disconnect
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			msg := "no terminal frame within timeout"
-			ch.hub.turns.fail(key, msg)
-			sse.emitError("timeout", msg)
-		} else {
-			ch.hub.turns.finish(key, turnStateDisconnected)
-			sse.emitError(commander.ErrCodeBackendUnavailable, "daemon disconnected")
-		}
+		ch.finishTurnWithoutTerminal(key, ctx.Err(), sse)
+	}
+}
+
+func (ch *commanderHandlers) finishTurnWithoutTerminal(key turnKey, ctxErr error, sse *sseWriter) {
+	switch {
+	case errors.Is(ctxErr, context.DeadlineExceeded):
+		msg := "no terminal frame within timeout"
+		ch.hub.turns.fail(key, msg)
+		sse.emitError("timeout", msg)
+	case errors.Is(ctxErr, context.Canceled):
+		msg := context.Canceled.Error()
+		ch.hub.turns.fail(key, msg)
+		sse.emitError("request_canceled", msg)
+	default:
+		ch.hub.turns.finish(key, turnStateDisconnected)
+		sse.emitError(commander.ErrCodeBackendUnavailable, "daemon disconnected")
 	}
 }
 
