@@ -32,3 +32,205 @@ textarea {
   grid-template-columns: minmax(280px, 360px) minmax(420px, 1fr) minmax(280px, 380px);
   background: #f5f7fa;
 }
+
+.daemon-tree,
+.file-panel {
+  min-width: 0;
+  overflow: auto;
+  border-right: 1px solid #d9e1ec;
+  background: #fbfcfe;
+}
+
+.file-panel {
+  border-right: 0;
+  border-left: 1px solid #d9e1ec;
+}
+
+.daemon-group {
+  padding: 10px;
+}
+
+.daemon-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  color: #253348;
+}
+
+.online-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #259566;
+}
+
+.session-list {
+  display: grid;
+  gap: 6px;
+}
+
+.session-row {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  text-align: left;
+  border: 1px solid #dce4ef;
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px;
+  color: #26364d;
+}
+
+.session-row.selected {
+  border-color: #1e7894;
+  background: #eef8fb;
+}
+
+.session-title,
+.session-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-title {
+  font-weight: 650;
+}
+
+.session-meta {
+  color: #69768a;
+  font-size: 12px;
+}
+
+.status-badge {
+  width: fit-content;
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 11px;
+  background: #e8edf4;
+  color: #506074;
+}
+
+.status-answering {
+  background: #e4f2fb;
+  color: #176c9c;
+}
+
+.status-awaiting_approval {
+  background: #fff2da;
+  color: #8d5b12;
+}
+
+.status-error {
+  background: #fde8e8;
+  color: #a33b3b;
+}
+
+.chat-workspace {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  background: #f7f9fc;
+}
+
+.chat-header {
+  min-width: 0;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 18px;
+  border-bottom: 1px solid #d9e1ec;
+  background: #fff;
+}
+
+.chat-header h1 {
+  margin: 0;
+  font-size: 16px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-header p {
+  margin: 3px 0 0;
+  color: #69768a;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turn-status {
+  color: #176c9c;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.message-list {
+  overflow: auto;
+  padding: 18px;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+
+.message {
+  max-width: min(760px, 88%);
+  border: 1px solid #dfe6ef;
+  border-radius: 8px;
+  background: #fff;
+  padding: 10px 12px;
+}
+
+.message-user {
+  justify-self: end;
+  background: #f1f6fb;
+}
+
+.message-markdown pre,
+.file-preview {
+  overflow: auto;
+}
+
+.composer {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  padding: 12px 18px;
+  border-top: 1px solid #d9e1ec;
+  background: #fff;
+}
+
+.composer textarea {
+  min-height: 42px;
+  resize: vertical;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 9px;
+}
+
+.composer button {
+  border: 0;
+  border-radius: 8px;
+  padding: 0 14px;
+  color: #fff;
+  background: #1e7894;
+}
+
+.composer button:disabled,
+.composer textarea:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+@media (max-width: 900px) {
+  .commander-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .daemon-tree,
+  .file-panel {
+    display: none;
+  }
+}
