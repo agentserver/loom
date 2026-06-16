@@ -338,36 +338,60 @@ func loadSessionMessageAggregates(ctx context.Context, db *sql.DB, counts map[st
 	}
 
 	rows, err = db.QueryContext(ctx, `
-		SELECT m.session_id, m.type, p.data
+		SELECT m.session_id, m.id, m.type, m.time_created, p.data
 		FROM session_message m
-		JOIN part p ON p.message_id = m.id
+		LEFT JOIN part p ON p.message_id = m.id
 		WHERE m.type IN ('user', 'assistant')
 		ORDER BY m.session_id, m.seq, p.time_created`)
 	if err != nil {
 		return
 	}
 	defer rows.Close()
+
+	var currentSession string
+	var current messageAccumulator
+	flush := func() {
+		if currentSession == "" || current.id == "" {
+			return
+		}
+		msg, ok := current.message()
+		if !ok {
+			return
+		}
+		switch msg.Role {
+		case "user":
+			if firstUser[currentSession] == "" {
+				if title := titleFromUserText(msg.Text); title != "" {
+					firstUser[currentSession] = title
+				}
+			}
+		case "assistant":
+			lastAssistant[currentSession] = msg.Text
+		}
+	}
 	for rows.Next() {
-		var sid, role, data string
-		if err := rows.Scan(&sid, &role, &data); err != nil {
+		var sid, msgID, role string
+		var partData sql.NullString
+		var createdMS int64
+		if err := rows.Scan(&sid, &msgID, &role, &createdMS, &partData); err != nil {
 			continue
+		}
+		if current.id != "" && (current.id != msgID || currentSession != sid) {
+			flush()
+			current = messageAccumulator{}
 		}
 		if skip[sid] {
 			continue
 		}
-		if text := extractPartText(data); text != "" {
-			switch role {
-			case "user":
-				if firstUser[sid] == "" {
-					if title := titleFromUserText(text); title != "" {
-						firstUser[sid] = title
-					}
-				}
-			case "assistant":
-				lastAssistant[sid] = text
-			}
+		if current.id == "" {
+			currentSession = sid
+			current = messageAccumulator{id: msgID, role: normalizeRole(role), ts: msToTime(createdMS)}
+		}
+		if partData.Valid {
+			current.addText(extractPartText(partData.String))
 		}
 	}
+	flush()
 }
 
 func loadMessagesFromMessageTable(ctx context.Context, db *sql.DB, id string) ([]agentbackend.SessionMessage, bool, error) {
