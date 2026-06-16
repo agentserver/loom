@@ -2,6 +2,7 @@ package commanderhub
 
 import (
 	"context"
+	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -92,6 +93,7 @@ func TestAuth_LoginPollPendingThenApproved(t *testing.T) {
 	require.NotNil(t, doneCookie)
 	require.Equal(t, sessionCookieName, doneCookie.Name)
 	require.True(t, doneCookie.HttpOnly)
+	require.False(t, doneCookie.Secure, "loopback/http browser flows must accept the login cookie")
 	require.Equal(t, http.SameSiteLaxMode, doneCookie.SameSite)
 
 	// replay poll → entry consumed (deleted) → 404, no cookie
@@ -99,6 +101,61 @@ func TestAuth_LoginPollPendingThenApproved(t *testing.T) {
 	a.ServeLoginPoll(rec4, httptest.NewRequest(http.MethodGet, "/api/commander/login/poll?id="+lr.LoginID, nil))
 	require.Equal(t, http.StatusNotFound, rec4.Code)
 	require.Empty(t, rec4.Result().Cookies())
+}
+
+func TestAuth_LoginCookieSecureOnlyForHTTPS(t *testing.T) {
+	t.Run("direct tls", func(t *testing.T) {
+		cookie := completeLoginAndReturnCookie(t, true, "")
+		require.True(t, cookie.Secure)
+	})
+	t.Run("forwarded https", func(t *testing.T) {
+		cookie := completeLoginAndReturnCookie(t, false, "https")
+		require.True(t, cookie.Secure)
+	})
+	t.Run("plain http", func(t *testing.T) {
+		cookie := completeLoginAndReturnCookie(t, false, "")
+		require.False(t, cookie.Secure)
+	})
+}
+
+func completeLoginAndReturnCookie(t *testing.T, useTLS bool, forwardedProto string) *http.Cookie {
+	t.Helper()
+	resolver := &fakeResolver{mu: map[string]identity.Identity{
+		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
+	}}
+	flow := newFakeDeviceFlow("tok-alice")
+	a := newAuth(t, resolver, flow)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/commander/login", nil)
+	rec := httptest.NewRecorder()
+	a.ServeLogin(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var lr struct {
+		LoginID string `json:"login_id"`
+	}
+	require.NoError(t, jsonUnmarshal(rec.Body.Bytes(), &lr))
+	require.NotEmpty(t, lr.LoginID)
+
+	flow.approve()
+	var cookie *http.Cookie
+	require.Eventually(t, func() bool {
+		pollReq := httptest.NewRequest(http.MethodGet, "/api/commander/login/poll?id="+lr.LoginID, nil)
+		if useTLS {
+			pollReq.TLS = &tls.ConnectionState{}
+		}
+		if forwardedProto != "" {
+			pollReq.Header.Set("X-Forwarded-Proto", forwardedProto)
+		}
+		pollRec := httptest.NewRecorder()
+		a.ServeLoginPoll(pollRec, pollReq)
+		if pollRec.Code != http.StatusOK || len(pollRec.Result().Cookies()) != 1 {
+			return false
+		}
+		cookie = pollRec.Result().Cookies()[0]
+		return true
+	}, time.Second, 10*time.Millisecond)
+	require.NotNil(t, cookie)
+	return cookie
 }
 
 // TestAuth_CommanderIdentityCookieOrBearer: cookie session → cached identity;
@@ -156,8 +213,8 @@ func TestAuth_LogoutClearsSession(t *testing.T) {
 // ServeLogin called RequestCode before the cap check, the counter would equal
 // the number of requests; with the slot reserved first, it is capped.
 type countingDeviceFlow struct {
-	expiresIn     time.Duration
-	requestCodeN  int32 // atomic
+	expiresIn    time.Duration
+	requestCodeN int32 // atomic
 }
 
 func (f *countingDeviceFlow) RequestCode(context.Context) (DeviceCode, error) {
