@@ -137,6 +137,48 @@ func TestGetSession_ReturnsMessages(t *testing.T) {
 	}
 }
 
+func TestGetSession_CurrentRolloutResponseItemsReturnMessages(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	dir := filepath.Join(home, ".codex", "sessions", "2026", "06", "16")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id := "bbbbbbbb-1111-2222-3333-cccccccccccc"
+	body := strings.Join([]string{
+		`{"timestamp":"2026-06-16T01:00:00.000Z","type":"session_meta","payload":{"id":"` + id + `","cwd":"/tmp/codex-current"}}`,
+		`{"timestamp":"2026-06-16T01:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello new codex"}]}}`,
+		`{"timestamp":"2026-06-16T01:00:02.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi from assistant"}]}}`,
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(dir, "rollout-2026-06-16T01-00-00-"+id+".jsonl"), []byte(body+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir()}, nil)
+	sess, msgs, err := b.GetSession(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.WorkingDir != "/tmp/codex-current" {
+		t.Errorf("WorkingDir=%q", sess.WorkingDir)
+	}
+	if sess.MessageCount != 2 {
+		t.Errorf("MessageCount=%d want 2", sess.MessageCount)
+	}
+	if sess.Preview != "hi from assistant" {
+		t.Errorf("Preview=%q", sess.Preview)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("len(msgs)=%d want 2", len(msgs))
+	}
+	if msgs[0].Role != "user" || msgs[0].Text != "hello new codex" {
+		t.Errorf("msgs[0]=%+v", msgs[0])
+	}
+	if msgs[1].Role != "assistant" || msgs[1].Text != "hi from assistant" {
+		t.Errorf("msgs[1]=%+v", msgs[1])
+	}
+}
+
 func TestGetSession_UnknownIDReturnsErrSessionNotFound(t *testing.T) {
 	home := copyFixtureToHOME(t)
 	setTestHome(t, home)

@@ -139,6 +139,17 @@ type codexTextPayload struct {
 	Text string `json:"text"`
 }
 
+type codexResponseItemPayload struct {
+	Type    string                     `json:"type"`
+	Role    string                     `json:"role"`
+	Content []codexResponseItemContent `json:"content"`
+}
+
+type codexResponseItemContent struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
 func scanCodexSession(path, fallbackID string, withMessages bool) codexScanResult {
 	res := codexScanResult{session: agentbackend.Session{
 		ID:   fallbackID,
@@ -189,6 +200,15 @@ func scanCodexSession(path, fallbackID string, withMessages bool) codexScanResul
 			}
 			res.addMessage("assistant", text, ts, withMessages)
 			lastAssistantText = text
+		case "response_item":
+			role, text, ok := codexResponseItemMessage(ln.Payload)
+			if !ok {
+				continue
+			}
+			res.addMessage(role, text, ts, withMessages)
+			if role == "assistant" {
+				lastAssistantText = text
+			}
 		}
 	}
 	if lastAssistantText != "" {
@@ -220,6 +240,30 @@ func codexPayloadText(raw json.RawMessage) string {
 		return p.Text
 	}
 	return ""
+}
+
+func codexResponseItemMessage(raw json.RawMessage) (string, string, bool) {
+	var p codexResponseItemPayload
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "", "", false
+	}
+	if p.Type != "message" {
+		return "", "", false
+	}
+	if p.Role != "user" && p.Role != "assistant" {
+		return "", "", false
+	}
+	parts := make([]string, 0, len(p.Content))
+	for _, c := range p.Content {
+		if c.Text == "" {
+			continue
+		}
+		parts = append(parts, c.Text)
+	}
+	if len(parts) == 0 {
+		return "", "", false
+	}
+	return p.Role, strings.Join(parts, "\n"), true
 }
 
 func parseTimestamp(s string) time.Time {
