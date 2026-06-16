@@ -1,6 +1,8 @@
-import { render, screen } from '@testing-library/react';
-import { expect, test } from 'vitest';
+import { cleanup, render, screen } from '@testing-library/react';
+import { afterEach, expect, test } from 'vitest';
 import { DaemonSessionTree } from './DaemonSessionTree';
+
+afterEach(cleanup);
 
 test('groups sessions under daemon rows', () => {
   render(
@@ -31,4 +33,25 @@ test('groups sessions under daemon rows', () => {
   expect(screen.getByText('prod-codex')).toBeInTheDocument();
   expect(screen.getByText('Fix session cache')).toBeInTheDocument();
   expect(screen.getByText('answering')).toBeInTheDocument();
+});
+
+test('renders daemon error status', () => {
+  render(
+    <DaemonSessionTree
+      daemons={[
+        {
+          daemon_id: 'd1',
+          display_name: 'prod-codex',
+          kind: 'codex',
+          status: 'error',
+          error: 'list_sessions timed out',
+          sessions: [],
+        },
+      ]}
+      selected={null}
+      onSelect={() => {}}
+    />,
+  );
+  expect(screen.getByText('error')).toBeInTheDocument();
+  expect(screen.getByText('list_sessions timed out')).toBeInTheDocument();
 });

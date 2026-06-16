@@ -13,12 +13,21 @@ export interface SessionDetail {
   messages: SessionMessage[];
 }
 
+const turnStateLabels: Record<TurnState, string> = {
+  idle: '',
+  queued: '已排队',
+  starting: '正在启动 Codex',
+  answering: 'Codex 正在回答',
+  awaiting_approval: '需人工审批',
+  done: '已回答完毕',
+  error: '出错',
+  disconnected: '已断开',
+};
+
 function displayTurnState(state: TurnState | string) {
-  if (state === 'starting') return '正在启动 Codex';
-  if (state === 'answering') return 'Codex 正在回答';
-  if (state === 'awaiting_approval') return '需人工审批';
-  if (state === 'done') return '已回答完毕';
-  if (state === 'error') return '出错';
+  if (Object.prototype.hasOwnProperty.call(turnStateLabels, state)) {
+    return turnStateLabels[state as TurnState];
+  }
   return '';
 }
 
@@ -44,7 +53,7 @@ export function ChatWorkspace({
           <h1>{title}</h1>
           <p>{cwd}</p>
         </div>
-        <span data-testid="turn-status" className="turn-status">
+        <span data-testid="turn-status" className="turn-status" role="status" aria-live="polite">
           {displayTurnState(turnState)}
         </span>
       </header>
@@ -61,14 +70,20 @@ export function ChatWorkspace({
       </div>
       <form
         className="composer"
-        onSubmit={(event) => {
+        onSubmit={async (event) => {
           event.preventDefault();
           const input = event.currentTarget.elements.namedItem('prompt') as HTMLTextAreaElement;
-          void onSend(input.value);
-          input.value = '';
+          const prompt = input.value.trim();
+          if (!prompt) return;
+          try {
+            await onSend(prompt);
+            input.value = '';
+          } catch {
+            // Keep the draft in place so the user can retry or edit it.
+          }
         }}
       >
-        <textarea name="prompt" disabled={disabled} />
+        <textarea aria-label="输入提示词" name="prompt" disabled={disabled} />
         <button type="submit" disabled={disabled}>
           发送
         </button>

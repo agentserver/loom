@@ -58,11 +58,37 @@ textarea {
   color: #253348;
 }
 
+.daemon-row strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .online-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: #259566;
+}
+
+.online-dot-error {
+  background: #c84848;
+}
+
+.daemon-status {
+  margin-left: auto;
+  color: #69768a;
+  font-size: 12px;
+}
+
+.daemon-error {
+  margin: 0 0 8px 16px;
+  color: #a33b3b;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .session-list {
@@ -161,7 +187,12 @@ textarea {
   white-space: nowrap;
 }
 
+.chat-header > div {
+  min-width: 0;
+}
+
 .turn-status {
+  flex: 0 0 auto;
   color: #176c9c;
   font-size: 13px;
   white-space: nowrap;
