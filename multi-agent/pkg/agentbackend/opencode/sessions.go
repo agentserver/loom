@@ -114,7 +114,7 @@ func (b *Backend) ListSessions(ctx context.Context) ([]agentbackend.Session, err
 		return nil, err
 	}
 
-	counts, lastAssistant := loadAggregates(ctx, db, ids)
+	counts, lastAssistant, firstUser := loadAggregates(ctx, db, ids)
 	out := make([]agentbackend.Session, 0, len(recs))
 	for _, r := range recs {
 		s := agentbackend.Session{
@@ -124,6 +124,9 @@ func (b *Backend) ListSessions(ctx context.Context) ([]agentbackend.Session, err
 			StartedAt:    msToTime(r.created),
 			UpdatedAt:    msToTime(r.updated),
 			MessageCount: counts[r.id],
+		}
+		if text := firstUser[r.id]; text != "" {
+			s.Title = titleFromUserText(text)
 		}
 		if text := lastAssistant[r.id]; text != "" {
 			s.Preview = truncatePreview(text)
@@ -175,6 +178,7 @@ func (b *Backend) GetSession(ctx context.Context, id string) (agentbackend.Sessi
 		UpdatedAt:    msToTime(updated),
 		MessageCount: len(msgs),
 	}
+	sess.Title = firstUserTitle(msgs)
 	if last := lastAssistantText(msgs); last != "" {
 		sess.Preview = truncatePreview(last)
 	}
@@ -223,11 +227,12 @@ func (m messageAccumulator) message() (agentbackend.SessionMessage, bool) {
 	return agentbackend.SessionMessage{Role: m.role, Text: text, Ts: m.ts}, true
 }
 
-func loadAggregates(ctx context.Context, db *sql.DB, ids []string) (map[string]int, map[string]string) {
+func loadAggregates(ctx context.Context, db *sql.DB, ids []string) (map[string]int, map[string]string, map[string]string) {
 	counts := map[string]int{}
 	lastAssistant := map[string]string{}
+	firstUser := map[string]string{}
 	if len(ids) == 0 {
-		return counts, lastAssistant
+		return counts, lastAssistant, firstUser
 	}
 
 	seenInMessageTable := map[string]bool{}
@@ -235,22 +240,26 @@ func loadAggregates(ctx context.Context, db *sql.DB, ids []string) (map[string]i
 		// Current opencode DBs store chat turns in message+part. The
 		// session_message table may still exist, but it records switch
 		// events there; sessions seen in message suppress fallback reads.
-		msgCounts, msgLast, seen := loadMessageTableAggregates(ctx, db)
+		msgCounts, msgLast, msgFirst, seen := loadMessageTableAggregates(ctx, db)
 		for sid, n := range msgCounts {
 			counts[sid] = n
 		}
 		for sid, text := range msgLast {
 			lastAssistant[sid] = text
 		}
+		for sid, text := range msgFirst {
+			firstUser[sid] = text
+		}
 		seenInMessageTable = seen
 	}
-	loadSessionMessageAggregates(ctx, db, counts, lastAssistant, seenInMessageTable)
-	return counts, lastAssistant
+	loadSessionMessageAggregates(ctx, db, counts, lastAssistant, firstUser, seenInMessageTable)
+	return counts, lastAssistant, firstUser
 }
 
-func loadMessageTableAggregates(ctx context.Context, db *sql.DB) (map[string]int, map[string]string, map[string]bool) {
+func loadMessageTableAggregates(ctx context.Context, db *sql.DB) (map[string]int, map[string]string, map[string]string, map[string]bool) {
 	counts := map[string]int{}
 	lastAssistant := map[string]string{}
+	firstUser := map[string]string{}
 	seen := map[string]bool{}
 
 	rows, err := db.QueryContext(ctx, `
@@ -259,7 +268,7 @@ func loadMessageTableAggregates(ctx context.Context, db *sql.DB) (map[string]int
 		LEFT JOIN part p ON p.message_id = m.id
 		ORDER BY m.session_id, m.time_created, p.time_created`)
 	if err != nil {
-		return counts, lastAssistant, seen
+		return counts, lastAssistant, firstUser, seen
 	}
 	defer rows.Close()
 
@@ -277,6 +286,9 @@ func loadMessageTableAggregates(ctx context.Context, db *sql.DB) (map[string]int
 		counts[currentSession]++
 		if msg.Role == "assistant" {
 			lastAssistant[currentSession] = msg.Text
+		}
+		if msg.Role == "user" && firstUser[currentSession] == "" {
+			firstUser[currentSession] = msg.Text
 		}
 	}
 	for rows.Next() {
@@ -299,10 +311,10 @@ func loadMessageTableAggregates(ctx context.Context, db *sql.DB) (map[string]int
 		}
 	}
 	flush()
-	return counts, lastAssistant, seen
+	return counts, lastAssistant, firstUser, seen
 }
 
-func loadSessionMessageAggregates(ctx context.Context, db *sql.DB, counts map[string]int, lastAssistant map[string]string, skip map[string]bool) {
+func loadSessionMessageAggregates(ctx context.Context, db *sql.DB, counts map[string]int, lastAssistant map[string]string, firstUser map[string]string, skip map[string]bool) {
 	// Fallback for older/pre-flight schemas where session_message carried
 	// user/assistant turns. Current opencode DBs usually use message+part.
 	rows, err := db.QueryContext(ctx, `
@@ -324,25 +336,32 @@ func loadSessionMessageAggregates(ctx context.Context, db *sql.DB, counts map[st
 	}
 
 	rows, err = db.QueryContext(ctx, `
-		SELECT m.session_id, p.data
+		SELECT m.session_id, m.type, p.data
 		FROM session_message m
 		JOIN part p ON p.message_id = m.id
-		WHERE m.type = 'assistant'
+		WHERE m.type IN ('user', 'assistant')
 		ORDER BY m.session_id, m.seq, p.time_created`)
 	if err != nil {
 		return
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var sid, data string
-		if err := rows.Scan(&sid, &data); err != nil {
+		var sid, role, data string
+		if err := rows.Scan(&sid, &role, &data); err != nil {
 			continue
 		}
 		if skip[sid] {
 			continue
 		}
 		if text := extractPartText(data); text != "" {
-			lastAssistant[sid] = text
+			switch role {
+			case "user":
+				if firstUser[sid] == "" {
+					firstUser[sid] = text
+				}
+			case "assistant":
+				lastAssistant[sid] = text
+			}
 		}
 	}
 }
@@ -472,6 +491,17 @@ func lastAssistantText(msgs []agentbackend.SessionMessage) string {
 	return last
 }
 
+func firstUserTitle(msgs []agentbackend.SessionMessage) string {
+	for _, msg := range msgs {
+		if msg.Role == "user" {
+			if title := titleFromUserText(msg.Text); title != "" {
+				return title
+			}
+		}
+	}
+	return ""
+}
+
 func extractPartText(data string) string {
 	var p struct {
 		Type string `json:"type"`
@@ -511,4 +541,15 @@ func truncatePreview(s string) string {
 		end--
 	}
 	return s[:end]
+}
+
+func titleFromUserText(s string) string {
+	s = strings.TrimSpace(strings.Join(strings.Fields(s), " "))
+	if s == "" {
+		return ""
+	}
+	if len(s) <= agentbackend.SessionPreviewMaxBytes {
+		return s
+	}
+	return truncatePreview(s)
 }

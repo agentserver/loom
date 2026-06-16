@@ -94,6 +94,10 @@ type Session struct {
 	// as recorded by the backend itself. May be empty when unknown.
 	WorkingDir string
 
+	// Title is a short human-readable name for the session. Backends set it to
+	// the first user prompt when available. UIs may fall back to Preview or ID.
+	Title string
+
 	// StartedAt is when the first message in the session was recorded.
 	// Zero value means unknown.
 	StartedAt time.Time

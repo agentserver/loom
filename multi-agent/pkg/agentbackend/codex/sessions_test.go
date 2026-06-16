@@ -79,18 +79,23 @@ func TestListSessions_ReturnsKnownSessions(t *testing.T) {
 		"ffffffff-1111-2222-3333-444444444444": "",
 		"99999999-aaaa-bbbb-cccc-dddddddddddd": "/tmp/empty-codex",
 	}
+	gotByID := map[string]agentbackend.Session{}
 	for _, s := range got {
 		wantCwd, ok := wantIDs[s.ID]
 		if !ok {
 			t.Errorf("unexpected id %q", s.ID)
 			continue
 		}
+		gotByID[s.ID] = s
 		if s.Kind != agentbackend.KindCodex {
 			t.Errorf("session %s: kind=%v want codex", s.ID, s.Kind)
 		}
 		if s.WorkingDir != wantCwd {
 			t.Errorf("session %s: cwd=%q want %q", s.ID, s.WorkingDir, wantCwd)
 		}
+	}
+	if gotByID["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"].Title != "sum 2 and 3" {
+		t.Fatalf("Title=%q want first user prompt", gotByID["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"].Title)
 	}
 }
 
