@@ -3,6 +3,7 @@ package commanderhub
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -82,6 +83,87 @@ func TestHTTP_DaemonsReturnsOwn(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	body, _ := io.ReadAll(resp.Body)
 	require.Contains(t, string(body), "tester") // DisplayName from register
+}
+
+func TestHTTP_TreeGroupsAndSortsSessions(t *testing.T) {
+	now := time.Now()
+	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
+	srv, _, _, _, cookie, cleanup := commanderSetup(t, resolver, "tok-alice", &tbBackend{
+		listFn: func(context.Context) ([]agentbackend.Session, error) {
+			return []agentbackend.Session{
+				{ID: "old-session", Kind: agentbackend.KindCodex, Title: "old prompt", UpdatedAt: now.Add(-time.Hour)},
+				{ID: "new-session", Kind: agentbackend.KindCodex, Title: "new prompt", UpdatedAt: now},
+			}, nil
+		},
+	})
+	defer cleanup()
+
+	tree := getCommanderTree(t, srv, cookie)
+
+	require.Len(t, tree.Daemons, 1)
+	require.Equal(t, "ok", tree.Daemons[0].Status)
+	require.Equal(t, 2, tree.Daemons[0].SessionCount)
+	require.Len(t, tree.Daemons[0].Sessions, 2)
+	require.Equal(t, "new-session", tree.Daemons[0].Sessions[0].SessionID)
+	require.Equal(t, "old-session", tree.Daemons[0].Sessions[1].SessionID)
+	require.Equal(t, "new prompt", tree.Daemons[0].Sessions[0].Title)
+}
+
+func TestHTTP_TreeUsesSessionCacheWithinTTL(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
+	var mu sync.Mutex
+	var calls int
+	srv, _, _, _, cookie, cleanup := commanderSetup(t, resolver, "tok-alice", &tbBackend{
+		listFn: func(context.Context) ([]agentbackend.Session, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			calls++
+			return []agentbackend.Session{{ID: "cached-session", Kind: agentbackend.KindClaude, Title: "cached prompt"}}, nil
+		},
+	})
+	defer cleanup()
+
+	first := getCommanderTree(t, srv, cookie)
+	second := getCommanderTree(t, srv, cookie)
+
+	require.Equal(t, "cached-session", first.Daemons[0].Sessions[0].SessionID)
+	require.Equal(t, "cached-session", second.Daemons[0].Sessions[0].SessionID)
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, 1, calls)
+}
+
+func TestHTTP_TreeMergesTurnState(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
+	srv, hub, _, o, cookie, cleanup := commanderSetup(t, resolver, "tok-alice", &tbBackend{
+		listFn: func(context.Context) ([]agentbackend.Session, error) {
+			return []agentbackend.Session{{ID: "s1", Kind: agentbackend.KindClaude, Title: "needs approval"}}, nil
+		},
+	})
+	defer cleanup()
+
+	dis := hub.reg.daemons(o)
+	require.NotEmpty(t, dis)
+	key := turnKey{owner: o, daemonID: dis[0].DaemonID, sessionID: "s1"}
+	hub.turns.mu.Lock()
+	hub.turns.m[key] = turnSnapshot{
+		State:            turnStateAnswering,
+		ActiveWorker:     true,
+		AwaitingApproval: true,
+		updatedAt:        time.Now(),
+	}
+	hub.turns.mu.Unlock()
+
+	tree := getCommanderTree(t, srv, cookie)
+
+	require.Len(t, tree.Daemons, 1)
+	require.Equal(t, 1, tree.Daemons[0].ActiveCount)
+	require.Equal(t, 1, tree.Daemons[0].TurnCount)
+	require.Len(t, tree.Daemons[0].Sessions, 1)
+	row := tree.Daemons[0].Sessions[0]
+	require.Equal(t, "answering", row.TurnState)
+	require.True(t, row.ActiveWorker)
+	require.True(t, row.AwaitingApproval)
 }
 
 // TestHTTP_TurnStreamsSSE: POST .../turn returns text/event-stream with chunk
@@ -456,4 +538,17 @@ func TestHTTP_ListSessionsGenericErrorMaps502(t *testing.T) {
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusBadGateway, resp.StatusCode)
+}
+
+func getCommanderTree(t *testing.T, srv *httptest.Server, cookie *http.Cookie) CommanderTree {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/commander/tree", nil)
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var tree CommanderTree
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&tree))
+	return tree
 }
