@@ -3,9 +3,14 @@ package commanderhub
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +23,7 @@ const (
 	sessionCookieName = "commander_sess"
 	sessionTTL        = 12 * time.Hour
 	loginTTL          = 10 * time.Minute
+	deviceClientID    = "agentserver-agent-cli"
 	// maxPendingLogins bounds the in-flight login map. POST /login is
 	// unauthenticated (it's the auth entry); an attacker spamming it without
 	// ever polling would otherwise grow the map without bound. pollLogin
@@ -33,13 +39,19 @@ type DeviceCode struct {
 	Code                    string
 	VerificationURIComplete string
 	ExpiresIn               time.Duration
+	Interval                time.Duration
+}
+
+type loginToken struct {
+	AccessToken string
+	IDToken     string
 }
 
 // deviceFlow is the seam between Authenticator and the OAuth grant. Production
 // uses agentsdkDeviceFlow; tests inject a fake.
 type deviceFlow interface {
 	RequestCode(ctx context.Context) (DeviceCode, error)
-	PollToken(ctx context.Context, code DeviceCode) (string, error)
+	PollToken(ctx context.Context, code DeviceCode) (loginToken, error)
 }
 
 // agentsdkDeviceFlow wraps the real agentserver device-code endpoints.
@@ -62,21 +74,78 @@ func (f agentsdkDeviceFlow) RequestCode(ctx context.Context) (DeviceCode, error)
 		Code:                    dc.DeviceCode,
 		VerificationURIComplete: dc.VerificationURIComplete,
 		ExpiresIn:               time.Duration(dc.ExpiresIn) * time.Second,
+		Interval:                time.Duration(dc.Interval) * time.Second,
 	}, nil
 }
 
-func (f agentsdkDeviceFlow) PollToken(ctx context.Context, code DeviceCode) (string, error) {
-	// PollForToken wants the agentsdk DeviceAuthResponse; rebuild the minimal
-	// shape it reads (DeviceCode + ExpiresIn for its own poll deadline).
-	dc := &agentsdk.DeviceAuthResponse{
-		DeviceCode: code.Code,
-		ExpiresIn:  int(code.ExpiresIn / time.Second),
+func (f agentsdkDeviceFlow) PollToken(ctx context.Context, code DeviceCode) (loginToken, error) {
+	tokenURL := strings.TrimRight(f.serverURL, "/") + "/api/oauth2/token"
+	interval := code.Interval
+	if interval < 5*time.Second {
+		interval = 5 * time.Second
 	}
-	tok, err := agentsdk.PollForToken(ctx, f.serverURL, dc)
-	if err != nil {
-		return "", err
+	deadline := time.Now().Add(code.ExpiresIn)
+
+	for {
+		if time.Now().After(deadline) {
+			return loginToken{}, fmt.Errorf("authorization expired, please try again")
+		}
+
+		select {
+		case <-ctx.Done():
+			return loginToken{}, ctx.Err()
+		case <-time.After(interval):
+		}
+
+		form := url.Values{
+			"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
+			"client_id":   {deviceClientID},
+			"device_code": {code.Code},
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+		if err != nil {
+			return loginToken{}, fmt.Errorf("create token request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			continue
+		}
+
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			var tokenResp struct {
+				AccessToken string `json:"access_token"`
+				IDToken     string `json:"id_token"`
+			}
+			if err := json.Unmarshal(body, &tokenResp); err != nil {
+				return loginToken{}, fmt.Errorf("decode token response: %w", err)
+			}
+			return loginToken{AccessToken: tokenResp.AccessToken, IDToken: tokenResp.IDToken}, nil
+		}
+
+		var errResp struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(body, &errResp)
+
+		switch errResp.Error {
+		case "authorization_pending":
+			continue
+		case "slow_down":
+			interval += 5 * time.Second
+			continue
+		case "access_denied":
+			return loginToken{}, fmt.Errorf("authorization denied by user")
+		case "expired_token":
+			return loginToken{}, fmt.Errorf("authorization expired, please try again")
+		default:
+			return loginToken{}, fmt.Errorf("token error: %s", errResp.Error)
+		}
 	}
-	return tok.AccessToken, nil
 }
 
 type session struct {
@@ -89,6 +158,7 @@ type loginState struct {
 	code      DeviceCode
 	sessionID string // set when PollToken succeeds
 	failed    bool
+	failure   string
 	done      bool
 	createdAt time.Time // set when the entry is created; drives loginTTL reaping
 }
@@ -232,17 +302,19 @@ func (a *Authenticator) pollLogin(lid string, dc DeviceCode) {
 	if err != nil {
 		a.loginMu.Lock()
 		st.failed = true
+		st.failure = err.Error()
 		a.loginMu.Unlock()
 		return
 	}
-	ident, err := a.resolver.Resolve(ctx, tok)
+	ident, err := identityFromIDToken(tok.IDToken, time.Now())
 	if err != nil {
 		a.loginMu.Lock()
 		st.failed = true
+		st.failure = err.Error()
 		a.loginMu.Unlock()
 		return
 	}
-	sid := a.putSession(tok, ident)
+	sid := a.putSession(tok.AccessToken, ident)
 	a.loginMu.Lock()
 	st.sessionID = sid
 	st.done = true
@@ -267,12 +339,14 @@ func (a *Authenticator) ServeLoginPoll(w http.ResponseWriter, r *http.Request) {
 	st := a.logins[lid]
 	var (
 		failed    bool
+		failure   string
 		done      bool
 		sessionID string
 		expired   bool
 	)
 	if st != nil {
 		failed = st.failed
+		failure = st.failure
 		done = st.done
 		sessionID = st.sessionID
 		expired = time.Since(st.createdAt) > loginTTL
@@ -289,7 +363,10 @@ func (a *Authenticator) ServeLoginPoll(w http.ResponseWriter, r *http.Request) {
 	}
 	if failed {
 		// Consumed: one-shot. A replay poll will get 404.
-		http.Error(w, "login failed", http.StatusUnauthorized)
+		if failure == "" {
+			failure = "login failed"
+		}
+		writeJSONStatus(w, http.StatusUnauthorized, map[string]any{"status": "error", "error": failure})
 		return
 	}
 	if !done {
@@ -333,8 +410,52 @@ func writeJSON(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+func writeJSONStatus(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
 func randomID() string {
 	var b [16]byte
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
+}
+
+func identityFromIDToken(raw string, now time.Time) (identity.Identity, error) {
+	// /api/agent/whoami only accepts agentserver ProxyToken values. Commander
+	// web login gets an OAuth token response instead, so the user/workspace
+	// owner key comes from the device-flow id_token claims.
+	parts := strings.Split(raw, ".")
+	if len(parts) != 3 {
+		return identity.Identity{}, fmt.Errorf("%w: OAuth token response missing id_token claims", identity.ErrInvalid)
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return identity.Identity{}, fmt.Errorf("%w: decode id_token claims: %v", identity.ErrInvalid, err)
+	}
+	var claims struct {
+		Subject       string `json:"sub"`
+		WorkspaceID   string `json:"workspace_id"`
+		WorkspaceRole string `json:"workspace_role"`
+		ExpiresAt     int64  `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return identity.Identity{}, fmt.Errorf("%w: decode id_token claims: %v", identity.ErrInvalid, err)
+	}
+	if claims.Subject == "" {
+		return identity.Identity{}, fmt.Errorf("%w: id_token missing sub", identity.ErrInvalid)
+	}
+	if claims.WorkspaceID == "" {
+		return identity.Identity{}, fmt.Errorf("%w: id_token missing workspace_id", identity.ErrInvalid)
+	}
+	if claims.ExpiresAt > 0 && !now.Before(time.Unix(claims.ExpiresAt, 0)) {
+		return identity.Identity{}, fmt.Errorf("%w: id_token expired", identity.ErrInvalid)
+	}
+	return identity.Identity{
+		UserID:      claims.Subject,
+		WorkspaceID: claims.WorkspaceID,
+		Role:        claims.WorkspaceRole,
+		Source:      identity.SourceAgentserver,
+	}, nil
 }

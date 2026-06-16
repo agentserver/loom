@@ -3,8 +3,11 @@ package commanderhub
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,10 +23,17 @@ import (
 type fakeDeviceFlow struct {
 	mu       sync.Mutex
 	approved chan struct{}
-	token    string
+	token    loginToken
 }
 
 func newFakeDeviceFlow(token string) *fakeDeviceFlow {
+	return newFakeDeviceFlowToken(loginToken{
+		AccessToken: token,
+		IDToken:     makeIDToken("alice", "W1", ""),
+	})
+}
+
+func newFakeDeviceFlowToken(token loginToken) *fakeDeviceFlow {
 	return &fakeDeviceFlow{approved: make(chan struct{}), token: token}
 }
 
@@ -31,12 +41,12 @@ func (f *fakeDeviceFlow) RequestCode(context.Context) (DeviceCode, error) {
 	return DeviceCode{Code: "dc", VerificationURIComplete: "https://agent/verify?user_code=XX", ExpiresIn: 5 * time.Minute}, nil
 }
 
-func (f *fakeDeviceFlow) PollToken(ctx context.Context, _ DeviceCode) (string, error) {
+func (f *fakeDeviceFlow) PollToken(ctx context.Context, _ DeviceCode) (loginToken, error) {
 	select {
 	case <-f.approved:
 		return f.token, nil
 	case <-ctx.Done():
-		return "", ctx.Err()
+		return loginToken{}, ctx.Err()
 	}
 }
 func (f *fakeDeviceFlow) approve() { close(f.approved) }
@@ -101,6 +111,73 @@ func TestAuth_LoginPollPendingThenApproved(t *testing.T) {
 	a.ServeLoginPoll(rec4, httptest.NewRequest(http.MethodGet, "/api/commander/login/poll?id="+lr.LoginID, nil))
 	require.Equal(t, http.StatusNotFound, rec4.Code)
 	require.Empty(t, rec4.Result().Cookies())
+}
+
+func TestAuth_LoginUsesOAuthIDTokenIdentityNotProxyWhoami(t *testing.T) {
+	resolver := &countingResolver{err: identity.ErrInvalid}
+	flow := newFakeDeviceFlowToken(loginToken{
+		AccessToken: "oauth-access-token-not-a-proxy-token",
+		IDToken:     makeIDToken("alice", "W1", ""),
+	})
+	a := newAuth(t, resolver, flow)
+
+	rec := httptest.NewRecorder()
+	a.ServeLogin(rec, httptest.NewRequest(http.MethodPost, "/api/commander/login", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var lr struct {
+		LoginID string `json:"login_id"`
+	}
+	require.NoError(t, jsonUnmarshal(rec.Body.Bytes(), &lr))
+	require.NotEmpty(t, lr.LoginID)
+
+	flow.approve()
+	var cookie *http.Cookie
+	require.Eventually(t, func() bool {
+		pollRec := httptest.NewRecorder()
+		a.ServeLoginPoll(pollRec, httptest.NewRequest(http.MethodGet, "/api/commander/login/poll?id="+lr.LoginID, nil))
+		if pollRec.Code != http.StatusOK || len(pollRec.Result().Cookies()) != 1 {
+			return false
+		}
+		cookie = pollRec.Result().Cookies()[0]
+		return true
+	}, time.Second, 10*time.Millisecond)
+	require.Equal(t, int32(0), atomic.LoadInt32(&resolver.calls), "OAuth access tokens are not proxy tokens and must not be sent to whoami")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/commander/daemons", nil)
+	req.AddCookie(cookie)
+	ident, ok := a.CommanderIdentity(req)
+	require.True(t, ok)
+	require.Equal(t, identity.Identity{
+		UserID:      "alice",
+		WorkspaceID: "W1",
+		Source:      identity.SourceAgentserver,
+	}, ident)
+}
+
+func TestAuth_LoginPollFailureIncludesReason(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{}}
+	flow := newFakeDeviceFlowToken(loginToken{AccessToken: "oauth-access-token", IDToken: ""})
+	a := newAuth(t, resolver, flow)
+
+	rec := httptest.NewRecorder()
+	a.ServeLogin(rec, httptest.NewRequest(http.MethodPost, "/api/commander/login", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var lr struct {
+		LoginID string `json:"login_id"`
+	}
+	require.NoError(t, jsonUnmarshal(rec.Body.Bytes(), &lr))
+
+	flow.approve()
+	require.Eventually(t, func() bool {
+		pollRec := httptest.NewRecorder()
+		a.ServeLoginPoll(pollRec, httptest.NewRequest(http.MethodGet, "/api/commander/login/poll?id="+lr.LoginID, nil))
+		if pollRec.Code != http.StatusUnauthorized {
+			return false
+		}
+		require.Contains(t, pollRec.Header().Get("Content-Type"), "application/json")
+		require.Contains(t, pollRec.Body.String(), "id_token")
+		return true
+	}, time.Second, 10*time.Millisecond)
 }
 
 func TestAuth_LoginCookieSecureOnlyForHTTPS(t *testing.T) {
@@ -226,9 +303,9 @@ func (f *countingDeviceFlow) RequestCode(context.Context) (DeviceCode, error) {
 	}, nil
 }
 
-func (f *countingDeviceFlow) PollToken(ctx context.Context, _ DeviceCode) (string, error) {
+func (f *countingDeviceFlow) PollToken(ctx context.Context, _ DeviceCode) (loginToken, error) {
 	<-ctx.Done()
-	return "", ctx.Err()
+	return loginToken{}, ctx.Err()
 }
 
 // TestAuth_LoginCapsPendingLogins: hammering the unauthenticated POST /login
@@ -276,4 +353,35 @@ func TestAuth_LoginCapsPendingLogins(t *testing.T) {
 	n := atomic.LoadInt32(&flow.requestCodeN)
 	require.LessOrEqualf(t, int(n), maxPendingLogins,
 		"RequestCode was called %d times; the cap must gate it at %d", n, maxPendingLogins)
+}
+
+type countingResolver struct {
+	calls int32
+	err   error
+}
+
+func (r *countingResolver) Resolve(context.Context, string) (identity.Identity, error) {
+	atomic.AddInt32(&r.calls, 1)
+	if r.err != nil {
+		return identity.Identity{}, r.err
+	}
+	return identity.Identity{UserID: "unexpected", WorkspaceID: "unexpected"}, nil
+}
+
+func makeIDToken(sub, workspaceID, workspaceRole string) string {
+	header := map[string]string{"alg": "none", "typ": "JWT"}
+	payload := map[string]any{
+		"sub":            sub,
+		"workspace_id":   workspaceID,
+		"workspace_role": workspaceRole,
+	}
+	return encodeJWTPart(header) + "." + encodeJWTPart(payload) + "."
+}
+
+func encodeJWTPart(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return strings.TrimRight(base64.URLEncoding.EncodeToString(b), "=")
 }

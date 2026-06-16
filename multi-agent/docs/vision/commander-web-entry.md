@@ -11,7 +11,7 @@
 |---|---|---|
 | **driver-agent** | stdio MCP 服务，**短命**（codex/claude/opencode 的子进程） | 没法被网页消费；进程关 → driver 关 |
 | **observer-server** (`39.104.x:8090`) | 已是**全局**的（所有 driver/slave 推事件过去），有 dashboard / `/api/tasks/{id}/progress` / token + workspace 鉴权 | 只读：网页能看，不能下指令 |
-| **identity 链路** (`internal/identity/agentserver/resolver.go`) | observer 已能调 agentserver `/api/agent/whoami` 验 token、拿 subject | 现在仅事件上推走这条；下行命令通道未做 |
+| **identity 链路** (`internal/identity/agentserver/resolver.go`) | observer 已能调 agentserver `/api/agent/whoami` 验 **ProxyToken**、拿 subject | 现在仅事件上推走这条；下行命令通道未做 |
 | **agentserver** (`agent.cs.ac.cn`) | 中心 tunnel + device-code OAuth + workspace 注册 | 不暴露面向终端用户的任务下发 |
 | **星池指挥官 app** | **不存在** | 整块缺位 |
 
@@ -30,7 +30,7 @@
             │   sessions 列表    发新指令到 session            │
             └─────────────┬──────────────┬───────────────────┘
                           │ agentserver  │ HTTPS
-                          │ OAuth token  │
+                          │ OAuth id_token claims │
                           ▼              ▼
               ┌────────────────────────────────────────────────┐
               │      observer-server (云端 39.104.x:8090)       │
@@ -68,13 +68,13 @@
 
 | 角色 | token 源 | observer 验证路径 |
 |---|---|---|
-| Web 用户 | agentserver device-code OAuth | `identity.Resolver` → agentserver `/api/agent/whoami` → 拿 subject |
-| daemon → observer (WS) | driver register 时 agentserver 颁的 `ProxyToken` | 同上 |
-| driver/slave 推事件（现有） | 同 ProxyToken | 同上 |
+| Web 用户 | agentserver device-code OAuth | observer 轮询 `/api/oauth2/token` 后读取 `id_token` 的 `sub/workspace_id` claims，颁自己的 httpOnly cookie |
+| daemon → observer (WS) | driver register 时 agentserver 颁的 `ProxyToken` | `identity.Resolver` → agentserver `/api/agent/whoami` → 拿 subject/workspace |
+| driver/slave 推事件（现有） | 同 ProxyToken | `identity.Resolver` → agentserver `/api/agent/whoami` → 拿 subject/workspace |
 | 旧 `observer.api_key` | shared secret | 退化为「v1 兼容 fallback」，新功能不依赖 |
 
 含义：
-- 「我的 daemon」自动 = WS 连接 token 的 subject 与当前 web 用户 subject 一致
+- 「我的 daemon」自动 = WS 连接 ProxyToken 解出的 subject/workspace 与当前 web 登录 id_token claims 一致
 - 多用户共享一个 observer，自然按 subject 隔离 session 视图
 - 不需要新增 token 分发流程，复用 driver register 已走过的 OAuth
 
@@ -156,7 +156,7 @@
 ## 5. 反范围 / 反目标
 
 - **不动 master 路径**（cmd/master-agent/, internal/orchestrator/, internal/orchestration/）
-- **不改 agentserver**：复用现有 OAuth + whoami；不要求 agentserver 加新 API
+- **不改 agentserver**：web 复用现有 device-code OAuth + `id_token` claims；daemon/事件继续用 ProxyToken + whoami；不要求 agentserver 加新 API
 - **不引入新 binary**：daemon 是 `driver-agent` 的新子命令，不是新 binary
 - **不持久化 daemon session map** v1（重启清空 in-memory 部分；backend session 文件本身一直在）
 - **不实现网页端的 humanloop 批准 UI**：v1 用户从 web 发指令进入 awaiting_user 时显示「请到 CLI 端继续」；v2 再做
@@ -170,7 +170,7 @@
 | 一个入口路径 (a) Loom 侧 daemon | (b) agentserver 侧任务总线 | agentserver 不在本仓；(a) Loom 自包含 |
 | daemon 住 driver-agent 新子命令 | 独立 binary | driver 业务逻辑 (submit_task / wait_task / chat_resume) 直接复用；不增加部署单元 |
 | 多 host 聚合走 (Z) observer reverse proxy | (X) observer 存 session / (Y) 网页直连 N daemon | 网页只面一个 endpoint；session 数据不重复；可加 subject filtering |
-| Web 用户 auth 复用 agentserver OAuth | 本地 token / 不鉴权 | 已有 identity.Resolver；与 daemon 同身份体系 |
+| Web 用户 auth 复用 agentserver OAuth | 本地 token / 不鉴权 | device-flow `id_token` 与 daemon ProxyToken 都带 user/workspace 身份；observer 可按同一 owner key 隔离 |
 | daemon → observer token 用 `ProxyToken` | `observer.api_key` / 单独 daemon token | ProxyToken 带 user identity；observer 验证路径现成 |
 | daemon ↔ observer transport WS | SSE / long-poll | NAT-friendly + 双向；既能事件上推也能命令下推 |
 | Session 权威源 = backend CLI 文件夹 | daemon 自己存 / observer 存 | 复用 backend 已有 session 持久化；不增 schema |
