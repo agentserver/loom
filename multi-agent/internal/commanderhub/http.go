@@ -21,6 +21,7 @@ func Mount(mux *http.ServeMux, hub *Hub, auth *Authenticator) {
 	}
 	ch := &commanderHandlers{hub: hub, auth: auth}
 	mux.HandleFunc("/api/commander/daemons", ch.daemons)
+	mux.HandleFunc("/api/commander/tree", ch.tree)
 	mux.HandleFunc("/api/commander/sessions", ch.sessionsFanout)
 	mux.HandleFunc("/api/commander/daemons/", ch.daemonScoped)
 }
@@ -61,6 +62,18 @@ func (ch *commanderHandlers) sessionsFanout(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	writeJSON(w, map[string]any{"daemons": ch.hub.FanOutSessions(r.Context(), o)})
+}
+
+func (ch *commanderHandlers) tree(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	o, ok := ch.ownerOf(w, r)
+	if !ok {
+		return
+	}
+	writeJSON(w, ch.hub.CommanderTree(r.Context(), o))
 }
 
 // daemonScoped routes /api/commander/daemons/{id}/sessions[/{sid}[/turn]].

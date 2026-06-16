@@ -25,15 +25,16 @@ const (
 // Hub owns the /daemon-link WebSocket endpoint and the owner-keyed registry of
 // live daemon connections.
 type Hub struct {
-	resolver identity.Resolver
-	upgrader websocket.Upgrader
-	reg      *registry
-	turns    *turnStateStore
-	cmdSeq   atomic.Int64 // generates per-command IDs (see proxy.go)
+	resolver     identity.Resolver
+	upgrader     websocket.Upgrader
+	reg          *registry
+	turns        *turnStateStore
+	sessionCache *sessionListCache
+	cmdSeq       atomic.Int64 // generates per-command IDs (see proxy.go)
 
 	// TurnTimeout is the observer-side safety max applied to a session_turn
-	// command. The browser/SSE client context is the real bound; this just
-	// guards against a daemon that never sends a terminal frame. Defaults to
+	// command. Turns continue draining after the browser/SSE client disconnects;
+	// this bounds daemon work that never sends a terminal frame. Defaults to
 	// defaultTurnTimeout (10 min); a caller may override it after NewHub.
 	TurnTimeout time.Duration
 }
@@ -41,11 +42,12 @@ type Hub struct {
 // NewHub builds a Hub backed by resolver for bearer-token → Identity resolution.
 func NewHub(resolver identity.Resolver) *Hub {
 	return &Hub{
-		resolver:    resolver,
-		upgrader:    websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }},
-		reg:         newRegistry(),
-		turns:       newTurnStateStore(),
-		TurnTimeout: defaultTurnTimeout,
+		resolver:     resolver,
+		upgrader:     websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }},
+		reg:          newRegistry(),
+		turns:        newTurnStateStore(),
+		sessionCache: newSessionListCache(10 * time.Second),
+		TurnTimeout:  defaultTurnTimeout,
 	}
 }
 

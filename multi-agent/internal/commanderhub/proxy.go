@@ -32,7 +32,7 @@ func (e *DaemonError) Error() string {
 
 const (
 	defaultCmdTimeout  = 10 * time.Second
-	defaultTurnTimeout = 10 * time.Minute // safety max; the browser/SSE client ctx is the real bound
+	defaultTurnTimeout = 10 * time.Minute // safety max after browser/SSE disconnect
 )
 
 // SendCommand runs a non-streaming command (list_sessions / get_session) on one
