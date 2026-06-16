@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -256,6 +258,109 @@ func TestWSClient_DispatchesCommandAndReturnsResult(t *testing.T) {
 		}
 		return false
 	}, time.Second)
+}
+
+func TestWSClient_DispatchesListFiles(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module x\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	fo := newFakeObserver(t)
+	fo.sendAck = true
+	srv := httptest.NewServer(fo.handler())
+	defer srv.Close()
+	c := NewWSClient(WSConfig{
+		URL:        observerWSURL(srv),
+		ProxyToken: "t",
+		Register:   RegisterPayload{SchemaVersion: SchemaVersion, Kind: "codex"},
+		Handler: &Handler{Backend: &fakeBackend{
+			getFn: func(context.Context, string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+				return agentbackend.Session{ID: "s1", WorkingDir: root}, nil, nil
+			},
+		}},
+		HeartbeatInt:   10 * time.Second,
+		InitialBackoff: 10 * time.Millisecond,
+		MaxBackoff:     50 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- c.Run(ctx) }()
+	defer func() {
+		cancel()
+		fo.closeAll()
+		<-errCh
+	}()
+
+	waitFor(t, c.Linked, time.Second)
+	if err := fo.Send(Envelope{
+		Type: "command",
+		ID:   "files-1",
+		Payload: jsonRaw(t, CommandPayload{
+			Command: "list_files",
+			Args:    jsonRaw(t, FileListArgs{ID: "s1", Path: "."}),
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var got FileListResult
+	waitForCommandFrame(t, fo, "files-1", &got)
+	for _, ent := range got.Entries {
+		if ent.Name == "go.mod" && ent.Kind == "file" {
+			return
+		}
+	}
+	t.Fatalf("entries=%+v want go.mod file", got.Entries)
+}
+
+func TestWSClient_DispatchesReadFile(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("# hello\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	fo := newFakeObserver(t)
+	fo.sendAck = true
+	srv := httptest.NewServer(fo.handler())
+	defer srv.Close()
+	c := NewWSClient(WSConfig{
+		URL:        observerWSURL(srv),
+		ProxyToken: "t",
+		Register:   RegisterPayload{SchemaVersion: SchemaVersion, Kind: "codex"},
+		Handler: &Handler{Backend: &fakeBackend{
+			getFn: func(context.Context, string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+				return agentbackend.Session{ID: "s1", WorkingDir: root}, nil, nil
+			},
+		}},
+		HeartbeatInt:   10 * time.Second,
+		InitialBackoff: 10 * time.Millisecond,
+		MaxBackoff:     50 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- c.Run(ctx) }()
+	defer func() {
+		cancel()
+		fo.closeAll()
+		<-errCh
+	}()
+
+	waitFor(t, c.Linked, time.Second)
+	if err := fo.Send(Envelope{
+		Type: "command",
+		ID:   "files-read-1",
+		Payload: jsonRaw(t, CommandPayload{
+			Command: "read_file",
+			Args:    jsonRaw(t, FileReadArgs{ID: "s1", Path: "README.md"}),
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var got FileReadResult
+	waitForCommandFrame(t, fo, "files-read-1", &got)
+	if got.Path != "README.md" || got.Content != "# hello\n" {
+		t.Fatalf("result=%+v want README.md content", got)
+	}
 }
 
 func TestWSClient_TurnCommandStreamsEventsAndResult(t *testing.T) {
@@ -732,6 +837,31 @@ func jsonRaw(t *testing.T, v any) json.RawMessage {
 		t.Fatal(err)
 	}
 	return b
+}
+
+func waitForCommandFrame(t *testing.T, fo *fakeObserver, id string, out any) {
+	t.Helper()
+	waitFor(t, func() bool {
+		for _, env := range fo.frames() {
+			if env.ID != id {
+				continue
+			}
+			switch env.Type {
+			case "command_result":
+				if err := json.Unmarshal(env.Payload, out); err != nil {
+					t.Fatalf("command_result payload=%s unmarshal: %v", string(env.Payload), err)
+				}
+				return true
+			case "error":
+				var body ErrorPayload
+				if err := json.Unmarshal(env.Payload, &body); err != nil {
+					t.Fatalf("error payload=%s unmarshal: %v", string(env.Payload), err)
+				}
+				t.Fatalf("command %s returned error %s: %s", id, body.Code, body.Message)
+			}
+		}
+		return false
+	}, time.Second)
 }
 
 func waitFor(t *testing.T, cond func() bool, timeout time.Duration) {

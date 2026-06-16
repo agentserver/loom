@@ -254,6 +254,42 @@ func (c *WSClient) dispatchCommand(ctx context.Context, env Envelope, write func
 		payload, _ := json.Marshal(map[string]any{"session": session, "messages": messages})
 		_ = write(Envelope{Type: "command_result", ID: env.ID, Payload: payload})
 
+	case "list_files":
+		var args FileListArgs
+		if err := json.Unmarshal(cmd.Args, &args); err != nil {
+			_ = write(errorEnvelope(env.ID, ErrCodeInternal, "bad list_files args: "+err.Error()))
+			return
+		}
+		result, err := c.cfg.Handler.ListFiles(ctx, args.ID, args.Path)
+		if errors.Is(err, agentbackend.ErrSessionNotFound) {
+			_ = write(errorEnvelope(env.ID, ErrCodeSessionNotFound, "session not found"))
+			return
+		}
+		if err != nil {
+			_ = write(errorEnvelope(env.ID, ErrCodeBackendUnavailable, err.Error()))
+			return
+		}
+		payload, _ := json.Marshal(result)
+		_ = write(Envelope{Type: "command_result", ID: env.ID, Payload: payload})
+
+	case "read_file":
+		var args FileReadArgs
+		if err := json.Unmarshal(cmd.Args, &args); err != nil {
+			_ = write(errorEnvelope(env.ID, ErrCodeInternal, "bad read_file args: "+err.Error()))
+			return
+		}
+		result, err := c.cfg.Handler.ReadFile(ctx, args.ID, args.Path)
+		if errors.Is(err, agentbackend.ErrSessionNotFound) {
+			_ = write(errorEnvelope(env.ID, ErrCodeSessionNotFound, "session not found"))
+			return
+		}
+		if err != nil {
+			_ = write(errorEnvelope(env.ID, ErrCodeBackendUnavailable, err.Error()))
+			return
+		}
+		payload, _ := json.Marshal(result)
+		_ = write(Envelope{Type: "command_result", ID: env.ID, Payload: payload})
+
 	case "session_turn":
 		var args SessionTurnArgs
 		if err := json.Unmarshal(cmd.Args, &args); err != nil {
