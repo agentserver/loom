@@ -65,3 +65,42 @@ func main() {
 		t.Fatalf("resume cwd=%q want session WorkingDir %q (config WorkDir was %q)", got, sessionDir, configDir)
 	}
 }
+
+func TestSessionWorkingDirReadsOnlyMetadata(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	sessionDir := t.TempDir()
+
+	id := "eeeeeeee-1111-2222-3333-ffffffffffff"
+	sessionRoot := filepath.Join(home, ".codex", "sessions", "2026", "06", "16")
+	if err := os.MkdirAll(sessionRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta, err := json.Marshal(map[string]any{
+		"timestamp": "2026-06-16T01:00:00Z",
+		"type":      "session_meta",
+		"payload": map[string]string{
+			"id":  id,
+			"cwd": sessionDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(meta) + "\n" + `{"timestamp":"2026-06-16T01:00:01Z","type":"response_item","payload":{"type":"function_call_output","content":"ignored"}}` + "\n"
+	if err := os.WriteFile(filepath.Join(sessionRoot, "rollout-2026-06-16T01-00-00-"+id+".jsonl"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir()}, nil)
+	got, ok, err := b.sessionWorkingDir(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("sessionWorkingDir did not find session")
+	}
+	if got != sessionDir {
+		t.Fatalf("sessionWorkingDir=%q want %q", got, sessionDir)
+	}
+}

@@ -124,6 +124,37 @@ func (b *Backend) GetSession(ctx context.Context, id string) (agentbackend.Sessi
 	return agentbackend.Session{}, nil, agentbackend.ErrSessionNotFound
 }
 
+func (b *Backend) sessionWorkingDir(ctx context.Context, id string) (string, bool, error) {
+	root := sessionsRoot()
+	if root == "" {
+		return "", false, nil
+	}
+	projectDirs, err := os.ReadDir(root)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+
+	for _, projectDir := range projectDirs {
+		if err := ctx.Err(); err != nil {
+			return "", false, err
+		}
+		if !projectDir.IsDir() {
+			continue
+		}
+		path := filepath.Join(root, projectDir.Name(), id+".jsonl")
+		if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return "", false, err
+		}
+		return decodeCwd(projectDir.Name()), true, nil
+	}
+	return "", false, nil
+}
+
 type claudeJSONLLine struct {
 	Type      string          `json:"type"`
 	Timestamp string          `json:"timestamp"`
