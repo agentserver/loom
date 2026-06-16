@@ -260,9 +260,10 @@ func (c *WSClient) dispatchCommand(ctx context.Context, env Envelope, write func
 			_ = write(errorEnvelope(env.ID, ErrCodeInternal, "bad session_turn args: "+err.Error()))
 			return
 		}
+		sink := newWSSink(env.ID, write)
+		sink.Write("status", "queued on daemon")
 		unlock := c.lockTurn(args.ID)
 		defer unlock()
-		sink := newWSSink(env.ID, write)
 		result, err := c.cfg.Handler.SessionTurn(ctx, args.ID, args.Prompt, sink)
 		if errors.Is(err, agentbackend.ErrSessionNotFound) {
 			_ = write(errorEnvelope(env.ID, ErrCodeSessionNotFound, "session not found"))

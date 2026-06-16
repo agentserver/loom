@@ -94,6 +94,8 @@ func (e *executor) RunResume(ctx context.Context, sessionID, answer string, sink
 		"resume",
 		sessionID,
 		"--json",
+		"--dangerously-bypass-approvals-and-sandbox",
+		"--skip-git-repo-check",
 	}, e.cfg.ExtraArgs...)
 	prompt := "User answered: " + answer
 	return e.runWithArgv(ctx, args, prompt, sink)
@@ -136,9 +138,11 @@ func (e *executor) runWithArgv(ctx context.Context, argvHead []string, prompt st
 	var stderrBuf strings.Builder
 	cmd.Stderr = &stderrBuf
 
+	sink.Write("status", "starting codex")
 	if err := cmd.Start(); err != nil {
 		return agentbackend.Result{}, err
 	}
+	sink.Write("status", "codex running")
 
 	// Send the prompt; signal completion so the pause goroutine doesn't close
 	// stdin mid-write. Codex reads PROMPT from stdin (the trailing `-` arg)

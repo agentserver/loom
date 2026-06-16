@@ -94,21 +94,14 @@ func handleTurn(h *Handler, w http.ResponseWriter, r *http.Request, id string) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
 
+	sink.Write("status", "accepted by daemon")
 	res, err := h.SessionTurn(r.Context(), id, body.Prompt, sink)
 	if errors.Is(err, agentbackend.ErrSessionNotFound) {
-		if sink.Written() {
-			sink.EmitError(ErrCodeSessionNotFound, "session not found")
-			return
-		}
-		http.Error(w, "session not found", http.StatusNotFound)
+		sink.EmitError(ErrCodeSessionNotFound, "session not found")
 		return
 	}
 	if err != nil {
-		if sink.Written() {
-			sink.EmitError(ErrCodeInternal, err.Error())
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		sink.EmitError(ErrCodeInternal, err.Error())
 		return
 	}
 	sink.EmitDone(marshalTurnResult(res))

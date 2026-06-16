@@ -304,6 +304,7 @@ func TestWSClient_TurnCommandStreamsEventsAndResult(t *testing.T) {
 
 	waitFor(t, func() bool {
 		eventCount := 0
+		sawStatus := false
 		sawResult := false
 		for _, env := range fo.frames() {
 			if env.ID != "turn-1" {
@@ -311,13 +312,17 @@ func TestWSClient_TurnCommandStreamsEventsAndResult(t *testing.T) {
 			}
 			if env.Type == "event" {
 				eventCount++
+				var ep EventPayload
+				if err := json.Unmarshal(env.Payload, &ep); err == nil && ep.EventKind == "status" {
+					sawStatus = true
+				}
 			}
 			if env.Type == "command_result" {
 				sawResult = strings.Contains(string(env.Payload), `"result":`) &&
 					strings.Contains(string(env.Payload), `"summary":"done"`)
 			}
 		}
-		return eventCount >= 2 && sawResult
+		return eventCount >= 3 && sawStatus && sawResult
 	}, 2*time.Second)
 }
 

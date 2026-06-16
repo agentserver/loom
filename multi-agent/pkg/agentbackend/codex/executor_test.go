@@ -273,6 +273,12 @@ func main() {
 	if !strings.Contains(string(args), "exec resume thr-1") {
 		t.Errorf("expected 'exec resume thr-1' in argv, got %q", string(args))
 	}
+	if !strings.Contains(string(args), "--skip-git-repo-check") {
+		t.Errorf("resume argv missing --skip-git-repo-check: %q", string(args))
+	}
+	if !strings.Contains(string(args), "--dangerously-bypass-approvals-and-sandbox") {
+		t.Errorf("resume argv missing noninteractive sandbox bypass: %q", string(args))
+	}
 	if !strings.Contains(res.Summary, "User answered: the user's answer") {
 		t.Errorf("expected 'User answered: …' in summary, got %q", res.Summary)
 	}

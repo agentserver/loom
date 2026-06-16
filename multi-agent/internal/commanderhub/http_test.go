@@ -33,10 +33,10 @@ func commanderSetup(t *testing.T, resolver *fakeResolver, token string, backend 
 
 	wsURL := "ws" + srv.URL[len("http"):] + "/api/daemon-link"
 	c := commander.NewWSClient(commander.WSConfig{
-		URL:        wsURL,
-		ProxyToken: token,
-		Register:   commander.RegisterPayload{SchemaVersion: commander.SchemaVersion, Kind: "claude", DisplayName: "tester"},
-		Handler:    &commander.Handler{Backend: backend},
+		URL:            wsURL,
+		ProxyToken:     token,
+		Register:       commander.RegisterPayload{SchemaVersion: commander.SchemaVersion, Kind: "claude", DisplayName: "tester"},
+		Handler:        &commander.Handler{Backend: backend},
 		HeartbeatInt:   10 * time.Second,
 		InitialBackoff: 50 * time.Millisecond,
 		MaxBackoff:     50 * time.Millisecond,
@@ -114,6 +114,7 @@ func TestHTTP_TurnStreamsSSE(t *testing.T) {
 		lines = append(lines, sc.Text())
 	}
 	joined := strings.Join(lines, "\n")
+	require.Contains(t, joined, "event: status")
 	require.Contains(t, joined, "event: chunk")
 	require.Contains(t, joined, "hello")
 	require.Contains(t, joined, "event: done")
