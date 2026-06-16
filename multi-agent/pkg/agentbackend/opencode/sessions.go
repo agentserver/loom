@@ -125,8 +125,8 @@ func (b *Backend) ListSessions(ctx context.Context) ([]agentbackend.Session, err
 			UpdatedAt:    msToTime(r.updated),
 			MessageCount: counts[r.id],
 		}
-		if text := firstUser[r.id]; text != "" {
-			s.Title = titleFromUserText(text)
+		if title := firstUser[r.id]; title != "" {
+			s.Title = title
 		}
 		if text := lastAssistant[r.id]; text != "" {
 			s.Preview = truncatePreview(text)
@@ -288,7 +288,9 @@ func loadMessageTableAggregates(ctx context.Context, db *sql.DB) (map[string]int
 			lastAssistant[currentSession] = msg.Text
 		}
 		if msg.Role == "user" && firstUser[currentSession] == "" {
-			firstUser[currentSession] = msg.Text
+			if title := titleFromUserText(msg.Text); title != "" {
+				firstUser[currentSession] = title
+			}
 		}
 	}
 	for rows.Next() {
@@ -357,7 +359,9 @@ func loadSessionMessageAggregates(ctx context.Context, db *sql.DB, counts map[st
 			switch role {
 			case "user":
 				if firstUser[sid] == "" {
-					firstUser[sid] = text
+					if title := titleFromUserText(text); title != "" {
+						firstUser[sid] = title
+					}
 				}
 			case "assistant":
 				lastAssistant[sid] = text

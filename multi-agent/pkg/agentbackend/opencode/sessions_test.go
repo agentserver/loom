@@ -105,6 +105,9 @@ func TestGetSession_ReturnsMessages(t *testing.T) {
 	if sess.MessageCount != 4 {
 		t.Errorf("MessageCount=%d want 4", sess.MessageCount)
 	}
+	if sess.Title != "hello from a" {
+		t.Errorf("Title=%q want hello from a", sess.Title)
+	}
 	if sess.Preview != "final answer" {
 		t.Errorf("Preview=%q", sess.Preview)
 	}
@@ -195,6 +198,36 @@ func TestListSessions_MessageTableSchemaSetsPreview(t *testing.T) {
 		return
 	}
 	t.Fatalf("session %s not listed", id)
+}
+
+func TestListSessions_SkipsWhitespaceOnlyUserTextForTitle(t *testing.T) {
+	home := buildFixtureDB(t)
+	setTestHome(t, home)
+	sessionMessageID := addWhitespaceFirstUserSession(t, home)
+	messageTableID := addMessageTableWhitespaceFirstUserSession(t, home)
+
+	b := New(agentbackend.Config{Bin: "opencode", WorkDir: t.TempDir()}, nil)
+	got, err := b.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		sessionMessageID: "real prompt",
+		messageTableID:   "real message prompt",
+	}
+	for _, s := range got {
+		wantTitle, ok := want[s.ID]
+		if !ok {
+			continue
+		}
+		delete(want, s.ID)
+		if s.Title != wantTitle {
+			t.Fatalf("Title=%q want first non-empty normalized user prompt", s.Title)
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("sessions not listed: %v", want)
+	}
 }
 
 func setTestHome(t *testing.T, home string) {

@@ -128,6 +128,9 @@ func TestGetSession_ReturnsMessages(t *testing.T) {
 	if sess.MessageCount != 4 {
 		t.Errorf("MessageCount=%d want 4", sess.MessageCount)
 	}
+	if sess.Title != "sum 2 and 3" {
+		t.Errorf("Title=%q want sum 2 and 3", sess.Title)
+	}
 	if sess.Preview != "division by zero is undefined" {
 		t.Errorf("Preview=%q", sess.Preview)
 	}
