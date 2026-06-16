@@ -56,6 +56,7 @@ func (b *Backend) ListSessions(ctx context.Context) ([]agentbackend.Session, err
 	}
 
 	var out []agentbackend.Session
+	seen := map[string]struct{}{}
 	for _, projectDir := range projectDirs {
 		if err := ctx.Err(); err != nil {
 			return out, err
@@ -77,9 +78,18 @@ func (b *Backend) ListSessions(ctx context.Context) ([]agentbackend.Session, err
 				continue
 			}
 			id := strings.TrimSuffix(f.Name(), ".jsonl")
-			out = append(out, scanSession(filepath.Join(dirPath, f.Name()), id, cwd))
+			path := filepath.Join(dirPath, f.Name())
+			info, err := f.Info()
+			if err != nil {
+				continue
+			}
+			seen[path] = struct{}{}
+			out = append(out, b.list.Get(path, info, func() agentbackend.Session {
+				return scanSession(path, id, cwd)
+			}))
 		}
 	}
+	b.list.Prune(seen)
 	return out, nil
 }
 

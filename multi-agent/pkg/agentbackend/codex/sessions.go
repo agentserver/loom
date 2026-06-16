@@ -57,6 +57,7 @@ func (b *Backend) ListSessions(ctx context.Context) ([]agentbackend.Session, err
 	}
 
 	var out []agentbackend.Session
+	seen := map[string]struct{}{}
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return nil
@@ -71,13 +72,21 @@ func (b *Backend) ListSessions(ctx context.Context) ([]agentbackend.Session, err
 		if id == "" {
 			return nil
 		}
-		res := scanCodexSession(path, id, false)
-		out = append(out, res.session)
+		info, err := entry.Info()
+		if err != nil {
+			return nil
+		}
+		seen[path] = struct{}{}
+		session := b.list.Get(path, info, func() agentbackend.Session {
+			return scanCodexSession(path, id, false).session
+		})
+		out = append(out, session)
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
+	b.list.Prune(seen)
 	return out, nil
 }
 

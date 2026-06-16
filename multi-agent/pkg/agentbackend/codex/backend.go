@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/yourorg/multi-agent/internal/sessioncache"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
@@ -13,6 +14,7 @@ type Backend struct {
 	exec *executor
 	perm *Store
 	llm  *llmRunner
+	list *sessioncache.FileCache
 }
 
 // New returns a fully-assembled Codex Backend. (Replaces the throwaway
@@ -29,6 +31,7 @@ func New(cfg agentbackend.Config, env []string) *Backend {
 		exec: newExecutor(cfg, env),
 		perm: NewStore(cfg.WorkDir),
 		llm:  newLLM(cfg, env),
+		list: sessioncache.NewFileCache(),
 	}
 }
 
