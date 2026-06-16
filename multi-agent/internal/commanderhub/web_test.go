@@ -16,14 +16,16 @@ func TestWeb_CommanderPageAndAssets(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/commander")
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	require.Equal(t, "text/html; charset=utf-8", resp.Header.Get("Content-Type"))
-	body, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	require.NoError(t, err)
-	require.Contains(t, string(body), `id="root"`)
+	for _, path := range []string{"/commander", "/commander/"} {
+		resp, err := http.Get(srv.URL + path)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, resp.StatusCode, path)
+		require.Equal(t, "text/html; charset=utf-8", resp.Header.Get("Content-Type"), path)
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		require.NoError(t, err)
+		require.Contains(t, string(body), `id="root"`, path)
+	}
 
 	entries, err := os.ReadDir("assets/dist/assets")
 	require.NoError(t, err)
@@ -37,7 +39,7 @@ func TestWeb_CommanderPageAndAssets(t *testing.T) {
 	}
 	require.NotEmpty(t, assetName)
 
-	resp, err = http.Get(srv.URL + "/commander/assets/" + assetName)
+	resp, err := http.Get(srv.URL + "/commander/assets/" + assetName)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	resp.Body.Close()
