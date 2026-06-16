@@ -50,9 +50,21 @@ async function startLogin() {
     try {
       pr = await fetch("/api/commander/login/poll?id=" + encodeURIComponent(login_id), { credentials: "include" });
     } catch (e) { setTimeout(poll, 1500); return; }
-    if (pr.status === 401 || pr.status === 404) { showLogin(); return; } // failed/expired/gone
     let body = {};
     try { body = await pr.json(); } catch (e) {}
+    if (pr.status === 401 || pr.status === 404) {
+      auth.innerHTML = "";
+      const retry = document.createElement("button");
+      retry.textContent = "重新登录";
+      retry.onclick = startLogin;
+      auth.appendChild(retry);
+      const msg = document.createElement("p");
+      msg.className = "muted";
+      msg.textContent = body.error || "登录失败或已过期。";
+      app.innerHTML = "";
+      app.appendChild(msg);
+      return;
+    } // failed/expired/gone
     if (body.status === "ok") { await whoami(); return; }
     const s = document.getElementById("loginstatus"); if (s) s.textContent = "等待授权…";
     setTimeout(poll, 1500);
