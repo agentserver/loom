@@ -141,7 +141,7 @@ export function CommanderApp() {
   if (error) return <div className="login-shell">加载失败: {error}</div>;
   if (!tree) return <div className="login-shell">加载中</div>;
   return (
-    <div className="commander-shell">
+    <div className="commander-shell" data-testid="commander-shell">
       <DaemonSessionTree
         daemons={tree.daemons}
         selected={selected}

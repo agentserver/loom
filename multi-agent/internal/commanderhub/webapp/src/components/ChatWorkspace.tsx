@@ -43,7 +43,7 @@ export function ChatWorkspace({
   const disabled = ['queued', 'starting', 'answering', 'awaiting_approval'].includes(turnState);
 
   return (
-    <main className="chat-workspace">
+    <main className="chat-workspace" data-testid="chat-workspace">
       <header className="chat-header">
         <div>
           <h1>{title}</h1>

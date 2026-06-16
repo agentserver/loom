@@ -11,7 +11,7 @@ export function DaemonSessionTree({
   onSelect: (daemonID: string, sessionID: string) => void;
 }) {
   return (
-    <aside className="daemon-tree">
+    <aside className="daemon-tree" data-testid="daemon-tree">
       {daemons.map((daemon) => (
         <section className="daemon-group" key={daemon.daemon_id}>
           <div className={`daemon-row daemon-${daemon.status}`}>
