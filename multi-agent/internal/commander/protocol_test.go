@@ -242,15 +242,16 @@ func TestEnvelope_EventStreamingShape(t *testing.T) {
 // TestEnvelope_ErrorCodesEnumerated pins the spec's error codes so typos at
 // call sites fail tests instead of silently becoming protocol drift.
 func TestEnvelope_ErrorCodesEnumerated(t *testing.T) {
-	codes := []string{
-		ErrCodeSessionNotFound,
-		ErrCodeBackendUnavailable,
-		ErrCodeSchemaVersionMismatch,
-		ErrCodeInternal,
+	codes := map[string]string{
+		"session_not_found":       ErrCodeSessionNotFound,
+		"backend_unavailable":     ErrCodeBackendUnavailable,
+		"schema_version_mismatch": ErrCodeSchemaVersionMismatch,
+		"invalid_request":         ErrCodeInvalidRequest,
+		"internal":                ErrCodeInternal,
 	}
-	for _, c := range codes {
-		if c == "" {
-			t.Errorf("error code is empty string")
+	for want, got := range codes {
+		if got != want {
+			t.Errorf("error code=%q want %q", got, want)
 		}
 	}
 }

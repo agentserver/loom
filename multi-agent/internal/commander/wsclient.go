@@ -265,6 +265,10 @@ func (c *WSClient) dispatchCommand(ctx context.Context, env Envelope, write func
 			_ = write(errorEnvelope(env.ID, ErrCodeSessionNotFound, "session not found"))
 			return
 		}
+		if errors.Is(err, errFileRequest) {
+			_ = write(errorEnvelope(env.ID, ErrCodeInvalidRequest, err.Error()))
+			return
+		}
 		if err != nil {
 			_ = write(errorEnvelope(env.ID, ErrCodeBackendUnavailable, err.Error()))
 			return
@@ -281,6 +285,10 @@ func (c *WSClient) dispatchCommand(ctx context.Context, env Envelope, write func
 		result, err := c.cfg.Handler.ReadFile(ctx, args.ID, args.Path)
 		if errors.Is(err, agentbackend.ErrSessionNotFound) {
 			_ = write(errorEnvelope(env.ID, ErrCodeSessionNotFound, "session not found"))
+			return
+		}
+		if errors.Is(err, errFileRequest) {
+			_ = write(errorEnvelope(env.ID, ErrCodeInvalidRequest, err.Error()))
 			return
 		}
 		if err != nil {

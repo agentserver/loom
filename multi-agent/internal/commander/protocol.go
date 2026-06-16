@@ -114,5 +114,6 @@ const (
 	ErrCodeSessionNotFound       = "session_not_found"
 	ErrCodeBackendUnavailable    = "backend_unavailable"
 	ErrCodeSchemaVersionMismatch = "schema_version_mismatch"
+	ErrCodeInvalidRequest        = "invalid_request"
 	ErrCodeInternal              = "internal"
 )

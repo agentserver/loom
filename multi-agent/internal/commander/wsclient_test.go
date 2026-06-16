@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -360,6 +361,56 @@ func TestWSClient_DispatchesReadFile(t *testing.T) {
 	waitForCommandFrame(t, fo, "files-read-1", &got)
 	if got.Path != "README.md" || got.Content != "# hello\n" {
 		t.Fatalf("result=%+v want README.md content", got)
+	}
+}
+
+func TestWSClient_FileCommandPathErrorReturnsInvalidRequest(t *testing.T) {
+	root := t.TempDir()
+	got := dispatchFileCommandError(t, &fakeBackend{
+		getFn: func(context.Context, string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+			return agentbackend.Session{ID: "s1", WorkingDir: root}, nil, nil
+		},
+	}, "read_file", FileReadArgs{ID: "s1", Path: "../secret.txt"})
+
+	if got.Code != ErrCodeInvalidRequest || !strings.Contains(got.Message, "outside session root") {
+		t.Fatalf("error=%+v want invalid_request outside session root", got)
+	}
+}
+
+func TestWSClient_FileCommandMissingFileReturnsInvalidRequest(t *testing.T) {
+	root := t.TempDir()
+	got := dispatchFileCommandError(t, &fakeBackend{
+		getFn: func(context.Context, string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+			return agentbackend.Session{ID: "s1", WorkingDir: root}, nil, nil
+		},
+	}, "read_file", FileReadArgs{ID: "s1", Path: "missing.md"})
+
+	if got.Code != ErrCodeInvalidRequest || !strings.Contains(got.Message, "missing.md") {
+		t.Fatalf("error=%+v want invalid_request missing file", got)
+	}
+}
+
+func TestWSClient_FileCommandSessionNotFoundReturnsSessionNotFound(t *testing.T) {
+	got := dispatchFileCommandError(t, &fakeBackend{
+		getFn: func(context.Context, string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+			return agentbackend.Session{}, nil, agentbackend.ErrSessionNotFound
+		},
+	}, "list_files", FileListArgs{ID: "missing", Path: "."})
+
+	if got.Code != ErrCodeSessionNotFound {
+		t.Fatalf("error=%+v want session_not_found", got)
+	}
+}
+
+func TestWSClient_FileCommandBackendErrorReturnsBackendUnavailable(t *testing.T) {
+	got := dispatchFileCommandError(t, &fakeBackend{
+		getFn: func(context.Context, string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+			return agentbackend.Session{}, nil, errors.New("backend down")
+		},
+	}, "list_files", FileListArgs{ID: "s1", Path: "."})
+
+	if got.Code != ErrCodeBackendUnavailable || !strings.Contains(got.Message, "backend down") {
+		t.Fatalf("error=%+v want backend_unavailable backend down", got)
 	}
 }
 
@@ -862,6 +913,68 @@ func waitForCommandFrame(t *testing.T, fo *fakeObserver, id string, out any) {
 		}
 		return false
 	}, time.Second)
+}
+
+func dispatchFileCommandError(t *testing.T, backend *fakeBackend, command string, args any) ErrorPayload {
+	t.Helper()
+	fo := newFakeObserver(t)
+	fo.sendAck = true
+	srv := httptest.NewServer(fo.handler())
+	defer srv.Close()
+	c := NewWSClient(WSConfig{
+		URL:            observerWSURL(srv),
+		ProxyToken:     "t",
+		Register:       RegisterPayload{SchemaVersion: SchemaVersion, Kind: "codex"},
+		Handler:        &Handler{Backend: backend},
+		HeartbeatInt:   10 * time.Second,
+		InitialBackoff: 10 * time.Millisecond,
+		MaxBackoff:     50 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- c.Run(ctx) }()
+	defer func() {
+		cancel()
+		fo.closeAll()
+		<-errCh
+	}()
+
+	waitFor(t, c.Linked, time.Second)
+	id := fmt.Sprintf("%s-error", command)
+	if err := fo.Send(Envelope{
+		Type: "command",
+		ID:   id,
+		Payload: jsonRaw(t, CommandPayload{
+			Command: command,
+			Args:    jsonRaw(t, args),
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return waitForCommandError(t, fo, id)
+}
+
+func waitForCommandError(t *testing.T, fo *fakeObserver, id string) ErrorPayload {
+	t.Helper()
+	var got ErrorPayload
+	waitFor(t, func() bool {
+		for _, env := range fo.frames() {
+			if env.ID != id {
+				continue
+			}
+			switch env.Type {
+			case "error":
+				if err := json.Unmarshal(env.Payload, &got); err != nil {
+					t.Fatalf("error payload=%s unmarshal: %v", string(env.Payload), err)
+				}
+				return true
+			case "command_result":
+				t.Fatalf("command %s returned result %s, want error", id, string(env.Payload))
+			}
+		}
+		return false
+	}, time.Second)
+	return got
 }
 
 func waitFor(t *testing.T, cond func() bool, timeout time.Duration) {

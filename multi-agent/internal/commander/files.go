@@ -15,7 +15,10 @@ import (
 	"unicode/utf8"
 )
 
-var errPathOutsideRoot = errors.New("path outside session root")
+var (
+	errFileRequest     = errors.New("commander: invalid file request")
+	errPathOutsideRoot = errors.New("path outside session root")
+)
 
 // ListFiles returns a lazy, non-recursive listing rooted at the session cwd.
 func (h *Handler) ListFiles(ctx context.Context, sessionID, rel string) (FileListResult, error) {
@@ -28,7 +31,7 @@ func (h *Handler) ListFiles(ctx context.Context, sessionID, rel string) (FileLis
 	}
 	entries, err := os.ReadDir(target)
 	if err != nil {
-		return FileListResult{}, err
+		return FileListResult{}, fileRequestError(err)
 	}
 
 	out := FileListResult{Root: root, Path: cleanRel, Entries: make([]FileEntry, 0, len(entries))}
@@ -38,7 +41,7 @@ func (h *Handler) ListFiles(ctx context.Context, sessionID, rel string) (FileLis
 		}
 		info, err := entry.Info()
 		if err != nil {
-			continue
+			return FileListResult{}, fileRequestError(err)
 		}
 		kind := "file"
 		if entry.IsDir() {
@@ -81,23 +84,23 @@ func (h *Handler) ReadFile(ctx context.Context, sessionID, rel string) (FileRead
 	}
 	info, err := os.Stat(target)
 	if err != nil {
-		return FileReadResult{}, err
+		return FileReadResult{}, fileRequestError(err)
 	}
 	if err := rejectNonPreviewFile(info, cleanRel); err != nil {
-		return FileReadResult{}, err
+		return FileReadResult{}, fileRequestError(err)
 	}
 
 	f, err := os.Open(target)
 	if err != nil {
-		return FileReadResult{}, err
+		return FileReadResult{}, fileRequestError(err)
 	}
 	defer f.Close()
 	info, err = f.Stat()
 	if err != nil {
-		return FileReadResult{}, err
+		return FileReadResult{}, fileRequestError(err)
 	}
 	if err := rejectNonPreviewFile(info, cleanRel); err != nil {
-		return FileReadResult{}, err
+		return FileReadResult{}, fileRequestError(err)
 	}
 	res := FileReadResult{Path: cleanRel, Size: info.Size()}
 	if err := ctx.Err(); err != nil {
@@ -105,7 +108,7 @@ func (h *Handler) ReadFile(ctx context.Context, sessionID, rel string) (FileRead
 	}
 	body, err := io.ReadAll(io.LimitReader(f, MaxFilePreviewBytes+1))
 	if err != nil {
-		return FileReadResult{}, err
+		return FileReadResult{}, fileRequestError(err)
 	}
 	observed := int64(len(body))
 	if observed > res.Size {
@@ -147,12 +150,12 @@ func (h *Handler) sessionFileTarget(ctx context.Context, sessionID, rel string) 
 		return "", "", "", err
 	}
 	if sess.WorkingDir == "" {
-		return "", "", "", errors.New("session working directory unknown")
+		return "", "", "", fileRequestError(errors.New("session working directory unknown"))
 	}
 
 	cleanRel = filepath.Clean(filepath.FromSlash(rel))
 	if filepath.IsAbs(cleanRel) {
-		return "", "", "", errPathOutsideRoot
+		return "", "", "", fileRequestError(errPathOutsideRoot)
 	}
 	if cleanRel == "" {
 		cleanRel = "."
@@ -160,14 +163,14 @@ func (h *Handler) sessionFileTarget(ctx context.Context, sessionID, rel string) 
 
 	root, err = filepath.Abs(sess.WorkingDir)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", fileRequestError(err)
 	}
 	target, err = filepath.Abs(filepath.Join(root, cleanRel))
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", fileRequestError(err)
 	}
 	if !pathWithinRoot(root, target) {
-		return "", "", "", errPathOutsideRoot
+		return "", "", "", fileRequestError(errPathOutsideRoot)
 	}
 
 	// EvalSymlinks gives static containment before opening. Closing
@@ -175,16 +178,42 @@ func (h *Handler) sessionFileTarget(ctx context.Context, sessionID, rel string) 
 	// containment, which is outside this cross-platform helper's current scope.
 	realRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", fileRequestError(err)
 	}
 	realTarget, err := filepath.EvalSymlinks(target)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", fileRequestError(err)
 	}
 	if !pathWithinRoot(realRoot, realTarget) {
-		return "", "", "", errPathOutsideRoot
+		return "", "", "", fileRequestError(errPathOutsideRoot)
 	}
 	return root, target, filepath.ToSlash(cleanRel), nil
+}
+
+func fileRequestError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errFileRequest) {
+		return err
+	}
+	return fileRequestWrap{err: err}
+}
+
+type fileRequestWrap struct {
+	err error
+}
+
+func (e fileRequestWrap) Error() string {
+	return e.err.Error()
+}
+
+func (e fileRequestWrap) Unwrap() error {
+	return e.err
+}
+
+func (e fileRequestWrap) Is(target error) bool {
+	return target == errFileRequest
 }
 
 func pathWithinRoot(root, target string) bool {
