@@ -130,6 +130,16 @@ func (h *Hub) SendCommandStream(ctx context.Context, o owner, daemonID, command 
 	return out, nil
 }
 
+func (h *Hub) ListFiles(ctx context.Context, o owner, daemonID, sessionID, path string) (json.RawMessage, error) {
+	args, _ := json.Marshal(commander.FileListArgs{ID: sessionID, Path: path})
+	return h.SendCommand(ctx, o, daemonID, "list_files", args)
+}
+
+func (h *Hub) ReadFile(ctx context.Context, o owner, daemonID, sessionID, path string) (json.RawMessage, error) {
+	args, _ := json.Marshal(commander.FileReadArgs{ID: sessionID, Path: path})
+	return h.SendCommand(ctx, o, daemonID, "read_file", args)
+}
+
 // DaemonSessions is one row of the fan-out GET /sessions result.
 type DaemonSessions struct {
 	DaemonID    string           `json:"daemon_id"`
