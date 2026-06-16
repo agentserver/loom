@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -150,15 +151,17 @@ func TestAuth_LogoutClearsSession(t *testing.T) {
 	require.False(t, ok)
 }
 
-// blockingDeviceFlow is a fakeDeviceFlow whose PollToken blocks until its
-// context is cancelled (simulating a login that is never approved and never
-// polled to terminal). RequestCode hands out a short ExpiresIn so the pollLogin
-// goroutines self-terminate quickly after the test asserts — no goroutine leak.
-type blockingDeviceFlow struct {
-	expiresIn time.Duration
+// countingDeviceFlow wraps a blockingDeviceFlow and COUNTS RequestCode calls.
+// This proves the cap GATES the agentserver call (not just the local map): if
+// ServeLogin called RequestCode before the cap check, the counter would equal
+// the number of requests; with the slot reserved first, it is capped.
+type countingDeviceFlow struct {
+	expiresIn     time.Duration
+	requestCodeN  int32 // atomic
 }
 
-func (f blockingDeviceFlow) RequestCode(context.Context) (DeviceCode, error) {
+func (f *countingDeviceFlow) RequestCode(context.Context) (DeviceCode, error) {
+	atomic.AddInt32(&f.requestCodeN, 1)
 	return DeviceCode{
 		Code:                    "dc",
 		VerificationURIComplete: "https://agent/verify?user_code=XX",
@@ -166,22 +169,27 @@ func (f blockingDeviceFlow) RequestCode(context.Context) (DeviceCode, error) {
 	}, nil
 }
 
-func (blockingDeviceFlow) PollToken(ctx context.Context, _ DeviceCode) (string, error) {
+func (f *countingDeviceFlow) PollToken(ctx context.Context, _ DeviceCode) (string, error) {
 	<-ctx.Done()
 	return "", ctx.Err()
 }
 
 // TestAuth_LoginCapsPendingLogins: hammering the unauthenticated POST /login
-// without ever polling must not grow the logins map without bound. Calls beyond
-// maxPendingLogins return 429, and len(logins) never exceeds the cap.
+// without ever polling must (a) call RequestCode at most maxPendingLogins times
+// — i.e. the cap GATES the agentserver call, not just the local map — (b) never
+// grow the logins map beyond the cap, and (c) reject overflow requests with 429.
+//
+// Regression: the pre-fix code called RequestCode before the cap check, so the
+// counter hit maxPendingLogins+N (unbounded upstream amplification).
 func TestAuth_LoginCapsPendingLogins(t *testing.T) {
 	resolver := &fakeResolver{mu: map[string]identity.Identity{
 		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
 	}}
 	// Short ExpiresIn: pollLogin's PollToken ctx times out → goroutines exit.
-	a := newAuth(t, resolver, blockingDeviceFlow{expiresIn: 50 * time.Millisecond})
+	flow := &countingDeviceFlow{expiresIn: 50 * time.Millisecond}
+	a := newAuth(t, resolver, flow)
 
-	total := maxPendingLogins + 5
+	total := maxPendingLogins + 10
 	var four29s int
 	for i := 0; i < total; i++ {
 		req := httptest.NewRequest(http.MethodPost, "/api/commander/login", nil)
@@ -202,7 +210,13 @@ func TestAuth_LoginCapsPendingLogins(t *testing.T) {
 	}
 
 	// Exactly the overflow calls beyond the cap were rejected.
-	require.Equal(t, 5, four29s, "calls beyond maxPendingLogins should be rejected with 429")
+	require.Equal(t, 10, four29s, "calls beyond maxPendingLogins should be rejected with 429")
 	final := len(a.logins)
 	require.Equal(t, maxPendingLogins, final, "map should be exactly at the cap")
+
+	// The cap must GATE the agentserver RequestCode call: at most
+	// maxPendingLogins calls, never one per request.
+	n := atomic.LoadInt32(&flow.requestCodeN)
+	require.LessOrEqualf(t, int(n), maxPendingLogins,
+		"RequestCode was called %d times; the cap must gate it at %d", n, maxPendingLogins)
 }
