@@ -2,6 +2,7 @@ package commander
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 )
 
@@ -48,7 +49,7 @@ func TestEnvelope_RegisterCarriesCapabilities(t *testing.T) {
 		Payload: mustMarshal(t, RegisterPayload{
 			SchemaVersion: SchemaVersion,
 			Kind:          "codex",
-			Capabilities:  []string{"sessions", "turn", "files"},
+			Capabilities:  []string{CapabilitySessions, CapabilityTurn, CapabilityFiles},
 		}),
 	}
 	b, _ := json.Marshal(in)
@@ -60,8 +61,9 @@ func TestEnvelope_RegisterCarriesCapabilities(t *testing.T) {
 	if err := json.Unmarshal(out.Payload, &pl); err != nil {
 		t.Fatal(err)
 	}
-	if len(pl.Capabilities) != 3 || pl.Capabilities[2] != "files" {
-		t.Fatalf("capabilities=%v", pl.Capabilities)
+	want := []string{CapabilitySessions, CapabilityTurn, CapabilityFiles}
+	if !slices.Equal(pl.Capabilities, want) {
+		t.Fatalf("capabilities=%v want %v", pl.Capabilities, want)
 	}
 }
 
@@ -120,6 +122,78 @@ func TestEnvelope_FileCommandsRoundTrip(t *testing.T) {
 		if cp.Command != name {
 			t.Fatalf("command=%q want %q", cp.Command, name)
 		}
+		switch name {
+		case "list_files":
+			var got FileListArgs
+			if err := json.Unmarshal(cp.Args, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got != listArgs {
+				t.Fatalf("list args=%+v want %+v", got, listArgs)
+			}
+			assertJSONKeys(t, cp.Args, "id", "path")
+		case "read_file":
+			var got FileReadArgs
+			if err := json.Unmarshal(cp.Args, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got != readArgs {
+				t.Fatalf("read args=%+v want %+v", got, readArgs)
+			}
+			assertJSONKeys(t, cp.Args, "id", "path")
+		}
+	}
+
+	listResult := FileListResult{
+		Root: "/repo",
+		Path: "internal",
+		Entries: []FileEntry{{
+			Name:    "protocol.go",
+			Path:    "internal/commander/protocol.go",
+			Kind:    "file",
+			Size:    123,
+			ModTime: "2026-06-16T10:00:00Z",
+		}},
+	}
+	listResultJSON := mustMarshal(t, listResult)
+	assertJSONKeys(t, listResultJSON, "root", "path", "entries")
+	var listResultBody struct {
+		Entries []json.RawMessage `json:"entries"`
+	}
+	if err := json.Unmarshal(listResultJSON, &listResultBody); err != nil {
+		t.Fatal(err)
+	}
+	if len(listResultBody.Entries) != 1 {
+		t.Fatalf("entries len=%d want 1", len(listResultBody.Entries))
+	}
+	assertJSONKeys(t, listResultBody.Entries[0], "name", "path", "kind", "size", "mod_time")
+	var gotListResult FileListResult
+	if err := json.Unmarshal(listResultJSON, &gotListResult); err != nil {
+		t.Fatal(err)
+	}
+	if gotListResult.Root != listResult.Root ||
+		gotListResult.Path != listResult.Path ||
+		len(gotListResult.Entries) != 1 ||
+		gotListResult.Entries[0] != listResult.Entries[0] {
+		t.Fatalf("list result=%+v want %+v", gotListResult, listResult)
+	}
+
+	readResult := FileReadResult{
+		Path:     "go.mod",
+		Size:     456,
+		MIME:     "text/plain; charset=utf-8",
+		Binary:   true,
+		TooLarge: true,
+		Content:  "module github.com/yourorg/multi-agent",
+	}
+	readResultJSON := mustMarshal(t, readResult)
+	assertJSONKeys(t, readResultJSON, "path", "size", "mime", "binary", "too_large", "content")
+	var gotReadResult FileReadResult
+	if err := json.Unmarshal(readResultJSON, &gotReadResult); err != nil {
+		t.Fatal(err)
+	}
+	if gotReadResult != readResult {
+		t.Fatalf("read result=%+v want %+v", gotReadResult, readResult)
 	}
 }
 
@@ -172,6 +246,9 @@ func TestSchemaVersion_IsOne(t *testing.T) {
 	if SchemaVersion != 1 {
 		t.Fatalf("SchemaVersion=%d want 1", SchemaVersion)
 	}
+	if MaxFilePreviewBytes != 2*1024*1024 {
+		t.Fatalf("MaxFilePreviewBytes=%d want %d", MaxFilePreviewBytes, 2*1024*1024)
+	}
 }
 
 func mustMarshal(t *testing.T, v any) json.RawMessage {
@@ -181,4 +258,29 @@ func mustMarshal(t *testing.T, v any) json.RawMessage {
 		t.Fatal(err)
 	}
 	return b
+}
+
+func assertJSONKeys(t *testing.T, b []byte, wantKeys ...string) {
+	t.Helper()
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range wantKeys {
+		if _, ok := got[key]; !ok {
+			t.Fatalf("json keys=%v missing %q", keys(got), key)
+		}
+	}
+	if len(got) != len(wantKeys) {
+		t.Fatalf("json keys=%v want %v", keys(got), wantKeys)
+	}
+}
+
+func keys(m map[string]json.RawMessage) []string {
+	out := make([]string, 0, len(m))
+	for key := range m {
+		out = append(out, key)
+	}
+	slices.Sort(out)
+	return out
 }
