@@ -56,3 +56,31 @@ func main() {
 		t.Fatalf("resume cwd=%q want session WorkingDir %q (config WorkDir was %q)", got, sessionDir, configDir)
 	}
 }
+
+func TestSessionWorkingDirUsesProjectDirectory(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	sessionDir := t.TempDir()
+
+	id := "resume-cwd-metadata-only"
+	encodedCwd := strings.ReplaceAll(sessionDir, string(filepath.Separator), "-")
+	sessionRoot := filepath.Join(home, ".claude", "projects", encodedCwd)
+	if err := os.MkdirAll(sessionRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionRoot, id+".jsonl"), []byte("not parsed by cwd lookup\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	b := New(agentbackend.Config{Bin: "claude", WorkDir: t.TempDir()}, nil)
+	got, ok, err := b.sessionWorkingDir(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("sessionWorkingDir did not find session")
+	}
+	if got != sessionDir {
+		t.Fatalf("sessionWorkingDir=%q want %q", got, sessionDir)
+	}
+}

@@ -181,6 +181,27 @@ func (b *Backend) GetSession(ctx context.Context, id string) (agentbackend.Sessi
 	return sess, msgs, nil
 }
 
+func (b *Backend) sessionWorkingDir(ctx context.Context, id string) (string, bool, error) {
+	db, err := openDB()
+	if err != nil {
+		return "", false, err
+	}
+	if db == nil {
+		return "", false, nil
+	}
+	defer db.Close()
+
+	var dir string
+	err = db.QueryRowContext(ctx, `SELECT directory FROM session WHERE id = ?`, id).Scan(&dir)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return dir, true, nil
+}
+
 type messageAccumulator struct {
 	id    string
 	role  string

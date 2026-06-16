@@ -128,6 +128,43 @@ func (b *Backend) GetSession(ctx context.Context, id string) (agentbackend.Sessi
 	return res.session, res.messages, nil
 }
 
+func (b *Backend) sessionWorkingDir(ctx context.Context, id string) (string, bool, error) {
+	root := sessionsRoot()
+	if root == "" {
+		return "", false, nil
+	}
+	if _, err := os.Stat(root); errors.Is(err, fs.ErrNotExist) {
+		return "", false, nil
+	} else if err != nil {
+		return "", false, err
+	}
+
+	var found string
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			return nil
+		}
+		if sessionIDFromFilename(entry.Name()) == id {
+			found = path
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if err != nil {
+		return "", false, err
+	}
+	if found == "" {
+		return "", false, nil
+	}
+	return scanCodexSessionWorkingDir(found), true, nil
+}
+
 type codexScanResult struct {
 	session  agentbackend.Session
 	messages []agentbackend.SessionMessage
@@ -224,6 +261,32 @@ func scanCodexSession(path, fallbackID string, withMessages bool) codexScanResul
 		res.session.Preview = truncatePreview(lastAssistantText)
 	}
 	return res
+}
+
+func scanCodexSessionWorkingDir(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for sc.Scan() {
+		var ln codexLine
+		if err := json.Unmarshal(sc.Bytes(), &ln); err != nil {
+			continue
+		}
+		if ln.Type != "session_meta" {
+			continue
+		}
+		var p codexMetaPayload
+		if err := json.Unmarshal(ln.Payload, &p); err != nil {
+			return ""
+		}
+		return p.Cwd
+	}
+	return ""
 }
 
 func (r *codexScanResult) addMessage(role, text string, ts time.Time, withMessages bool) {

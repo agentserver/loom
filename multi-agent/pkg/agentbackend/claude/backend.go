@@ -2,7 +2,6 @@ package claude
 
 import (
 	"context"
-	"errors"
 
 	"github.com/yourorg/multi-agent/internal/sessioncache"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
@@ -60,17 +59,14 @@ func (b *Backend) Permissions() agentbackend.PermissionsStore { return b.perm }
 func (b *Backend) Detect(ctx context.Context) error { return detect(ctx, b.cfg.Bin) }
 
 func (b *Backend) resumeWorkDir(ctx context.Context, sessionID string) (string, error) {
-	sess, _, err := b.GetSession(ctx, sessionID)
-	if err == nil {
-		if sess.WorkingDir != "" {
-			return sess.WorkingDir, nil
-		}
+	workDir, ok, err := b.sessionWorkingDir(ctx, sessionID)
+	if err != nil {
+		return "", err
+	}
+	if !ok || workDir == "" {
 		return b.cfg.WorkDir, nil
 	}
-	if errors.Is(err, agentbackend.ErrSessionNotFound) {
-		return b.cfg.WorkDir, nil
-	}
-	return "", err
+	return workDir, nil
 }
 
 func (b *Backend) executorForWorkDir(workDir string) *executor {
