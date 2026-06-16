@@ -97,11 +97,13 @@ func TestListSessions_ReturnsKnownSessions(t *testing.T) {
 		"bbbb2222-cccc-3333-dddd-444444444444": false,
 		"cccc3333-dddd-4444-eeee-555555555555": false,
 	}
+	gotByID := map[string]agentbackend.Session{}
 	for _, s := range got {
 		if _, ok := want[s.ID]; !ok {
 			t.Errorf("unexpected session id %q", s.ID)
 		}
 		want[s.ID] = true
+		gotByID[s.ID] = s
 		if s.Kind != agentbackend.KindClaude {
 			t.Errorf("session %s: kind=%v want claude", s.ID, s.Kind)
 		}
@@ -113,6 +115,9 @@ func TestListSessions_ReturnsKnownSessions(t *testing.T) {
 		if !found {
 			t.Errorf("missing session %s", id)
 		}
+	}
+	if gotByID["aaaa1111-bbbb-2222-cccc-333333333333"].Title != "hello, claude" {
+		t.Fatalf("Title=%q want first user prompt", gotByID["aaaa1111-bbbb-2222-cccc-333333333333"].Title)
 	}
 }
 

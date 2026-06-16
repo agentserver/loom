@@ -227,6 +227,9 @@ func loadSessionImpl(path, id, cwd string, withMessages bool) (agentbackend.Sess
 			sess.UpdatedAt = ts
 		}
 		sess.MessageCount++
+		if ln.Message.Role == "user" && sess.Title == "" {
+			sess.Title = titleFromUserText(text)
+		}
 		if ln.Message.Role == "assistant" {
 			lastAssistantText = text
 		}
@@ -288,4 +291,15 @@ func truncatePreview(s string) string {
 		end--
 	}
 	return s[:end]
+}
+
+func titleFromUserText(s string) string {
+	s = strings.TrimSpace(strings.Join(strings.Fields(s), " "))
+	if s == "" {
+		return ""
+	}
+	if len(s) <= agentbackend.SessionPreviewMaxBytes {
+		return s
+	}
+	return truncatePreview(s)
 }

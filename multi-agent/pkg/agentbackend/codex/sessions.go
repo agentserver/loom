@@ -238,6 +238,9 @@ func scanCodexSession(path, fallbackID string, withMessages bool) codexScanResul
 			if text == "" {
 				continue
 			}
+			if res.session.Title == "" {
+				res.session.Title = titleFromUserText(text)
+			}
 			res.addMessage("user", text, ts, withMessages)
 		case "model_output":
 			text := codexPayloadText(ln.Payload)
@@ -250,6 +253,9 @@ func scanCodexSession(path, fallbackID string, withMessages bool) codexScanResul
 			role, text, ok := codexResponseItemMessage(ln.Payload)
 			if !ok {
 				continue
+			}
+			if role == "user" && res.session.Title == "" {
+				res.session.Title = titleFromUserText(text)
 			}
 			res.addMessage(role, text, ts, withMessages)
 			if role == "assistant" {
@@ -358,4 +364,15 @@ func truncatePreview(s string) string {
 		end--
 	}
 	return s[:end]
+}
+
+func titleFromUserText(s string) string {
+	s = strings.TrimSpace(strings.Join(strings.Fields(s), " "))
+	if s == "" {
+		return ""
+	}
+	if len(s) <= agentbackend.SessionPreviewMaxBytes {
+		return s
+	}
+	return truncatePreview(s)
 }
