@@ -3,6 +3,17 @@
 const app = document.getElementById("app");
 const auth = document.getElementById("auth");
 
+let viewGeneration = 0;
+
+function beginView() {
+  viewGeneration += 1;
+  return viewGeneration;
+}
+
+function isCurrentView(view) {
+  return view === viewGeneration;
+}
+
 async function api(path, opts = {}) {
   const res = await fetch(path, { credentials: "include", ...opts });
   if (res.status === 401) { showLogin(); throw new Error("unauthorized"); }
@@ -10,6 +21,7 @@ async function api(path, opts = {}) {
 }
 
 function showLogin() {
+  beginView();
   auth.innerHTML = "";
   const btn = document.createElement("button");
   btn.textContent = "用 agentserver 登录";
@@ -19,14 +31,17 @@ function showLogin() {
 }
 
 async function startLogin() {
+  const view = beginView();
   auth.innerHTML = '<button disabled>用 agentserver 登录…</button>';
   app.innerHTML = '<p>正在向 agentserver 请求登录码…</p>';
   let r;
   try {
     r = await fetch("/api/commander/login", { method: "POST", credentials: "include" });
   } catch (e) { app.innerHTML = '<p class="muted">请求失败,请重试。</p>'; showLogin(); return; }
+  if (!isCurrentView(view)) return;
   if (!r.ok) { app.innerHTML = '<p class="muted">请求登录失败 (HTTP ' + r.status + '),请稍后重试。</p>'; showLogin(); return; }
   const { verification_uri_complete, login_id } = await r.json();
+  if (!isCurrentView(view)) return;
 
   // Show the authorize URL on the page (popup-blocker safe) + a status line.
   // Link built with createElement/textContent so the agentserver URL can't inject markup.
@@ -46,12 +61,15 @@ async function startLogin() {
   // Raw fetch (not api()) so a 401/404 during polling just returns to the login
   // button instead of throwing through api()'s handler.
   const poll = async () => {
+    if (!isCurrentView(view)) return;
     let pr;
     try {
       pr = await fetch("/api/commander/login/poll?id=" + encodeURIComponent(login_id), { credentials: "include" });
     } catch (e) { setTimeout(poll, 1500); return; }
+    if (!isCurrentView(view)) return;
     let body = {};
     try { body = await pr.json(); } catch (e) {}
+    if (!isCurrentView(view)) return;
     if (pr.status === 401 || pr.status === 404) {
       auth.innerHTML = "";
       const retry = document.createElement("button");
@@ -82,8 +100,11 @@ async function whoami() {
 }
 
 async function showDaemons() {
+  const view = beginView();
   const r = await api("/api/commander/daemons");
+  if (!isCurrentView(view)) return;
   const { daemons } = await r.json();
+  if (!isCurrentView(view)) return;
   app.innerHTML = '<h2>daemons</h2><ul class="daemons"></ul>';
   const ul = app.querySelector("ul.daemons");
   if (!daemons || daemons.length === 0) {
@@ -99,8 +120,11 @@ async function showDaemons() {
 }
 
 async function showSessions(daemonID, name) {
+  const view = beginView();
   const r = await api(`/api/commander/daemons/${daemonID}/sessions`);
+  if (!isCurrentView(view)) return;
   const { sessions } = await r.json();
+  if (!isCurrentView(view)) return;
   // Static shell only (no untrusted interpolation); the daemon-controlled
   // display_name is set via textContent below to avoid DOM XSS.
   app.innerHTML = `<h2><span class="daemon-name"></span> · sessions</h2><button id="back">← daemons</button><ul class="sessions"></ul>`;
@@ -119,8 +143,11 @@ async function showSessions(daemonID, name) {
 }
 
 async function showChat(daemonID, sid) {
+  const view = beginView();
   const r = await api(`/api/commander/daemons/${daemonID}/sessions/${sid}`);
+  if (!isCurrentView(view)) return;
   const { session, messages } = await r.json();
+  if (!isCurrentView(view)) return;
   // Static shell only (no untrusted interpolation); the session-controlled ID
   // is set via textContent below to avoid DOM XSS.
   app.innerHTML = `<h2><span class="session-id"></span></h2>
