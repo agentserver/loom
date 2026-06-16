@@ -255,6 +255,29 @@ func TestWriteSendCmdErrorInvalidRequestMaps400(t *testing.T) {
 	require.Contains(t, rec.Body.String(), "bad path")
 }
 
+func TestHTTP_FileRouteInvalidRequestMaps400(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "inside.txt"), []byte("ok\n"), 0644))
+	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
+	srv, hub, _, o, cookie, cleanup := commanderSetup(t, resolver, "tok-alice", &tbBackend{
+		getFn: func(context.Context, string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+			return agentbackend.Session{ID: "s1", WorkingDir: root}, nil, nil
+		},
+	})
+	defer cleanup()
+
+	daemonID := hub.reg.daemons(o)[0].DaemonID
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/commander/daemons/"+daemonID+"/sessions/s1/files/content?path=../secret.txt", nil)
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	body, _ := io.ReadAll(resp.Body)
+	require.Contains(t, string(body), "outside session root")
+}
+
 // TestHTTP_TurnStreamsSSE: POST .../turn returns text/event-stream with chunk
 // events and a terminal done event. daemonID is read from the hub registry.
 func TestHTTP_TurnStreamsSSE(t *testing.T) {
