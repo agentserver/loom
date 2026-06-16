@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/yourorg/multi-agent/internal/commander"
 )
 
 func TestRegistry_AddLookupRemove(t *testing.T) {
@@ -43,6 +45,22 @@ func TestRegistry_DaemonsSnapshot(t *testing.T) {
 
 	// 别人的 owner 快照为空
 	require.Empty(t, r.daemons(owner{userID: "bob", workspaceID: "W1"}))
+}
+
+func TestRegistryDaemonInfoIncludesCapabilities(t *testing.T) {
+	r := newRegistry()
+	o := owner{userID: "alice", workspaceID: "W1"}
+	r.add(&daemonConn{
+		id:           "d1",
+		owner:        o,
+		displayName:  "prod-codex",
+		kind:         "codex",
+		capabilities: map[string]bool{commander.CapabilityFiles: true},
+	})
+
+	got := r.daemons(o)
+	require.Len(t, got, 1)
+	require.Contains(t, got[0].Capabilities, commander.CapabilityFiles)
 }
 
 func TestRegistry_RemoveCleansEmptyOwner(t *testing.T) {

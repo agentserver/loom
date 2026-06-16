@@ -107,6 +107,20 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	dc.displayName = rp.DisplayName
 	dc.kind = rp.Kind
 	dc.driverVersion = rp.DriverVersion
+	capabilities := map[string]bool{
+		commander.CapabilitySessions: true,
+		commander.CapabilityTurn:     true,
+	}
+	for _, capability := range rp.Capabilities {
+		capability = strings.TrimSpace(capability)
+		if capability != "" {
+			capabilities[capability] = true
+		}
+	}
+	dc.metaMu.Lock()
+	dc.capabilities = capabilities
+	dc.lastSeenAt = time.Now().UTC()
+	dc.metaMu.Unlock()
 
 	h.reg.add(dc)
 	defer h.reg.remove(o, dc.id)
@@ -208,7 +222,11 @@ func (dc *daemonConn) readLoop() {
 		}
 		// A successful read means the peer is alive; push the read deadline
 		// out. A failed SetReadDeadline here is harmless (conn already closing).
-		_ = dc.conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
+		now := time.Now()
+		dc.metaMu.Lock()
+		dc.lastSeenAt = now.UTC()
+		dc.metaMu.Unlock()
+		_ = dc.conn.SetReadDeadline(now.Add(wsReadTimeout))
 		dc.routeFrame(env)
 	}
 }

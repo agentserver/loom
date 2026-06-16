@@ -5,7 +5,9 @@
 package commanderhub
 
 import (
+	"sort"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -19,10 +21,15 @@ type owner struct {
 
 // DaemonInfo is the JSON snapshot of an online daemon, returned to the web.
 type DaemonInfo struct {
-	DaemonID      string `json:"daemon_id"`
-	DisplayName   string `json:"display_name"`
-	Kind          string `json:"kind"`
-	DriverVersion string `json:"driver_version"`
+	DaemonID      string   `json:"daemon_id"`
+	DisplayName   string   `json:"display_name"`
+	Kind          string   `json:"kind"`
+	DriverVersion string   `json:"driver_version"`
+	Capabilities  []string `json:"capabilities,omitempty"`
+	LastSeenAt    string   `json:"last_seen_at,omitempty"`
+	SessionCount  int      `json:"session_count,omitempty"`
+	ActiveCount   int      `json:"active_count,omitempty"`
+	TurnCount     int      `json:"turn_count,omitempty"`
 }
 
 // daemonConn is one live daemon WebSocket link. Defined here (not hub.go) so
@@ -35,6 +42,10 @@ type daemonConn struct {
 	kind          string
 	driverVersion string
 
+	metaMu       sync.Mutex
+	capabilities map[string]bool
+	lastSeenAt   time.Time
+
 	conn      *websocket.Conn
 	writeMu   sync.Mutex // serializes conn.WriteJSON / WriteControl
 	pendingMu sync.Mutex // guards pending map
@@ -44,11 +55,27 @@ type daemonConn struct {
 }
 
 func (dc *daemonConn) info() DaemonInfo {
+	dc.metaMu.Lock()
+	capabilities := make([]string, 0, len(dc.capabilities))
+	for capability, enabled := range dc.capabilities {
+		if enabled {
+			capabilities = append(capabilities, capability)
+		}
+	}
+	sort.Strings(capabilities)
+	lastSeenAt := ""
+	if !dc.lastSeenAt.IsZero() {
+		lastSeenAt = dc.lastSeenAt.UTC().Format(time.RFC3339Nano)
+	}
+	dc.metaMu.Unlock()
+
 	return DaemonInfo{
 		DaemonID:      dc.id,
 		DisplayName:   dc.displayName,
 		Kind:          dc.kind,
 		DriverVersion: dc.driverVersion,
+		Capabilities:  capabilities,
+		LastSeenAt:    lastSeenAt,
 	}
 }
 
@@ -96,10 +123,15 @@ func (r *registry) lookup(o owner, daemonID string) (*daemonConn, bool) {
 
 func (r *registry) daemons(o owner) []DaemonInfo {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	m := r.conns[o]
-	out := make([]DaemonInfo, 0, len(m))
+	conns := make([]*daemonConn, 0, len(m))
 	for _, dc := range m {
+		conns = append(conns, dc)
+	}
+	r.mu.Unlock()
+
+	out := make([]DaemonInfo, 0, len(conns))
+	for _, dc := range conns {
 		out = append(out, dc.info())
 	}
 	return out
