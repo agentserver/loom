@@ -162,16 +162,20 @@ func (ch *commanderHandlers) turn(w http.ResponseWriter, r *http.Request, daemon
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return
 	}
+	if _, ok := ch.hub.reg.lookup(o, daemonID); !ok {
+		http.NotFound(w, r)
+		return
+	}
 	key := turnKey{owner: o, daemonID: daemonID, sessionID: sid}
 	if !ch.hub.turns.begin(key) {
 		http.Error(w, "turn already in flight", http.StatusConflict)
 		return
 	}
 	args, _ := json.Marshal(commander.SessionTurnArgs{ID: sid, Prompt: body.Prompt})
-	ctx, cancel := context.WithTimeout(r.Context(), ch.hub.TurnTimeout)
+	turnCtx, cancel := context.WithTimeout(context.Background(), ch.hub.TurnTimeout)
 	defer cancel()
 
-	chunkCh, err := ch.hub.SendCommandStream(ctx, o, daemonID, "session_turn", args)
+	chunkCh, err := ch.hub.SendCommandStream(turnCtx, o, daemonID, "session_turn", args)
 	if errors.Is(err, ErrDaemonNotFound) {
 		ch.hub.turns.finish(key, turnStateDisconnected)
 		http.NotFound(w, r)
@@ -189,31 +193,51 @@ func (ch *commanderHandlers) turn(w http.ResponseWriter, r *http.Request, daemon
 	}
 	sse := newSSEWriter(w)
 	terminal := false
-	for env := range chunkCh {
-		ch.updateTurnStateFromEnvelope(key, env)
-		sse.writeEnvelope(env)
-		if env.Type == "command_result" || env.Type == "error" {
-			terminal = true
+	writeSSE := true
+	reqDone := r.Context().Done()
+	for !terminal {
+		select {
+		case env, ok := <-chunkCh:
+			if !ok {
+				goto streamClosed
+			}
+			ch.updateTurnStateFromEnvelope(key, env)
+			if writeSSE {
+				sse.writeEnvelope(env)
+			}
+			if env.Type == "command_result" || env.Type == "error" {
+				terminal = true
+			}
+		case <-reqDone:
+			writeSSE = false
+			reqDone = nil
 		}
 	}
+streamClosed:
 	if !terminal {
-		ch.finishTurnWithoutTerminal(key, ctx.Err(), sse)
+		ch.finishTurnWithoutTerminal(key, turnCtx.Err(), sse, writeSSE)
 	}
 }
 
-func (ch *commanderHandlers) finishTurnWithoutTerminal(key turnKey, ctxErr error, sse *sseWriter) {
+func (ch *commanderHandlers) finishTurnWithoutTerminal(key turnKey, ctxErr error, sse *sseWriter, writeSSE bool) {
 	switch {
 	case errors.Is(ctxErr, context.DeadlineExceeded):
 		msg := "no terminal frame within timeout"
 		ch.hub.turns.fail(key, msg)
-		sse.emitError("timeout", msg)
+		if writeSSE {
+			sse.emitError("timeout", msg)
+		}
 	case errors.Is(ctxErr, context.Canceled):
 		msg := context.Canceled.Error()
 		ch.hub.turns.fail(key, msg)
-		sse.emitError("request_canceled", msg)
+		if writeSSE {
+			sse.emitError("request_canceled", msg)
+		}
 	default:
 		ch.hub.turns.finish(key, turnStateDisconnected)
-		sse.emitError(commander.ErrCodeBackendUnavailable, "daemon disconnected")
+		if writeSSE {
+			sse.emitError(commander.ErrCodeBackendUnavailable, "daemon disconnected")
+		}
 	}
 }
 

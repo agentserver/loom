@@ -1,6 +1,11 @@
 package commanderhub
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
+
+const maxTurnStateEntries = 1024
 
 type turnState string
 
@@ -27,6 +32,7 @@ type turnSnapshot struct {
 	AwaitingApproval bool      `json:"awaiting_approval"`
 	ActiveWorker     bool      `json:"active_worker"`
 	Message          string    `json:"turn_message,omitempty"`
+	updatedAt        time.Time
 }
 
 type turnStateStore struct {
@@ -45,7 +51,8 @@ func (s *turnStateStore) begin(key turnKey) bool {
 	if cur.InFlight {
 		return false
 	}
-	s.m[key] = turnSnapshot{State: turnStateQueued, InFlight: true}
+	s.m[key] = turnSnapshot{State: turnStateQueued, InFlight: true, updatedAt: time.Now()}
+	s.pruneLocked()
 	return true
 }
 
@@ -55,7 +62,9 @@ func (s *turnStateStore) set(key turnKey, state turnState) {
 	cur := s.m[key]
 	cur.State = state
 	cur.InFlight = state == turnStateQueued || state == turnStateStarting || state == turnStateAnswering
+	cur.updatedAt = time.Now()
 	s.m[key] = cur
+	s.pruneLocked()
 }
 
 func (s *turnStateStore) finish(key turnKey, state turnState) {
@@ -65,7 +74,9 @@ func (s *turnStateStore) finish(key turnKey, state turnState) {
 	cur.State = state
 	cur.InFlight = false
 	cur.AwaitingApproval = state == turnStateAwaitingApproval
+	cur.updatedAt = time.Now()
 	s.m[key] = cur
+	s.pruneLocked()
 }
 
 func (s *turnStateStore) fail(key turnKey, msg string) {
@@ -75,7 +86,9 @@ func (s *turnStateStore) fail(key turnKey, msg string) {
 	cur.State = turnStateError
 	cur.InFlight = false
 	cur.Message = msg
+	cur.updatedAt = time.Now()
 	s.m[key] = cur
+	s.pruneLocked()
 }
 
 func (s *turnStateStore) get(key turnKey) turnSnapshot {
@@ -85,4 +98,26 @@ func (s *turnStateStore) get(key turnKey) turnSnapshot {
 		return snap
 	}
 	return turnSnapshot{State: turnStateIdle}
+}
+
+func (s *turnStateStore) pruneLocked() {
+	for len(s.m) > maxTurnStateEntries {
+		var oldestKey turnKey
+		var oldest turnSnapshot
+		found := false
+		for key, snap := range s.m {
+			if snap.InFlight {
+				continue
+			}
+			if !found || snap.updatedAt.Before(oldest.updatedAt) {
+				oldestKey = key
+				oldest = snap
+				found = true
+			}
+		}
+		if !found {
+			return
+		}
+		delete(s.m, oldestKey)
+	}
 }
