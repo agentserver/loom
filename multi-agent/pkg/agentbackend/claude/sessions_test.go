@@ -48,6 +48,24 @@ func setTestHome(t *testing.T, home string) {
 	t.Setenv("USERPROFILE", home)
 }
 
+func TestEncodeCwdWindowsDrivePathIsAValidProjectDir(t *testing.T) {
+	encoded := encodeCwd(`C:\Users\runneradmin\project`)
+	if strings.ContainsAny(encoded, `<>:"/\|?*`) {
+		t.Fatalf("encoded cwd contains characters invalid in Windows directory names: %q", encoded)
+	}
+	if encoded != "C--Users-runneradmin-project" {
+		t.Fatalf("encoded cwd=%q want C--Users-runneradmin-project", encoded)
+	}
+}
+
+func TestDecodeCwdWindowsDrivePath(t *testing.T) {
+	got := decodeCwd("C--Users-runneradmin-project")
+	want := filepath.FromSlash("C:/Users/runneradmin/project")
+	if got != want {
+		t.Fatalf("decodeCwd=%q want %q", got, want)
+	}
+}
+
 func TestListSessions_EmptyDir(t *testing.T) {
 	setTestHome(t, t.TempDir())
 

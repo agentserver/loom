@@ -38,8 +38,21 @@ func sessionsRoot() string {
 	return filepath.Join(home, ".claude", "projects")
 }
 
+func encodeCwd(cwd string) string {
+	replacer := strings.NewReplacer(":", "-", "\\", "-", "/", "-")
+	return replacer.Replace(cwd)
+}
+
 func decodeCwd(encoded string) string {
+	if len(encoded) >= 3 && isASCIIAlpha(encoded[0]) && encoded[1] == '-' && encoded[2] == '-' {
+		rest := strings.ReplaceAll(encoded[3:], "-", "/")
+		return filepath.FromSlash(string(encoded[0]) + ":/" + rest)
+	}
 	return "/" + strings.ReplaceAll(strings.TrimPrefix(encoded, "-"), "-", "/")
+}
+
+func isASCIIAlpha(b byte) bool {
+	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')
 }
 
 func (b *Backend) ListSessions(ctx context.Context) ([]agentbackend.Session, error) {
