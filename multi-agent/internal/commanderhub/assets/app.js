@@ -61,7 +61,10 @@ async function showDaemons() {
 async function showSessions(daemonID, name) {
   const r = await api(`/api/commander/daemons/${daemonID}/sessions`);
   const { sessions } = await r.json();
-  app.innerHTML = `<h2>${name} · sessions</h2><button id="back">← daemons</button><ul class="sessions"></ul>`;
+  // Static shell only (no untrusted interpolation); the daemon-controlled
+  // display_name is set via textContent below to avoid DOM XSS.
+  app.innerHTML = `<h2><span class="daemon-name"></span> · sessions</h2><button id="back">← daemons</button><ul class="sessions"></ul>`;
+  app.querySelector("h2 .daemon-name").textContent = name || daemonID;
   document.getElementById("back").onclick = showDaemons;
   const ul = app.querySelector("ul.sessions");
   if (!sessions || sessions.length === 0) {
@@ -78,11 +81,14 @@ async function showSessions(daemonID, name) {
 async function showChat(daemonID, sid) {
   const r = await api(`/api/commander/daemons/${daemonID}/sessions/${sid}`);
   const { session, messages } = await r.json();
-  app.innerHTML = `<h2>${session && session.ID || sid}</h2>
+  // Static shell only (no untrusted interpolation); the session-controlled ID
+  // is set via textContent below to avoid DOM XSS.
+  app.innerHTML = `<h2><span class="session-id"></span></h2>
     <button id="back">← sessions</button>
     <div class="chat" id="chat"></div>
     <textarea id="prompt" rows="2" placeholder="发一轮 turn…"></textarea>
     <button id="send">发送</button>`;
+  app.querySelector("h2 .session-id").textContent = (session && session.ID) || sid;
   document.getElementById("back").onclick = () => showSessions(daemonID, session && session.WorkingDir || "");
   const chat = document.getElementById("chat");
   (messages || []).forEach(renderMsg);
