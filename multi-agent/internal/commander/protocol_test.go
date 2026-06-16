@@ -44,6 +44,20 @@ func TestEnvelope_RegisterRoundTrip(t *testing.T) {
 }
 
 func TestEnvelope_RegisterCarriesCapabilities(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		got  string
+		want string
+	}{
+		{name: "CapabilitySessions", got: CapabilitySessions, want: "sessions"},
+		{name: "CapabilityTurn", got: CapabilityTurn, want: "turn"},
+		{name: "CapabilityFiles", got: CapabilityFiles, want: "files"},
+	} {
+		if tc.got != tc.want {
+			t.Fatalf("%s=%q want %q", tc.name, tc.got, tc.want)
+		}
+	}
+
 	in := Envelope{
 		Type: "register",
 		Payload: mustMarshal(t, RegisterPayload{
