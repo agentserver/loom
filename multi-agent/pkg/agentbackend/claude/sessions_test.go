@@ -150,6 +150,9 @@ func TestGetSession_ReturnsMessages(t *testing.T) {
 	if sess.MessageCount != 4 {
 		t.Errorf("MessageCount=%d want 4", sess.MessageCount)
 	}
+	if sess.Title != "hello, claude" {
+		t.Errorf("Title=%q want hello, claude", sess.Title)
+	}
 	if sess.Preview != "4" {
 		t.Errorf("Preview=%q want 4", sess.Preview)
 	}

@@ -106,3 +106,50 @@ func addMessageTableSession(t *testing.T, home string) string {
 	}
 	return "ses_real"
 }
+
+func addWhitespaceFirstUserSession(t *testing.T, home string) string {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(home, ".local", "share", "opencode", "opencode.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	stmts := []string{
+		`INSERT INTO session VALUES ('ses_title','/tmp/opencode-title','title','1.17.6',1781442800000,1781442803000)`,
+		`INSERT INTO session_message VALUES ('msg_title_blank','ses_title','user',1,1781442801000,1781442801000,'{}')`,
+		`INSERT INTO part VALUES ('prt_title_blank','msg_title_blank','ses_title',1781442801000,1781442801000,'{"type":"text","text":"   \n\t   "}')`,
+		`INSERT INTO session_message VALUES ('msg_title_user','ses_title','user',2,1781442802000,1781442802000,'{}')`,
+		`INSERT INTO part VALUES ('prt_title_user','msg_title_user','ses_title',1781442802000,1781442802000,'{"type":"text","text":"real prompt"}')`,
+	}
+	for _, q := range stmts {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("whitespace-title fixture exec %q: %v", q, err)
+		}
+	}
+	return "ses_title"
+}
+
+func addMessageTableWhitespaceFirstUserSession(t *testing.T, home string) string {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(home, ".local", "share", "opencode", "opencode.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)`,
+		`INSERT INTO session VALUES ('ses_message_title','/tmp/opencode-message-title','title','1.17.6',1781442900000,1781442903000)`,
+		`INSERT INTO message VALUES ('msg_message_title_blank','ses_message_title',1781442901000,1781442901000,'{"role":"user","time":{"created":1781442901000}}')`,
+		`INSERT INTO part VALUES ('prt_message_title_blank','msg_message_title_blank','ses_message_title',1781442901000,1781442901000,'{"type":"text","text":"   \n\t   "}')`,
+		`INSERT INTO message VALUES ('msg_message_title_user','ses_message_title',1781442902000,1781442902000,'{"role":"user","time":{"created":1781442902000}}')`,
+		`INSERT INTO part VALUES ('prt_message_title_user','msg_message_title_user','ses_message_title',1781442902000,1781442902000,'{"type":"text","text":"real message prompt"}')`,
+	}
+	for _, q := range stmts {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("message-table whitespace-title fixture exec %q: %v", q, err)
+		}
+	}
+	return "ses_message_title"
+}
