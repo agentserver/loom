@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
@@ -227,6 +229,49 @@ func TestListSessions_SkipsWhitespaceOnlyUserTextForTitle(t *testing.T) {
 	}
 	if len(want) != 0 {
 		t.Fatalf("sessions not listed: %v", want)
+	}
+}
+
+func TestListSessions_MultipartSessionMessageTitleMatchesGetSession(t *testing.T) {
+	home := buildFixtureDB(t)
+	setTestHome(t, home)
+	id := addMultipartUserSession(t, home)
+
+	b := New(agentbackend.Config{Bin: "opencode", WorkDir: t.TempDir()}, nil)
+	got, err := b.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listed agentbackend.Session
+	for _, s := range got {
+		if s.ID == id {
+			listed = s
+			break
+		}
+	}
+	if listed.ID == "" {
+		t.Fatalf("session %s not listed", id)
+	}
+
+	detail, _, err := b.GetSession(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listed.Title != "hello world" {
+		t.Fatalf("ListSessions title=%q want hello world", listed.Title)
+	}
+	if detail.Title != listed.Title {
+		t.Fatalf("GetSession title=%q, ListSessions title=%q", detail.Title, listed.Title)
+	}
+}
+
+func TestTitleFromUserText_TruncatesAtValidUTF8Boundary(t *testing.T) {
+	title := titleFromUserText(strings.Repeat("界", agentbackend.SessionPreviewMaxBytes))
+	if len(title) > agentbackend.SessionPreviewMaxBytes {
+		t.Fatalf("title length=%d, want <= %d", len(title), agentbackend.SessionPreviewMaxBytes)
+	}
+	if !utf8.ValidString(title) {
+		t.Fatalf("title is not valid UTF-8: %q", title)
 	}
 }
 

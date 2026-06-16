@@ -153,3 +153,27 @@ func addMessageTableWhitespaceFirstUserSession(t *testing.T, home string) string
 	}
 	return "ses_message_title"
 }
+
+func addMultipartUserSession(t *testing.T, home string) string {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(home, ".local", "share", "opencode", "opencode.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	stmts := []string{
+		`INSERT INTO session VALUES ('ses_multipart','/tmp/opencode-multipart','multipart','1.17.6',1781443000000,1781443003000)`,
+		`INSERT INTO session_message VALUES ('msg_multipart_user','ses_multipart','user',1,1781443001000,1781443001000,'{}')`,
+		`INSERT INTO part VALUES ('prt_multipart_user_a','msg_multipart_user','ses_multipart',1781443001000,1781443001000,'{"type":"text","text":"hello"}')`,
+		`INSERT INTO part VALUES ('prt_multipart_user_b','msg_multipart_user','ses_multipart',1781443001001,1781443001001,'{"type":"text","text":" world"}')`,
+		`INSERT INTO session_message VALUES ('msg_multipart_assistant','ses_multipart','assistant',2,1781443002000,1781443002000,'{}')`,
+		`INSERT INTO part VALUES ('prt_multipart_assistant','msg_multipart_assistant','ses_multipart',1781443002000,1781443002000,'{"type":"text","text":"done"}')`,
+	}
+	for _, q := range stmts {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("multipart fixture exec %q: %v", q, err)
+		}
+	}
+	return "ses_multipart"
+}

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
@@ -198,6 +199,16 @@ func TestGetSession_RespectsPreviewCap(t *testing.T) {
 	}
 	if len(sess.Preview) > agentbackend.SessionPreviewMaxBytes {
 		t.Fatalf("preview length=%d, want <= %d", len(sess.Preview), agentbackend.SessionPreviewMaxBytes)
+	}
+}
+
+func TestTitleFromUserText_TruncatesAtValidUTF8Boundary(t *testing.T) {
+	title := titleFromUserText(strings.Repeat("界", agentbackend.SessionPreviewMaxBytes))
+	if len(title) > agentbackend.SessionPreviewMaxBytes {
+		t.Fatalf("title length=%d, want <= %d", len(title), agentbackend.SessionPreviewMaxBytes)
+	}
+	if !utf8.ValidString(title) {
+		t.Fatalf("title is not valid UTF-8: %q", title)
 	}
 }
 
