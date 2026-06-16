@@ -102,12 +102,8 @@ func (ch *commanderHandlers) listSessions(w http.ResponseWriter, r *http.Request
 		return
 	}
 	payload, err := ch.hub.SendCommand(r.Context(), o, daemonID, "list_sessions", nil)
-	if errors.Is(err, ErrDaemonNotFound) {
-		http.NotFound(w, r)
-		return
-	}
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		writeSendCmdError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -125,16 +121,29 @@ func (ch *commanderHandlers) getSession(w http.ResponseWriter, r *http.Request, 
 	}
 	args, _ := json.Marshal(commander.GetSessionArgs{ID: sid})
 	payload, err := ch.hub.SendCommand(r.Context(), o, daemonID, "get_session", args)
-	if errors.Is(err, ErrDaemonNotFound) {
-		http.NotFound(w, r)
-		return
-	}
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		writeSendCmdError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(payload)
+}
+
+// writeSendCmdError maps a SendCommand error to an HTTP status for the
+// non-streaming handlers (listSessions, getSession). A daemon-originated
+// session_not_found or an absent daemon → 404; anything else → 502. The turn
+// handler streams and forwards error frames as SSE, so it does not use this.
+func writeSendCmdError(w http.ResponseWriter, err error) {
+	var de *DaemonError
+	if errors.As(err, &de) && de.Code == commander.ErrCodeSessionNotFound {
+		http.NotFound(w, nil)
+		return
+	}
+	if errors.Is(err, ErrDaemonNotFound) {
+		http.NotFound(w, nil)
+		return
+	}
+	http.Error(w, err.Error(), http.StatusBadGateway)
 }
 
 func (ch *commanderHandlers) turn(w http.ResponseWriter, r *http.Request, daemonID, sid string) {

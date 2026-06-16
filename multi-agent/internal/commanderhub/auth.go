@@ -18,6 +18,13 @@ const (
 	sessionCookieName = "commander_sess"
 	sessionTTL        = 12 * time.Hour
 	loginTTL          = 10 * time.Minute
+	// maxPendingLogins bounds the in-flight login map. POST /login is
+	// unauthenticated (it's the auth entry); an attacker spamming it without
+	// ever polling would otherwise grow the map without bound. pollLogin
+	// goroutines self-terminate after dc.ExpiresIn, so this cap plus the lazy
+	// TTL sweep below bounds both the map and the goroutine count — no
+	// background sweeper is needed.
+	maxPendingLogins = 64
 )
 
 // DeviceCode is the observer-internal view of an agentserver device-authorization
@@ -157,7 +164,22 @@ func (a *Authenticator) ServeLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	lid := randomID()
 	a.loginMu.Lock()
-	a.logins[lid] = &loginState{code: dc, createdAt: time.Now()}
+	// Lazy reaping of orphan entries (created but never polled to a terminal /
+	// expired state): drop anything older than loginTTL before deciding whether
+	// there's room for a new entry. No background sweeper goroutine — this is
+	// the only place orphans are reaped, and it runs on every /login.
+	now := time.Now()
+	for k, st := range a.logins {
+		if now.Sub(st.createdAt) > loginTTL {
+			delete(a.logins, k)
+		}
+	}
+	if len(a.logins) >= maxPendingLogins {
+		a.loginMu.Unlock()
+		http.Error(w, "too many pending logins", http.StatusTooManyRequests)
+		return
+	}
+	a.logins[lid] = &loginState{code: dc, createdAt: now}
 	a.loginMu.Unlock()
 
 	go a.pollLogin(lid, dc)
