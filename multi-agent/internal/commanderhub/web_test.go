@@ -174,18 +174,106 @@ vm.createContext(context);
 vm.runInContext(process.env.APP_JS, context);
 
 const assistant = { textContent: "" };
-context.handleSSE('event: status\ndata: {"text":"starting codex"}', assistant);
-if (assistant.textContent !== "starting codex") {
+context.handleSSE('event: status\ndata: {"text":"codex running"}', assistant);
+if (assistant.textContent !== "Codex 正在回答…") {
   throw new Error("status not rendered: " + assistant.textContent);
 }
 context.handleSSE('event: chunk\ndata: {"text":"OK"}', assistant);
-if (assistant.textContent !== "OK") {
-  throw new Error("chunk should replace status-only text: " + assistant.textContent);
+if (assistant.textContent !== "Codex 正在回答…\nOK") {
+  throw new Error("chunk should keep in-flight status: " + assistant.textContent);
+}
+context.handleSSE('event: done\ndata: {"result":{"summary":"OK"}}', assistant);
+if (assistant.textContent !== "OK\n已回答完毕") {
+  throw new Error("done status not rendered: " + assistant.textContent);
 }
 context.handleSSE('event: error\ndata: {"code":"backend_unavailable","message":"codex exit"}', assistant);
 if (!assistant.textContent.includes("codex exit")) {
   throw new Error("error message not rendered: " + assistant.textContent);
 }
+`
+	cmd := exec.Command(node, "-e", script)
+	cmd.Env = append(os.Environ(), "APP_JS="+string(appJS))
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+}
+
+func TestWeb_CommanderAppDisablesSendWhileTurnInFlight(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node unavailable for commander app turn state test")
+	}
+	appJS, err := os.ReadFile("assets/app.js")
+	require.NoError(t, err)
+
+	script := `
+const vm = require("node:vm");
+
+const elements = new Map();
+class Element {
+  constructor(id) {
+    this.id = id;
+    this.children = [];
+    this.textContent = "";
+    this.className = "";
+    this.value = "";
+    this.disabled = false;
+    this.scrollTop = 0;
+    this.scrollHeight = 0;
+    this._innerHTML = "";
+  }
+  appendChild(child) { this.children.push(child); return child; }
+  querySelector(selector) {
+    if (!elements.has(selector)) elements.set(selector, new Element(selector));
+    return elements.get(selector);
+  }
+  set innerHTML(value) { this._innerHTML = value; }
+  get innerHTML() { return this._innerHTML; }
+}
+function getElement(id) {
+  if (!elements.has(id)) elements.set(id, new Element(id));
+  return elements.get(id);
+}
+const context = {
+  console,
+  setTimeout,
+  TextDecoder,
+  window: { open: () => {} },
+  document: {
+    getElementById: getElement,
+    createElement: tag => new Element(tag),
+  },
+  fetch: async path => {
+    if (path === "/api/commander/daemons") return { ok: false, status: 401 };
+    if (path === "/api/commander/daemons/d/sessions/s/turn") {
+      return { ok: true, body: { getReader: () => ({ read: async () => ({ done: true }) }) } };
+    }
+    throw new Error("unexpected fetch " + path);
+  },
+};
+elements.set("app", new Element("app"));
+elements.set("auth", new Element("auth"));
+elements.set("chat", new Element("chat"));
+elements.set("prompt", new Element("prompt"));
+elements.set("send", new Element("send"));
+vm.createContext(context);
+vm.runInContext(process.env.APP_JS, context);
+
+(async () => {
+  const prompt = elements.get("prompt");
+  const send = elements.get("send");
+  prompt.value = "go";
+  const turn = context.sendTurn("d", "s");
+  if (!send.disabled) {
+    throw new Error("send button was not disabled while turn was in flight");
+  }
+  await turn;
+  if (send.disabled) {
+    throw new Error("send button was not re-enabled after turn completed");
+  }
+})().catch(err => {
+  console.error(err && err.stack || err);
+  process.exit(1);
+});
 `
 	cmd := exec.Command(node, "-e", script)
 	cmd.Env = append(os.Environ(), "APP_JS="+string(appJS))
