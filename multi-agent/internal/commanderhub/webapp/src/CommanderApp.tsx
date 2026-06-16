@@ -25,6 +25,10 @@ function errorMessage(data: unknown): string {
   return data.message;
 }
 
+function turnKey(selection: { daemonID: string; sessionID: string }) {
+  return `${selection.daemonID}\0${selection.sessionID}`;
+}
+
 export function CommanderApp() {
   const [tree, setTree] = useState<CommanderTree | null>(null);
   const [error, setError] = useState<string>('');
@@ -32,7 +36,7 @@ export function CommanderApp() {
   const [sessionDetail, setSessionDetail] = useState<SessionDetail | null>(null);
   const [turnState, setTurnState] = useState<TurnState>('idle');
   const selectedRef = useRef<typeof selected>(null);
-  const turnRequestRef = useRef(0);
+  const turnRequestsRef = useRef(new Map<string, number>());
 
   useEffect(() => {
     apiGet<CommanderTree>('/api/commander/tree')
@@ -72,10 +76,12 @@ export function CommanderApp() {
     const submitted = selectedRef.current;
     if (!submitted || !text) return;
 
-    const requestID = turnRequestRef.current + 1;
-    turnRequestRef.current = requestID;
+    const key = turnKey(submitted);
+    const previousRequestID = turnRequestsRef.current.get(key) || 0;
+    const requestID = previousRequestID + 1;
+    turnRequestsRef.current.set(key, requestID);
     const isCurrentTurn = () =>
-      turnRequestRef.current === requestID &&
+      turnRequestsRef.current.get(key) === requestID &&
       selectedRef.current?.daemonID === submitted.daemonID &&
       selectedRef.current?.sessionID === submitted.sessionID;
     const setCurrentTurnState = (state: TurnState) => {
@@ -105,7 +111,19 @@ export function CommanderApp() {
       if (isCurrentTurn()) setSessionDetail(detail);
     } catch (err) {
       if (isTurnInFlightError(err)) {
-        setCurrentTurnState('queued');
+        if (turnRequestsRef.current.get(key) === requestID) {
+          if (previousRequestID === 0) {
+            turnRequestsRef.current.delete(key);
+          } else {
+            turnRequestsRef.current.set(key, previousRequestID);
+          }
+        }
+        if (
+          selectedRef.current?.daemonID === submitted.daemonID &&
+          selectedRef.current?.sessionID === submitted.sessionID
+        ) {
+          setTurnState('queued');
+        }
         throw err;
       }
       setCurrentTurnState('error');
@@ -115,9 +133,7 @@ export function CommanderApp() {
 
   function selectSession(daemonID: string, sessionID: string) {
     const next = { daemonID, sessionID };
-    const changed = selectedRef.current?.daemonID !== daemonID || selectedRef.current.sessionID !== sessionID;
     selectedRef.current = next;
-    if (changed) turnRequestRef.current += 1;
     setSelected(next);
   }
 

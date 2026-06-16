@@ -65,3 +65,35 @@ test('ignores stale file preview responses after a newer click', async () => {
   expect(screen.getByText('new content')).toBeInTheDocument();
   expect(screen.queryByText('old content')).not.toBeInTheDocument();
 });
+
+test('ignores stale file preview responses after session changes', async () => {
+  const oldPreview = deferred<Response>();
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), 'http://commander.test');
+      if (url.pathname.endsWith('/files')) {
+        return jsonResponse({
+          root: '/repo',
+          path: '.',
+          entries: [{ name: 'old.log', path: 'old.log', kind: 'file', size: 3 }],
+        });
+      }
+      if (url.searchParams.get('path') === 'old.log') {
+        return oldPreview.promise;
+      }
+      return jsonResponse({ path: 'other.log', size: 3, content: 'other content' });
+    }),
+  );
+
+  const { rerender } = render(<FileExplorerPanel daemonID="d1" sessionID="s1" />);
+  fireEvent.click(await screen.findByText('old.log'));
+  rerender(<FileExplorerPanel daemonID="d1" sessionID="s2" />);
+
+  await act(async () => {
+    oldPreview.resolve(jsonResponse({ path: 'old.log', size: 3, content: 'old content' }));
+    await oldPreview.promise;
+  });
+
+  expect(screen.queryByText('old content')).not.toBeInTheDocument();
+});
