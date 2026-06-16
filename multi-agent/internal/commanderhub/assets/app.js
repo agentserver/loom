@@ -19,15 +19,43 @@ function showLogin() {
 }
 
 async function startLogin() {
-  const r = await api("/api/commander/login", { method: "POST" });
+  auth.innerHTML = '<button disabled>用 agentserver 登录…</button>';
+  app.innerHTML = '<p>正在向 agentserver 请求登录码…</p>';
+  let r;
+  try {
+    r = await fetch("/api/commander/login", { method: "POST", credentials: "include" });
+  } catch (e) { app.innerHTML = '<p class="muted">请求失败,请重试。</p>'; showLogin(); return; }
+  if (!r.ok) { app.innerHTML = '<p class="muted">请求登录失败 (HTTP ' + r.status + '),请稍后重试。</p>'; showLogin(); return; }
   const { verification_uri_complete, login_id } = await r.json();
-  window.open(verification_uri_complete, "_blank"); // user approves on agentserver
+
+  // Show the authorize URL on the page (popup-blocker safe) + a status line.
+  // Link built with createElement/textContent so the agentserver URL can't inject markup.
+  app.innerHTML = "";
+  const p1 = document.createElement("p");
+  p1.textContent = "1. 打开下面链接并在 agentserver 授权(应已自动弹出新标签;若被拦截,点此链接):";
+  const a = document.createElement("a");
+  a.href = verification_uri_complete; a.target = "_blank"; a.textContent = verification_uri_complete;
+  const p2 = document.createElement("p"); p2.appendChild(a);
+  const p3 = document.createElement("p"); p3.className = "muted";
+  p3.textContent = "2. 授权后回到本页,自动登录 → ";
+  const status = document.createElement("span"); status.id = "loginstatus"; status.textContent = "等待授权…";
+  p3.appendChild(status);
+  app.appendChild(p1); app.appendChild(p2); app.appendChild(p3);
+  try { window.open(verification_uri_complete, "_blank"); } catch (e) { /* link above is the fallback */ }
+
+  // Raw fetch (not api()) so a 401/404 during polling just returns to the login
+  // button instead of throwing through api()'s handler.
   const poll = async () => {
-    const pr = await api("/api/commander/login/poll?id=" + encodeURIComponent(login_id));
-    if (pr.status === 401) { app.innerHTML = '<p class="muted">登录失败,重试。</p>'; return; }
-    const body = await pr.json();
+    let pr;
+    try {
+      pr = await fetch("/api/commander/login/poll?id=" + encodeURIComponent(login_id), { credentials: "include" });
+    } catch (e) { setTimeout(poll, 1500); return; }
+    if (pr.status === 401 || pr.status === 404) { showLogin(); return; } // failed/expired/gone
+    let body = {};
+    try { body = await pr.json(); } catch (e) {}
     if (body.status === "ok") { await whoami(); return; }
-    setTimeout(poll, 1500); // pending → keep polling
+    const s = document.getElementById("loginstatus"); if (s) s.textContent = "等待授权…";
+    setTimeout(poll, 1500);
   };
   poll();
 }
