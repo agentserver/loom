@@ -152,23 +152,26 @@ func (a *Authenticator) putSession(token string, ident identity.Identity) string
 }
 
 // ServeLogin: POST /api/commander/login → starts device flow, returns verify URL.
+//
+// The pending slot is RESERVED under the lock BEFORE the agentserver RequestCode
+// call: an unauthenticated POST /login is the auth entry point, so it must not
+// amplify upstream. Reserving the placeholder first (lazy sweep + cap + insert)
+// means concurrent requests serialize on the cap before any HTTP call — overflow
+// requests are 429'd without ever hitting agentserver. On RequestCode failure the
+// reserved slot is released.
 func (a *Authenticator) ServeLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	dc, err := a.flow.RequestCode(r.Context())
-	if err != nil {
-		http.Error(w, "device flow: "+err.Error(), http.StatusBadGateway)
-		return
-	}
+
 	lid := randomID()
+	now := time.Now()
 	a.loginMu.Lock()
 	// Lazy reaping of orphan entries (created but never polled to a terminal /
 	// expired state): drop anything older than loginTTL before deciding whether
 	// there's room for a new entry. No background sweeper goroutine — this is
 	// the only place orphans are reaped, and it runs on every /login.
-	now := time.Now()
 	for k, st := range a.logins {
 		if now.Sub(st.createdAt) > loginTTL {
 			delete(a.logins, k)
@@ -179,10 +182,35 @@ func (a *Authenticator) ServeLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "too many pending logins", http.StatusTooManyRequests)
 		return
 	}
-	a.logins[lid] = &loginState{code: dc, createdAt: now}
+	// RESERVE the slot: insert a placeholder (no code yet) so the cap holds
+	// atomically before the upstream call. Concurrent requests serialize here.
+	a.logins[lid] = &loginState{createdAt: now}
 	a.loginMu.Unlock()
 
-	go a.pollLogin(lid, dc)
+	// Now the agentserver call, gated by the reserved slot. Do NOT hold the
+	// lock during this HTTP call.
+	dc, err := a.flow.RequestCode(r.Context())
+	if err != nil {
+		a.loginMu.Lock()
+		delete(a.logins, lid) // release the reserved slot
+		a.loginMu.Unlock()
+		http.Error(w, "device flow: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	// Fill in the reserved entry. It was created moments ago (createdAt=now),
+	// so it cannot have been TTL-swept in the sub-millisecond window; if it
+	// were somehow nil, skip the poller — defensive, effectively unreachable.
+	a.loginMu.Lock()
+	st := a.logins[lid]
+	if st != nil {
+		st.code = dc
+	}
+	a.loginMu.Unlock()
+
+	if st != nil {
+		go a.pollLogin(lid, dc)
+	}
 
 	writeJSON(w, map[string]any{
 		"verification_uri_complete": dc.VerificationURIComplete,
