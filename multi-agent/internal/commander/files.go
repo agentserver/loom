@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -82,21 +83,40 @@ func (h *Handler) ReadFile(ctx context.Context, sessionID, rel string) (FileRead
 	if err != nil {
 		return FileReadResult{}, err
 	}
-	if info.IsDir() {
-		return FileReadResult{}, fmt.Errorf("path is a directory: %s", cleanRel)
+	if err := rejectNonPreviewFile(info, cleanRel); err != nil {
+		return FileReadResult{}, err
 	}
 
-	res := FileReadResult{Path: cleanRel, Size: info.Size()}
-	if info.Size() > MaxFilePreviewBytes {
-		res.TooLarge = true
-		return res, nil
+	f, err := os.Open(target)
+	if err != nil {
+		return FileReadResult{}, err
 	}
+	defer f.Close()
+	info, err = f.Stat()
+	if err != nil {
+		return FileReadResult{}, err
+	}
+	if err := rejectNonPreviewFile(info, cleanRel); err != nil {
+		return FileReadResult{}, err
+	}
+	res := FileReadResult{Path: cleanRel, Size: info.Size()}
 	if err := ctx.Err(); err != nil {
 		return FileReadResult{}, err
 	}
-	body, err := os.ReadFile(target)
+	body, err := io.ReadAll(io.LimitReader(f, MaxFilePreviewBytes+1))
 	if err != nil {
 		return FileReadResult{}, err
+	}
+	observed := int64(len(body))
+	if observed > res.Size {
+		res.Size = observed
+	}
+	if observed > MaxFilePreviewBytes || res.Size > MaxFilePreviewBytes {
+		if res.Size < MaxFilePreviewBytes+1 {
+			res.Size = MaxFilePreviewBytes + 1
+		}
+		res.TooLarge = true
+		return res, nil
 	}
 
 	res.MIME = http.DetectContentType(body)
@@ -106,6 +126,16 @@ func (h *Handler) ReadFile(ctx context.Context, sessionID, rel string) (FileRead
 	}
 	res.Content = string(body)
 	return res, nil
+}
+
+func rejectNonPreviewFile(info os.FileInfo, cleanRel string) error {
+	if info.IsDir() {
+		return fmt.Errorf("path is a directory: %s", cleanRel)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("path is not a regular file: %s", cleanRel)
+	}
+	return nil
 }
 
 func (h *Handler) sessionFileTarget(ctx context.Context, sessionID, rel string) (root, target, cleanRel string, err error) {
@@ -140,6 +170,9 @@ func (h *Handler) sessionFileTarget(ctx context.Context, sessionID, rel string) 
 		return "", "", "", errPathOutsideRoot
 	}
 
+	// EvalSymlinks gives static containment before opening. Closing
+	// workspace-writable TOCTOU races would require descriptor/openat-based
+	// containment, which is outside this cross-platform helper's current scope.
 	realRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return "", "", "", err
