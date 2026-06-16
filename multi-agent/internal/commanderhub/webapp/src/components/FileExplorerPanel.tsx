@@ -72,7 +72,7 @@ export function FileExplorerPanel({ daemonID, sessionID }: { daemonID: string; s
   }
 
   return (
-    <aside className="file-panel">
+    <aside className="file-panel" data-testid="file-panel">
       <div className="file-list">
         {entries.map((entry) => (
           <button
