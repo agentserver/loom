@@ -159,7 +159,7 @@ func TestProxy_FanOutSessionsFailOpen(t *testing.T) {
 	// register a second "daemon" entry under same owner that will never answer
 	// (no real conn) → SendCommand hits ErrDaemonGone quickly via the pre-check
 	// on the already-closed done chan.
-	hub.reg.add(&daemonConn{id: "ghost", owner: o, done: closedDone(), pending: map[string]chan commander.Envelope{}})
+	hub.reg.add(&daemonConn{id: "ghost", owner: o, done: closedDone(), pending: map[string]*pendingEntry{}})
 
 	res := hub.FanOutSessions(context.Background(), o)
 	byID := map[string]DaemonSessions{}

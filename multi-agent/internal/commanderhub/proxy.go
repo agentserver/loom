@@ -34,7 +34,8 @@ func (h *Hub) SendCommand(ctx context.Context, o owner, daemonID, command string
 	default:
 	}
 	cmdID := h.nextCmdID()
-	ch := dc.registerPending(cmdID)
+	pe := dc.registerPending(cmdID)
+	ch := pe.ch
 	defer dc.removePending(cmdID)
 	if err := dc.writeEnvelope(commandEnvelope(cmdID, command, args)); err != nil {
 		return nil, ErrDaemonGone
@@ -77,7 +78,8 @@ func (h *Hub) SendCommandStream(ctx context.Context, o owner, daemonID, command 
 	default:
 	}
 	cmdID := h.nextCmdID()
-	ch := dc.registerPending(cmdID)
+	pe := dc.registerPending(cmdID)
+	ch := pe.ch
 	if err := dc.writeEnvelope(commandEnvelope(cmdID, command, args)); err != nil {
 		dc.removePending(cmdID)
 		return nil, ErrDaemonGone

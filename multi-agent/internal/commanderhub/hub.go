@@ -76,7 +76,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		id:      newDaemonID(),
 		owner:   o,
 		conn:    conn,
-		pending: make(map[string]chan commander.Envelope),
+		pending: make(map[string]*pendingEntry),
 		done:    make(chan struct{}),
 		hub:     h,
 	}
@@ -135,41 +135,67 @@ func (dc *daemonConn) writeEnvelope(env commander.Envelope) error {
 	return dc.conn.WriteJSON(env)
 }
 
-// registerPending reserves a reply channel for cmdID. The channel is NEVER
-// closed: it is reclaimed by the GC once the registry map entry is removed and
-// the consumer drops its reference. Closing the channel would race routeFrame's
-// unlocked sendOrDrop (run in the per-conn read loop) against the consumer's
-// removePending (run in the proxy goroutine on turn-timeout/disconnect) — a late
-// daemon frame landing in that window panicked the observer via "send on closed
-// channel". Consumers detect completion without a close: terminal via
-// env.Type == "command_result"/"error", disconnect via <-dc.done, cancel via
-// <-ctx.Done().
-func (dc *daemonConn) registerPending(cmdID string) chan commander.Envelope {
-	ch := make(chan commander.Envelope, 16)
-	dc.pendingMu.Lock()
-	dc.pending[cmdID] = ch
-	dc.pendingMu.Unlock()
-	return ch
+// pendingEntry is one in-flight command's reply state. The data channel ch is
+// NEVER closed (closing it would race routeFrame's unlocked sendOrDrop against a
+// consumer's removePending, panicking on a late frame). cancel is closed by
+// removePending to unblock a stuck terminal send in routeFrame: if a consumer
+// cancels while the buffer is full, the blocking terminal send must have an
+// escape hatch other than dc.done (which is closed only AFTER the read loop
+// returns — and the read loop is exactly the stuck goroutine).
+type pendingEntry struct {
+	ch     chan commander.Envelope // data channel; NEVER closed (GC reclaims it)
+	cancel chan struct{}           // closed by removePending to unblock a stuck terminal send
 }
 
-// removePending drops the registry entry for cmdID. It does NOT close the
-// channel (see registerPending): once the map entry is gone, routeFrame lookups
-// for this id miss and drop any late frame, and the GC reclaims the channel when
-// the consumer also releases its reference.
+// registerPending reserves a reply entry for cmdID and returns it. The data
+// channel ch is NEVER closed (see pendingEntry); the per-entry cancel channel is
+// closed by removePending. Consumers read from entry.ch and detect completion
+// without a ch-close: terminal via env.Type == "command_result"/"error",
+// disconnect via <-dc.done, cancel via <-ctx.Done().
+func (dc *daemonConn) registerPending(cmdID string) *pendingEntry {
+	pe := &pendingEntry{
+		ch:     make(chan commander.Envelope, 16),
+		cancel: make(chan struct{}),
+	}
+	dc.pendingMu.Lock()
+	dc.pending[cmdID] = pe
+	dc.pendingMu.Unlock()
+	return pe
+}
+
+// removePending drops the registry entry for cmdID and closes its per-entry
+// cancel channel. Closing cancel is safe: it is only closed here and only ever
+// received-from (never sent-to). It does NOT close entry.ch — a late daemon
+// frame landing in routeFrame after this delete finds no map entry and is
+// dropped, OR, if routeFrame already grabbed the entry before this delete, its
+// stuck terminal send selects <-cancel and unblocks instead of wedging the read
+// loop forever.
 func (dc *daemonConn) removePending(cmdID string) {
 	dc.pendingMu.Lock()
-	delete(dc.pending, cmdID)
+	pe, ok := dc.pending[cmdID]
+	if ok {
+		delete(dc.pending, cmdID)
+	}
 	dc.pendingMu.Unlock()
+	if ok {
+		close(pe.cancel)
+	}
 }
 
 // failAllPending swaps in a fresh empty map so routeFrame lookups miss for every
-// in-flight command. It does NOT close the channels (see registerPending);
-// consumers unblock via <-dc.done, which ServeHTTP closes via its defer. Called
-// on read-loop exit.
+// in-flight command, and closes each old entry's per-entry cancel so any in-
+// flight routeFrame terminal send unblocks. It does NOT close any data channel
+// (see pendingEntry). Called on read-loop exit; by the time ServeHTTP's defers
+// run this the read loop (and thus any routeFrame) has already returned, but the
+// closes are correct/safe regardless.
 func (dc *daemonConn) failAllPending() {
 	dc.pendingMu.Lock()
-	dc.pending = make(map[string]chan commander.Envelope)
+	old := dc.pending
+	dc.pending = make(map[string]*pendingEntry)
 	dc.pendingMu.Unlock()
+	for _, pe := range old {
+		close(pe.cancel)
+	}
 }
 
 // readLoop drains inbound frames and routes each to its pending reply channel
@@ -192,13 +218,13 @@ func (dc *daemonConn) routeFrame(env commander.Envelope) {
 		return // ack / heartbeat / unsolicited: nothing to correlate
 	}
 	dc.pendingMu.Lock()
-	ch := dc.pending[env.ID]
+	pe := dc.pending[env.ID]
 	dc.pendingMu.Unlock()
-	if ch == nil {
-		return // unknown id (stale/late): drop
+	if pe == nil {
+		return // unknown id (stale/late, or removed by a cancelling consumer): drop
 	}
 	terminal := env.Type == "command_result" || env.Type == "error"
-	if !sendOrDrop(ch, env, terminal, dc.done) {
+	if !sendOrDrop(pe.ch, env, terminal, pe.cancel, dc.done) {
 		return
 	}
 	if terminal {
@@ -208,8 +234,13 @@ func (dc *daemonConn) routeFrame(env commander.Envelope) {
 
 // sendOrDrop delivers env to ch. Non-terminal events are dropped if the buffer
 // is full (avoid blocking the read loop on a slow consumer). Terminal frames
-// force through (blocking on dc.done as escape). Returns false if dropped.
-func sendOrDrop(ch chan commander.Envelope, env commander.Envelope, terminal bool, done <-chan struct{}) bool {
+// force through, blocking on cancel (consumer cancelled → removePending closed
+// the per-entry cancel) or done (connection gone) as escapes. The cancel escape
+// is what prevents a terminal frame from wedging the read loop forever when the
+// consumer cancelled with a full buffer: dc.done alone is insufficient because
+// it is closed only after the read loop returns — and the read loop is exactly
+// the stuck goroutine. Returns false if dropped.
+func sendOrDrop(ch chan commander.Envelope, env commander.Envelope, terminal bool, cancel <-chan struct{}, done <-chan struct{}) bool {
 	select {
 	case ch <- env:
 		return true
@@ -221,8 +252,10 @@ func sendOrDrop(ch chan commander.Envelope, env commander.Envelope, terminal boo
 	select {
 	case ch <- env:
 		return true
+	case <-cancel:
+		return false // consumer cancelled; drop the terminal
 	case <-done:
-		return false
+		return false // connection gone
 	}
 }
 
