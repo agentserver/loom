@@ -10,13 +10,9 @@ import (
 //go:embed assets/dist/assets/*
 var assetsFS embed.FS
 
-// MountWeb registers GET /commander (the page) and its static assets.
+// MountWeb registers the commander page routes and static assets.
 func MountWeb(mux *http.ServeMux) {
-	mux.HandleFunc("/commander", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/commander" {
-			http.NotFound(w, r)
-			return
-		}
+	serveIndex := func(w http.ResponseWriter, r *http.Request) {
 		data, err := assetsFS.ReadFile("assets/dist/index.html")
 		if err != nil {
 			http.Error(w, "index unavailable", http.StatusInternalServerError)
@@ -24,6 +20,20 @@ func MountWeb(mux *http.ServeMux) {
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(data)
+	}
+	mux.HandleFunc("/commander", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/commander" {
+			http.NotFound(w, r)
+			return
+		}
+		serveIndex(w, r)
+	})
+	mux.HandleFunc("/commander/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/commander/" {
+			http.NotFound(w, r)
+			return
+		}
+		serveIndex(w, r)
 	})
 	sub, _ := fs.Sub(assetsFS, "assets/dist")
 	fileServer := http.StripPrefix("/commander/", http.FileServer(http.FS(sub)))
