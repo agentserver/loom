@@ -3,6 +3,8 @@ package commanderhub
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -38,4 +40,107 @@ func TestWeb_CommanderPageAndAssets(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusNotFound, resp.StatusCode)
 	resp.Body.Close()
+}
+
+func TestWeb_CommanderAppIgnoresStaleSessionListResponses(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node unavailable for commander app race test")
+	}
+	appJS, err := os.ReadFile("assets/app.js")
+	require.NoError(t, err)
+
+	script := `
+const vm = require("node:vm");
+
+let appHTML = "";
+const elements = new Map();
+class Element {
+  constructor(id) {
+    this.id = id;
+    this.children = [];
+    this._innerHTML = "";
+    this.textContent = "";
+    this.className = "";
+    this.onclick = null;
+    this.value = "";
+    this.scrollTop = 0;
+    this.scrollHeight = 0;
+  }
+  set innerHTML(value) {
+    this._innerHTML = value;
+    if (this.id === "app") appHTML = value;
+    if (value.includes('ul class="daemons"')) elements.set("ul.daemons", new Element("ul.daemons"));
+    if (value.includes('ul class="sessions"')) elements.set("ul.sessions", new Element("ul.sessions"));
+    if (value.includes('class="daemon-name"')) elements.set("h2 .daemon-name", new Element("h2 .daemon-name"));
+    if (value.includes('class="session-id"')) elements.set("h2 .session-id", new Element("h2 .session-id"));
+    if (value.includes('id="back"')) elements.set("back", new Element("back"));
+    if (value.includes('id="chat"')) elements.set("chat", new Element("chat"));
+    if (value.includes('id="prompt"')) elements.set("prompt", new Element("prompt"));
+    if (value.includes('id="send"')) elements.set("send", new Element("send"));
+  }
+  get innerHTML() { return this._innerHTML; }
+  appendChild(child) { this.children.push(child); return child; }
+  querySelector(selector) {
+    if (!elements.has(selector)) elements.set(selector, new Element(selector));
+    return elements.get(selector);
+  }
+}
+function getElement(id) {
+  if (!elements.has(id)) elements.set(id, new Element(id));
+  return elements.get(id);
+}
+function response(body, status = 200) {
+  return { ok: status >= 200 && status < 300, status, json: async () => body };
+}
+const sessionListResolvers = [];
+const context = {
+  console,
+  setTimeout,
+  TextDecoder,
+  window: { open: () => {} },
+  document: {
+    getElementById: getElement,
+    createElement: tag => new Element(tag),
+  },
+  fetch: async path => {
+    if (path === "/api/commander/daemons") return response({}, 401);
+    if (path === "/api/commander/daemons/d/sessions") {
+      return new Promise(resolve => sessionListResolvers.push(resolve));
+    }
+    if (path === "/api/commander/daemons/d/sessions/sid") {
+      return response({ session: { ID: "sid" }, messages: [] });
+    }
+    throw new Error("unexpected fetch " + path);
+  },
+};
+elements.set("app", new Element("app"));
+elements.set("auth", new Element("auth"));
+vm.createContext(context);
+vm.runInContext(process.env.APP_JS, context);
+
+(async () => {
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const staleList = context.showSessions("d", "daemon");
+  const freshList = context.showSessions("d", "daemon");
+  sessionListResolvers[1](response({ sessions: [{ ID: "sid", Preview: "" }] }));
+  await freshList;
+  await context.showChat("d", "sid");
+  if (!appHTML.includes('class="session-id"')) {
+    throw new Error("expected chat detail before stale response, got: " + appHTML);
+  }
+  sessionListResolvers[0](response({ sessions: [{ ID: "sid", Preview: "late" }] }));
+  await staleList;
+  if (appHTML.includes("· sessions")) {
+    throw new Error("stale sessions response replaced chat detail");
+  }
+})().catch(err => {
+  console.error(err && err.stack || err);
+  process.exit(1);
+});
+`
+	cmd := exec.Command(node, "-e", script)
+	cmd.Env = append(os.Environ(), "APP_JS="+string(appJS))
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
 }
