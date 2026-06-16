@@ -42,6 +42,29 @@ func TestEnvelope_RegisterRoundTrip(t *testing.T) {
 	}
 }
 
+func TestEnvelope_RegisterCarriesCapabilities(t *testing.T) {
+	in := Envelope{
+		Type: "register",
+		Payload: mustMarshal(t, RegisterPayload{
+			SchemaVersion: SchemaVersion,
+			Kind:          "codex",
+			Capabilities:  []string{"sessions", "turn", "files"},
+		}),
+	}
+	b, _ := json.Marshal(in)
+	var out Envelope
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	var pl RegisterPayload
+	if err := json.Unmarshal(out.Payload, &pl); err != nil {
+		t.Fatal(err)
+	}
+	if len(pl.Capabilities) != 3 || pl.Capabilities[2] != "files" {
+		t.Fatalf("capabilities=%v", pl.Capabilities)
+	}
+}
+
 // TestEnvelope_CommandWithIDRoundTrip pins that observer-to-daemon command
 // frames carry an ID so replies and events can correlate with the command.
 func TestEnvelope_CommandWithIDRoundTrip(t *testing.T) {
@@ -67,6 +90,36 @@ func TestEnvelope_CommandWithIDRoundTrip(t *testing.T) {
 	}
 	if cp.Command != "get_session" {
 		t.Fatalf("command=%q", cp.Command)
+	}
+}
+
+func TestEnvelope_FileCommandsRoundTrip(t *testing.T) {
+	listArgs := FileListArgs{ID: "s1", Path: "internal"}
+	readArgs := FileReadArgs{ID: "s1", Path: "go.mod"}
+	for name, args := range map[string]any{
+		"list_files": listArgs,
+		"read_file":  readArgs,
+	} {
+		env := Envelope{
+			Type: "command",
+			ID:   "cmd-file",
+			Payload: mustMarshal(t, CommandPayload{
+				Command: name,
+				Args:    mustMarshal(t, args),
+			}),
+		}
+		b, _ := json.Marshal(env)
+		var out Envelope
+		if err := json.Unmarshal(b, &out); err != nil {
+			t.Fatal(err)
+		}
+		var cp CommandPayload
+		if err := json.Unmarshal(out.Payload, &cp); err != nil {
+			t.Fatal(err)
+		}
+		if cp.Command != name {
+			t.Fatalf("command=%q want %q", cp.Command, name)
+		}
 	}
 }
 
