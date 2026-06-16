@@ -1,17 +1,5 @@
 import { MessageRenderer } from './MessageRenderer';
-import type { SessionMessage, TurnState } from '../api/types';
-
-export interface SessionDetail {
-  session: {
-    ID?: string;
-    Title?: string;
-    WorkingDir?: string;
-    id?: string;
-    title?: string;
-    working_dir?: string;
-  };
-  messages: SessionMessage[];
-}
+import type { SessionDetail, TurnState } from '../api/types';
 
 const turnStateLabels: Record<TurnState, string> = {
   idle: '',
@@ -31,6 +19,14 @@ function displayTurnState(state: TurnState | string) {
   return '';
 }
 
+function sessionString(session: Record<string, unknown> | undefined, ...keys: string[]) {
+  for (const key of keys) {
+    const value = session?.[key];
+    if (typeof value === 'string') return value;
+  }
+  return '';
+}
+
 export function ChatWorkspace({
   session,
   turnState,
@@ -42,8 +38,8 @@ export function ChatWorkspace({
   turnState: TurnState | string;
   onSend: (prompt: string) => Promise<void>;
 }) {
-  const title = session?.session.Title || session?.session.title || 'Session';
-  const cwd = session?.session.WorkingDir || session?.session.working_dir || '';
+  const title = sessionString(session?.session, 'Title', 'title') || 'Session';
+  const cwd = sessionString(session?.session, 'WorkingDir', 'working_dir');
   const disabled = ['queued', 'starting', 'answering', 'awaiting_approval'].includes(turnState);
 
   return (
