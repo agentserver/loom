@@ -128,6 +128,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	h.reg.add(dc)
 	defer h.reg.remove(o, dc.id)
+	defer h.invalidateDaemonSessions(o, dc.id)
 	defer close(dc.done)
 	defer dc.failAllPending()
 

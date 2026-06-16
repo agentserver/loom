@@ -3,6 +3,7 @@ package commanderhub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sort"
 	"strings"
 	"sync"
@@ -23,23 +24,26 @@ type DaemonTree struct {
 }
 
 type SessionRow struct {
-	DaemonID         string    `json:"daemon_id"`
-	SessionID        string    `json:"session_id"`
-	Kind             string    `json:"kind"`
-	Title            string    `json:"title"`
-	WorkingDir       string    `json:"working_dir,omitempty"`
-	UpdatedAt        time.Time `json:"updated_at,omitempty"`
-	MessageCount     int       `json:"message_count,omitempty"`
-	Preview          string    `json:"preview,omitempty"`
-	TurnState        string    `json:"turn_state"`
-	ActiveWorker     bool      `json:"active_worker"`
-	AwaitingApproval bool      `json:"awaiting_approval"`
+	DaemonID     string    `json:"daemon_id"`
+	SessionID    string    `json:"session_id"`
+	Kind         string    `json:"kind"`
+	Title        string    `json:"title"`
+	WorkingDir   string    `json:"working_dir,omitempty"`
+	UpdatedAt    time.Time `json:"updated_at,omitempty"`
+	MessageCount int       `json:"message_count,omitempty"`
+	Preview      string    `json:"preview,omitempty"`
+	TurnState    string    `json:"turn_state"`
+	// ActiveWorker is reserved for future worker-pool ownership. Normal
+	// in-flight turns are represented by TurnState and daemon TurnCount.
+	ActiveWorker     bool `json:"active_worker"`
+	AwaitingApproval bool `json:"awaiting_approval"`
 }
 
 type sessionListCache struct {
 	mu      sync.Mutex
 	ttl     time.Duration
 	entries map[cacheKey]sessionCacheEntry
+	gens    map[cacheKey]uint64
 }
 
 type cacheKey struct {
@@ -53,7 +57,11 @@ type sessionCacheEntry struct {
 }
 
 func newSessionListCache(ttl time.Duration) *sessionListCache {
-	return &sessionListCache{ttl: ttl, entries: make(map[cacheKey]sessionCacheEntry)}
+	return &sessionListCache{
+		ttl:     ttl,
+		entries: make(map[cacheKey]sessionCacheEntry),
+		gens:    make(map[cacheKey]uint64),
+	}
 }
 
 func sessionTitle(title, preview, id string) string {
@@ -96,37 +104,56 @@ func sortSessionRows(rows []SessionRow) {
 }
 
 func (h *Hub) CommanderTree(ctx context.Context, o owner) CommanderTree {
-	infos := h.reg.daemons(o)
-	out := CommanderTree{Daemons: make([]DaemonTree, 0, len(infos))}
-	for _, info := range infos {
-		row := DaemonTree{DaemonInfo: info, Status: "ok"}
-		sessions, err := h.cachedSessionRows(ctx, o, info)
-		if err != nil {
-			row.Status = "error"
-			row.Error = err.Error()
-		} else {
-			row.Sessions = sessions
-			row.SessionCount = len(sessions)
-			for _, session := range sessions {
-				if session.ActiveWorker {
-					row.ActiveCount++
-				}
-				if session.TurnState == string(turnStateQueued) ||
-					session.TurnState == string(turnStateStarting) ||
-					session.TurnState == string(turnStateAnswering) {
-					row.TurnCount++
-				}
-			}
-		}
-		out.Daemons = append(out.Daemons, row)
+	return h.commanderTreeForInfos(ctx, o, h.reg.daemons(o))
+}
+
+func (h *Hub) commanderTreeForInfos(ctx context.Context, o owner, infos []DaemonInfo) CommanderTree {
+	out := CommanderTree{Daemons: make([]DaemonTree, len(infos))}
+	var wg sync.WaitGroup
+	for i, info := range infos {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			out.Daemons[i] = h.daemonTree(ctx, o, info)
+		}()
 	}
+	wg.Wait()
 	return out
+}
+
+func (h *Hub) daemonTree(ctx context.Context, o owner, info DaemonInfo) DaemonTree {
+	row := DaemonTree{DaemonInfo: info, Status: "ok"}
+	cctx, cancel := context.WithTimeout(ctx, defaultCmdTimeout)
+	defer cancel()
+	sessions, err := h.cachedSessionRows(cctx, o, info)
+	if err != nil {
+		row.Status = "error"
+		if errors.Is(err, context.DeadlineExceeded) {
+			row.Status = "timeout"
+		}
+		row.Error = err.Error()
+		return row
+	}
+	row.Sessions = sessions
+	row.SessionCount = len(sessions)
+	for _, session := range sessions {
+		if session.ActiveWorker {
+			row.ActiveCount++
+		}
+		if session.TurnState == string(turnStateQueued) ||
+			session.TurnState == string(turnStateStarting) ||
+			session.TurnState == string(turnStateAnswering) {
+			row.TurnCount++
+		}
+	}
+	return row
 }
 
 func (h *Hub) cachedSessionRows(ctx context.Context, o owner, info DaemonInfo) ([]SessionRow, error) {
 	key := cacheKey{owner: o, daemonID: info.DaemonID}
 	now := time.Now()
 	h.sessionCache.mu.Lock()
+	gen := h.sessionCache.gens[key]
 	if ent, ok := h.sessionCache.entries[key]; ok && now.Before(ent.expires) {
 		rows := append([]SessionRow(nil), ent.rows...)
 		h.sessionCache.mu.Unlock()
@@ -140,9 +167,11 @@ func (h *Hub) cachedSessionRows(ctx context.Context, o owner, info DaemonInfo) (
 		return nil, err
 	}
 	h.sessionCache.mu.Lock()
-	h.sessionCache.entries[key] = sessionCacheEntry{
-		expires: time.Now().Add(h.sessionCache.ttl),
-		rows:    append([]SessionRow(nil), rows...),
+	if h.sessionCache.gens[key] == gen {
+		h.sessionCache.entries[key] = sessionCacheEntry{
+			expires: time.Now().Add(h.sessionCache.ttl),
+			rows:    append([]SessionRow(nil), rows...),
+		}
 	}
 	h.sessionCache.mu.Unlock()
 	return append([]SessionRow(nil), rows...), nil
@@ -150,7 +179,9 @@ func (h *Hub) cachedSessionRows(ctx context.Context, o owner, info DaemonInfo) (
 
 func (h *Hub) invalidateDaemonSessions(o owner, daemonID string) {
 	h.sessionCache.mu.Lock()
-	delete(h.sessionCache.entries, cacheKey{owner: o, daemonID: daemonID})
+	key := cacheKey{owner: o, daemonID: daemonID}
+	h.sessionCache.gens[key]++
+	delete(h.sessionCache.entries, key)
 	h.sessionCache.mu.Unlock()
 }
 
