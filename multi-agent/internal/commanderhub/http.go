@@ -154,7 +154,7 @@ func (ch *commanderHandlers) turn(w http.ResponseWriter, r *http.Request, daemon
 		return
 	}
 	args, _ := json.Marshal(commander.SessionTurnArgs{ID: sid, Prompt: body.Prompt})
-	ctx, cancel := context.WithTimeout(r.Context(), defaultTurnTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), ch.hub.TurnTimeout)
 	defer cancel()
 
 	chunkCh, err := ch.hub.SendCommandStream(ctx, o, daemonID, "session_turn", args)

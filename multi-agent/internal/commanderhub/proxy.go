@@ -18,7 +18,7 @@ var (
 
 const (
 	defaultCmdTimeout  = 10 * time.Second
-	defaultTurnTimeout = 30 * time.Second
+	defaultTurnTimeout = 10 * time.Minute // safety max; the browser/SSE client ctx is the real bound
 )
 
 // SendCommand runs a non-streaming command (list_sessions / get_session) on one
