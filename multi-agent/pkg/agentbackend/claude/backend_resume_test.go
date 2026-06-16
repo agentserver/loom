@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
@@ -18,7 +17,7 @@ func TestBackendRunResumeUsesSessionWorkingDir(t *testing.T) {
 	configDir := t.TempDir()
 
 	id := "resume-cwd-session"
-	encodedCwd := strings.ReplaceAll(sessionDir, string(filepath.Separator), "-")
+	encodedCwd := encodeCwd(sessionDir)
 	sessionRoot := filepath.Join(home, ".claude", "projects", encodedCwd)
 	if err := os.MkdirAll(sessionRoot, 0o755); err != nil {
 		t.Fatal(err)
@@ -63,7 +62,7 @@ func TestSessionWorkingDirUsesProjectDirectory(t *testing.T) {
 	sessionDir := t.TempDir()
 
 	id := "resume-cwd-metadata-only"
-	encodedCwd := strings.ReplaceAll(sessionDir, string(filepath.Separator), "-")
+	encodedCwd := encodeCwd(sessionDir)
 	sessionRoot := filepath.Join(home, ".claude", "projects", encodedCwd)
 	if err := os.MkdirAll(sessionRoot, 0o755); err != nil {
 		t.Fatal(err)
