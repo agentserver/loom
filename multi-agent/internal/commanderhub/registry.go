@@ -8,8 +8,6 @@ import (
 	"sync"
 
 	"github.com/gorilla/websocket"
-
-	"github.com/yourorg/multi-agent/internal/commander"
 )
 
 // owner is the isolation key: daemons under the same (UserID, WorkspaceID)
@@ -40,7 +38,7 @@ type daemonConn struct {
 	conn      *websocket.Conn
 	writeMu   sync.Mutex // serializes conn.WriteJSON / WriteControl
 	pendingMu sync.Mutex // guards pending map
-	pending   map[string]chan commander.Envelope
+	pending   map[string]*pendingEntry
 	done      chan struct{} // closed when the read loop exits
 	hub       *Hub
 }
