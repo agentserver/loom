@@ -39,11 +39,14 @@ func (h *Hub) SendCommand(ctx context.Context, o owner, daemonID, command string
 	if err := dc.writeEnvelope(commandEnvelope(cmdID, command, args)); err != nil {
 		return nil, ErrDaemonGone
 	}
+	// ch is never closed (see daemonConn.registerPending): !ok below is dead but
+	// kept as defensive code. Disconnect is detected via <-dc.done, cancel via
+	// <-ctx.Done(), terminal via the env.Type switch.
 	for {
 		select {
 		case env, ok := <-ch:
 			if !ok {
-				return nil, ErrDaemonGone
+				return nil, ErrDaemonGone // dead: ch is never closed
 			}
 			switch env.Type {
 			case "error":
@@ -83,11 +86,13 @@ func (h *Hub) SendCommandStream(ctx context.Context, o owner, daemonID, command 
 	go func() {
 		defer close(out)
 		defer dc.removePending(cmdID)
+		// ch is never closed (see daemonConn.registerPending): !ok below is dead
+		// but kept defensively. Disconnect via <-dc.done, cancel via <-ctx.Done().
 		for {
 			select {
 			case env, ok := <-ch:
 				if !ok {
-					return
+					return // dead: ch is never closed
 				}
 				select {
 				case out <- env:
