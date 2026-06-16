@@ -128,8 +128,15 @@ func (dc *daemonConn) writeEnvelope(env commander.Envelope) error {
 	return dc.conn.WriteJSON(env)
 }
 
-// registerPending reserves a reply channel for cmdID. Caller owns lifecycle via
-// removePending (terminal) or failAllPending (disconnect).
+// registerPending reserves a reply channel for cmdID. The channel is NEVER
+// closed: it is reclaimed by the GC once the registry map entry is removed and
+// the consumer drops its reference. Closing the channel would race routeFrame's
+// unlocked sendOrDrop (run in the per-conn read loop) against the consumer's
+// removePending (run in the proxy goroutine on turn-timeout/disconnect) — a late
+// daemon frame landing in that window panicked the observer via "send on closed
+// channel". Consumers detect completion without a close: terminal via
+// env.Type == "command_result"/"error", disconnect via <-dc.done, cancel via
+// <-ctx.Done().
 func (dc *daemonConn) registerPending(cmdID string) chan commander.Envelope {
 	ch := make(chan commander.Envelope, 16)
 	dc.pendingMu.Lock()
@@ -138,28 +145,24 @@ func (dc *daemonConn) registerPending(cmdID string) chan commander.Envelope {
 	return ch
 }
 
+// removePending drops the registry entry for cmdID. It does NOT close the
+// channel (see registerPending): once the map entry is gone, routeFrame lookups
+// for this id miss and drop any late frame, and the GC reclaims the channel when
+// the consumer also releases its reference.
 func (dc *daemonConn) removePending(cmdID string) {
 	dc.pendingMu.Lock()
-	ch, ok := dc.pending[cmdID]
-	if ok {
-		delete(dc.pending, cmdID)
-	}
+	delete(dc.pending, cmdID)
 	dc.pendingMu.Unlock()
-	if ok {
-		close(ch)
-	}
 }
 
-// failAllPending closes every pending channel so SendCommand/Stream callers
-// unblock with a disconnect error. Called on read-loop exit.
+// failAllPending swaps in a fresh empty map so routeFrame lookups miss for every
+// in-flight command. It does NOT close the channels (see registerPending);
+// consumers unblock via <-dc.done, which ServeHTTP closes via its defer. Called
+// on read-loop exit.
 func (dc *daemonConn) failAllPending() {
 	dc.pendingMu.Lock()
-	olds := dc.pending
 	dc.pending = make(map[string]chan commander.Envelope)
 	dc.pendingMu.Unlock()
-	for _, ch := range olds {
-		close(ch)
-	}
 }
 
 // readLoop drains inbound frames and routes each to its pending reply channel
