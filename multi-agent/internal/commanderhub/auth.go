@@ -302,7 +302,9 @@ func (a *Authenticator) ServeLoginPoll(w http.ResponseWriter, r *http.Request) {
 		Value:    sessionID,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   true,
+		// Secure only over real TLS (direct or via forwarding proxy) so the
+		// cookie is accepted on loopback HTTP (http://127.0.0.1) during dev.
+		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(sessionTTL / time.Second),
 	})
