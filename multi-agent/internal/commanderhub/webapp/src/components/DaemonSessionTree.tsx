@@ -14,11 +14,13 @@ export function DaemonSessionTree({
     <aside className="daemon-tree">
       {daemons.map((daemon) => (
         <section className="daemon-group" key={daemon.daemon_id}>
-          <div className="daemon-row">
-            <span className="online-dot" />
+          <div className={`daemon-row daemon-${daemon.status}`}>
+            <span className={`online-dot online-dot-${daemon.status}`} />
             <strong>{daemon.display_name || daemon.daemon_id}</strong>
             <span>{daemon.kind}</span>
+            <span className="daemon-status">{daemon.status}</span>
           </div>
+          {daemon.error ? <p className="daemon-error">{daemon.error}</p> : null}
           <div className="session-list">
             {(daemon.sessions || []).map((session) => {
               const isSelected =
