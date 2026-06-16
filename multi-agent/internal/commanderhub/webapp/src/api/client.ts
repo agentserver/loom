@@ -5,6 +5,17 @@ export async function apiGet<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+export class TurnInFlightError extends Error {
+  constructor() {
+    super('turn already in flight');
+    this.name = 'TurnInFlightError';
+  }
+}
+
+export function isTurnInFlightError(err: unknown): err is TurnInFlightError {
+  return err instanceof TurnInFlightError;
+}
+
 export function sessionPath(daemonID: string, sessionID: string) {
   return `/api/commander/daemons/${encodeURIComponent(daemonID)}/sessions/${encodeURIComponent(sessionID)}`;
 }
@@ -51,7 +62,7 @@ export async function postTurn(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt }),
   });
-  if (res.status === 409) throw new Error('turn already in flight');
+  if (res.status === 409) throw new TurnInFlightError();
   if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
 
   const reader = res.body.getReader();

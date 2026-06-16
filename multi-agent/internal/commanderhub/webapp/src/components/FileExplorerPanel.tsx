@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { apiGet, fileContentPath, filesPath } from '../api/client';
 import type { FileEntry, FileListResult, FileReadResult } from '../api/types';
 
@@ -31,9 +31,11 @@ export function FileExplorerPanel({ daemonID, sessionID }: { daemonID: string; s
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [preview, setPreview] = useState<FileReadResult | null>(null);
   const [error, setError] = useState('');
+  const previewRequestRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
+    previewRequestRef.current += 1;
     setEntries([]);
     setPreview(null);
     setError('');
@@ -55,12 +57,17 @@ export function FileExplorerPanel({ daemonID, sessionID }: { daemonID: string; s
 
   async function openFile(entry: FileEntry) {
     if (entry.kind !== 'file' || !daemonID || !sessionID) return;
+    const requestID = previewRequestRef.current + 1;
+    previewRequestRef.current = requestID;
+    setPreview(null);
     setError('');
     try {
       const result = await apiGet<FileReadResult>(fileContentPath(daemonID, sessionID, entry.path));
-      setPreview(result);
+      if (previewRequestRef.current === requestID) setPreview(result);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (previewRequestRef.current === requestID) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     }
   }
 
