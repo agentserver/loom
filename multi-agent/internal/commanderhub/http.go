@@ -191,16 +191,19 @@ func (ch *commanderHandlers) turn(w http.ResponseWriter, r *http.Request, daemon
 	chunkCh, err := ch.hub.SendCommandStream(turnCtx, o, daemonID, "session_turn", args)
 	if errors.Is(err, ErrDaemonNotFound) {
 		ch.hub.turns.finish(key, turnStateDisconnected)
+		ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
 		http.NotFound(w, r)
 		return
 	}
 	if errors.Is(err, ErrDaemonGone) {
 		ch.hub.turns.finish(key, turnStateDisconnected)
+		ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	if err != nil {
 		ch.hub.turns.fail(key, err.Error())
+		ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -252,6 +255,7 @@ func (ch *commanderHandlers) finishTurnWithoutTerminal(key turnKey, ctxErr error
 			sse.emitError(commander.ErrCodeBackendUnavailable, "daemon disconnected")
 		}
 	}
+	ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
 }
 
 func (ch *commanderHandlers) updateTurnStateFromEnvelope(key turnKey, env commander.Envelope) {
@@ -280,8 +284,10 @@ func (ch *commanderHandlers) updateTurnStateFromEnvelope(key turnKey, env comman
 		} else {
 			ch.hub.turns.finish(key, turnStateDone)
 		}
+		ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
 	case "error":
 		ch.hub.turns.fail(key, errorMessage(env.Payload))
+		ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
 	}
 }
 

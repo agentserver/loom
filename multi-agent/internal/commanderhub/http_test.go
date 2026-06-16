@@ -133,6 +133,53 @@ func TestHTTP_TreeUsesSessionCacheWithinTTL(t *testing.T) {
 	require.Equal(t, 1, calls)
 }
 
+func TestHTTP_TreeInvalidatesDaemonCacheAfterTurnCompletes(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
+	var mu sync.Mutex
+	var calls int
+	completed := false
+	srv, hub, _, o, cookie, cleanup := commanderSetup(t, resolver, "tok-alice", &tbBackend{
+		listFn: func(context.Context) ([]agentbackend.Session, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			calls++
+			title := "before turn"
+			if completed {
+				title = "after turn"
+			}
+			return []agentbackend.Session{{ID: "s1", Kind: agentbackend.KindClaude, Title: title}}, nil
+		},
+		resumeFn: func(context.Context, string, string, executor.Sink) (executor.Result, error) {
+			mu.Lock()
+			completed = true
+			mu.Unlock()
+			return executor.Result{Summary: "done"}, nil
+		},
+	})
+	defer cleanup()
+
+	first := getCommanderTree(t, srv, cookie)
+	require.Equal(t, "before turn", first.Daemons[0].Sessions[0].Title)
+
+	dis := hub.reg.daemons(o)
+	require.NotEmpty(t, dis)
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/commander/daemons/"+dis[0].DaemonID+"/sessions/s1/turn", strings.NewReader(`{"prompt":"go"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body, _ := io.ReadAll(resp.Body)
+	require.Contains(t, string(body), "event: done")
+
+	second := getCommanderTree(t, srv, cookie)
+	require.Equal(t, "after turn", second.Daemons[0].Sessions[0].Title)
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, 2, calls)
+}
+
 func TestHTTP_TreeMergesTurnState(t *testing.T) {
 	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
 	srv, hub, _, o, cookie, cleanup := commanderSetup(t, resolver, "tok-alice", &tbBackend{
