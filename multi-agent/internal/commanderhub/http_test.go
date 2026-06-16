@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -211,6 +213,46 @@ func TestHTTP_TreeMergesTurnState(t *testing.T) {
 	require.Equal(t, "answering", row.TurnState)
 	require.True(t, row.ActiveWorker)
 	require.True(t, row.AwaitingApproval)
+}
+
+func TestHTTP_FileRoutesProxyToDaemon(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "go.mod"), []byte("module x\n"), 0644))
+	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
+	srv, hub, _, o, cookie, cleanup := commanderSetup(t, resolver, "tok-alice", &tbBackend{
+		getFn: func(context.Context, string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+			return agentbackend.Session{ID: "s1", WorkingDir: root}, nil, nil
+		},
+	})
+	defer cleanup()
+
+	daemonID := hub.reg.daemons(o)[0].DaemonID
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/commander/daemons/"+daemonID+"/sessions/s1/files?path=.", nil)
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body, _ := io.ReadAll(resp.Body)
+	require.Contains(t, string(body), "go.mod")
+
+	req2, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/commander/daemons/"+daemonID+"/sessions/s1/files/content?path=go.mod", nil)
+	req2.AddCookie(cookie)
+	resp2, err := http.DefaultClient.Do(req2)
+	require.NoError(t, err)
+	defer resp2.Body.Close()
+	require.Equal(t, http.StatusOK, resp2.StatusCode)
+	body2, _ := io.ReadAll(resp2.Body)
+	require.Contains(t, string(body2), "module x")
+}
+
+func TestWriteSendCmdErrorInvalidRequestMaps400(t *testing.T) {
+	rec := httptest.NewRecorder()
+
+	writeSendCmdError(rec, &DaemonError{Code: commander.ErrCodeInvalidRequest, Message: "bad path"})
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), "bad path")
 }
 
 // TestHTTP_TurnStreamsSSE: POST .../turn returns text/event-stream with chunk

@@ -95,6 +95,10 @@ func (ch *commanderHandlers) daemonScoped(w http.ResponseWriter, r *http.Request
 			http.NotFound(w, r)
 		case tail == "turn":
 			ch.turn(w, r, id, sid)
+		case tail == "files":
+			ch.listFiles(w, r, id, sid)
+		case tail == "files/content":
+			ch.readFile(w, r, id, sid)
 		case tail == "":
 			ch.getSession(w, r, id, sid)
 		default:
@@ -142,15 +146,57 @@ func (ch *commanderHandlers) getSession(w http.ResponseWriter, r *http.Request, 
 	_, _ = w.Write(payload)
 }
 
+func (ch *commanderHandlers) listFiles(w http.ResponseWriter, r *http.Request, daemonID, sid string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	o, ok := ch.ownerOf(w, r)
+	if !ok {
+		return
+	}
+	payload, err := ch.hub.ListFiles(r.Context(), o, daemonID, sid, r.URL.Query().Get("path"))
+	if err != nil {
+		writeSendCmdError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(payload)
+}
+
+func (ch *commanderHandlers) readFile(w http.ResponseWriter, r *http.Request, daemonID, sid string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	o, ok := ch.ownerOf(w, r)
+	if !ok {
+		return
+	}
+	payload, err := ch.hub.ReadFile(r.Context(), o, daemonID, sid, r.URL.Query().Get("path"))
+	if err != nil {
+		writeSendCmdError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(payload)
+}
+
 // writeSendCmdError maps a SendCommand error to an HTTP status for the
-// non-streaming handlers (listSessions, getSession). A daemon-originated
-// session_not_found or an absent daemon → 404; anything else → 502. The turn
-// handler streams and forwards error frames as SSE, so it does not use this.
+// non-streaming handlers. Daemon-originated session_not_found or an absent
+// daemon → 404, invalid_request → 400, anything else → 502. The turn handler
+// streams and forwards error frames as SSE, so it does not use this.
 func writeSendCmdError(w http.ResponseWriter, err error) {
 	var de *DaemonError
-	if errors.As(err, &de) && de.Code == commander.ErrCodeSessionNotFound {
-		http.NotFound(w, nil)
-		return
+	if errors.As(err, &de) {
+		switch de.Code {
+		case commander.ErrCodeSessionNotFound:
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		case commander.ErrCodeInvalidRequest:
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	if errors.Is(err, ErrDaemonNotFound) {
 		http.NotFound(w, nil)
