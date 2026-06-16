@@ -1,6 +1,10 @@
 package commanderhub
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+	"time"
+)
 
 func TestTurnStateStoreRejectsConcurrentTurn(t *testing.T) {
 	s := newTurnStateStore()
@@ -25,5 +29,51 @@ func TestTurnStateStoreSnapshot(t *testing.T) {
 	got := s.get(key)
 	if got.State != turnStateAnswering || !got.InFlight {
 		t.Fatalf("snapshot=%+v", got)
+	}
+}
+
+func TestTurnStateStorePrunesTerminalStatesPreservingInFlight(t *testing.T) {
+	s := newTurnStateStore()
+	inFlight := turnKey{owner: owner{"alice", "W1"}, daemonID: "d1", sessionID: "active"}
+	if !s.begin(inFlight) {
+		t.Fatal("in-flight begin should succeed")
+	}
+
+	var firstTerminal turnKey
+	for i := 0; i < maxTurnStateEntries-1; i++ {
+		key := turnKey{owner: owner{"alice", "W1"}, daemonID: "d1", sessionID: fmt.Sprintf("done-%d", i)}
+		if i == 0 {
+			firstTerminal = key
+		}
+		if !s.begin(key) {
+			t.Fatalf("begin terminal %d should succeed", i)
+		}
+		s.finish(key, turnStateDone)
+	}
+	s.mu.Lock()
+	snap := s.m[firstTerminal]
+	snap.updatedAt = time.Now().Add(-time.Hour)
+	s.m[firstTerminal] = snap
+	s.mu.Unlock()
+	latestTerminal := turnKey{owner: owner{"alice", "W1"}, daemonID: "d1", sessionID: "latest"}
+	if !s.begin(latestTerminal) {
+		t.Fatal("latest terminal begin should succeed")
+	}
+	s.finish(latestTerminal, turnStateDone)
+
+	if got := s.get(inFlight); got.State != turnStateQueued || !got.InFlight {
+		t.Fatalf("in-flight snapshot pruned or changed: %+v", got)
+	}
+	if got := s.get(firstTerminal); got.State != turnStateIdle || got.InFlight {
+		t.Fatalf("oldest terminal should be pruned, got %+v", got)
+	}
+	if got := s.get(latestTerminal); got.State != turnStateDone || got.InFlight {
+		t.Fatalf("latest terminal should remain, got %+v", got)
+	}
+	s.mu.Lock()
+	gotLen := len(s.m)
+	s.mu.Unlock()
+	if gotLen > maxTurnStateEntries {
+		t.Fatalf("store len=%d, want <= %d", gotLen, maxTurnStateEntries)
 	}
 }

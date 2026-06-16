@@ -279,10 +279,40 @@ func TestHTTP_TurnPreStreamDaemonGoneLeavesStoreDisconnected(t *testing.T) {
 	require.False(t, snap.InFlight)
 }
 
-func TestHTTP_TurnRequestCanceledLeavesStoreError(t *testing.T) {
+func TestHTTP_TurnMissingDaemonDoesNotCreateTurnState(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
+	hub := NewHub(resolver)
+	auth := newAuthenticatorWithFlow(resolver, newFakeDeviceFlow("tok-alice"))
+	mux := http.NewServeMux()
+	Mount(mux, hub, auth)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	ident := identity.Identity{UserID: "alice", WorkspaceID: "W1"}
+	o := owner{userID: ident.UserID, workspaceID: ident.WorkspaceID}
+	cookie := &http.Cookie{Name: sessionCookieName, Value: auth.putSession("tok-alice", ident)}
+	key := turnKey{owner: o, daemonID: "missing", sessionID: "s1"}
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/commander/daemons/missing/sessions/s1/turn", strings.NewReader(`{"prompt":"go"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+	require.Equal(t, turnStateIdle, hub.turns.get(key).State)
+	hub.turns.mu.Lock()
+	_, exists := hub.turns.m[key]
+	hub.turns.mu.Unlock()
+	require.False(t, exists, "missing daemon request should not create turn state")
+}
+
+func TestHTTP_TurnRequestCanceledKeepsGuardUntilDaemonTerminal(t *testing.T) {
 	block := make(chan struct{})
 	started := make(chan struct{})
 	var startedOnce sync.Once
+	var blockOnce sync.Once
+	closeBlock := func() { blockOnce.Do(func() { close(block) }) }
 	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
 	srv, hub, _, o, cookie, cleanup := commanderSetup(t, resolver, "tok-alice", &tbBackend{
 		resumeFn: func(_ context.Context, _, _ string, _ executor.Sink) (executor.Result, error) {
@@ -292,7 +322,7 @@ func TestHTTP_TurnRequestCanceledLeavesStoreError(t *testing.T) {
 		},
 	})
 	defer cleanup()
-	defer close(block)
+	defer closeBlock()
 
 	dis := hub.reg.daemons(o)
 	require.NotEmpty(t, dis)
@@ -330,11 +360,24 @@ func TestHTTP_TurnRequestCanceledLeavesStoreError(t *testing.T) {
 	}
 
 	key := turnKey{owner: o, daemonID: daemonID, sessionID: "s1"}
-	waitFor(t, func() bool { return !hub.turns.get(key).InFlight }, 2*time.Second, "turn state did not clear")
 	snap := hub.turns.get(key)
-	require.Equal(t, turnStateError, snap.State)
-	require.NotEqual(t, turnStateDisconnected, snap.State)
-	require.Contains(t, snap.Message, context.Canceled.Error())
+	require.True(t, snap.InFlight, "browser cancellation must not clear daemon turn guard: %+v", snap)
+
+	secondCtx, secondCancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer secondCancel()
+	req2, _ := http.NewRequestWithContext(secondCtx, http.MethodPost, url, strings.NewReader(`{"prompt":"two"}`))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.AddCookie(cookie)
+	resp2, err := http.DefaultClient.Do(req2)
+	require.NoError(t, err)
+	defer resp2.Body.Close()
+	require.Equal(t, http.StatusConflict, resp2.StatusCode)
+
+	closeBlock()
+	waitFor(t, func() bool {
+		snap := hub.turns.get(key)
+		return snap.State == turnStateDone && !snap.InFlight
+	}, 2*time.Second, "turn state did not finish after daemon terminal")
 }
 
 // TestHTTP_SessionListJSONCasing: the session list serializes agentbackend.Session
