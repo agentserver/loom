@@ -171,7 +171,10 @@ async function showChat(daemonID, sid) {
 }
 
 async function sendTurn(daemonID, sid) {
-  const prompt = document.getElementById("prompt").value.trim();
+  const promptEl = document.getElementById("prompt");
+  const sendBtn = document.getElementById("send");
+  if (sendBtn && sendBtn.disabled) return;
+  const prompt = promptEl.value.trim();
   if (!prompt) return;
   const chat = document.getElementById("chat");
   const div = document.createElement("div");
@@ -179,30 +182,38 @@ async function sendTurn(daemonID, sid) {
   chat.appendChild(div);
   const assistant = document.createElement("div");
   assistant.className = "msg assistant"; chat.appendChild(assistant);
-  document.getElementById("prompt").value = "";
+  setTurnStatus(assistant, "已发送，等待 daemon 接收…");
+  promptEl.value = "";
+  if (sendBtn) sendBtn.disabled = true;
 
-  // POST + stream SSE via fetch ReadableStream (EventSource can't POST).
-  const res = await fetch(`/api/commander/daemons/${daemonID}/sessions/${sid}/turn`, {
-    method: "POST",
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt }),
-  });
-  if (!res.ok) { assistant.textContent = "错误: " + res.status; return; }
-  const reader = res.body.getReader();
-  const dec = new TextDecoder();
-  let buf = "";
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let idx;
-    while ((idx = buf.indexOf("\n\n")) >= 0) {
-      const block = buf.slice(0, idx); buf = buf.slice(idx + 2);
-      handleSSE(block, assistant);
+  try {
+    // POST + stream SSE via fetch ReadableStream (EventSource can't POST).
+    const res = await fetch(`/api/commander/daemons/${daemonID}/sessions/${sid}/turn`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt }),
+    });
+    if (!res.ok) { setTurnError(assistant, "HTTP " + res.status); return; }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const block = buf.slice(0, idx); buf = buf.slice(idx + 2);
+        handleSSE(block, assistant);
+      }
     }
+  } catch (e) {
+    setTurnError(assistant, e && e.message ? e.message : "turn failed");
+  } finally {
+    if (sendBtn) sendBtn.disabled = false;
+    chat.scrollTop = chat.scrollHeight;
   }
-  chat.scrollTop = chat.scrollHeight;
 }
 
 function handleSSE(block, assistant) {
@@ -220,31 +231,68 @@ function handleSSE(block, assistant) {
       } catch {
         if (event === "error") text = line.slice(6);
       }
-      if (event === "status" && text && !assistant._hasChunk) {
-        assistant.textContent = text;
-        assistant._statusOnly = true;
+      if (event === "status" && text) {
+        setTurnStatus(assistant, text);
       }
       if (event === "chunk" && text) {
-        if (assistant._statusOnly) assistant.textContent = "";
-        assistant._statusOnly = false;
         assistant._hasChunk = true;
-        assistant.textContent += text;
+        assistant._contentText = (assistant._contentText || "") + text;
+        renderTurnMessage(assistant);
       }
       if (event === "error") {
-        assistant.textContent = "错误: " + (text || "turn failed");
-        assistant._statusOnly = false;
+        setTurnError(assistant, text || "turn failed");
       }
       if (event === "done") {
-        if (assistant._statusOnly && text) {
-          assistant.textContent = text;
-          assistant._statusOnly = false;
-        }
         try { const r = body || JSON.parse(line.slice(6)); if (r.result && r.result.awaiting_user) {
-          assistant.textContent += "\n(需审批:请到 CLI 端继续)";
-        } } catch {}
+          assistant._statusText = "";
+          if (!assistant._contentText && text) assistant._contentText = text;
+          assistant._doneText = "需审批:请到 CLI 端继续";
+          renderTurnMessage(assistant);
+        } else {
+          assistant._statusText = "";
+          if (!assistant._contentText && text) assistant._contentText = text;
+          appendTurnStatus(assistant, "已回答完毕");
+        } } catch {
+          assistant._statusText = "";
+          appendTurnStatus(assistant, "已回答完毕");
+        }
       }
     }
   }
+}
+
+function displayStatus(text) {
+  if (text === "accepted by daemon" || text === "queued on daemon") return "已接收，排队中…";
+  if (text === "starting codex") return "正在启动 Codex…";
+  if (text === "codex running") return "Codex 正在回答…";
+  return text;
+}
+
+function setTurnStatus(assistant, text) {
+  assistant._statusText = displayStatus(text);
+  assistant._statusOnly = true;
+  renderTurnMessage(assistant);
+}
+
+function appendTurnStatus(assistant, text) {
+  assistant._doneText = text;
+  assistant._statusOnly = false;
+  renderTurnMessage(assistant);
+}
+
+function renderTurnMessage(assistant) {
+  const lines = [];
+  if (assistant._statusText) lines.push(assistant._statusText);
+  if (assistant._contentText) lines.push(assistant._contentText);
+  if (assistant._doneText) lines.push(assistant._doneText);
+  assistant.textContent = lines.join("\n");
+}
+
+function setTurnError(assistant, text) {
+  assistant.textContent = "错误: " + (text || "turn failed");
+  assistant._statusOnly = false;
+  assistant._statusText = "";
+  assistant._doneText = "";
 }
 
 // boot: try /daemons to see if already authed (cookie present); else show login.
