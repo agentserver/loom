@@ -107,8 +107,8 @@ func TestHTTP_GetSessionOK(t *testing.T) {
 	}
 }
 
-// TestHTTP_PostTurnStreamsSSE pins the SSE shape: one "event: chunk" per
-// sink Write, then "event: done" with a result payload.
+// TestHTTP_PostTurnStreamsSSE pins the SSE shape: an immediate status event,
+// one "event: chunk" per sink Write, then "event: done" with a result payload.
 func TestHTTP_PostTurnStreamsSSE(t *testing.T) {
 	h := &Handler{Backend: &fakeBackend{
 		resumeFn: func(_ context.Context, id, prompt string, sink executor.Sink) (executor.Result, error) {
@@ -148,6 +148,9 @@ func TestHTTP_PostTurnStreamsSSE(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := strings.Join(lines, "\n")
+	if !strings.Contains(body, "event: status") {
+		t.Errorf("missing status event:\n%s", body)
+	}
 	if !strings.Contains(body, "event: chunk") {
 		t.Errorf("missing chunk event:\n%s", body)
 	}
@@ -178,8 +181,15 @@ func TestHTTP_PostTurnErrSessionNotFound(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("status=%d want 404", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status=%d want 200 SSE error", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "event: status") {
+		t.Errorf("missing status event:\n%s", body)
+	}
+	if !strings.Contains(string(body), "event: error") || !strings.Contains(string(body), ErrCodeSessionNotFound) {
+		t.Errorf("missing session_not_found error event:\n%s", body)
 	}
 }
 

@@ -144,3 +144,51 @@ vm.runInContext(process.env.APP_JS, context);
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
 }
+
+func TestWeb_CommanderAppRendersStatusAndErrorEvents(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node unavailable for commander app SSE test")
+	}
+	appJS, err := os.ReadFile("assets/app.js")
+	require.NoError(t, err)
+
+	script := `
+const vm = require("node:vm");
+
+const context = {
+  console,
+  setTimeout,
+  TextDecoder,
+  window: { open: () => {} },
+  document: {
+    getElementById: () => ({ innerHTML: "", style: {}, appendChild: () => {}, querySelector: () => ({}) }),
+    createElement: () => ({ textContent: "", appendChild: () => {}, querySelector: () => ({}) }),
+  },
+  fetch: async path => {
+    if (path === "/api/commander/daemons") return { ok: false, status: 401 };
+    throw new Error("unexpected fetch " + path);
+  },
+};
+vm.createContext(context);
+vm.runInContext(process.env.APP_JS, context);
+
+const assistant = { textContent: "" };
+context.handleSSE('event: status\ndata: {"text":"starting codex"}', assistant);
+if (assistant.textContent !== "starting codex") {
+  throw new Error("status not rendered: " + assistant.textContent);
+}
+context.handleSSE('event: chunk\ndata: {"text":"OK"}', assistant);
+if (assistant.textContent !== "OK") {
+  throw new Error("chunk should replace status-only text: " + assistant.textContent);
+}
+context.handleSSE('event: error\ndata: {"code":"backend_unavailable","message":"codex exit"}', assistant);
+if (!assistant.textContent.includes("codex exit")) {
+  throw new Error("error message not rendered: " + assistant.textContent);
+}
+`
+	cmd := exec.Command(node, "-e", script)
+	cmd.Env = append(os.Environ(), "APP_JS="+string(appJS))
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+}

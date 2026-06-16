@@ -211,13 +211,35 @@ function handleSSE(block, assistant) {
     if (line.startsWith("event: ")) event = line.slice(7);
     else if (line.startsWith("data: ")) {
       let text = "";
-      try { text = JSON.parse(line.slice(6)).text || ""; } catch {
-        // done/error payloads carry result/error objects, not {text}
-        if (event === "error") text = "[error] " + line.slice(6);
+      let body = null;
+      try {
+        body = JSON.parse(line.slice(6));
+        text = body.text || "";
+        if (event === "error") text = body.message || body.code || text;
+        if (event === "done" && body.result && body.result.summary) text = body.result.summary;
+      } catch {
+        if (event === "error") text = line.slice(6);
       }
-      if (event === "chunk" && text) assistant.textContent += text;
+      if (event === "status" && text && !assistant._hasChunk) {
+        assistant.textContent = text;
+        assistant._statusOnly = true;
+      }
+      if (event === "chunk" && text) {
+        if (assistant._statusOnly) assistant.textContent = "";
+        assistant._statusOnly = false;
+        assistant._hasChunk = true;
+        assistant.textContent += text;
+      }
+      if (event === "error") {
+        assistant.textContent = "错误: " + (text || "turn failed");
+        assistant._statusOnly = false;
+      }
       if (event === "done") {
-        try { const r = JSON.parse(line.slice(6)); if (r.result && r.result.awaiting_user) {
+        if (assistant._statusOnly && text) {
+          assistant.textContent = text;
+          assistant._statusOnly = false;
+        }
+        try { const r = body || JSON.parse(line.slice(6)); if (r.result && r.result.awaiting_user) {
           assistant.textContent += "\n(需审批:请到 CLI 端继续)";
         } } catch {}
       }

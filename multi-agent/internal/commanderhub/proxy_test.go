@@ -59,10 +59,10 @@ func dialFakeDaemon(t *testing.T, resolver *fakeResolver, token string, backend 
 	srv := httptest.NewServer(hub)
 	wsURL := "ws" + srv.URL[len("http"):] + "/api/daemon-link"
 	c := commander.NewWSClient(commander.WSConfig{
-		URL:        wsURL,
-		ProxyToken: token,
-		Register:   commander.RegisterPayload{SchemaVersion: commander.SchemaVersion, Kind: "claude", DisplayName: "tester"},
-		Handler:    &commander.Handler{Backend: backend},
+		URL:            wsURL,
+		ProxyToken:     token,
+		Register:       commander.RegisterPayload{SchemaVersion: commander.SchemaVersion, Kind: "claude", DisplayName: "tester"},
+		Handler:        &commander.Handler{Backend: backend},
 		HeartbeatInt:   10 * time.Second,
 		InitialBackoff: 50 * time.Millisecond,
 		MaxBackoff:     50 * time.Millisecond,
@@ -132,15 +132,22 @@ func TestProxy_SendCommandStreamTurn(t *testing.T) {
 	require.NoError(t, err)
 
 	var events, results int
+	var sawStatus bool
 	for env := range ch {
 		if env.Type == "event" {
 			events++
+			var ep commander.EventPayload
+			require.NoError(t, json.Unmarshal(env.Payload, &ep))
+			if ep.EventKind == "status" {
+				sawStatus = true
+			}
 		}
 		if env.Type == "command_result" {
 			results++
 		}
 	}
-	require.Equal(t, 2, events)
+	require.Equal(t, 3, events)
+	require.True(t, sawStatus)
 	require.Equal(t, 1, results)
 }
 
