@@ -72,8 +72,9 @@ type Patch struct {
 	Mode        string   `json:"mode,omitempty"`
 }
 
-// SessionPreviewMaxBytes caps Session.Preview so a session-list UI can
-// render one line per row without unbounded growth from verbose output.
+// SessionPreviewMaxBytes caps session list text fields such as Preview and
+// Title so a session-list UI can render one line per row without unbounded
+// growth from verbose output.
 const SessionPreviewMaxBytes = 256
 
 // Session is a backend-agnostic descriptor of a conversation thread

@@ -10,6 +10,14 @@ import "encoding/json"
 // Bump on any breaking change to envelope or payload shape.
 const SchemaVersion = 1
 
+const (
+	CapabilitySessions = "sessions"
+	CapabilityTurn     = "turn"
+	CapabilityFiles    = "files"
+)
+
+const MaxFilePreviewBytes int64 = 2 * 1024 * 1024
+
 // Envelope is the JSON shell wrapping every WebSocket frame.
 //
 // Daemon-to-observer types: register, heartbeat, command_result, event, error.
@@ -25,12 +33,13 @@ type Envelope struct {
 
 // RegisterPayload is the first frame the daemon sends after the WS upgrade.
 type RegisterPayload struct {
-	SchemaVersion int    `json:"schema_version"`
-	Kind          string `json:"kind"`
-	AgentBin      string `json:"agent_bin"`
-	AgentWorkDir  string `json:"agent_workdir"`
-	DisplayName   string `json:"display_name"`
-	DriverVersion string `json:"driver_version"`
+	SchemaVersion int      `json:"schema_version"`
+	Kind          string   `json:"kind"`
+	AgentBin      string   `json:"agent_bin"`
+	AgentWorkDir  string   `json:"agent_workdir"`
+	DisplayName   string   `json:"display_name"`
+	DriverVersion string   `json:"driver_version"`
+	Capabilities  []string `json:"capabilities,omitempty"`
 }
 
 // CommandPayload describes an observer-to-daemon command.
@@ -48,6 +57,44 @@ type GetSessionArgs struct {
 type SessionTurnArgs struct {
 	ID     string `json:"id"`
 	Prompt string `json:"prompt"`
+}
+
+// FileListArgs is the payload for command="list_files".
+type FileListArgs struct {
+	ID   string `json:"id"`
+	Path string `json:"path"`
+}
+
+// FileEntry describes one file or directory in a list_files result.
+type FileEntry struct {
+	Name    string `json:"name"`
+	Path    string `json:"path"`
+	Kind    string `json:"kind"`
+	Size    int64  `json:"size,omitempty"`
+	ModTime string `json:"mod_time,omitempty"`
+}
+
+// FileListResult is the response payload for command="list_files".
+type FileListResult struct {
+	Root    string      `json:"root"`
+	Path    string      `json:"path"`
+	Entries []FileEntry `json:"entries"`
+}
+
+// FileReadArgs is the payload for command="read_file".
+type FileReadArgs struct {
+	ID   string `json:"id"`
+	Path string `json:"path"`
+}
+
+// FileReadResult is the response payload for command="read_file".
+type FileReadResult struct {
+	Path     string `json:"path"`
+	Size     int64  `json:"size"`
+	MIME     string `json:"mime,omitempty"`
+	Binary   bool   `json:"binary,omitempty"`
+	TooLarge bool   `json:"too_large,omitempty"`
+	Content  string `json:"content,omitempty"`
 }
 
 // EventPayload is one streaming event in a session_turn flow.
