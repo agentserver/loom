@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { apiGet, postTurn, sessionPath } from './api/client';
+import { useEffect, useRef, useState } from 'react';
+import { apiGet, isTurnInFlightError, postTurn, sessionPath } from './api/client';
 import type { CommanderTree, SessionDetail, TurnState } from './api/types';
 import { ChatWorkspace } from './components/ChatWorkspace';
 import { DaemonSessionTree } from './components/DaemonSessionTree';
@@ -31,6 +31,8 @@ export function CommanderApp() {
   const [selected, setSelected] = useState<{ daemonID: string; sessionID: string } | null>(null);
   const [sessionDetail, setSessionDetail] = useState<SessionDetail | null>(null);
   const [turnState, setTurnState] = useState<TurnState>('idle');
+  const selectedRef = useRef<typeof selected>(null);
+  const turnRequestRef = useRef(0);
 
   useEffect(() => {
     apiGet<CommanderTree>('/api/commander/tree')
@@ -67,31 +69,56 @@ export function CommanderApp() {
 
   async function sendPrompt(prompt: string) {
     const text = prompt.trim();
-    if (!selected || !text) return;
+    const submitted = selectedRef.current;
+    if (!submitted || !text) return;
 
-    setTurnState('queued');
+    const requestID = turnRequestRef.current + 1;
+    turnRequestRef.current = requestID;
+    const isCurrentTurn = () =>
+      turnRequestRef.current === requestID &&
+      selectedRef.current?.daemonID === submitted.daemonID &&
+      selectedRef.current?.sessionID === submitted.sessionID;
+    const setCurrentTurnState = (state: TurnState) => {
+      if (isCurrentTurn()) setTurnState(state);
+    };
+
+    setCurrentTurnState('queued');
     let turnError: Error | null = null;
     try {
-      await postTurn(selected.daemonID, selected.sessionID, text, (event, data) => {
+      await postTurn(submitted.daemonID, submitted.sessionID, text, (event, data) => {
+        if (!isCurrentTurn()) return;
         if (event === 'status') {
           const statusText = isRecord(data) && typeof data.text === 'string' ? data.text : '';
-          setTurnState(statusTurnState(statusText));
+          setCurrentTurnState(statusTurnState(statusText));
         } else if (event === 'chunk') {
-          setTurnState('answering');
+          setCurrentTurnState('answering');
         } else if (event === 'done') {
-          setTurnState(doneTurnState(data));
+          setCurrentTurnState(doneTurnState(data));
         } else if (event === 'error') {
-          setTurnState('error');
+          setCurrentTurnState('error');
           turnError = new Error(errorMessage(data));
         }
       });
       if (turnError) throw turnError;
-      const detail = await apiGet<SessionDetail>(sessionPath(selected.daemonID, selected.sessionID));
-      setSessionDetail(detail);
+      if (!isCurrentTurn()) return;
+      const detail = await apiGet<SessionDetail>(sessionPath(submitted.daemonID, submitted.sessionID));
+      if (isCurrentTurn()) setSessionDetail(detail);
     } catch (err) {
-      setTurnState('error');
+      if (isTurnInFlightError(err)) {
+        setCurrentTurnState('queued');
+        throw err;
+      }
+      setCurrentTurnState('error');
       throw err;
     }
+  }
+
+  function selectSession(daemonID: string, sessionID: string) {
+    const next = { daemonID, sessionID };
+    const changed = selectedRef.current?.daemonID !== daemonID || selectedRef.current.sessionID !== sessionID;
+    selectedRef.current = next;
+    if (changed) turnRequestRef.current += 1;
+    setSelected(next);
   }
 
   if (error === 'unauthorized') return <div className="login-shell">用 agentserver 登录</div>;
@@ -102,7 +129,7 @@ export function CommanderApp() {
       <DaemonSessionTree
         daemons={tree.daemons}
         selected={selected}
-        onSelect={(daemonID, sessionID) => setSelected({ daemonID, sessionID })}
+        onSelect={selectSession}
       />
       <ChatWorkspace
         daemonID={selected?.daemonID || ''}
