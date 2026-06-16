@@ -162,22 +162,30 @@ func (ch *commanderHandlers) turn(w http.ResponseWriter, r *http.Request, daemon
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return
 	}
+	key := turnKey{owner: o, daemonID: daemonID, sessionID: sid}
+	if !ch.hub.turns.begin(key) {
+		http.Error(w, "turn already in flight", http.StatusConflict)
+		return
+	}
 	args, _ := json.Marshal(commander.SessionTurnArgs{ID: sid, Prompt: body.Prompt})
 	ctx, cancel := context.WithTimeout(r.Context(), ch.hub.TurnTimeout)
 	defer cancel()
 
 	chunkCh, err := ch.hub.SendCommandStream(ctx, o, daemonID, "session_turn", args)
 	if errors.Is(err, ErrDaemonNotFound) {
+		ch.hub.turns.finish(key, turnStateDisconnected)
 		http.NotFound(w, r)
 		return
 	}
 	if err != nil {
+		ch.hub.turns.fail(key, err.Error())
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	sse := newSSEWriter(w)
 	terminal := false
 	for env := range chunkCh {
+		ch.updateTurnStateFromEnvelope(key, env)
 		sse.writeEnvelope(env)
 		if env.Type == "command_result" || env.Type == "error" {
 			terminal = true
@@ -186,9 +194,53 @@ func (ch *commanderHandlers) turn(w http.ResponseWriter, r *http.Request, daemon
 	if !terminal {
 		// stream closed without a terminal frame: timeout vs disconnect
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			sse.emitError("timeout", "no terminal frame within timeout")
+			msg := "no terminal frame within timeout"
+			ch.hub.turns.fail(key, msg)
+			sse.emitError("timeout", msg)
 		} else {
+			ch.hub.turns.finish(key, turnStateDisconnected)
 			sse.emitError(commander.ErrCodeBackendUnavailable, "daemon disconnected")
 		}
 	}
+}
+
+func (ch *commanderHandlers) updateTurnStateFromEnvelope(key turnKey, env commander.Envelope) {
+	switch env.Type {
+	case "event":
+		var ep commander.EventPayload
+		if err := json.Unmarshal(env.Payload, &ep); err != nil {
+			return
+		}
+		switch ep.EventKind {
+		case "status":
+			switch ep.Text {
+			case "queued on daemon", "queued-on-daemon", "accepted by daemon":
+				ch.hub.turns.set(key, turnStateQueued)
+			case "starting codex":
+				ch.hub.turns.set(key, turnStateStarting)
+			case "codex running":
+				ch.hub.turns.set(key, turnStateAnswering)
+			}
+		case "chunk":
+			ch.hub.turns.set(key, turnStateAnswering)
+		}
+	case "command_result":
+		if payloadAwaitingUser(env.Payload) {
+			ch.hub.turns.finish(key, turnStateAwaitingApproval)
+		} else {
+			ch.hub.turns.finish(key, turnStateDone)
+		}
+	case "error":
+		ch.hub.turns.fail(key, errorMessage(env.Payload))
+	}
+}
+
+func payloadAwaitingUser(payload []byte) bool {
+	var body struct {
+		Result struct {
+			AwaitingUser any `json:"awaiting_user"`
+		} `json:"result"`
+	}
+	_ = json.Unmarshal(payload, &body)
+	return body.Result.AwaitingUser != nil
 }

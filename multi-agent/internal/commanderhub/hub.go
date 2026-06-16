@@ -28,6 +28,7 @@ type Hub struct {
 	resolver identity.Resolver
 	upgrader websocket.Upgrader
 	reg      *registry
+	turns    *turnStateStore
 	cmdSeq   atomic.Int64 // generates per-command IDs (see proxy.go)
 
 	// TurnTimeout is the observer-side safety max applied to a session_turn
@@ -43,6 +44,7 @@ func NewHub(resolver identity.Resolver) *Hub {
 		resolver:    resolver,
 		upgrader:    websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }},
 		reg:         newRegistry(),
+		turns:       newTurnStateStore(),
 		TurnTimeout: defaultTurnTimeout,
 	}
 }
