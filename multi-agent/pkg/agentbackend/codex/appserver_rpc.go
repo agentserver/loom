@@ -52,6 +52,10 @@ func newAppServerRPC(r io.Reader, w io.Writer) *appServerRPC {
 }
 
 func (c *appServerRPC) call(ctx context.Context, method string, params any, out any) error {
+	return c.callWithWriteHook(ctx, method, params, out, nil)
+}
+
+func (c *appServerRPC) callWithWriteHook(ctx context.Context, method string, params any, out any, beforeWrite func()) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -91,7 +95,17 @@ func (c *appServerRPC) call(ctx context.Context, method string, params any, out 
 		c.mu.Unlock()
 		return err
 	}
-	if err := c.writeMessageChecked(req, c.callBeforeWrite(ctx)); err != nil {
+	writeCheck := c.callBeforeWrite(ctx)
+	if beforeWrite != nil {
+		writeCheck = func() error {
+			if err := c.callBeforeWrite(ctx)(); err != nil {
+				return err
+			}
+			beforeWrite()
+			return nil
+		}
+	}
+	if err := c.writeMessageChecked(req, writeCheck); err != nil {
 		c.mu.Lock()
 		if c.wait[id] == ch {
 			delete(c.wait, id)
