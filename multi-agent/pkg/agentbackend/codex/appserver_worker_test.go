@@ -188,6 +188,48 @@ func TestAppServerManagerSendsInitializeResumeAndTurnWithContext(t *testing.T) {
 	assertTurnStartRequest(t, reqs[3], "thr-1", "/session-cwd", "User answered: continue")
 }
 
+func TestAppServerManagerLearnsTurnIDFromDelta(t *testing.T) {
+	cfg := agentbackend.Config{Kind: agentbackend.KindCodex, Bin: "codex", WorkDir: "/repo"}
+	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
+		if req.Method != "turn/start" {
+			return false
+		}
+		writeFakeAppServerResult(t, w, *req.ID, map[string]any{"turn": map[string]any{"status": "running"}})
+		writeFakeAppServerNotification(t, w, "item/agentMessage/delta", `{"threadId":"other","turnId":"turn-x","itemId":"other","delta":"ignored"}`)
+		writeFakeAppServerNotification(t, w, "item/agentMessage/delta", `{"threadId":"thr-1","turnId":"turn-1","itemId":"i1","delta":"ok"}`)
+		writeFakeAppServerNotification(t, w, "item/agentMessage/delta", `{"threadId":"thr-1","turnId":"turn-2","itemId":"stale","delta":"stale"}`)
+		writeFakeAppServerNotification(t, w, "turn/completed", `{"threadId":"thr-1","turn":{"id":"turn-1","status":"completed"}}`)
+		return true
+	})
+	m := newAppServerManager(cfg, nil)
+	m.starter = fake.starter
+	wb := &workerBackend{Backend: New(cfg, nil), manager: m}
+
+	worker, err := wb.NewSessionWorker(context.Background(), agentbackend.Session{
+		ID:         "thr-1",
+		Kind:       agentbackend.KindCodex,
+		WorkingDir: "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), appServerRPCTestTimeout)
+	defer cancel()
+	sink := &appServerWorkerTestSink{}
+	res, err := worker.Run(ctx, "continue", sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Summary != "ok" || res.SessionID != "thr-1" {
+		t.Fatalf("result=%+v, want summary ok and session thr-1", res)
+	}
+	if got := sink.events; len(got) != 1 || got[0] != (appServerWorkerTestEvent{kind: "chunk", data: "ok"}) {
+		t.Fatalf("events=%+v, want only ok chunk", got)
+	}
+}
+
 func TestAppServerManagerUsesManagerOwnedLifecycleContext(t *testing.T) {
 	fake := newFakeAppServerTransport(t, nil)
 	m := newAppServerManager(agentbackend.Config{Bin: "codex", WorkDir: "/repo"}, nil)
