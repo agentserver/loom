@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -27,7 +28,6 @@ type codexSessionWorker struct {
 
 func (w *codexSessionWorker) Run(ctx context.Context, prompt string, sink agentbackend.Sink) (agentbackend.Result, error) {
 	agentbackend.WriteStatus(sink, agentbackend.StatusStarting, "starting codex app-server")
-	defer sink.Close()
 
 	var (
 		mu              sync.Mutex
@@ -106,12 +106,14 @@ func (w *codexSessionWorker) Run(ctx context.Context, prompt string, sink agentb
 		CapabilityChange: change,
 		SessionID:        w.sessionID,
 	}
-	if runErr != nil {
-		if wasAccepted {
-			return result, runErr
-		}
+	if runErr != nil && !wasAccepted {
 		return agentbackend.Result{}, agentbackend.ErrSessionWorkerUnavailable
 	}
+	if runErr != nil {
+		sink.Close()
+		return result, nonFallbackWorkerRunError(runErr)
+	}
+	sink.Close()
 	return result, nil
 }
 
@@ -148,4 +150,11 @@ func (w *codexSessionWorker) appServerErrorForSession(msg appServerRPCMessage) b
 		return true
 	}
 	return p.ThreadID == "" || p.ThreadID == w.sessionID
+}
+
+func nonFallbackWorkerRunError(err error) error {
+	if errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
+		return fmt.Errorf("codex app-server accepted execution before worker became unavailable: %v", err)
+	}
+	return err
 }

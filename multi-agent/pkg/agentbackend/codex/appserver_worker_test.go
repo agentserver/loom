@@ -12,9 +12,10 @@ import (
 )
 
 type appServerWorkerTestSink struct {
-	events   []appServerWorkerTestEvent
-	statuses []appServerWorkerTestStatus
-	closed   bool
+	events           []appServerWorkerTestEvent
+	statuses         []appServerWorkerTestStatus
+	closed           bool
+	writesAfterClose int
 }
 
 type appServerWorkerTestEvent struct {
@@ -28,6 +29,9 @@ type appServerWorkerTestStatus struct {
 }
 
 func (s *appServerWorkerTestSink) Write(kind, data string) {
+	if s.closed {
+		s.writesAfterClose++
+	}
 	s.events = append(s.events, appServerWorkerTestEvent{kind: kind, data: data})
 }
 
@@ -191,6 +195,40 @@ func TestCodexSessionWorkerReturnsUnavailableBeforeAcceptedExecution(t *testing.
 	if res != (agentbackend.Result{}) {
 		t.Fatalf("result=%+v, want zero result", res)
 	}
+	if sink.closed {
+		t.Fatal("sink closed before fallback")
+	}
+	sink.Write("chunk", "fallback can still write")
+	if sink.writesAfterClose != 0 {
+		t.Fatalf("writesAfterClose=%d, want 0", sink.writesAfterClose)
+	}
+}
+
+func TestCodexSessionWorkerReturnsNonSentinelErrorAfterAcceptedUnavailable(t *testing.T) {
+	sink := &appServerWorkerTestSink{}
+	w := &codexSessionWorker{
+		sessionID: "thr-1",
+		workDir:   t.TempDir(),
+		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage)) error {
+			emit(appServerWorkerNotification("turn/started", `{"threadId":"thr-1","turn":{"id":"turn-1","status":"running"}}`))
+			emit(appServerWorkerNotification("item/agentMessage/delta", `{"threadId":"thr-1","turnId":"turn-1","itemId":"i1","delta":"partial"}`))
+			return agentbackend.ErrSessionWorkerUnavailable
+		},
+	}
+
+	res, err := w.Run(context.Background(), "prompt", sink)
+	if err == nil {
+		t.Fatal("Run error = nil, want non-sentinel unavailable detail")
+	}
+	if errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
+		t.Fatalf("Run error = %v, should not match ErrSessionWorkerUnavailable after accepted execution", err)
+	}
+	if !strings.Contains(err.Error(), agentbackend.ErrSessionWorkerUnavailable.Error()) {
+		t.Fatalf("Run error = %v, want unavailable detail preserved", err)
+	}
+	if res.Summary != "partial" || res.SessionID != "thr-1" {
+		t.Fatalf("result=%+v", res)
+	}
 	if !sink.closed {
 		t.Fatal("sink not closed")
 	}
@@ -270,11 +308,15 @@ func TestCodexSessionWorkerErrorNotificationBeforeAcceptedExecutionReturnsUnavai
 	if res != (agentbackend.Result{}) {
 		t.Fatalf("result=%+v, want zero result", res)
 	}
-	if !sink.closed {
-		t.Fatal("sink not closed")
+	if sink.closed {
+		t.Fatal("sink closed before fallback")
 	}
 	if len(sink.events) != 0 {
 		t.Fatalf("events=%+v, want none", sink.events)
+	}
+	sink.Write("chunk", "fallback can still write")
+	if sink.writesAfterClose != 0 {
+		t.Fatalf("writesAfterClose=%d, want 0", sink.writesAfterClose)
 	}
 }
 

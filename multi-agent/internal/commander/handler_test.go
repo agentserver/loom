@@ -107,8 +107,9 @@ func (w *fakeSessionWorker) Healthy() bool {
 }
 
 type captureSink struct {
-	events []captured
-	closed bool
+	events           []captured
+	closed           bool
+	writesAfterClose int
 }
 
 type captured struct {
@@ -117,6 +118,9 @@ type captured struct {
 }
 
 func (c *captureSink) Write(kind, data string) {
+	if c.closed {
+		c.writesAfterClose++
+	}
 	c.events = append(c.events, captured{kind: kind, data: data})
 }
 
@@ -478,11 +482,12 @@ func TestHandler_SessionTurnFallsBackWhenHotWorkerRunUnavailable(t *testing.T) {
 		workerFn: func(context.Context, agentbackend.Session) (agentbackend.SessionWorker, error) {
 			return worker, nil
 		},
-		resumeFn: func(_ context.Context, id, answer string, _ executor.Sink) (executor.Result, error) {
+		resumeFn: func(_ context.Context, id, answer string, sink executor.Sink) (executor.Result, error) {
 			fallback.Add(1)
 			if id != "s1" || answer != "again" {
 				t.Fatalf("RunResume id=%q answer=%q, want s1/again", id, answer)
 			}
+			sink.Write("chunk", "fallback")
 			return executor.Result{Summary: "fallback", SessionID: "s1"}, nil
 		},
 	}}
@@ -491,12 +496,19 @@ func TestHandler_SessionTurnFallsBackWhenHotWorkerRunUnavailable(t *testing.T) {
 	if _, err := h.SessionTurn(context.Background(), "s1", "warm", &captureSink{}); err != nil {
 		t.Fatal(err)
 	}
-	res, err := h.SessionTurn(context.Background(), "s1", "again", &captureSink{})
+	sink := &captureSink{}
+	res, err := h.SessionTurn(context.Background(), "s1", "again", sink)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.Summary != "fallback" || fallback.Load() != 1 {
 		t.Fatalf("result=%+v fallback=%d", res, fallback.Load())
+	}
+	if sink.writesAfterClose != 0 {
+		t.Fatalf("fallback wrote after close %d times", sink.writesAfterClose)
+	}
+	if len(sink.events) != 1 || sink.events[0] != (captured{kind: "chunk", data: "fallback"}) {
+		t.Fatalf("sink events=%+v, want fallback chunk", sink.events)
 	}
 	worker.mu.Lock()
 	closed := worker.closed
