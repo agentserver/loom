@@ -1,14 +1,20 @@
 package codex
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/yourorg/multi-agent/internal/commander"
+	"github.com/yourorg/multi-agent/internal/humanloop"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
@@ -128,20 +134,229 @@ func TestCodexWorkerBackendNewSessionWorkerUnavailableWhenSessionIDEmpty(t *test
 	}
 }
 
+func TestAppServerManagerSendsInitializeResumeAndTurnWithContext(t *testing.T) {
+	cfg := agentbackend.Config{
+		Kind:    agentbackend.KindCodex,
+		Bin:     "codex",
+		WorkDir: "/manager-cwd",
+	}
+	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
+		if req.Method != "turn/start" {
+			return false
+		}
+		writeFakeAppServerResult(t, w, *req.ID, fakeAppServerResultFor(req.Method))
+		writeFakeAppServerNotification(t, w, "turn/started", `{"threadId":"thr-1","turn":{"id":"turn-1","status":"running"}}`)
+		writeFakeAppServerNotification(t, w, "item/agentMessage/delta", `{"threadId":"thr-1","turnId":"turn-1","itemId":"i1","delta":"ok"}`)
+		writeFakeAppServerNotification(t, w, "turn/completed", `{"threadId":"thr-1","turn":{"id":"turn-1","status":"completed"}}`)
+		return true
+	})
+	m := newAppServerManager(cfg, []string{"LOOM_TEST_ENV=present"})
+	m.starter = fake.starter
+	backend := New(cfg, []string{"LOOM_TEST_ENV=present"})
+	backend.exec.binSelf = "/path/to/driver-agent"
+	wb := &workerBackend{Backend: backend, manager: m}
+
+	worker, err := wb.NewSessionWorker(context.Background(), agentbackend.Session{
+		ID:         "thr-1",
+		Kind:       agentbackend.KindCodex,
+		WorkingDir: "/session-cwd",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Close()
+
+	sink := &appServerWorkerTestSink{}
+	res, err := worker.Run(context.Background(), "continue", sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Summary != "ok" || res.SessionID != "thr-1" {
+		t.Fatalf("result=%+v, want summary ok and session thr-1", res)
+	}
+
+	reqs := fake.takeRequests(t, 4)
+	wantMethods := []string{"initialize", "initialized", "thread/resume", "turn/start"}
+	for i, want := range wantMethods {
+		if reqs[i].Method != want {
+			t.Fatalf("request[%d].method=%q, want %q", i, reqs[i].Method, want)
+		}
+	}
+	assertInitializeRequest(t, reqs[0])
+	assertInitializedNotification(t, reqs[1])
+	assertThreadResumeRequest(t, reqs[2], "thr-1", "/session-cwd", "/path/to/driver-agent", "5")
+	assertTurnStartRequest(t, reqs[3], "thr-1", "/session-cwd", "User answered: continue")
+}
+
+func TestAppServerManagerEnsureUnavailableAndClosesTransportWhenInitializeFails(t *testing.T) {
+	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
+		if req.Method == "initialize" && req.ID != nil {
+			writeFakeAppServerError(t, w, *req.ID, "init rejected")
+			return true
+		}
+		return false
+	})
+	m := newAppServerManager(agentbackend.Config{Bin: "codex", WorkDir: "/repo"}, nil)
+	m.starter = fake.starter
+
+	err := m.ensure(context.Background())
+	if !errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
+		t.Fatalf("ensure error = %v, want ErrSessionWorkerUnavailable", err)
+	}
+	if got := fake.closeCount.Load(); got == 0 {
+		t.Fatal("transport close count = 0, want cleanup on initialize failure")
+	}
+}
+
+func TestCodexWorkerBackendNewSessionWorkerUnavailableWhenResumeRejectsConfig(t *testing.T) {
+	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
+		if req.Method == "thread/resume" && req.ID != nil {
+			writeFakeAppServerError(t, w, *req.ID, "bad mcp config")
+			return true
+		}
+		return false
+	})
+	cfg := agentbackend.Config{Kind: agentbackend.KindCodex, Bin: "codex", WorkDir: "/repo"}
+	m := newAppServerManager(cfg, nil)
+	m.starter = fake.starter
+	wb := &workerBackend{Backend: New(cfg, nil), manager: m}
+
+	worker, err := wb.NewSessionWorker(context.Background(), agentbackend.Session{
+		ID:         "thr-1",
+		Kind:       agentbackend.KindCodex,
+		WorkingDir: "/repo",
+	})
+	if !errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
+		t.Fatalf("NewSessionWorker error = %v, want ErrSessionWorkerUnavailable", err)
+	}
+	if worker != nil {
+		t.Fatalf("worker=%#v, want nil", worker)
+	}
+	reqs := fake.takeRequests(t, 3)
+	for i, want := range []string{"initialize", "initialized", "thread/resume"} {
+		if reqs[i].Method != want {
+			t.Fatalf("request[%d].method=%q, want %q", i, reqs[i].Method, want)
+		}
+	}
+	select {
+	case req := <-fake.requests:
+		t.Fatalf("unexpected request after rejected resume: %s", req.Method)
+	default:
+	}
+}
+
+func TestAppServerWorkerTurnStartSubmissionPreventsFallbackOnLostResponse(t *testing.T) {
+	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
+		if req.Method == "turn/start" {
+			if closer, ok := w.(io.Closer); ok {
+				_ = closer.Close()
+			}
+			return true
+		}
+		return false
+	})
+	cfg := agentbackend.Config{Kind: agentbackend.KindCodex, Bin: "codex", WorkDir: "/repo"}
+	m := newAppServerManager(cfg, nil)
+	m.starter = fake.starter
+	wb := &workerBackend{Backend: New(cfg, nil), manager: m}
+
+	worker, err := wb.NewSessionWorker(context.Background(), agentbackend.Session{
+		ID:         "thr-1",
+		Kind:       agentbackend.KindCodex,
+		WorkingDir: "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Close()
+
+	_, err = worker.Run(context.Background(), "continue", &appServerWorkerTestSink{})
+	if err == nil {
+		t.Fatal("Run error = nil, want lost response error")
+	}
+	if errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
+		t.Fatalf("Run error = %v, should not allow fallback after turn/start may have been written", err)
+	}
+}
+
+func TestAppServerWorkerReturnsAwaitingUserFromHumanloopIPC(t *testing.T) {
+	var endpoint atomic.Value
+	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
+		switch req.Method {
+		case "thread/resume":
+			ep := endpointFromThreadResumeRequest(t, req)
+			endpoint.Store(humanloop.EndpointArg(ep))
+			return false
+		case "turn/start":
+			writeFakeAppServerResult(t, w, *req.ID, fakeAppServerResultFor(req.Method))
+			raw, ok := endpoint.Load().(string)
+			if !ok {
+				t.Error("turn/start before thread/resume endpoint captured")
+				return true
+			}
+			ep, err := humanloop.ParseEndpointArg(raw)
+			if err != nil {
+				t.Errorf("ParseEndpointArg: %v", err)
+				return true
+			}
+			c, err := humanloop.DialIPC(ep)
+			if err != nil {
+				t.Errorf("DialIPC: %v", err)
+				return true
+			}
+			defer c.Close()
+			_ = c.Send(humanloop.Payload{
+				Kind:     "ask_user",
+				Question: "pick?",
+				Options:  []string{"a", "b"},
+			})
+			writeFakeAppServerNotification(t, w, "turn/completed", `{"threadId":"thr-1","turn":{"id":"turn-1","status":"completed"}}`)
+			return true
+		}
+		return false
+	})
+	cfg := agentbackend.Config{Kind: agentbackend.KindCodex, Bin: "codex", WorkDir: "/repo"}
+	m := newAppServerManager(cfg, nil)
+	m.starter = fake.starter
+	wb := &workerBackend{Backend: New(cfg, nil), manager: m}
+
+	worker, err := wb.NewSessionWorker(context.Background(), agentbackend.Session{
+		ID:         "thr-1",
+		Kind:       agentbackend.KindCodex,
+		WorkingDir: "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Close()
+
+	res, err := worker.Run(context.Background(), "continue", &appServerWorkerTestSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.AwaitingUser == nil {
+		t.Fatal("AwaitingUser = nil, want ask_user payload")
+	}
+	if res.AwaitingUser.Kind != "ask_user" || res.AwaitingUser.Question != "pick?" || len(res.AwaitingUser.Options) != 2 {
+		t.Fatalf("AwaitingUser=%+v, want ask_user pick? options", res.AwaitingUser)
+	}
+}
+
 func TestCodexSessionWorkerStreamsDeltasAndCapability(t *testing.T) {
 	sink := &appServerWorkerTestSink{}
 	var gotPrompt string
 	w := &codexSessionWorker{
 		sessionID: "thr-1",
 		workDir:   t.TempDir(),
-		runTurn: func(_ context.Context, prompt string, emit func(appServerRPCMessage), _ func()) error {
+		runTurn: func(_ context.Context, prompt string, emit func(appServerRPCMessage), _ func()) (appServerTurnResult, error) {
 			gotPrompt = prompt
 			emit(appServerWorkerNotification("turn/started", `{"threadId":"thr-1","turn":{"id":"turn-1","status":"running"}}`))
 			emit(appServerWorkerNotification("item/agentMessage/delta", `{"threadId":"thr-1","turnId":"turn-1","itemId":"i1","delta":"hello"}`))
+			emit(appServerWorkerNotification("item/agentMessage/delta", `{"threadId":"thr-1","turnId":"stale-turn","itemId":"old","delta":"stale"}`))
 			emit(appServerWorkerNotification("item/agentMessage/delta", `{"threadId":"other","turnId":"turn-x","itemId":"i2","delta":"ignored"}`))
 			emit(appServerWorkerNotification("item/agentMessage/delta", `{"threadId":"thr-1","turnId":"turn-1","itemId":"i1","delta":"\n=== CAPABILITY ===\nnew cap"}`))
 			emit(appServerWorkerNotification("turn/completed", `{"threadId":"thr-1","turn":{"id":"turn-1","status":"completed"}}`))
-			return nil
+			return appServerTurnResult{}, nil
 		},
 	}
 
@@ -181,8 +396,8 @@ func TestCodexSessionWorkerReturnsUnavailableBeforeAcceptedExecution(t *testing.
 	w := &codexSessionWorker{
 		sessionID: "thr-1",
 		workDir:   t.TempDir(),
-		runTurn: func(context.Context, string, func(appServerRPCMessage), func()) error {
-			return runErr
+		runTurn: func(context.Context, string, func(appServerRPCMessage), func()) (appServerTurnResult, error) {
+			return appServerTurnResult{}, runErr
 		},
 	}
 
@@ -210,10 +425,10 @@ func TestCodexSessionWorkerReturnsNonSentinelErrorAfterAcceptedUnavailable(t *te
 	w := &codexSessionWorker{
 		sessionID: "thr-1",
 		workDir:   t.TempDir(),
-		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage), _ func()) error {
+		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage), _ func()) (appServerTurnResult, error) {
 			emit(appServerWorkerNotification("turn/started", `{"threadId":"thr-1","turn":{"id":"turn-1","status":"running"}}`))
 			emit(appServerWorkerNotification("item/agentMessage/delta", `{"threadId":"thr-1","turnId":"turn-1","itemId":"i1","delta":"partial"}`))
-			return agentbackend.ErrSessionWorkerUnavailable
+			return appServerTurnResult{}, agentbackend.ErrSessionWorkerUnavailable
 		},
 	}
 
@@ -239,9 +454,9 @@ func TestCodexSessionWorkerSubmittedUnavailableDoesNotFallbackThroughCommander(t
 	worker := &codexSessionWorker{
 		sessionID: "thr-1",
 		workDir:   t.TempDir(),
-		runTurn: func(_ context.Context, _ string, _ func(appServerRPCMessage), markSubmitted func()) error {
+		runTurn: func(_ context.Context, _ string, _ func(appServerRPCMessage), markSubmitted func()) (appServerTurnResult, error) {
 			markSubmitted()
-			return agentbackend.ErrSessionWorkerUnavailable
+			return appServerTurnResult{}, agentbackend.ErrSessionWorkerUnavailable
 		},
 	}
 	worker.healthy.Store(true)
@@ -282,8 +497,8 @@ func TestCodexSessionWorkerUnsubmittedUnavailableFallsBackThroughCommander(t *te
 	worker := &codexSessionWorker{
 		sessionID: "thr-1",
 		workDir:   t.TempDir(),
-		runTurn: func(context.Context, string, func(appServerRPCMessage), func()) error {
-			return agentbackend.ErrSessionWorkerUnavailable
+		runTurn: func(context.Context, string, func(appServerRPCMessage), func()) (appServerTurnResult, error) {
+			return appServerTurnResult{}, agentbackend.ErrSessionWorkerUnavailable
 		},
 	}
 	worker.healthy.Store(true)
@@ -328,9 +543,10 @@ func TestCodexSessionWorkerReturnsRealErrorAfterDeltaAcceptedExecution(t *testin
 	w := &codexSessionWorker{
 		sessionID: "thr-1",
 		workDir:   t.TempDir(),
-		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage), _ func()) error {
+		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage), _ func()) (appServerTurnResult, error) {
+			emit(appServerWorkerNotification("turn/started", `{"threadId":"thr-1","turn":{"id":"turn-1","status":"running"}}`))
 			emit(appServerWorkerNotification("item/agentMessage/delta", `{"threadId":"thr-1","turnId":"turn-1","itemId":"i1","delta":"partial"}`))
-			return runErr
+			return appServerTurnResult{}, runErr
 		},
 	}
 
@@ -355,11 +571,11 @@ func TestCodexSessionWorkerIgnoresOtherSessionNotificationsBeforeFallback(t *tes
 	w := &codexSessionWorker{
 		sessionID: "thr-1",
 		workDir:   t.TempDir(),
-		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage), _ func()) error {
+		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage), _ func()) (appServerTurnResult, error) {
 			emit(appServerWorkerNotification("turn/started", `{"threadId":"other","turn":{"id":"turn-x","status":"running"}}`))
 			emit(appServerWorkerNotification("item/agentMessage/delta", `{"threadId":"other","turnId":"turn-x","itemId":"i1","delta":"ignored"}`))
 			emit(appServerWorkerNotification("turn/completed", `{"threadId":"other","turn":{"id":"turn-x","status":"completed"}}`))
-			return runErr
+			return appServerTurnResult{}, runErr
 		},
 	}
 
@@ -383,9 +599,9 @@ func TestCodexSessionWorkerErrorNotificationBeforeAcceptedExecutionReturnsUnavai
 	w := &codexSessionWorker{
 		sessionID: "thr-1",
 		workDir:   t.TempDir(),
-		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage), _ func()) error {
+		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage), _ func()) (appServerTurnResult, error) {
 			emit(appServerWorkerNotification("error", `{"threadId":"thr-1","message":"turn rejected"}`))
-			return nil
+			return appServerTurnResult{}, nil
 		},
 	}
 
@@ -413,10 +629,11 @@ func TestCodexSessionWorkerErrorNotificationAfterAcceptedExecutionReturnsRealErr
 	w := &codexSessionWorker{
 		sessionID: "thr-1",
 		workDir:   t.TempDir(),
-		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage), _ func()) error {
+		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage), _ func()) (appServerTurnResult, error) {
+			emit(appServerWorkerNotification("turn/started", `{"threadId":"thr-1","turn":{"id":"turn-1","status":"running"}}`))
 			emit(appServerWorkerNotification("item/agentMessage/delta", `{"threadId":"thr-1","turnId":"turn-1","itemId":"i1","delta":"partial"}`))
 			emit(appServerWorkerNotification("error", `{"threadId":"thr-1","message":"lost worker"}`))
-			return nil
+			return appServerTurnResult{}, nil
 		},
 	}
 
@@ -466,6 +683,256 @@ func TestCodexSessionWorkerHealthyAndClose(t *testing.T) {
 
 func appServerWorkerNotification(method string, params string) appServerRPCMessage {
 	return appServerRPCMessage{Method: method, Params: json.RawMessage(params)}
+}
+
+type fakeAppServerTransport struct {
+	requests   chan appServerRPCMessage
+	closeCount atomic.Int32
+	handler    func(appServerRPCMessage, io.Writer) bool
+}
+
+func newFakeAppServerTransport(t *testing.T, handler func(appServerRPCMessage, io.Writer) bool) *fakeAppServerTransport {
+	t.Helper()
+	return &fakeAppServerTransport{
+		requests: make(chan appServerRPCMessage, 16),
+		handler:  handler,
+	}
+}
+
+func (f *fakeAppServerTransport) starter(context.Context, agentbackend.Config, []string) (*appServerConnection, error) {
+	clientReader, serverWriter := io.Pipe()
+	serverReader, clientWriter := io.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sc := bufio.NewScanner(serverReader)
+		for sc.Scan() {
+			var req appServerRPCMessage
+			if err := json.Unmarshal(sc.Bytes(), &req); err != nil {
+				return
+			}
+			f.requests <- req
+			handled := false
+			if f.handler != nil {
+				handled = f.handler(req, serverWriter)
+			}
+			if req.ID == nil || handled {
+				continue
+			}
+			select {
+			case <-done:
+				return
+			default:
+			}
+			if req.Method == "initialize" || req.Method == "thread/resume" || req.Method == "turn/start" {
+				writeFakeAppServerResult(nil, serverWriter, *req.ID, fakeAppServerResultFor(req.Method))
+			}
+		}
+	}()
+	closeFn := func() error {
+		f.closeCount.Add(1)
+		_ = clientReader.Close()
+		_ = clientWriter.Close()
+		_ = serverReader.Close()
+		_ = serverWriter.Close()
+		select {
+		case <-done:
+		case <-time.After(appServerRPCTestTimeout):
+		}
+		return nil
+	}
+	return &appServerConnection{
+		rpc:   newAppServerRPC(clientReader, clientWriter),
+		close: closeFn,
+	}, nil
+}
+
+func (f *fakeAppServerTransport) takeRequests(t *testing.T, n int) []appServerRPCMessage {
+	t.Helper()
+	got := make([]appServerRPCMessage, 0, n)
+	for len(got) < n {
+		select {
+		case req := <-f.requests:
+			got = append(got, req)
+		case <-time.After(appServerRPCTestTimeout):
+			t.Fatalf("timed out waiting for request %d/%d", len(got)+1, n)
+		}
+	}
+	return got
+}
+
+func fakeAppServerResultFor(method string) any {
+	switch method {
+	case "turn/start":
+		return map[string]any{"turn": map[string]any{"id": "turn-1", "status": "running"}}
+	case "thread/resume":
+		return map[string]any{"thread": map[string]any{"id": "thr-1"}}
+	default:
+		return map[string]any{}
+	}
+}
+
+func writeFakeAppServerResult(t *testing.T, w io.Writer, id json.RawMessage, result any) {
+	if t != nil {
+		t.Helper()
+	}
+	body, err := json.Marshal(appServerRPCMessage{ID: &id, Result: mustMarshalRaw(result)})
+	if err != nil {
+		if t != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	_, err = fmt.Fprintln(w, string(body))
+	if err != nil && t != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeFakeAppServerError(t *testing.T, w io.Writer, id json.RawMessage, message string) {
+	t.Helper()
+	body, err := json.Marshal(appServerRPCMessage{ID: &id, Error: &appServerError{Code: -32000, Message: message}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintln(w, string(body)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeFakeAppServerNotification(t *testing.T, w io.Writer, method string, params string) {
+	t.Helper()
+	body, err := json.Marshal(appServerWorkerNotification(method, params))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintln(w, string(body)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustMarshalRaw(v any) json.RawMessage {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+func assertInitializeRequest(t *testing.T, req appServerRPCMessage) {
+	t.Helper()
+	if req.ID == nil {
+		t.Fatal("initialize missing request id")
+	}
+	var params struct {
+		ClientInfo struct {
+			Name    string `json:"name"`
+			Title   string `json:"title"`
+			Version string `json:"version"`
+		} `json:"clientInfo"`
+		Capabilities struct {
+			ExperimentalAPI bool `json:"experimentalApi"`
+		} `json:"capabilities"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		t.Fatal(err)
+	}
+	if params.ClientInfo.Name != "loom_driver_daemon" ||
+		params.ClientInfo.Title != "Loom Driver Daemon" ||
+		params.ClientInfo.Version != "v0.0.0" ||
+		!params.Capabilities.ExperimentalAPI {
+		t.Fatalf("initialize params=%s", string(req.Params))
+	}
+}
+
+func assertInitializedNotification(t *testing.T, req appServerRPCMessage) {
+	t.Helper()
+	if req.ID != nil {
+		t.Fatalf("initialized id=%s, want omitted", string(*req.ID))
+	}
+	if strings.TrimSpace(string(req.Params)) != "{}" {
+		t.Fatalf("initialized params=%s, want {}", string(req.Params))
+	}
+}
+
+func assertThreadResumeRequest(t *testing.T, req appServerRPCMessage, threadID, cwd, command, maxQuestions string) {
+	t.Helper()
+	if req.ID == nil {
+		t.Fatal("thread/resume missing request id")
+	}
+	var params struct {
+		ThreadID string `json:"threadId"`
+		CWD      string `json:"cwd"`
+		Config   struct {
+			MCPServers map[string]struct {
+				Command string   `json:"command"`
+				Args    []string `json:"args"`
+			} `json:"mcp_servers"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		t.Fatal(err)
+	}
+	if params.ThreadID != threadID || params.CWD != cwd {
+		t.Fatalf("thread/resume threadID=%q cwd=%q, want %q %q", params.ThreadID, params.CWD, threadID, cwd)
+	}
+	got := params.Config.MCPServers["loom_humanloop"]
+	if got.Command != command {
+		t.Fatalf("mcp command=%q, want %q", got.Command, command)
+	}
+	if len(got.Args) != 3 || got.Args[0] != "humanloop-mcp" || got.Args[2] != maxQuestions {
+		t.Fatalf("mcp args=%#v, want [humanloop-mcp ENDPOINT %s]", got.Args, maxQuestions)
+	}
+	if _, err := humanloop.ParseEndpointArg(got.Args[1]); err != nil {
+		t.Fatalf("humanloop endpoint arg: %v", err)
+	}
+}
+
+func endpointFromThreadResumeRequest(t *testing.T, req appServerRPCMessage) humanloop.Endpoint {
+	t.Helper()
+	var params struct {
+		Config struct {
+			MCPServers map[string]struct {
+				Args []string `json:"args"`
+			} `json:"mcp_servers"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		t.Fatal(err)
+	}
+	args := params.Config.MCPServers["loom_humanloop"].Args
+	if len(args) < 2 {
+		t.Fatalf("mcp args=%#v, want endpoint arg", args)
+	}
+	ep, err := humanloop.ParseEndpointArg(args[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ep
+}
+
+func assertTurnStartRequest(t *testing.T, req appServerRPCMessage, threadID, cwd, text string) {
+	t.Helper()
+	if req.ID == nil {
+		t.Fatal("turn/start missing request id")
+	}
+	var params struct {
+		ThreadID string `json:"threadId"`
+		CWD      string `json:"cwd"`
+		Input    []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"input"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		t.Fatal(err)
+	}
+	if params.ThreadID != threadID || params.CWD != cwd {
+		t.Fatalf("turn/start threadID=%q cwd=%q, want %q %q", params.ThreadID, params.CWD, threadID, cwd)
+	}
+	if len(params.Input) != 1 || params.Input[0].Type != "text" || params.Input[0].Text != text {
+		t.Fatalf("turn/start input=%+v, want text %q", params.Input, text)
+	}
 }
 
 func equalAppServerWorkerEvents(a, b []appServerWorkerTestEvent) bool {

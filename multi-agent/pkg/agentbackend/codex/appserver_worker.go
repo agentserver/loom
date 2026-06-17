@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	executorpkg "github.com/yourorg/multi-agent/internal/executor"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
@@ -17,14 +18,20 @@ var (
 	_ agentbackend.HealthySessionWorker = (*codexSessionWorker)(nil)
 )
 
+type appServerTurnResult struct {
+	AwaitingUser *executorpkg.AskUserPayload
+}
+
 type codexSessionWorker struct {
-	sessionID string
-	workDir   string
-	healthy   atomic.Bool
+	sessionID  string
+	workDir    string
+	healthy    atomic.Bool
+	generation int64
+	healthyFn  func() bool
 
 	// runTurn must call markSubmitted once the turn/start request may have
 	// reached app-server; after that, Run must not allow RunResume fallback.
-	runTurn func(ctx context.Context, prompt string, emit func(appServerRPCMessage), markSubmitted func()) error
+	runTurn func(ctx context.Context, prompt string, emit func(appServerRPCMessage), markSubmitted func()) (appServerTurnResult, error)
 	closeFn func() error
 }
 
@@ -38,6 +45,7 @@ func (w *codexSessionWorker) Run(ctx context.Context, prompt string, sink agentb
 		accepted        bool
 		answeringStatus bool
 		notifyErr       error
+		activeTurnID    string
 	)
 
 	markAccepted := func() {
@@ -62,30 +70,51 @@ func (w *codexSessionWorker) Run(ctx context.Context, prompt string, sink agentb
 
 		switch msg.Method {
 		case "turn/started":
-			if !w.appServerMessageForSession(msg) {
+			meta := appServerNotificationMetaFor(msg)
+			if meta.ThreadID != w.sessionID || meta.TurnID == "" {
+				return
+			}
+			if activeTurnID == "" {
+				activeTurnID = meta.TurnID
+			}
+			if meta.TurnID != activeTurnID {
 				return
 			}
 			markAccepted()
 		case "item/agentMessage/delta":
 			var p struct {
 				ThreadID string `json:"threadId"`
+				TurnID   string `json:"turnId"`
 				Delta    string `json:"delta"`
 			}
 			if err := json.Unmarshal(msg.Params, &p); err != nil {
 				return
 			}
-			if p.ThreadID != w.sessionID || p.Delta == "" {
+			if p.ThreadID != w.sessionID || p.Delta == "" || activeTurnID == "" || p.TurnID != activeTurnID {
 				return
 			}
 			markAccepted()
 			sink.Write("chunk", p.Delta)
 			text.WriteString(p.Delta)
 		case "turn/completed":
-			if !w.appServerMessageForSession(msg) {
+			meta := appServerNotificationMetaFor(msg)
+			if meta.ThreadID != w.sessionID || meta.TurnID == "" {
+				return
+			}
+			if activeTurnID == "" || meta.TurnID != activeTurnID {
 				return
 			}
 			markAccepted()
 		case "error":
+			meta := appServerNotificationMetaFor(msg)
+			if meta.ThreadID != "" && meta.ThreadID != w.sessionID {
+				return
+			}
+			if meta.TurnID != "" {
+				if activeTurnID == "" || meta.TurnID != activeTurnID {
+					return
+				}
+			}
 			if !w.appServerErrorForSession(msg) {
 				return
 			}
@@ -94,13 +123,14 @@ func (w *codexSessionWorker) Run(ctx context.Context, prompt string, sink agentb
 	}
 
 	runErr := agentbackend.ErrSessionWorkerUnavailable
+	var turnResult appServerTurnResult
 	if w.runTurn != nil {
-		runErr = w.runTurn(ctx, prompt, emit, markSubmitted)
+		turnResult, runErr = w.runTurn(ctx, prompt, emit, markSubmitted)
 	}
 
 	mu.Lock()
 	full := text.String()
-	unsafeForFallback := accepted || submitted
+	unsafeForFallback := accepted || submitted || turnResult.AwaitingUser != nil
 	if runErr == nil {
 		runErr = notifyErr
 	}
@@ -114,6 +144,7 @@ func (w *codexSessionWorker) Run(ctx context.Context, prompt string, sink agentb
 		Summary:          summary,
 		CapabilityChange: change,
 		SessionID:        w.sessionID,
+		AwaitingUser:     turnResult.AwaitingUser,
 	}
 	if runErr != nil && !unsafeForFallback {
 		return agentbackend.Result{}, agentbackend.ErrSessionWorkerUnavailable
@@ -135,7 +166,14 @@ func (w *codexSessionWorker) Close() error {
 }
 
 func (w *codexSessionWorker) Healthy() bool {
-	return w.healthy.Load()
+	if !w.healthy.Load() {
+		return false
+	}
+	if w.healthyFn != nil && !w.healthyFn() {
+		w.healthy.Store(false)
+		return false
+	}
+	return true
 }
 
 func (w *codexSessionWorker) appServerMessageForSession(msg appServerRPCMessage) bool {
@@ -166,4 +204,27 @@ func nonFallbackWorkerRunError(err error) error {
 		return fmt.Errorf("codex app-server turn may have executed before worker became unavailable: %v", err)
 	}
 	return err
+}
+
+type appServerNotificationMeta struct {
+	ThreadID string
+	TurnID   string
+}
+
+func appServerNotificationMetaFor(msg appServerRPCMessage) appServerNotificationMeta {
+	var p struct {
+		ThreadID string `json:"threadId"`
+		TurnID   string `json:"turnId"`
+		Turn     struct {
+			ID string `json:"id"`
+		} `json:"turn"`
+	}
+	if err := json.Unmarshal(msg.Params, &p); err != nil {
+		return appServerNotificationMeta{}
+	}
+	turnID := p.TurnID
+	if turnID == "" {
+		turnID = p.Turn.ID
+	}
+	return appServerNotificationMeta{ThreadID: p.ThreadID, TurnID: turnID}
 }
