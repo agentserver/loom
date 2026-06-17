@@ -52,6 +52,28 @@ func (f *fakeBackend) NewSessionWorker(ctx context.Context, sess agentbackend.Se
 	return f.workerFn(ctx, sess)
 }
 
+type resumeOnlyBackend struct {
+	getFn    func(ctx context.Context, id string) (agentbackend.Session, []agentbackend.SessionMessage, error)
+	resumeFn func(ctx context.Context, id, answer string, sink executor.Sink) (executor.Result, error)
+}
+
+func (b *resumeOnlyBackend) Kind() agentbackend.Kind { return agentbackend.KindCodex }
+func (b *resumeOnlyBackend) Run(context.Context, executor.Task, executor.Sink) (executor.Result, error) {
+	return executor.Result{}, nil
+}
+func (b *resumeOnlyBackend) RunResume(ctx context.Context, id, answer string, sink executor.Sink) (executor.Result, error) {
+	return b.resumeFn(ctx, id, answer, sink)
+}
+func (b *resumeOnlyBackend) LLM() agentbackend.LLMRunner                { return nil }
+func (b *resumeOnlyBackend) Permissions() agentbackend.PermissionsStore { return nil }
+func (b *resumeOnlyBackend) Detect(context.Context) error               { return nil }
+func (b *resumeOnlyBackend) ListSessions(context.Context) ([]agentbackend.Session, error) {
+	return nil, nil
+}
+func (b *resumeOnlyBackend) GetSession(ctx context.Context, id string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+	return b.getFn(ctx, id)
+}
+
 type fakeSessionWorker struct {
 	mu      sync.Mutex
 	turns   []string
@@ -182,6 +204,32 @@ func TestHandler_SessionTurnStreamsAndReturns(t *testing.T) {
 	}
 	if len(sink.events) != 3 || sink.events[0].kind != "chunk" || sink.events[2].kind != "capability" {
 		t.Errorf("events=%+v", sink.events)
+	}
+}
+
+func TestHandler_OffModeBackendDoesNotFetchSessionBeforeResume(t *testing.T) {
+	var getCalls atomic.Int32
+	var resumeCalls atomic.Int32
+	h := &Handler{Backend: &resumeOnlyBackend{
+		getFn: func(context.Context, string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+			getCalls.Add(1)
+			return agentbackend.Session{}, nil, errors.New("unexpected GetSession")
+		},
+		resumeFn: func(context.Context, string, string, executor.Sink) (executor.Result, error) {
+			resumeCalls.Add(1)
+			return executor.Result{Summary: "fallback"}, nil
+		},
+	}}
+
+	_, err := h.SessionTurn(context.Background(), "s1", "prompt", &captureSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := getCalls.Load(); got != 0 {
+		t.Fatalf("GetSession calls=%d want 0", got)
+	}
+	if got := resumeCalls.Load(); got != 1 {
+		t.Fatalf("RunResume calls=%d want 1", got)
 	}
 }
 

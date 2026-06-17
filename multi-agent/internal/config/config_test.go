@@ -58,6 +58,20 @@ discovery:
 	require.ElementsMatch(t, []string{"chat", "mcp"}, c.Discovery.Skills)
 }
 
+func TestLoadAgentWorkerMode(t *testing.T) {
+	cfg, err := loadFromString(t, `
+server: {url: "http://observer", name: "test"}
+agent:
+  kind: codex
+  bin: codex
+  workdir: /tmp/repo
+  worker_mode: app_server
+discovery: {display_name: "daemon", description: "test", skills: []}
+`)
+	require.NoError(t, err)
+	require.Equal(t, "app_server", cfg.Agent.WorkerMode)
+}
+
 func TestLoad_MissingURL(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "c.yaml")

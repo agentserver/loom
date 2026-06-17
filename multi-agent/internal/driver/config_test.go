@@ -101,6 +101,60 @@ discovery: {display_name: drv}
 	if c.Fanout.SubTaskDefaults.TimeoutSec != 600 {
 		t.Errorf("default fanout.subtask_defaults.timeout_sec: want 600, got %d", c.Fanout.SubTaskDefaults.TimeoutSec)
 	}
+	if c.Daemon.WorkerMax != 0 {
+		t.Errorf("default daemon.worker_max: want 0, got %d", c.Daemon.WorkerMax)
+	}
+	if c.Daemon.WorkerIdleTimeoutSec != 0 {
+		t.Errorf("default daemon.worker_idle_timeout_sec: want 0, got %d", c.Daemon.WorkerIdleTimeoutSec)
+	}
+}
+
+func TestLoadConfigAgentWorkerMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "driver.yaml")
+	if err := os.WriteFile(path, []byte(`
+server: {url: "http://observer", name: "test"}
+credentials: {proxy_token: "tok"}
+agent:
+  kind: codex
+  bin: codex
+  workdir: /tmp/repo
+  worker_mode: app_server
+discovery: {display_name: "daemon", description: "test", skills: []}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Agent.WorkerMode != "app_server" {
+		t.Fatalf("worker_mode=%q", cfg.Agent.WorkerMode)
+	}
+}
+
+func TestLoadConfigDaemonWorkerCacheConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "driver.yaml")
+	if err := os.WriteFile(path, []byte(`
+server: {url: "http://observer", name: "test"}
+credentials: {proxy_token: "tok"}
+agent: {kind: codex, bin: codex, workdir: /tmp/repo}
+discovery: {display_name: "daemon", description: "test", skills: []}
+daemon:
+  worker_max: 3
+  worker_idle_timeout_sec: 45
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Daemon.WorkerMax != 3 {
+		t.Fatalf("daemon.worker_max=%d", cfg.Daemon.WorkerMax)
+	}
+	if cfg.Daemon.WorkerIdleTimeoutSec != 45 {
+		t.Fatalf("daemon.worker_idle_timeout_sec=%d", cfg.Daemon.WorkerIdleTimeoutSec)
+	}
 }
 
 // TestDriverConfig_ObserverForceRegisterRoundTrip locks the §1.3 #11 PR2
@@ -121,7 +175,7 @@ observer:
   workspace_id: ws1
   agent_id: drv-1
   api_key: ak_secret
-  token_state_path: ` + filepath.Join(dir, "obs.token") + `
+  token_state_path: `+filepath.Join(dir, "obs.token")+`
   force_register: true
 `), 0o600); err != nil {
 		t.Fatal(err)
