@@ -771,6 +771,31 @@ func TestAppServerWorkerWaitsForTerminalEventBeforeReturningAwaitingUser(t *test
 	}
 }
 
+func TestAppServerTerminalEventDrainsQueuedHumanloopPayload(t *testing.T) {
+	payloads := newAppServerHumanloopPayloadBuffer(1)
+	payloads.beginTurn()
+	defer payloads.endTurn()
+	payloads.deliver(humanloop.Payload{Kind: "ask_user", Question: "ready at terminal"})
+	terminal := appServerWorkerNotification("turn/completed", `{"threadId":"thr-1","turn":{"id":"turn-1","status":"completed"}}`)
+	terminalCh := make(chan appServerRPCMessage, 1)
+	terminalCh <- terminal
+
+	msg := receiveWithin(t, terminalCh, "queued terminal notification")
+	if !appServerNotificationRelevantToTurn(appServerNotificationMetaFor(msg), "thr-1", "turn-1") {
+		t.Fatal("terminal notification is not relevant to turn")
+	}
+
+	got := appServerRememberQueuedHumanloopPayload(payloads.C(), nil)
+	if got == nil || got.Question != "ready at terminal" {
+		t.Fatalf("AwaitingUser=%+v, want queued terminal-time payload", got)
+	}
+	select {
+	case stale := <-payloads.C():
+		t.Fatalf("payload remained queued after terminal drain: %+v", stale)
+	default:
+	}
+}
+
 func TestAppServerWorkerCompletionWithoutHumanloopPayloadDoesNotWaitGracePeriod(t *testing.T) {
 	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
 		if req.Method != "turn/start" {
