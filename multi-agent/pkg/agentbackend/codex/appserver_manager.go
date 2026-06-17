@@ -168,7 +168,7 @@ func (b *workerBackend) runAppServerTurn(
 				turnID = meta.TurnID
 			}
 			emit(msg)
-			if msg.Method == "error" && appServerNotificationRelevantToTurn(meta, w.sessionID, turnID) {
+			if msg.Method == "error" && !appServerErrorWillRetry(msg) && appServerNotificationRelevantToTurn(meta, w.sessionID, turnID) {
 				return result, nil
 			}
 			if msg.Method == "turn/completed" && appServerNotificationRelevantToTurn(meta, w.sessionID, turnID) {
@@ -232,6 +232,27 @@ func appServerSyntheticTurnStarted(threadID, turnID, status string) appServerRPC
 	return appServerRPCMessage{Method: "turn/started", Params: params}
 }
 
+func handleUnsupportedAppServerRequest(rpc *appServerRPC, router *appServerNotificationRouter, msg appServerRPCMessage) {
+	resp := appServerUnsupportedRequestResponse(msg)
+	if router != nil {
+		router.dispatch(appServerUnsupportedRequestNotification(msg, resp.Error.Message))
+	}
+	if rpc != nil && msg.ID != nil {
+		_ = rpc.writeMessage(resp)
+	}
+}
+
+func appServerUnsupportedRequestNotification(msg appServerRPCMessage, message string) appServerRPCMessage {
+	meta := appServerNotificationMetaFor(msg)
+	params, _ := json.Marshal(map[string]any{
+		"threadId":  meta.ThreadID,
+		"turnId":    meta.TurnID,
+		"message":   message,
+		"willRetry": false,
+	})
+	return appServerRPCMessage{Method: "error", Params: params}
+}
+
 func appServerNotificationRelevantToTurn(meta appServerNotificationMeta, threadID, turnID string) bool {
 	if meta.ThreadID != "" && meta.ThreadID != threadID {
 		return false
@@ -254,6 +275,8 @@ type appServerManager struct {
 	router     *appServerNotificationRouter
 	generation int64
 	starter    appServerStarter
+
+	lifecycleCancel context.CancelFunc
 }
 
 func newAppServerManager(cfg agentbackend.Config, env []string) *appServerManager {
@@ -281,12 +304,15 @@ func (m *appServerManager) ensure(ctx context.Context) error {
 		return agentbackend.ErrSessionWorkerUnavailable
 	}
 
-	conn, err := m.starter(ctx, m.cfg, m.env)
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
+	conn, err := m.starter(lifecycleCtx, m.cfg, m.env)
 	if err != nil {
+		lifecycleCancel()
 		m.mu.Unlock()
 		return agentbackend.ErrSessionWorkerUnavailable
 	}
 	if conn == nil || conn.rpc == nil {
+		lifecycleCancel()
 		m.mu.Unlock()
 		_ = closeAppServerConnection(conn)
 		return agentbackend.ErrSessionWorkerUnavailable
@@ -294,15 +320,23 @@ func (m *appServerManager) ensure(ctx context.Context) error {
 
 	router := newAppServerNotificationRouter()
 	conn.rpc.onNotification = router.dispatch
+	conn.rpc.onRequest = func(msg appServerRPCMessage) {
+		handleUnsupportedAppServerRequest(conn.rpc, router, msg)
+	}
 	readCtx, cancelRead := context.WithCancel(context.Background())
 	baseClose := conn.close
+	var closeOnce sync.Once
+	var closeErr error
 	conn.close = func() error {
-		cancelRead()
-		router.close()
-		if baseClose != nil {
-			return baseClose()
-		}
-		return nil
+		closeOnce.Do(func() {
+			cancelRead()
+			router.close()
+			lifecycleCancel()
+			if baseClose != nil {
+				closeErr = baseClose()
+			}
+		})
+		return closeErr
 	}
 	go func() {
 		_ = conn.rpc.readLoop(readCtx)
@@ -314,10 +348,23 @@ func (m *appServerManager) ensure(ctx context.Context) error {
 	m.conn = conn
 	m.cmd = conn.cmd
 	m.router = router
+	m.lifecycleCancel = lifecycleCancel
 	m.generation++
 	rpc := m.rpc
 
+	if err := ctx.Err(); err != nil {
+		conn := m.clearLocked()
+		m.mu.Unlock()
+		_ = closeAppServerConnection(conn)
+		return agentbackend.ErrSessionWorkerUnavailable
+	}
 	if err := rpc.call(ctx, "initialize", initializeParams(), nil); err != nil {
+		conn := m.clearLocked()
+		m.mu.Unlock()
+		_ = closeAppServerConnection(conn)
+		return agentbackend.ErrSessionWorkerUnavailable
+	}
+	if err := ctx.Err(); err != nil {
 		conn := m.clearLocked()
 		m.mu.Unlock()
 		_ = closeAppServerConnection(conn)
@@ -345,11 +392,15 @@ func (m *appServerManager) clearLocked() *appServerConnection {
 	if m.router != nil {
 		m.router.close()
 	}
+	if m.lifecycleCancel != nil {
+		m.lifecycleCancel()
+	}
 	m.started = false
 	m.rpc = nil
 	m.cmd = nil
 	m.conn = nil
 	m.router = nil
+	m.lifecycleCancel = nil
 	m.generation++
 	return conn
 }
@@ -452,8 +503,13 @@ type appServerConnection struct {
 	close func() error
 }
 
+func appServerProcessArgs(cfg agentbackend.Config) []string {
+	args := []string{"app-server", "--listen", "stdio://"}
+	return append(args, cfg.ExtraArgs...)
+}
+
 func startAppServerProcess(ctx context.Context, cfg agentbackend.Config, env []string) (*appServerConnection, error) {
-	cmd := exec.CommandContext(ctx, cfg.Bin, "app-server", "--listen", "stdio://")
+	cmd := exec.CommandContext(ctx, cfg.Bin, appServerProcessArgs(cfg)...)
 	cmd.Dir = cfg.WorkDir
 	cmd.Env = append(cmd.Environ(), env...)
 	stdin, err := cmd.StdinPipe()
@@ -477,13 +533,18 @@ func startAppServerProcess(ctx context.Context, cfg agentbackend.Config, env []s
 		waitDone <- cmd.Wait()
 	}()
 
+	var closeOnce sync.Once
+	var closeErr error
 	closeFn := func() error {
-		_ = stdin.Close()
-		_ = stdout.Close()
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-		return <-waitDone
+		closeOnce.Do(func() {
+			_ = stdin.Close()
+			_ = stdout.Close()
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			closeErr = <-waitDone
+		})
+		return closeErr
 	}
 	return &appServerConnection{
 		rpc:   newAppServerRPC(stdout, stdin),
@@ -570,19 +631,36 @@ func (r *appServerNotificationRouter) dispatch(msg appServerRPCMessage) {
 	if threadID == "" && msg.Method == "error" {
 		for _, subs := range r.subs {
 			for sub := range subs {
-				select {
-				case sub.ch <- msg:
-				default:
-				}
+				r.dispatchToSubscriptionLocked(sub, msg)
 			}
 		}
 	} else {
 		for sub := range r.subs[threadID] {
-			select {
-			case sub.ch <- msg:
-			default:
-			}
+			r.dispatchToSubscriptionLocked(sub, msg)
 		}
+	}
+}
+
+func (r *appServerNotificationRouter) dispatchToSubscriptionLocked(sub *appServerSubscription, msg appServerRPCMessage) {
+	select {
+	case sub.ch <- msg:
+	default:
+		r.closeSubscriptionLocked(sub)
+	}
+}
+
+func (r *appServerNotificationRouter) closeSubscriptionLocked(sub *appServerSubscription) {
+	subs := r.subs[sub.threadID]
+	if subs == nil {
+		return
+	}
+	if _, ok := subs[sub]; !ok {
+		return
+	}
+	delete(subs, sub)
+	close(sub.ch)
+	if len(subs) == 0 {
+		delete(r.subs, sub.threadID)
 	}
 }
 

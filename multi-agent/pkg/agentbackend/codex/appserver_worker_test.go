@@ -188,6 +188,103 @@ func TestAppServerManagerSendsInitializeResumeAndTurnWithContext(t *testing.T) {
 	assertTurnStartRequest(t, reqs[3], "thr-1", "/session-cwd", "User answered: continue")
 }
 
+func TestAppServerManagerUsesManagerOwnedLifecycleContext(t *testing.T) {
+	fake := newFakeAppServerTransport(t, nil)
+	m := newAppServerManager(agentbackend.Config{Bin: "codex", WorkDir: "/repo"}, nil)
+	var starterCtx context.Context
+	var starterCalls atomic.Int32
+	m.starter = func(ctx context.Context, cfg agentbackend.Config, env []string) (*appServerConnection, error) {
+		starterCalls.Add(1)
+		starterCtx = ctx
+		return fake.starter(ctx, cfg, env)
+	}
+
+	startupCtx, cancelStartup := context.WithCancel(context.Background())
+	if err := m.ensure(startupCtx); err != nil {
+		t.Fatal(err)
+	}
+	generation := m.generation
+	cancelStartup()
+
+	if err := starterCtx.Err(); err != nil {
+		t.Fatalf("starter lifecycle context error after startup context cancel = %v, want nil", err)
+	}
+	if !m.healthy(generation) {
+		t.Fatal("manager unhealthy after startup context cancellation")
+	}
+
+	if err := m.close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-starterCtx.Done():
+	case <-time.After(appServerRPCTestTimeout):
+		t.Fatal("manager close did not cancel app-server lifecycle context")
+	}
+	if m.healthy(generation) {
+		t.Fatal("manager healthy after close")
+	}
+	if err := m.close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.closeCount.Load(); got != 1 {
+		t.Fatalf("transport close count = %d, want idempotent close count 1", got)
+	}
+
+	if err := m.ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := starterCalls.Load(); got != 2 {
+		t.Fatalf("starter calls = %d, want restart after close", got)
+	}
+	_ = m.close()
+}
+
+func TestAppServerManagerCloseInvalidatesWorkerHealth(t *testing.T) {
+	fake := newFakeAppServerTransport(t, nil)
+	cfg := agentbackend.Config{Kind: agentbackend.KindCodex, Bin: "codex", WorkDir: "/repo"}
+	m := newAppServerManager(cfg, nil)
+	m.starter = fake.starter
+	wb := &workerBackend{Backend: New(cfg, nil), manager: m}
+
+	worker, err := wb.NewSessionWorker(context.Background(), agentbackend.Session{
+		ID:         "thr-1",
+		Kind:       agentbackend.KindCodex,
+		WorkingDir: "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	healthyWorker, ok := worker.(agentbackend.HealthySessionWorker)
+	if !ok {
+		t.Fatalf("worker does not implement HealthySessionWorker")
+	}
+	if !healthyWorker.Healthy() {
+		t.Fatal("worker unhealthy before manager close")
+	}
+
+	if err := m.close(); err != nil {
+		t.Fatal(err)
+	}
+	if healthyWorker.Healthy() {
+		t.Fatal("worker healthy after manager close")
+	}
+	if err := worker.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAppServerProcessArgsIncludeExtraArgs(t *testing.T) {
+	cfg := agentbackend.Config{
+		ExtraArgs: []string{"--profile", "loom-test", "-c", "model=gpt-5-codex"},
+	}
+	got := appServerProcessArgs(cfg)
+	want := []string{"app-server", "--listen", "stdio://", "--profile", "loom-test", "-c", "model=gpt-5-codex"}
+	if !equalStringSlices(got, want) {
+		t.Fatalf("args=%#v, want %#v", got, want)
+	}
+}
+
 func TestAppServerManagerEnsureUnavailableAndClosesTransportWhenInitializeFails(t *testing.T) {
 	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
 		if req.Method == "initialize" && req.ID != nil {
@@ -339,6 +436,91 @@ func TestAppServerWorkerReturnsAwaitingUserFromHumanloopIPC(t *testing.T) {
 	}
 	if res.AwaitingUser.Kind != "ask_user" || res.AwaitingUser.Question != "pick?" || len(res.AwaitingUser.Options) != 2 {
 		t.Fatalf("AwaitingUser=%+v, want ask_user pick? options", res.AwaitingUser)
+	}
+}
+
+func TestAppServerWorkerRejectsInboundServerRequestAndFailsTurn(t *testing.T) {
+	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
+		if req.Method != "turn/start" {
+			return false
+		}
+		writeFakeAppServerResult(t, w, *req.ID, fakeAppServerResultFor(req.Method))
+		writeFakeAppServerRequest(t, w, "77", "approval/request", `{"threadId":"thr-1","turnId":"turn-1"}`)
+		return true
+	})
+	cfg := agentbackend.Config{Kind: agentbackend.KindCodex, Bin: "codex", WorkDir: "/repo"}
+	m := newAppServerManager(cfg, nil)
+	m.starter = fake.starter
+	wb := &workerBackend{Backend: New(cfg, nil), manager: m}
+
+	worker, err := wb.NewSessionWorker(context.Background(), agentbackend.Session{
+		ID:         "thr-1",
+		Kind:       agentbackend.KindCodex,
+		WorkingDir: "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), appServerRPCTestTimeout)
+	defer cancel()
+	_, err = worker.Run(ctx, "continue", &appServerWorkerTestSink{})
+	if err == nil {
+		t.Fatal("Run error = nil, want unsupported inbound request error")
+	}
+	if errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
+		t.Fatalf("Run error = %v, should not allow fallback after unsupported inbound request", err)
+	}
+	if !strings.Contains(err.Error(), "approval/request") {
+		t.Fatalf("Run error = %v, want approval/request detail", err)
+	}
+
+	reqs := fake.takeRequests(t, 5)
+	resp := reqs[4]
+	if resp.ID == nil || strings.TrimSpace(string(*resp.ID)) != "77" {
+		t.Fatalf("response id=%v, want 77", resp.ID)
+	}
+	if resp.Method != "" {
+		t.Fatalf("response method=%q, want empty", resp.Method)
+	}
+	if resp.Error == nil || resp.Error.Code != -32601 || !strings.Contains(resp.Error.Message, "approval/request") {
+		t.Fatalf("response error=%+v, want unsupported approval/request error", resp.Error)
+	}
+}
+
+func TestAppServerWorkerIgnoresRetryableErrorNotification(t *testing.T) {
+	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
+		if req.Method != "turn/start" {
+			return false
+		}
+		writeFakeAppServerResult(t, w, *req.ID, fakeAppServerResultFor(req.Method))
+		writeFakeAppServerNotification(t, w, "error", `{"threadId":"thr-1","turnId":"turn-1","message":"transient","willRetry":true}`)
+		writeFakeAppServerNotification(t, w, "item/agentMessage/delta", `{"threadId":"thr-1","turnId":"turn-1","itemId":"i1","delta":"ok"}`)
+		writeFakeAppServerNotification(t, w, "turn/completed", `{"threadId":"thr-1","turn":{"id":"turn-1","status":"completed"}}`)
+		return true
+	})
+	cfg := agentbackend.Config{Kind: agentbackend.KindCodex, Bin: "codex", WorkDir: "/repo"}
+	m := newAppServerManager(cfg, nil)
+	m.starter = fake.starter
+	wb := &workerBackend{Backend: New(cfg, nil), manager: m}
+
+	worker, err := wb.NewSessionWorker(context.Background(), agentbackend.Session{
+		ID:         "thr-1",
+		Kind:       agentbackend.KindCodex,
+		WorkingDir: "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Close()
+
+	res, err := worker.Run(context.Background(), "continue", &appServerWorkerTestSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Summary != "ok" {
+		t.Fatalf("summary=%q, want ok", res.Summary)
 	}
 }
 
@@ -655,6 +837,40 @@ func TestCodexSessionWorkerErrorNotificationAfterAcceptedExecutionReturnsRealErr
 	}
 }
 
+func TestAppServerNotificationRouterDeliversTerminalNotificationWhenBuffered(t *testing.T) {
+	r := newAppServerNotificationRouter()
+	sub := r.subscribe("thr-1")
+
+	r.dispatch(appServerWorkerNotification("turn/completed", `{"threadId":"thr-1","turn":{"id":"turn-1","status":"completed"}}`))
+
+	msg := receiveWithin(t, sub.ch, "terminal notification")
+	if msg.Method != "turn/completed" {
+		t.Fatalf("method=%q, want turn/completed", msg.Method)
+	}
+}
+
+func TestAppServerNotificationRouterClosesSubscriptionOnOverflow(t *testing.T) {
+	r := newAppServerNotificationRouter()
+	sub := r.subscribe("thr-1")
+	for i := 0; i < cap(sub.ch); i++ {
+		r.dispatch(appServerWorkerNotification("item/agentMessage/delta", `{"threadId":"thr-1","turnId":"turn-1","itemId":"i1","delta":"x"}`))
+	}
+
+	r.dispatch(appServerWorkerNotification("turn/completed", `{"threadId":"thr-1","turn":{"id":"turn-1","status":"completed"}}`))
+
+	for i := 0; i < cap(sub.ch); i++ {
+		receiveWithin(t, sub.ch, "buffered notification")
+	}
+	select {
+	case _, ok := <-sub.ch:
+		if ok {
+			t.Fatal("subscription channel still open after overflow")
+		}
+	case <-time.After(appServerRPCTestTimeout):
+		t.Fatal("subscription channel not closed after overflow")
+	}
+}
+
 func TestCodexSessionWorkerHealthyAndClose(t *testing.T) {
 	closeErr := errors.New("close failed")
 	closed := false
@@ -811,6 +1027,22 @@ func writeFakeAppServerNotification(t *testing.T, w io.Writer, method string, pa
 	}
 }
 
+func writeFakeAppServerRequest(t *testing.T, w io.Writer, id, method, params string) {
+	t.Helper()
+	rawID := json.RawMessage(id)
+	body, err := json.Marshal(appServerRPCMessage{
+		ID:     &rawID,
+		Method: method,
+		Params: json.RawMessage(params),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintln(w, string(body)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func mustMarshalRaw(v any) json.RawMessage {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -948,6 +1180,18 @@ func equalAppServerWorkerEvents(a, b []appServerWorkerTestEvent) bool {
 }
 
 func equalAppServerWorkerStatuses(a, b []appServerWorkerTestStatus) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalStringSlices(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
 	}

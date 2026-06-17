@@ -23,6 +23,9 @@ type appServerRPC struct {
 	writeMu sync.Mutex
 	// onNotification runs on the readLoop goroutine and must not block.
 	onNotification func(appServerRPCMessage)
+	// onRequest is invoked from its own goroutine so readLoop can keep
+	// draining app-server frames while request handling writes a response.
+	onRequest func(appServerRPCMessage)
 }
 
 type appServerRPCResult struct {
@@ -173,10 +176,15 @@ func (c *appServerRPC) readLoop(ctx context.Context) error {
 			return err
 		}
 
-		if msg.ID != nil {
+		if msg.ID != nil && msg.Method == "" {
 			if id, ok := msg.numericID(); ok {
 				c.dispatchResponse(id, msg)
 			}
+			continue
+		}
+
+		if msg.ID != nil && msg.Method != "" {
+			c.dispatchRequest(msg)
 			continue
 		}
 
@@ -231,6 +239,21 @@ func (c *appServerRPC) dispatchResponse(id int64, msg appServerRPCMessage) {
 	}
 }
 
+func (c *appServerRPC) dispatchRequest(msg appServerRPCMessage) {
+	handler := c.onRequest
+	if handler == nil {
+		handler = c.rejectServerRequest
+	}
+	go handler(msg)
+}
+
+func (c *appServerRPC) rejectServerRequest(msg appServerRPCMessage) {
+	if msg.ID == nil {
+		return
+	}
+	_ = c.writeMessage(appServerUnsupportedRequestResponse(msg))
+}
+
 func (c *appServerRPC) finishReadLoop(err error) {
 	if err == nil {
 		err = io.EOF
@@ -275,4 +298,14 @@ func (msg appServerRPCMessage) numericID() (int64, bool) {
 		return 0, false
 	}
 	return id, true
+}
+
+func appServerUnsupportedRequestResponse(msg appServerRPCMessage) appServerRPCMessage {
+	return appServerRPCMessage{
+		ID: msg.ID,
+		Error: &appServerError{
+			Code:    -32601,
+			Message: fmt.Sprintf("unsupported app-server request %q", msg.Method),
+		},
+	}
 }

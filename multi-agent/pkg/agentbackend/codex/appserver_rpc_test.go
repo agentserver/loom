@@ -111,6 +111,79 @@ func TestAppServerRPCDispatchesNotifications(t *testing.T) {
 	}
 }
 
+func TestAppServerRPCDispatchesInboundServerRequestToHook(t *testing.T) {
+	clientReader := strings.NewReader(`{"id":7,"method":"approval/request","params":{"threadId":"thr-1","turnId":"turn-1"}}` + "\n")
+	c := newAppServerRPC(clientReader, io.Discard)
+	requestCh := make(chan appServerRPCMessage, 1)
+	c.onRequest = func(msg appServerRPCMessage) { requestCh <- msg }
+
+	if err := c.readLoop(context.Background()); !errors.Is(err, io.EOF) {
+		t.Fatalf("readLoop error = %v, want EOF", err)
+	}
+
+	msg := receiveWithin(t, requestCh, "server request")
+	if msg.Method != "approval/request" {
+		t.Fatalf("method=%q, want approval/request", msg.Method)
+	}
+	if msg.ID == nil || strings.TrimSpace(string(*msg.ID)) != "7" {
+		t.Fatalf("id=%v, want 7", msg.ID)
+	}
+}
+
+func TestAppServerRPCServerRequestHookDoesNotBlockReadLoop(t *testing.T) {
+	clientReader := strings.NewReader(
+		`{"id":7,"method":"approval/request","params":{"threadId":"thr-1","turnId":"turn-1"}}` + "\n" +
+			`{"method":"item/agentMessage/delta","params":{"threadId":"thr-1","turnId":"turn-1","itemId":"item","delta":"hi"}}` + "\n",
+	)
+	c := newAppServerRPC(clientReader, io.Discard)
+	blockRequest := make(chan struct{})
+	requestStarted := make(chan struct{}, 1)
+	notificationCh := make(chan appServerRPCMessage, 1)
+	c.onRequest = func(appServerRPCMessage) {
+		requestStarted <- struct{}{}
+		<-blockRequest
+	}
+	c.onNotification = func(msg appServerRPCMessage) { notificationCh <- msg }
+	defer close(blockRequest)
+
+	if err := c.readLoop(context.Background()); !errors.Is(err, io.EOF) {
+		t.Fatalf("readLoop error = %v, want EOF", err)
+	}
+
+	receiveWithin(t, requestStarted, "server request hook start")
+	msg := receiveWithin(t, notificationCh, "notification after blocked request hook")
+	if msg.Method != "item/agentMessage/delta" {
+		t.Fatalf("notification method=%q, want item/agentMessage/delta", msg.Method)
+	}
+}
+
+func TestAppServerRPCRejectsUnhandledServerRequest(t *testing.T) {
+	clientReader := strings.NewReader(`{"id":7,"method":"approval/request","params":{"threadId":"thr-1","turnId":"turn-1"}}` + "\n")
+	writeCh := make(chan []byte, 1)
+	c := newAppServerRPC(clientReader, writerFunc(func(p []byte) (int, error) {
+		writeCh <- append([]byte(nil), p...)
+		return len(p), nil
+	}))
+
+	if err := c.readLoop(context.Background()); !errors.Is(err, io.EOF) {
+		t.Fatalf("readLoop error = %v, want EOF", err)
+	}
+
+	var resp appServerRPCMessage
+	if err := json.Unmarshal(receiveWithin(t, writeCh, "server request error response"), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.ID == nil || strings.TrimSpace(string(*resp.ID)) != "7" {
+		t.Fatalf("response id=%v, want 7", resp.ID)
+	}
+	if resp.Method != "" {
+		t.Fatalf("response method=%q, want empty", resp.Method)
+	}
+	if resp.Error == nil || resp.Error.Code != -32601 || !strings.Contains(resp.Error.Message, "approval/request") {
+		t.Fatalf("response error=%+v, want unsupported approval/request error", resp.Error)
+	}
+}
+
 func TestAppServerRPCDropsUnknownResponses(t *testing.T) {
 	clientReader := strings.NewReader(`{"id":99,"result":{"ignored":true}}` + "\n")
 	c := newAppServerRPC(clientReader, io.Discard)
