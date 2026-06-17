@@ -118,6 +118,9 @@ func (w *codexSessionWorker) Run(ctx context.Context, prompt string, sink agentb
 			if !w.appServerErrorForSession(msg) {
 				return
 			}
+			if appServerErrorWillRetry(msg) {
+				return
+			}
 			notifyErr = fmt.Errorf("app-server error: %s", strings.TrimSpace(string(msg.Params)))
 		}
 	}
@@ -227,4 +230,14 @@ func appServerNotificationMetaFor(msg appServerRPCMessage) appServerNotification
 		turnID = p.Turn.ID
 	}
 	return appServerNotificationMeta{ThreadID: p.ThreadID, TurnID: turnID}
+}
+
+func appServerErrorWillRetry(msg appServerRPCMessage) bool {
+	var p struct {
+		WillRetry bool `json:"willRetry"`
+	}
+	if err := json.Unmarshal(msg.Params, &p); err != nil {
+		return false
+	}
+	return p.WillRetry
 }
