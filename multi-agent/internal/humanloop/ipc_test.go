@@ -122,6 +122,52 @@ func TestIPCRoundTrip(t *testing.T) {
 	}
 }
 
+func TestIPCClientSendWaitsForServerAck(t *testing.T) {
+	srv, ep, err := ListenIPC(t.TempDir())
+	if err != nil {
+		t.Fatalf("ListenIPC: %v", err)
+	}
+	defer srv.Close()
+
+	client, err := DialIPC(ep)
+	if err != nil {
+		t.Fatalf("DialIPC: %v", err)
+	}
+	defer client.Close()
+
+	sendErr := make(chan error, 1)
+	want := Payload{Kind: "ask_user", Question: "ack gated"}
+	go func() {
+		sendErr <- client.Send(want)
+	}()
+
+	pending, err := srv.ReceivePending()
+	if err != nil {
+		t.Fatalf("ReceivePending: %v", err)
+	}
+	if !payloadJSONEqual(pending.Payload, want) {
+		t.Fatalf("pending payload = %+v, want %+v", pending.Payload, want)
+	}
+
+	select {
+	case err := <-sendErr:
+		t.Fatalf("Send returned before Ack with error %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	if err := pending.Ack(); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	select {
+	case err := <-sendErr:
+		if err != nil {
+			t.Fatalf("Send returned error after Ack: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send did not return after Ack")
+	}
+}
+
 func TestIPCRejectsInvalidSecretBeforeReceivingValidPayload(t *testing.T) {
 	srv, ep, err := ListenIPC(t.TempDir())
 	if err != nil {

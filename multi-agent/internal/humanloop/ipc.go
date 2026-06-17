@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -40,7 +41,14 @@ type ipcMessage struct {
 	Payload Payload `json:"payload"`
 }
 
-const preauthReadTimeout = 250 * time.Millisecond
+type ipcAck struct {
+	Status string `json:"status"`
+}
+
+const (
+	preauthReadTimeout = 250 * time.Millisecond
+	ackTimeout         = time.Second
+)
 
 func EndpointArg(ep Endpoint) string {
 	b, _ := json.Marshal(ep)
@@ -104,6 +112,14 @@ type IPCServer struct {
 	secret  string
 }
 
+type ReceivedPayload struct {
+	Payload Payload
+
+	conn net.Conn
+	once sync.Once
+	err  error
+}
+
 func ListenIPC(baseDir string) (*IPCServer, Endpoint, error) {
 	srv, ep, err := listenIPC(baseDir)
 	if err != nil {
@@ -121,48 +137,88 @@ func ListenIPC(baseDir string) (*IPCServer, Endpoint, error) {
 
 func (s *IPCServer) Receive() (Payload, error) {
 	for {
-		p, ok, err := s.receiveOne()
+		pending, ok, err := s.receiveOnePending()
 		if err != nil {
 			return Payload{}, err
 		}
 		if ok {
-			return p, nil
+			_ = pending.Ack()
+			return pending.Payload, nil
 		}
 	}
 }
 
-func (s *IPCServer) receiveOne() (Payload, bool, error) {
+func (s *IPCServer) ReceivePending() (*ReceivedPayload, error) {
+	for {
+		pending, ok, err := s.receiveOnePending()
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			return pending, nil
+		}
+	}
+}
+
+func (s *IPCServer) receiveOnePending() (*ReceivedPayload, bool, error) {
 	conn, err := s.ln.Accept()
 	if err != nil {
-		return Payload{}, false, fmt.Errorf("humanloop accept: %w", err)
+		return nil, false, fmt.Errorf("humanloop accept: %w", err)
 	}
-	defer conn.Close()
 	if s.secret != "" {
 		_ = conn.SetReadDeadline(time.Now().Add(preauthReadTimeout))
 	}
 	line, err := bufio.NewReader(conn).ReadBytes('\n')
 	if err != nil {
+		_ = conn.Close()
 		var netErr net.Error
 		if s.secret != "" && errors.As(err, &netErr) && netErr.Timeout() {
-			return Payload{}, false, nil
+			return nil, false, nil
 		}
-		return Payload{}, false, fmt.Errorf("humanloop read: %w", err)
+		return nil, false, fmt.Errorf("humanloop read: %w", err)
 	}
 	if s.secret != "" {
 		var msg ipcMessage
 		if err := json.Unmarshal(line, &msg); err != nil {
-			return Payload{}, false, nil
+			_ = conn.Close()
+			return nil, false, nil
 		}
 		if msg.Secret != s.secret {
-			return Payload{}, false, nil
+			_ = conn.Close()
+			return nil, false, nil
 		}
-		return msg.Payload, true, nil
+		_ = conn.SetReadDeadline(time.Time{})
+		return &ReceivedPayload{Payload: msg.Payload, conn: conn}, true, nil
 	}
 	var p Payload
 	if err := json.Unmarshal(line, &p); err != nil {
-		return Payload{}, false, fmt.Errorf("humanloop unmarshal: %w", err)
+		_ = conn.Close()
+		return nil, false, fmt.Errorf("humanloop unmarshal: %w", err)
 	}
-	return p, true, nil
+	return &ReceivedPayload{Payload: p, conn: conn}, true, nil
+}
+
+func (p *ReceivedPayload) Ack() error {
+	if p == nil || p.conn == nil {
+		return nil
+	}
+	p.once.Do(func() {
+		p.err = p.ack()
+	})
+	return p.err
+}
+
+func (p *ReceivedPayload) ack() error {
+	_ = p.conn.SetWriteDeadline(time.Now().Add(ackTimeout))
+	_, writeErr := p.conn.Write([]byte(`{"status":"ok"}` + "\n"))
+	closeErr := p.conn.Close()
+	if writeErr != nil {
+		return fmt.Errorf("humanloop ack: %w", writeErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("humanloop ack close: %w", closeErr)
+	}
+	return nil
 }
 
 func (s *IPCServer) Close() error {
@@ -202,6 +258,20 @@ func (c *IPCClient) Send(p Payload) error {
 	b = append(b, '\n')
 	if _, err := c.conn.Write(b); err != nil {
 		return fmt.Errorf("humanloop send: %w", err)
+	}
+	if err := c.conn.SetReadDeadline(time.Now().Add(ackTimeout)); err != nil {
+		return fmt.Errorf("humanloop ack deadline: %w", err)
+	}
+	line, err := bufio.NewReader(c.conn).ReadBytes('\n')
+	if err != nil {
+		return fmt.Errorf("humanloop ack read: %w", err)
+	}
+	var ack ipcAck
+	if err := json.Unmarshal(line, &ack); err != nil {
+		return fmt.Errorf("humanloop ack decode: %w", err)
+	}
+	if ack.Status != "ok" {
+		return fmt.Errorf("humanloop ack status %q", ack.Status)
 	}
 	return nil
 }

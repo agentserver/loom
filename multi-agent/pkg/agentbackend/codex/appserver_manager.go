@@ -62,12 +62,13 @@ func (b *workerBackend) NewSessionWorker(ctx context.Context, session agentbacke
 	go func() {
 		defer close(receiveDone)
 		for {
-			p, err := srv.Receive()
+			pending, err := srv.ReceivePending()
 			if err != nil {
 				return
 			}
 			delivery := payloads.beginDelivery()
-			delivery.deliver(p)
+			delivery.deliver(pending.Payload)
+			_ = pending.Ack()
 		}
 	}()
 
