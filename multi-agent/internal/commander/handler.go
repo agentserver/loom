@@ -116,7 +116,7 @@ func (h *Handler) trySessionWorker(ctx context.Context, id, prompt string, sink 
 	if err != nil {
 		cache.remove(entry)
 	}
-	return res, true, false, err
+	return res, true, errors.Is(err, agentbackend.ErrSessionWorkerUnavailable), err
 }
 
 func (h *Handler) ensureWorkerCache() *sessionWorkerCache {
