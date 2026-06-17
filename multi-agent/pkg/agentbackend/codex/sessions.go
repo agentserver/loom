@@ -243,60 +243,64 @@ func scanCodexSession(path, fallbackID string, withMessages bool) codexScanResul
 	}
 	defer f.Close()
 
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-
 	var lastAssistantText string
-	for sc.Scan() {
-		var ln codexLine
-		if err := json.Unmarshal(sc.Bytes(), &ln); err != nil {
-			continue
-		}
-		ts := parseTimestamp(ln.Timestamp)
-		switch ln.Type {
-		case "session_meta":
-			var p codexMetaPayload
-			if err := json.Unmarshal(ln.Payload, &p); err != nil {
+	rd := bufio.NewReader(f)
+	for {
+		line, readErr := rd.ReadBytes('\n')
+		if len(line) > 0 {
+			var ln codexLine
+			if err := json.Unmarshal(line, &ln); err != nil {
 				continue
 			}
-			if p.ID != "" {
-				res.session.ID = p.ID
-			}
-			if p.Cwd != "" {
-				res.session.WorkingDir = p.Cwd
-			}
-			applyCodexSessionMeta(&res.session, p)
-			if res.session.StartedAt.IsZero() && !ts.IsZero() {
-				res.session.StartedAt = ts
-			}
-		case "user_input":
-			text := codexPayloadText(ln.Payload)
-			if text == "" {
-				continue
-			}
-			if res.session.Title == "" {
-				res.session.Title = titleFromUserText(text)
-			}
-			res.addMessage("user", text, ts, withMessages)
-		case "model_output":
-			text := codexPayloadText(ln.Payload)
-			if text == "" {
-				continue
-			}
-			res.addMessage("assistant", text, ts, withMessages)
-			lastAssistantText = text
-		case "response_item":
-			role, text, ok := codexResponseItemMessage(ln.Payload)
-			if !ok {
-				continue
-			}
-			if role == "user" && res.session.Title == "" {
-				res.session.Title = titleFromUserText(text)
-			}
-			res.addMessage(role, text, ts, withMessages)
-			if role == "assistant" {
+			ts := parseTimestamp(ln.Timestamp)
+			switch ln.Type {
+			case "session_meta":
+				var p codexMetaPayload
+				if err := json.Unmarshal(ln.Payload, &p); err != nil {
+					continue
+				}
+				if p.ID != "" {
+					res.session.ID = p.ID
+				}
+				if p.Cwd != "" {
+					res.session.WorkingDir = p.Cwd
+				}
+				applyCodexSessionMeta(&res.session, p)
+				if res.session.StartedAt.IsZero() && !ts.IsZero() {
+					res.session.StartedAt = ts
+				}
+			case "user_input":
+				text := codexPayloadText(ln.Payload)
+				if text == "" {
+					continue
+				}
+				if res.session.Title == "" {
+					res.session.Title = titleFromUserText(text)
+				}
+				res.addMessage("user", text, ts, withMessages)
+			case "model_output":
+				text := codexPayloadText(ln.Payload)
+				if text == "" {
+					continue
+				}
+				res.addMessage("assistant", text, ts, withMessages)
 				lastAssistantText = text
+			case "response_item":
+				role, text, ok := codexResponseItemMessage(ln.Payload)
+				if !ok {
+					continue
+				}
+				if role == "user" && res.session.Title == "" {
+					res.session.Title = titleFromUserText(text)
+				}
+				res.addMessage(role, text, ts, withMessages)
+				if role == "assistant" {
+					lastAssistantText = text
+				}
 			}
+		}
+		if readErr != nil {
+			break
 		}
 	}
 	if lastAssistantText != "" {
@@ -331,21 +335,23 @@ func scanCodexSessionWorkingDir(path string) string {
 	}
 	defer f.Close()
 
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for sc.Scan() {
+	rd := bufio.NewReader(f)
+	for {
+		line, readErr := rd.ReadBytes('\n')
+		if len(line) == 0 && readErr != nil {
+			break
+		}
 		var ln codexLine
-		if err := json.Unmarshal(sc.Bytes(), &ln); err != nil {
-			continue
+		if len(line) > 0 && json.Unmarshal(line, &ln) == nil && ln.Type == "session_meta" {
+			var p codexMetaPayload
+			if err := json.Unmarshal(ln.Payload, &p); err != nil {
+				return ""
+			}
+			return p.Cwd
 		}
-		if ln.Type != "session_meta" {
-			continue
+		if readErr != nil {
+			break
 		}
-		var p codexMetaPayload
-		if err := json.Unmarshal(ln.Payload, &p); err != nil {
-			return ""
-		}
-		return p.Cwd
 	}
 	return ""
 }

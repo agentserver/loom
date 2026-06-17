@@ -248,8 +248,9 @@ func TestHTTP_FileRoutesProxyToDaemon(t *testing.T) {
 
 func TestWriteSendCmdErrorInvalidRequestMaps400(t *testing.T) {
 	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/commander/daemons/d1/sessions/s1/files", nil)
 
-	writeSendCmdError(rec, &DaemonError{Code: commander.ErrCodeInvalidRequest, Message: "bad path"})
+	writeSendCmdError(rec, req, &DaemonError{Code: commander.ErrCodeInvalidRequest, Message: "bad path"})
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	require.Contains(t, rec.Body.String(), "bad path")
@@ -317,6 +318,29 @@ func TestHTTP_TurnStreamsSSE(t *testing.T) {
 	snap := hub.turns.get(turnKey{owner: o, daemonID: daemonID, sessionID: "s1"})
 	require.Equal(t, turnStateDone, snap.State)
 	require.False(t, snap.InFlight)
+}
+
+func TestUpdateTurnStateIgnoresBackendSpecificStatusText(t *testing.T) {
+	hub := NewHub(&fakeResolver{})
+	ch := &commanderHandlers{hub: hub}
+	key := turnKey{owner: owner{userID: "alice", workspaceID: "W1"}, daemonID: "d1", sessionID: "s1"}
+	require.True(t, hub.turns.begin(key))
+
+	payload, err := json.Marshal(commander.EventPayload{EventKind: "status", Text: "codex running"})
+	require.NoError(t, err)
+	ch.updateTurnStateFromEnvelope(key, commander.Envelope{Type: "event", Payload: payload})
+
+	snap := hub.turns.get(key)
+	require.Equal(t, turnStateQueued, snap.State)
+	require.True(t, snap.InFlight)
+
+	payload, err = json.Marshal(commander.EventPayload{EventKind: "chunk", Text: "hello"})
+	require.NoError(t, err)
+	ch.updateTurnStateFromEnvelope(key, commander.Envelope{Type: "event", Payload: payload})
+
+	snap = hub.turns.get(key)
+	require.Equal(t, turnStateAnswering, snap.State)
+	require.True(t, snap.InFlight)
 }
 
 func TestHTTP_TurnRejectsConcurrentSameSession(t *testing.T) {

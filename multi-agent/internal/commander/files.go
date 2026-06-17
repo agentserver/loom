@@ -173,9 +173,11 @@ func (h *Handler) sessionFileTarget(ctx context.Context, sessionID, rel string) 
 		return "", "", "", fileRequestError(errPathOutsideRoot)
 	}
 
-	// EvalSymlinks gives static containment before opening. Closing
-	// workspace-writable TOCTOU races would require descriptor/openat-based
-	// containment, which is outside this cross-platform helper's current scope.
+	// EvalSymlinks gives static containment before opening. The trust boundary
+	// here is the session working directory: callers are owner-scoped, but a
+	// process that can concurrently write this root can still win a TOCTOU race.
+	// Closing that would require descriptor/openat-based containment, which is
+	// outside this cross-platform helper's current scope.
 	realRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return "", "", "", fileRequestError(err)

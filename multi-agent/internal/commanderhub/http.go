@@ -120,7 +120,7 @@ func (ch *commanderHandlers) listSessions(w http.ResponseWriter, r *http.Request
 	}
 	payload, err := ch.hub.SendCommand(r.Context(), o, daemonID, "list_sessions", nil)
 	if err != nil {
-		writeSendCmdError(w, err)
+		writeSendCmdError(w, r, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -139,7 +139,7 @@ func (ch *commanderHandlers) getSession(w http.ResponseWriter, r *http.Request, 
 	args, _ := json.Marshal(commander.GetSessionArgs{ID: sid})
 	payload, err := ch.hub.SendCommand(r.Context(), o, daemonID, "get_session", args)
 	if err != nil {
-		writeSendCmdError(w, err)
+		writeSendCmdError(w, r, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -157,7 +157,7 @@ func (ch *commanderHandlers) listFiles(w http.ResponseWriter, r *http.Request, d
 	}
 	payload, err := ch.hub.ListFiles(r.Context(), o, daemonID, sid, r.URL.Query().Get("path"))
 	if err != nil {
-		writeSendCmdError(w, err)
+		writeSendCmdError(w, r, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -175,7 +175,7 @@ func (ch *commanderHandlers) readFile(w http.ResponseWriter, r *http.Request, da
 	}
 	payload, err := ch.hub.ReadFile(r.Context(), o, daemonID, sid, r.URL.Query().Get("path"))
 	if err != nil {
-		writeSendCmdError(w, err)
+		writeSendCmdError(w, r, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -186,7 +186,7 @@ func (ch *commanderHandlers) readFile(w http.ResponseWriter, r *http.Request, da
 // non-streaming handlers. Daemon-originated session_not_found or an absent
 // daemon → 404, invalid_request → 400, anything else → 502. The turn handler
 // streams and forwards error frames as SSE, so it does not use this.
-func writeSendCmdError(w http.ResponseWriter, err error) {
+func writeSendCmdError(w http.ResponseWriter, r *http.Request, err error) {
 	var de *DaemonError
 	if errors.As(err, &de) {
 		switch de.Code {
@@ -199,7 +199,7 @@ func writeSendCmdError(w http.ResponseWriter, err error) {
 		}
 	}
 	if errors.Is(err, ErrDaemonNotFound) {
-		http.NotFound(w, nil)
+		http.NotFound(w, r)
 		return
 	}
 	http.Error(w, err.Error(), http.StatusBadGateway)
@@ -316,10 +316,6 @@ func (ch *commanderHandlers) updateTurnStateFromEnvelope(key turnKey, env comman
 			switch ep.Text {
 			case "queued on daemon", "queued-on-daemon", "accepted by daemon":
 				ch.hub.turns.set(key, turnStateQueued)
-			case "starting codex":
-				ch.hub.turns.set(key, turnStateStarting)
-			case "codex running":
-				ch.hub.turns.set(key, turnStateAnswering)
 			}
 		case "chunk":
 			ch.hub.turns.set(key, turnStateAnswering)

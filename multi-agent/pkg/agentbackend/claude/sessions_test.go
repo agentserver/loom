@@ -210,6 +210,33 @@ func TestGetSession_SkipsClaudeMetaUserMessagesForTitle(t *testing.T) {
 	}
 }
 
+func TestGetSession_ContinuesAfterOversizedClaudeLine(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	dir := filepath.Join(home, ".claude", "projects", "-tmp-myproj")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id := "99999999-8888-7777-6666-555555555555"
+	body := strings.Repeat("{", 4*1024*1024+1) + "\n" +
+		`{"type":"user","timestamp":"2026-06-17T01:00:02Z","sessionId":"` + id + `","message":{"role":"user","content":"still parsed after huge line"}}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, id+".jsonl"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	b := New(agentbackend.Config{Bin: "claude", WorkDir: t.TempDir()}, nil)
+	sess, msgs, err := b.GetSession(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Title != "still parsed after huge line" {
+		t.Fatalf("Title=%q want later valid line", sess.Title)
+	}
+	if len(msgs) != 1 || msgs[0].Text != "still parsed after huge line" {
+		t.Fatalf("msgs=%+v want later valid line", msgs)
+	}
+}
+
 func TestListSessions_IncludesClaudeSubagents(t *testing.T) {
 	home := t.TempDir()
 	setTestHome(t, home)
@@ -265,6 +292,40 @@ func TestListSessions_IncludesClaudeSubagents(t *testing.T) {
 	}
 	if len(msgs) != 2 {
 		t.Fatalf("len(msgs)=%d want 2", len(msgs))
+	}
+}
+
+func TestListSessions_DoesNotAssignClaudeSidechainSelfParent(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	projectDir := filepath.Join(home, ".claude", "projects", "-tmp-myproj")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id := "77777777-8888-9999-aaaa-bbbbbbbbbbbb"
+	body := `{"type":"user","timestamp":"2026-06-17T02:00:01Z","sessionId":"` + id + `","isSidechain":true,"agentId":"reviewer","message":{"role":"user","content":"sidechain without path parent"}}` + "\n"
+	if err := os.WriteFile(filepath.Join(projectDir, id+".jsonl"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	b := New(agentbackend.Config{Bin: "claude", WorkDir: t.TempDir()}, nil)
+	listed, err := b.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("len(ListSessions)=%d want 1", len(listed))
+	}
+	if listed[0].ParentID == listed[0].ID {
+		t.Fatalf("ParentID self-reference: %+v", listed[0])
+	}
+
+	detail, _, err := b.GetSession(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.ParentID == detail.ID {
+		t.Fatalf("detail ParentID self-reference: %+v", detail)
 	}
 }
 

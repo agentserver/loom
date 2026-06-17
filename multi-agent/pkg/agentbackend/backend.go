@@ -140,9 +140,9 @@ type Session struct {
 // SessionMessage is one turn in a session. Roles map to claude / codex /
 // opencode conventions: "user", "assistant", "system", "tool".
 type SessionMessage struct {
-	Role string
-	Text string
-	Ts   time.Time
+	Role string    `json:"role"`
+	Text string    `json:"text"`
+	Ts   time.Time `json:"ts"`
 }
 
 // ErrSessionNotFound signals GetSession was called with an id that does

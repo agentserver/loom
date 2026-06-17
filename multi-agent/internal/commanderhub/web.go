@@ -7,7 +7,6 @@ import (
 )
 
 //go:embed assets/dist/*
-//go:embed assets/dist/assets/*
 var assetsFS embed.FS
 
 // MountWeb registers the commander page routes and static assets.

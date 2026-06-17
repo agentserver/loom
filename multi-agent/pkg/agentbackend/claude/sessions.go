@@ -288,44 +288,43 @@ func loadSessionImpl(path string, meta claudeSessionMeta, cwd string, withMessag
 	}
 	defer f.Close()
 
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-
 	var msgs []agentbackend.SessionMessage
 	var lastAssistantText string
-	for sc.Scan() {
-		var ln claudeJSONLLine
-		if err := json.Unmarshal(sc.Bytes(), &ln); err != nil {
-			continue
+	rd := bufio.NewReader(f)
+	for {
+		line, readErr := rd.ReadBytes('\n')
+		if len(line) > 0 {
+			var ln claudeJSONLLine
+			if err := json.Unmarshal(line, &ln); err == nil && ln.Message != nil {
+				applyClaudeLineMeta(&sess, ln)
+				text := extractText(ln.Message.Content)
+				if text != "" {
+					ts := parseTimestamp(ln.Timestamp)
+					if sess.StartedAt.IsZero() && !ts.IsZero() {
+						sess.StartedAt = ts
+					}
+					if !ts.IsZero() {
+						sess.UpdatedAt = ts
+					}
+					sess.MessageCount++
+					if ln.Message.Role == "user" && sess.Title == "" {
+						sess.Title = titleFromClaudeUserText(ln, text)
+					}
+					if ln.Message.Role == "assistant" {
+						lastAssistantText = text
+					}
+					if withMessages {
+						msgs = append(msgs, agentbackend.SessionMessage{
+							Role: ln.Message.Role,
+							Text: text,
+							Ts:   ts,
+						})
+					}
+				}
+			}
 		}
-		if ln.Message == nil {
-			continue
-		}
-		applyClaudeLineMeta(&sess, ln)
-		text := extractText(ln.Message.Content)
-		if text == "" {
-			continue
-		}
-		ts := parseTimestamp(ln.Timestamp)
-		if sess.StartedAt.IsZero() && !ts.IsZero() {
-			sess.StartedAt = ts
-		}
-		if !ts.IsZero() {
-			sess.UpdatedAt = ts
-		}
-		sess.MessageCount++
-		if ln.Message.Role == "user" && sess.Title == "" {
-			sess.Title = titleFromClaudeUserText(ln, text)
-		}
-		if ln.Message.Role == "assistant" {
-			lastAssistantText = text
-		}
-		if withMessages {
-			msgs = append(msgs, agentbackend.SessionMessage{
-				Role: ln.Message.Role,
-				Text: text,
-				Ts:   ts,
-			})
+		if readErr != nil {
+			break
 		}
 	}
 	if lastAssistantText != "" {
@@ -337,7 +336,7 @@ func loadSessionImpl(path string, meta claudeSessionMeta, cwd string, withMessag
 func applyClaudeLineMeta(sess *agentbackend.Session, ln claudeJSONLLine) {
 	if ln.IsSidechain || ln.AgentID != "" {
 		sess.Origin = agentbackend.SessionOriginSubagent
-		if sess.ParentID == "" {
+		if sess.ParentID == "" && ln.SessionID != "" && ln.SessionID != sess.ID {
 			sess.ParentID = ln.SessionID
 		}
 		if sess.AgentName == "" {

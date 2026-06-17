@@ -40,8 +40,8 @@ test.beforeEach(async ({ page }) => {
           WorkingDir: treePayload.daemons[0].sessions[0].working_dir,
         },
         messages: [
-          { Role: 'user', Text: '为什么每次 list session 都这么卡？' },
-          { Role: 'assistant', Text: '```go\nfunc cache() {}\n```' },
+          { role: 'user', text: '为什么每次 list session 都这么卡？' },
+          { role: 'assistant', text: '```go\nfunc cache() {}\n```' },
         ],
       },
     });
@@ -106,8 +106,8 @@ test('desktop panes own vertical scrolling and chat opens at bottom', async ({ p
           WorkingDir: sessions[0].working_dir,
         },
         messages: Array.from({ length: 70 }, (_, index) => ({
-          Role: index % 2 === 0 ? 'user' : 'assistant',
-          Text: `message ${index + 1}\n\n` + 'content line\n'.repeat(5),
+          role: index % 2 === 0 ? 'user' : 'assistant',
+          text: `message ${index + 1}\n\n` + 'content line\n'.repeat(5),
         })),
       },
     });
