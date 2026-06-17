@@ -407,6 +407,205 @@ func TestHandler_SessionTurnFallsBackWhenCachedWorkerUnhealthy(t *testing.T) {
 	}
 }
 
+func TestHandler_SessionTurnDoesNotFallbackAfterWorkerRunError(t *testing.T) {
+	runErr := errors.New("worker failed after starting")
+	worker := &fakeSessionWorker{healthy: true}
+	worker.runFn = func(_ context.Context, prompt string, sink executor.Sink) (executor.Result, error) {
+		sink.Write("chunk", "partial "+prompt)
+		return executor.Result{}, runErr
+	}
+	var fallback atomic.Int32
+	h := &Handler{Backend: &fakeBackend{
+		listFn: func(context.Context) ([]agentbackend.Session, error) {
+			return []agentbackend.Session{{ID: "s1", Kind: agentbackend.KindClaude, WorkingDir: "/repo"}}, nil
+		},
+		getFn: func(context.Context, string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+			return agentbackend.Session{ID: "s1", Kind: agentbackend.KindClaude, WorkingDir: "/repo"}, nil, nil
+		},
+		workerFn: func(context.Context, agentbackend.Session) (agentbackend.SessionWorker, error) {
+			return worker, nil
+		},
+		resumeFn: func(context.Context, string, string, executor.Sink) (executor.Result, error) {
+			fallback.Add(1)
+			return executor.Result{Summary: "fallback"}, nil
+		},
+	}}
+	defer h.Close()
+
+	sink := &captureSink{}
+	_, err := h.SessionTurn(context.Background(), "s1", "go", sink)
+	if !errors.Is(err, runErr) {
+		t.Fatalf("err=%v want %v", err, runErr)
+	}
+	if got := fallback.Load(); got != 0 {
+		t.Fatalf("fallback calls=%d want 0 after worker.Run started", got)
+	}
+	if len(sink.events) != 1 || sink.events[0].kind != "chunk" || sink.events[0].data != "partial go" {
+		t.Fatalf("sink events=%+v want only partial worker output", sink.events)
+	}
+	worker.mu.Lock()
+	closed := worker.closed
+	worker.mu.Unlock()
+	if !closed {
+		t.Fatalf("failed worker should be removed and closed")
+	}
+	sessions, err := h.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].ActiveWorker {
+		t.Fatalf("sessions=%+v want failed worker inactive", sessions)
+	}
+}
+
+func TestHandler_CloseWaitsForInFlightWorkerRun(t *testing.T) {
+	worker := &closeObservingWorker{
+		runStarted: make(chan struct{}),
+		releaseRun: make(chan struct{}),
+		closeDone:  make(chan struct{}),
+	}
+	h := &Handler{Backend: &fakeBackend{
+		getFn: func(context.Context, string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+			return agentbackend.Session{ID: "s1", Kind: agentbackend.KindClaude, WorkingDir: "/repo"}, nil, nil
+		},
+		workerFn: func(context.Context, agentbackend.Session) (agentbackend.SessionWorker, error) {
+			return worker, nil
+		},
+	}}
+
+	turnDone := make(chan error, 1)
+	go func() {
+		_, err := h.SessionTurn(context.Background(), "s1", "go", &captureSink{})
+		turnDone <- err
+	}()
+	select {
+	case <-worker.runStarted:
+	case <-time.After(time.Second):
+		t.Fatal("worker run did not start")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- h.Close() }()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close returned while worker.Run was still in flight: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(worker.releaseRun)
+	if err := <-turnDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return after worker.Run finished")
+	}
+	if worker.closedDuringRun.Load() {
+		t.Fatal("worker.Close ran concurrently with worker.Run")
+	}
+	select {
+	case <-worker.closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("worker.Close was not called after run completed")
+	}
+}
+
+func TestHandler_WorkerCacheLazyInitNoRace(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		worker := &fakeSessionWorker{healthy: true}
+		h := &Handler{Backend: &fakeBackend{
+			listFn: func(context.Context) ([]agentbackend.Session, error) {
+				return []agentbackend.Session{{ID: "s1", Kind: agentbackend.KindClaude, WorkingDir: "/repo"}}, nil
+			},
+			getFn: func(context.Context, string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+				return agentbackend.Session{ID: "s1", Kind: agentbackend.KindClaude, WorkingDir: "/repo"}, nil, nil
+			},
+			workerFn: func(context.Context, agentbackend.Session) (agentbackend.SessionWorker, error) {
+				return worker, nil
+			},
+		}}
+		var wg sync.WaitGroup
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			_, _ = h.ListSessions(context.Background())
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = h.SessionTurn(context.Background(), "s1", "go", &captureSink{})
+		}()
+		go func() {
+			defer wg.Done()
+			_ = h.Close()
+		}()
+		wg.Wait()
+	}
+}
+
+func TestHandler_CloseBeforeFirstTurnDisablesWorkerCache(t *testing.T) {
+	var fallback atomic.Int32
+	h := &Handler{Backend: &fakeBackend{
+		getFn: func(context.Context, string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+			return agentbackend.Session{ID: "s1", Kind: agentbackend.KindClaude, WorkingDir: "/repo"}, nil, nil
+		},
+		workerFn: func(context.Context, agentbackend.Session) (agentbackend.SessionWorker, error) {
+			t.Fatal("worker should not be created after Handler.Close")
+			return nil, agentbackend.ErrSessionWorkerUnavailable
+		},
+		resumeFn: func(context.Context, string, string, executor.Sink) (executor.Result, error) {
+			fallback.Add(1)
+			return executor.Result{Summary: "fallback"}, nil
+		},
+	}}
+
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.SessionTurn(context.Background(), "s1", "go", &captureSink{}); err != nil {
+		t.Fatal(err)
+	}
+	if fallback.Load() != 1 {
+		t.Fatalf("fallback calls=%d want 1", fallback.Load())
+	}
+	if h.workerCache.Load() != nil {
+		t.Fatal("worker cache should not be created after Handler.Close")
+	}
+}
+
+func TestHandler_WorkerMaxNegativeDisablesWorkerCache(t *testing.T) {
+	var fallback atomic.Int32
+	h := &Handler{
+		Backend: &fakeBackend{
+			getFn: func(context.Context, string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+				return agentbackend.Session{ID: "s1", Kind: agentbackend.KindClaude, WorkingDir: "/repo"}, nil, nil
+			},
+			workerFn: func(context.Context, agentbackend.Session) (agentbackend.SessionWorker, error) {
+				t.Fatal("worker should not be created when WorkerMax is negative")
+				return nil, agentbackend.ErrSessionWorkerUnavailable
+			},
+			resumeFn: func(context.Context, string, string, executor.Sink) (executor.Result, error) {
+				fallback.Add(1)
+				return executor.Result{Summary: "fallback"}, nil
+			},
+		},
+		WorkerMax: -1,
+	}
+
+	if _, err := h.SessionTurn(context.Background(), "s1", "go", &captureSink{}); err != nil {
+		t.Fatal(err)
+	}
+	if fallback.Load() != 1 {
+		t.Fatalf("fallback calls=%d want 1", fallback.Load())
+	}
+	if h.workerCache.Load() != nil {
+		t.Fatal("worker cache should not be created when WorkerMax is negative")
+	}
+}
+
 func TestHandler_SessionTurnSerializesSameSession(t *testing.T) {
 	firstStarted := make(chan struct{})
 	releaseFirst := make(chan struct{})
@@ -461,3 +660,29 @@ func TestHandler_SessionTurnSerializesSameSession(t *testing.T) {
 		}
 	}
 }
+
+type closeObservingWorker struct {
+	running         atomic.Bool
+	closedDuringRun atomic.Bool
+	runStarted      chan struct{}
+	releaseRun      chan struct{}
+	closeDone       chan struct{}
+}
+
+func (w *closeObservingWorker) Run(context.Context, string, executor.Sink) (executor.Result, error) {
+	w.running.Store(true)
+	close(w.runStarted)
+	<-w.releaseRun
+	w.running.Store(false)
+	return executor.Result{Summary: "done", SessionID: "s1"}, nil
+}
+
+func (w *closeObservingWorker) Close() error {
+	if w.running.Load() {
+		w.closedDuringRun.Store(true)
+	}
+	close(w.closeDone)
+	return nil
+}
+
+func (w *closeObservingWorker) Healthy() bool { return true }

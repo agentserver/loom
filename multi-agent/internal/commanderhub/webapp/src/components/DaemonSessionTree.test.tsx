@@ -107,6 +107,9 @@ test('marks sessions with active workers separately from turn state', () => {
   render(<DaemonSessionTree daemons={daemons} selected={null} onSelect={vi.fn()} />);
 
   const row = screen.getByRole('button', { name: /Resume work/ });
-  expect(within(row).getByText('active')).toBeInTheDocument();
+  expect(within(row).getByText('active')).toHaveAttribute(
+    'title',
+    'Daemon has a hot worker cached for this session',
+  );
   expect(within(row).getByText('idle')).toBeInTheDocument();
 });
