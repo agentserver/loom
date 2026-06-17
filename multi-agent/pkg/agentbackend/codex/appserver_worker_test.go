@@ -376,6 +376,142 @@ func TestAppServerWorkerTurnStartSubmissionPreventsFallbackOnLostResponse(t *tes
 	}
 }
 
+func TestAppServerWorkerTurnStartMethodNotFoundReturnsUnavailableForFallback(t *testing.T) {
+	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
+		if req.Method != "turn/start" {
+			return false
+		}
+		writeFakeAppServerErrorCode(t, w, *req.ID, -32601, "Method not found")
+		return true
+	})
+	cfg := agentbackend.Config{Kind: agentbackend.KindCodex, Bin: "codex", WorkDir: "/repo"}
+	m := newAppServerManager(cfg, nil)
+	m.starter = fake.starter
+	wb := &workerBackend{Backend: New(cfg, nil), manager: m}
+
+	worker, err := wb.NewSessionWorker(context.Background(), agentbackend.Session{
+		ID:         "thr-1",
+		Kind:       agentbackend.KindCodex,
+		WorkingDir: "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Close()
+
+	sink := &appServerWorkerTestSink{}
+	res, err := worker.Run(context.Background(), "continue", sink)
+	if !errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
+		t.Fatalf("Run error = %v, want ErrSessionWorkerUnavailable", err)
+	}
+	if res != (agentbackend.Result{}) {
+		t.Fatalf("result=%+v, want zero result", res)
+	}
+	if sink.closed {
+		t.Fatal("sink closed; fallback must be able to reuse it")
+	}
+}
+
+func TestAppServerWorkerTurnStartMethodNotFoundFallsBackThroughCommander(t *testing.T) {
+	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
+		if req.Method != "turn/start" {
+			return false
+		}
+		writeFakeAppServerErrorCode(t, w, *req.ID, -32601, "Method not found")
+		return true
+	})
+	cfg := agentbackend.Config{Kind: agentbackend.KindCodex, Bin: "codex", WorkDir: "/repo"}
+	m := newAppServerManager(cfg, nil)
+	m.starter = fake.starter
+	wb := &workerBackend{Backend: New(cfg, nil), manager: m}
+
+	worker, err := wb.NewSessionWorker(context.Background(), agentbackend.Session{
+		ID:         "thr-1",
+		Kind:       agentbackend.KindCodex,
+		WorkingDir: "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fallbackCalls int
+	backend := &appServerWorkerCommanderBackend{
+		worker: worker,
+		resumeFn: func(_ context.Context, id, answer string, sink agentbackend.Sink) (agentbackend.Result, error) {
+			fallbackCalls++
+			if id != "thr-1" || answer != "continue" {
+				t.Fatalf("RunResume id=%q answer=%q, want thr-1/continue", id, answer)
+			}
+			sink.Write("chunk", "fallback")
+			sink.Close()
+			return agentbackend.Result{Summary: "fallback", SessionID: id}, nil
+		},
+	}
+	h := &commander.Handler{Backend: backend}
+	defer h.Close()
+
+	sink := &appServerWorkerTestSink{}
+	res, err := h.SessionTurn(context.Background(), "thr-1", "continue", sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fallbackCalls != 1 {
+		t.Fatalf("RunResume calls=%d, want 1", fallbackCalls)
+	}
+	if res.Summary != "fallback" || res.SessionID != "thr-1" {
+		t.Fatalf("result=%+v, want fallback result", res)
+	}
+	if !equalAppServerWorkerEvents(sink.events, []appServerWorkerTestEvent{{kind: "chunk", data: "fallback"}}) {
+		t.Fatalf("events=%+v, want fallback chunk", sink.events)
+	}
+	for _, status := range sink.statuses {
+		if strings.Contains(status.text, "may have executed") || strings.Contains(status.text, "falling back") {
+			t.Fatalf("status=%+v, want no duplicate-execution/fallback warning", status)
+		}
+	}
+}
+
+func TestAppServerWorkerTurnStartOtherRPCErrorDoesNotFallback(t *testing.T) {
+	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
+		if req.Method != "turn/start" {
+			return false
+		}
+		writeFakeAppServerErrorCode(t, w, *req.ID, -32000, "turn rejected after submission")
+		return true
+	})
+	cfg := agentbackend.Config{Kind: agentbackend.KindCodex, Bin: "codex", WorkDir: "/repo"}
+	m := newAppServerManager(cfg, nil)
+	m.starter = fake.starter
+	wb := &workerBackend{Backend: New(cfg, nil), manager: m}
+
+	worker, err := wb.NewSessionWorker(context.Background(), agentbackend.Session{
+		ID:         "thr-1",
+		Kind:       agentbackend.KindCodex,
+		WorkingDir: "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Close()
+
+	sink := &appServerWorkerTestSink{}
+	res, err := worker.Run(context.Background(), "continue", sink)
+	if err == nil {
+		t.Fatal("Run error = nil, want non-fallback protocol error")
+	}
+	if errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
+		t.Fatalf("Run error = %v, should not allow fallback for non--32601 turn/start error", err)
+	}
+	if !strings.Contains(err.Error(), "turn rejected after submission") {
+		t.Fatalf("Run error = %v, want rejection detail", err)
+	}
+	if res.SessionID != "thr-1" {
+		t.Fatalf("result=%+v, want worker result with session ID", res)
+	}
+	if !sink.closed {
+		t.Fatal("sink not closed after non-fallback error")
+	}
+}
+
 func TestAppServerWorkerReturnsAwaitingUserFromHumanloopIPC(t *testing.T) {
 	var endpoint atomic.Value
 	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
@@ -897,6 +1033,32 @@ func TestCodexSessionWorkerHealthyAndClose(t *testing.T) {
 	}
 }
 
+func TestWorkerBackendCloseClosesAppServerManager(t *testing.T) {
+	fake := newFakeAppServerTransport(t, nil)
+	cfg := agentbackend.Config{Kind: agentbackend.KindCodex, Bin: "codex", WorkDir: "/repo"}
+	m := newAppServerManager(cfg, nil)
+	m.starter = fake.starter
+	wb := &workerBackend{Backend: New(cfg, nil), manager: m}
+
+	if err := m.ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	generation := m.generation
+	if !m.healthy(generation) {
+		t.Fatal("manager unhealthy before backend close")
+	}
+
+	if err := wb.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if m.healthy(generation) {
+		t.Fatal("manager healthy after backend close")
+	}
+	if got := fake.closeCount.Load(); got != 1 {
+		t.Fatalf("transport close count=%d want 1", got)
+	}
+}
+
 func appServerWorkerNotification(method string, params string) appServerRPCMessage {
 	return appServerRPCMessage{Method: method, Params: json.RawMessage(params)}
 }
@@ -1007,7 +1169,12 @@ func writeFakeAppServerResult(t *testing.T, w io.Writer, id json.RawMessage, res
 
 func writeFakeAppServerError(t *testing.T, w io.Writer, id json.RawMessage, message string) {
 	t.Helper()
-	body, err := json.Marshal(appServerRPCMessage{ID: &id, Error: &appServerError{Code: -32000, Message: message}})
+	writeFakeAppServerErrorCode(t, w, id, -32000, message)
+}
+
+func writeFakeAppServerErrorCode(t *testing.T, w io.Writer, id json.RawMessage, code int, message string) {
+	t.Helper()
+	body, err := json.Marshal(appServerRPCMessage{ID: &id, Error: &appServerError{Code: code, Message: message}})
 	if err != nil {
 		t.Fatal(err)
 	}

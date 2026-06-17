@@ -19,7 +19,8 @@ var (
 )
 
 type appServerTurnResult struct {
-	AwaitingUser *executorpkg.AskUserPayload
+	AwaitingUser  *executorpkg.AskUserPayload
+	AllowFallback bool
 }
 
 type codexSessionWorker struct {
@@ -133,7 +134,7 @@ func (w *codexSessionWorker) Run(ctx context.Context, prompt string, sink agentb
 
 	mu.Lock()
 	full := text.String()
-	unsafeForFallback := accepted || submitted || turnResult.AwaitingUser != nil
+	unsafeForFallback := accepted || turnResult.AwaitingUser != nil || (submitted && !turnResult.AllowFallback)
 	if runErr == nil {
 		runErr = notifyErr
 	}
