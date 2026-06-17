@@ -34,10 +34,11 @@ type HumanloopConfig struct {
 // claude:/codex: top-level YAML blocks plus a tiny Agent{Kind} stub;
 // collapsed in issue #15.
 type Agent struct {
-	Kind      string   `yaml:"kind"`
-	Bin       string   `yaml:"bin"`
-	WorkDir   string   `yaml:"workdir"`
-	ExtraArgs []string `yaml:"extra_args"`
+	Kind       string   `yaml:"kind"`
+	Bin        string   `yaml:"bin"`
+	WorkDir    string   `yaml:"workdir"`
+	ExtraArgs  []string `yaml:"extra_args"`
+	WorkerMode string   `yaml:"worker_mode"`
 }
 
 type Server struct {

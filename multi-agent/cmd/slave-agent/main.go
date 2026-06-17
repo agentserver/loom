@@ -186,10 +186,11 @@ func run(cfgPath string) error {
 	mcpExec := executor.NewMCPExecutor(mcpCfg)
 	defer mcpExec.Close()
 	backend, err := agentbackend.New(agentbackend.Config{
-		Kind:      agentbackend.Kind(cfg.Agent.Kind),
-		Bin:       cfg.Agent.Bin,
-		WorkDir:   cfg.Agent.WorkDir,
-		ExtraArgs: cfg.Agent.ExtraArgs,
+		Kind:       agentbackend.Kind(cfg.Agent.Kind),
+		Bin:        cfg.Agent.Bin,
+		WorkDir:    cfg.Agent.WorkDir,
+		ExtraArgs:  cfg.Agent.ExtraArgs,
+		WorkerMode: cfg.Agent.WorkerMode,
 	}, nil)
 	if err != nil {
 		log.Fatalf("agentbackend: %v", err)

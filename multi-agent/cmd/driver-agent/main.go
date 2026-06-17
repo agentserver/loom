@@ -274,10 +274,11 @@ func publishCard(cfg *driver.Config) error {
 
 func newAgentBackend(cfg *driver.Config) (agentbackend.Backend, error) {
 	return agentbackend.New(agentbackend.Config{
-		Kind:      agentbackend.Kind(cfg.Agent.Kind),
-		Bin:       cfg.Agent.Bin,
-		WorkDir:   cfg.Agent.WorkDir,
-		ExtraArgs: cfg.Agent.ExtraArgs,
+		Kind:       agentbackend.Kind(cfg.Agent.Kind),
+		Bin:        cfg.Agent.Bin,
+		WorkDir:    cfg.Agent.WorkDir,
+		ExtraArgs:  cfg.Agent.ExtraArgs,
+		WorkerMode: cfg.Agent.WorkerMode,
 	}, nil)
 }
 
@@ -336,8 +337,13 @@ func runServeDaemon(args []string) {
 		fmt.Fprintln(os.Stderr, "WARNING: serve-daemon WS uses ws://; credentials.proxy_token will be sent without TLS. Use https:// observer.url outside loopback/debug deployments.")
 	}
 
+	handler := &commander.Handler{Backend: backend, WorkerMax: cfg.Daemon.WorkerMax}
+	if cfg.Daemon.WorkerIdleTimeoutSec > 0 {
+		handler.WorkerIdleTimeout = time.Duration(cfg.Daemon.WorkerIdleTimeoutSec) * time.Second
+	}
+
 	d := commander.NewDaemon(commander.DaemonConfig{
-		Handler:       &commander.Handler{Backend: backend},
+		Handler:       handler,
 		ListenAddr:    listen,
 		HTTPAuthToken: cfg.Credentials.ProxyToken,
 		WS: commander.WSConfig{

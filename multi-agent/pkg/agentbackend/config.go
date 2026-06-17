@@ -10,10 +10,11 @@ package agentbackend
 // (e.g. opencode) only adds a sub-package — no Config edit here.
 // Fixes issue #15.
 type Config struct {
-	Kind      Kind     `yaml:"kind"`
-	Bin       string   `yaml:"bin"`
-	WorkDir   string   `yaml:"workdir"`
-	ExtraArgs []string `yaml:"extra_args"`
+	Kind       Kind     `yaml:"kind"`
+	Bin        string   `yaml:"bin"`
+	WorkDir    string   `yaml:"workdir"`
+	ExtraArgs  []string `yaml:"extra_args"`
+	WorkerMode string   `yaml:"worker_mode"`
 }
 
 // Deprecated: ClaudeConfig is a type alias for Config, retained as a

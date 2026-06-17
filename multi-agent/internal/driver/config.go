@@ -34,10 +34,11 @@ type Config struct {
 // across claude:/codex: top-level YAML blocks plus a tiny
 // AgentConfig{Kind} stub; collapsed in issue #15.
 type AgentConfig struct {
-	Kind      string   `yaml:"kind"`
-	Bin       string   `yaml:"bin"`
-	WorkDir   string   `yaml:"workdir"`
-	ExtraArgs []string `yaml:"extra_args"`
+	Kind       string   `yaml:"kind"`
+	Bin        string   `yaml:"bin"`
+	WorkDir    string   `yaml:"workdir"`
+	ExtraArgs  []string `yaml:"extra_args"`
+	WorkerMode string   `yaml:"worker_mode"`
 }
 
 type ServerConfig struct {
@@ -111,6 +112,10 @@ type DaemonConfig struct {
 	// InitialBackoffMs and MaxBackoffMs bound WS reconnect backoff.
 	InitialBackoffMs int `yaml:"initial_backoff_ms,omitempty"`
 	MaxBackoffMs     int `yaml:"max_backoff_ms,omitempty"`
+	// WorkerMax caps hot session workers kept by commander. Zero uses the handler default.
+	WorkerMax int `yaml:"worker_max,omitempty"`
+	// WorkerIdleTimeoutSec controls idle hot-worker lifetime. Zero uses the handler default.
+	WorkerIdleTimeoutSec int `yaml:"worker_idle_timeout_sec,omitempty"`
 }
 
 // LoadConfig reads + validates the yaml at path and applies DriverDefaults defaults.
