@@ -209,6 +209,7 @@ func (b *workerBackend) runAppServerTurn(
 	var result appServerTurnResult
 	var pendingAwaitingUser *executorpkg.AskUserPayload
 	for {
+		pendingAwaitingUser = appServerRememberQueuedHumanloopPayload(payloads.C(), pendingAwaitingUser)
 		select {
 		case p := <-payloads.C():
 			if pendingAwaitingUser == nil {
@@ -224,16 +225,31 @@ func (b *workerBackend) runAppServerTurn(
 			}
 			emit(msg)
 			if msg.Method == "error" && !appServerErrorWillRetry(msg) && appServerNotificationRelevantToTurn(meta, w.sessionID, turnID) {
+				pendingAwaitingUser = appServerRememberQueuedHumanloopPayload(payloads.C(), pendingAwaitingUser)
 				result.AwaitingUser = pendingAwaitingUser
 				return result, nil
 			}
 			if msg.Method == "turn/completed" && appServerNotificationRelevantToTurn(meta, w.sessionID, turnID) {
+				pendingAwaitingUser = appServerRememberQueuedHumanloopPayload(payloads.C(), pendingAwaitingUser)
 				result.AwaitingUser = pendingAwaitingUser
 				return result, nil
 			}
 		case <-ctx.Done():
 			_ = b.manager.close()
 			return result, ctx.Err()
+		}
+	}
+}
+
+func appServerRememberQueuedHumanloopPayload(payloads <-chan humanloop.Payload, pending *executorpkg.AskUserPayload) *executorpkg.AskUserPayload {
+	for {
+		select {
+		case p := <-payloads:
+			if pending == nil {
+				pending = humanloopPayloadToAwaitingUser(p)
+			}
+		default:
+			return pending
 		}
 	}
 }
