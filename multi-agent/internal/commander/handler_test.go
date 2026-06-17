@@ -52,6 +52,18 @@ func (f *fakeBackend) NewSessionWorker(ctx context.Context, sess agentbackend.Se
 	return f.workerFn(ctx, sess)
 }
 
+type closingBackend struct {
+	*fakeBackend
+	closeFn func() error
+}
+
+func (b *closingBackend) Close() error {
+	if b.closeFn == nil {
+		return nil
+	}
+	return b.closeFn()
+}
+
 type resumeOnlyBackend struct {
 	getFn    func(ctx context.Context, id string) (agentbackend.Session, []agentbackend.SessionMessage, error)
 	resumeFn func(ctx context.Context, id, answer string, sink executor.Sink) (executor.Result, error)
@@ -684,6 +696,27 @@ func TestHandler_CloseBeforeFirstTurnDisablesWorkerCache(t *testing.T) {
 	}
 	if h.workerCache.Load() != nil {
 		t.Fatal("worker cache should not be created after Handler.Close")
+	}
+}
+
+func TestHandler_CloseClosesBackendWithoutWorkerCache(t *testing.T) {
+	var backendClosed atomic.Int32
+	h := &Handler{Backend: &closingBackend{
+		fakeBackend: &fakeBackend{},
+		closeFn: func() error {
+			backendClosed.Add(1)
+			return nil
+		},
+	}}
+
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := backendClosed.Load(); got != 1 {
+		t.Fatalf("backend Close calls=%d want 1", got)
+	}
+	if h.workerCache.Load() != nil {
+		t.Fatal("worker cache should not be created by Close")
 	}
 }
 

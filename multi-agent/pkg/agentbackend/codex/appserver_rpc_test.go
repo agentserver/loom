@@ -282,6 +282,42 @@ func TestAppServerRPCPendingCallReturnsErrorOnMalformedJSON(t *testing.T) {
 	}
 }
 
+func TestAppServerRPCCallReturnsTypedProtocolError(t *testing.T) {
+	clientReader, serverWriter := io.Pipe()
+	defer clientReader.Close()
+	defer serverWriter.Close()
+
+	c := newAppServerRPC(clientReader, writerFunc(func(p []byte) (int, error) {
+		var req appServerRPCMessage
+		if err := json.Unmarshal(p, &req); err != nil {
+			return 0, err
+		}
+		writeFakeAppServerErrorCode(t, serverWriter, *req.ID, -32601, "Method not found")
+		return len(p), nil
+	}))
+
+	readErrCh := make(chan error, 1)
+	go func() {
+		readErrCh <- c.readLoop(context.Background())
+	}()
+
+	err := c.call(context.Background(), "turn/start", nil, nil)
+	var rpcErr *appServerRPCError
+	if !errors.As(err, &rpcErr) {
+		t.Fatalf("call error = %T %v, want *appServerRPCError", err, err)
+	}
+	if rpcErr.Method != "turn/start" || rpcErr.Code != -32601 || rpcErr.Message != "Method not found" {
+		t.Fatalf("rpc error=%+v, want turn/start -32601 Method not found", rpcErr)
+	}
+
+	if err := serverWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := receiveWithin(t, readErrCh, "read loop result"); !errors.Is(err, io.EOF) {
+		t.Fatalf("readLoop error = %v, want EOF", err)
+	}
+}
+
 func TestAppServerRPCCallWithCanceledContextDoesNotWriteRequest(t *testing.T) {
 	wroteRequest := make(chan struct{}, 1)
 	c := newAppServerRPC(strings.NewReader(""), writerFunc(func(p []byte) (int, error) {

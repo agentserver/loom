@@ -28,6 +28,13 @@ type workerBackend struct {
 	manager *appServerManager
 }
 
+func (b *workerBackend) Close() error {
+	if b == nil || b.manager == nil {
+		return nil
+	}
+	return b.manager.close()
+}
+
 func (b *workerBackend) NewSessionWorker(ctx context.Context, session agentbackend.Session) (agentbackend.SessionWorker, error) {
 	if session.ID == "" || b.manager == nil || b.Backend == nil || b.exec == nil {
 		return nil, agentbackend.ErrSessionWorkerUnavailable
@@ -150,6 +157,9 @@ func (b *workerBackend) runAppServerTurn(
 		emit(appServerSyntheticTurnStarted(w.sessionID, turnID, startResult.Turn.Status))
 	}
 	if err != nil {
+		if appServerMethodNotFound(err, "turn/start") {
+			return appServerTurnResult{AllowFallback: true}, agentbackend.ErrSessionWorkerUnavailable
+		}
 		return appServerTurnResult{}, err
 	}
 
@@ -251,6 +261,11 @@ func appServerUnsupportedRequestNotification(msg appServerRPCMessage, message st
 		"willRetry": false,
 	})
 	return appServerRPCMessage{Method: "error", Params: params}
+}
+
+func appServerMethodNotFound(err error, method string) bool {
+	var rpcErr *appServerRPCError
+	return errors.As(err, &rpcErr) && rpcErr.Method == method && rpcErr.Code == -32601
 }
 
 func appServerNotificationRelevantToTurn(meta appServerNotificationMeta, threadID, turnID string) bool {

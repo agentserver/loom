@@ -46,6 +46,16 @@ type appServerError struct {
 	Message string `json:"message"`
 }
 
+type appServerRPCError struct {
+	Method  string
+	Code    int
+	Message string
+}
+
+func (e *appServerRPCError) Error() string {
+	return fmt.Sprintf("app-server %s failed (%d): %s", e.Method, e.Code, e.Message)
+}
+
 func newAppServerRPC(r io.Reader, w io.Writer) *appServerRPC {
 	return &appServerRPC{
 		r:    r,
@@ -131,7 +141,11 @@ func (c *appServerRPC) callWithWriteHook(ctx context.Context, method string, par
 		}
 		resp := result.msg
 		if resp.Error != nil {
-			return fmt.Errorf("app-server %s: %s", method, resp.Error.Message)
+			return &appServerRPCError{
+				Method:  method,
+				Code:    resp.Error.Code,
+				Message: resp.Error.Message,
+			}
 		}
 		if out == nil {
 			return nil

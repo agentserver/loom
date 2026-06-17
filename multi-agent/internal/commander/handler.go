@@ -71,10 +71,14 @@ func (h *Handler) Close() error {
 	h.closed.Store(true)
 	h.workerOnce.Do(func() {})
 	cache := h.workerCache.Load()
-	if cache == nil {
-		return nil
+	var closeErr error
+	if cache != nil {
+		closeErr = cache.closeAll()
 	}
-	return cache.closeAll()
+	if backend, ok := h.Backend.(interface{ Close() error }); ok {
+		closeErr = errors.Join(closeErr, backend.Close())
+	}
+	return closeErr
 }
 
 func (h *Handler) trySessionWorker(ctx context.Context, id, prompt string, sink executor.Sink) (executor.Result, bool, bool, error) {

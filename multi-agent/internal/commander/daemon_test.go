@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -178,5 +179,51 @@ func TestDaemon_GracefulShutdownClosesBothTransports(t *testing.T) {
 	if err == nil {
 		resp.Body.Close()
 		t.Error("HTTP still serving after shutdown")
+	}
+}
+
+func TestDaemon_GracefulShutdownClosesBackend(t *testing.T) {
+	fo := newFakeObserver(t)
+	wsSrv := httptest.NewServer(fo.handler())
+	defer wsSrv.Close()
+	var backendClosed atomic.Int32
+
+	d := NewDaemon(DaemonConfig{
+		Handler: &Handler{Backend: &closingBackend{
+			fakeBackend: &fakeBackend{},
+			closeFn: func() error {
+				backendClosed.Add(1)
+				return nil
+			},
+		}},
+		ListenAddr: "127.0.0.1:0",
+		WS: WSConfig{
+			URL:            observerWSURL(wsSrv),
+			ProxyToken:     "t",
+			Register:       RegisterPayload{SchemaVersion: SchemaVersion, Kind: "claude"},
+			InitialBackoff: 10 * time.Millisecond,
+			MaxBackoff:     50 * time.Millisecond,
+			HeartbeatInt:   10 * time.Second,
+		},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- d.Run(ctx) }()
+
+	waitFor(t, func() bool { return d.HTTPAddr() != "" }, 2*time.Second)
+	cancel()
+	fo.closeAll()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run returned %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not exit within 2s of cancel")
+	}
+	if got := backendClosed.Load(); got != 1 {
+		t.Fatalf("backend Close calls=%d want 1", got)
 	}
 }
