@@ -37,6 +37,7 @@ Usage:
   driver-agent register      --config /path/to/driver.yaml
   driver-agent serve-mcp     --config /path/to/driver.yaml
   driver-agent serve-daemon  --config /path/to/driver.yaml [--listen host:port]
+  driver-agent humanloop-mcp ENDPOINT_JSON_OR_SOCKET_PATH MAX_QUESTIONS
 `
 
 // driverVersion is injected by release builds with:
@@ -56,6 +57,10 @@ func main() {
 		runServe(os.Args[2:])
 	case "serve-daemon":
 		runServeDaemon(os.Args[2:])
+	case "humanloop-mcp":
+		if err := runHumanloopMCP(os.Args[2:]); err != nil {
+			log.Fatalf("driver_agent humanloop-mcp: %v", err)
+		}
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
