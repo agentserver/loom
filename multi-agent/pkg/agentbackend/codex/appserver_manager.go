@@ -124,33 +124,43 @@ func (b *workerBackend) NewSessionWorker(ctx context.Context, session agentbacke
 }
 
 type appServerHumanloopPayloadBuffer struct {
-	mu     sync.Mutex
-	active bool
-	ch     chan humanloop.Payload
+	stateMu sync.Mutex
+	active  bool
+
+	flightMu   sync.Mutex
+	flightCond *sync.Cond
+	inFlight   int
+
+	ch chan humanloop.Payload
 }
 
 func newAppServerHumanloopPayloadBuffer(size int) *appServerHumanloopPayloadBuffer {
-	return &appServerHumanloopPayloadBuffer{ch: make(chan humanloop.Payload, size)}
+	b := &appServerHumanloopPayloadBuffer{ch: make(chan humanloop.Payload, size)}
+	b.flightCond = sync.NewCond(&b.flightMu)
+	return b
 }
 
 func (b *appServerHumanloopPayloadBuffer) beginTurn() {
-	b.mu.Lock()
+	b.stateMu.Lock()
 	b.active = true
-	b.mu.Unlock()
+	b.stateMu.Unlock()
 	drainHumanloopPayloads(b.ch)
 }
 
 func (b *appServerHumanloopPayloadBuffer) endTurn() {
-	b.mu.Lock()
-	b.active = false
-	b.mu.Unlock()
+	b.deactivateAndWait()
 	drainHumanloopPayloads(b.ch)
 }
 
 func (b *appServerHumanloopPayloadBuffer) deliver(p humanloop.Payload) {
-	b.mu.Lock()
+	b.flightMu.Lock()
+	b.inFlight++
+	b.flightMu.Unlock()
+	defer b.finishDelivery()
+
+	b.stateMu.Lock()
 	active := b.active
-	b.mu.Unlock()
+	b.stateMu.Unlock()
 	if !active {
 		return
 	}
@@ -158,6 +168,32 @@ func (b *appServerHumanloopPayloadBuffer) deliver(p humanloop.Payload) {
 	case b.ch <- p:
 	default:
 	}
+}
+
+func (b *appServerHumanloopPayloadBuffer) drainTerminal(pending *executorpkg.AskUserPayload) *executorpkg.AskUserPayload {
+	b.deactivateAndWait()
+	return appServerRememberQueuedHumanloopPayload(b.ch, pending)
+}
+
+func (b *appServerHumanloopPayloadBuffer) deactivateAndWait() {
+	b.stateMu.Lock()
+	b.active = false
+	b.stateMu.Unlock()
+
+	b.flightMu.Lock()
+	for b.inFlight > 0 {
+		b.flightCond.Wait()
+	}
+	b.flightMu.Unlock()
+}
+
+func (b *appServerHumanloopPayloadBuffer) finishDelivery() {
+	b.flightMu.Lock()
+	b.inFlight--
+	if b.inFlight == 0 {
+		b.flightCond.Broadcast()
+	}
+	b.flightMu.Unlock()
 }
 
 func (b *appServerHumanloopPayloadBuffer) C() <-chan humanloop.Payload {
@@ -233,12 +269,12 @@ func (b *workerBackend) runAppServerTurn(
 			}
 			emit(msg)
 			if msg.Method == "error" && !appServerErrorWillRetry(msg) && appServerNotificationRelevantToTurn(meta, w.sessionID, turnID) {
-				pendingAwaitingUser = appServerRememberQueuedHumanloopPayload(payloads.C(), pendingAwaitingUser)
+				pendingAwaitingUser = payloads.drainTerminal(pendingAwaitingUser)
 				result.AwaitingUser = pendingAwaitingUser
 				return result, nil
 			}
 			if msg.Method == "turn/completed" && appServerNotificationRelevantToTurn(meta, w.sessionID, turnID) {
-				pendingAwaitingUser = appServerRememberQueuedHumanloopPayload(payloads.C(), pendingAwaitingUser)
+				pendingAwaitingUser = payloads.drainTerminal(pendingAwaitingUser)
 				result.AwaitingUser = pendingAwaitingUser
 				return result, nil
 			}
@@ -300,7 +336,8 @@ func appServerSyntheticTurnStarted(threadID, turnID, status string) appServerRPC
 
 func handleUnsupportedAppServerRequest(rpc *appServerRPC, router *appServerNotificationRouter, msg appServerRPCMessage) {
 	resp := appServerUnsupportedRequestResponse(msg)
-	if router != nil {
+	meta := appServerNotificationMetaFor(msg)
+	if router != nil && meta.ThreadID != "" {
 		router.dispatch(appServerUnsupportedRequestNotification(msg, resp.Error.Message))
 	}
 	if rpc != nil && msg.ID != nil {

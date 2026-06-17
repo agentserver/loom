@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/yourorg/multi-agent/internal/commander"
+	executorpkg "github.com/yourorg/multi-agent/internal/executor"
 	"github.com/yourorg/multi-agent/internal/humanloop"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
@@ -65,6 +66,8 @@ func TestCodexFactoryDefaultDoesNotExposeSessionWorkerBackend(t *testing.T) {
 }
 
 func TestCodexFactoryAppServerModeExposesSessionWorkerBackend(t *testing.T) {
+	t.Setenv(appServerUnsafeHumanloopRoutingEnv, "1")
+
 	b, err := agentbackend.New(agentbackend.Config{
 		Kind:       agentbackend.KindCodex,
 		Bin:        "codex",
@@ -79,7 +82,26 @@ func TestCodexFactoryAppServerModeExposesSessionWorkerBackend(t *testing.T) {
 	}
 }
 
+func TestCodexFactoryAppServerModeRequiresUnsafeHumanloopRoutingOptIn(t *testing.T) {
+	t.Setenv(appServerUnsafeHumanloopRoutingEnv, "")
+
+	b, err := agentbackend.New(agentbackend.Config{
+		Kind:       agentbackend.KindCodex,
+		Bin:        "codex",
+		WorkDir:    t.TempDir(),
+		WorkerMode: "app_server",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b.(agentbackend.SessionWorkerBackend); ok {
+		t.Fatalf("app_server codex backend implements SessionWorkerBackend without %s=1", appServerUnsafeHumanloopRoutingEnv)
+	}
+}
+
 func TestCodexWorkerBackendNewSessionWorkerUnavailableWhenManagerUnavailable(t *testing.T) {
+	t.Setenv(appServerUnsafeHumanloopRoutingEnv, "1")
+
 	b, err := agentbackend.New(agentbackend.Config{
 		Kind:       agentbackend.KindCodex,
 		Bin:        filepath.Join(t.TempDir(), "missing-codex"),
@@ -108,6 +130,8 @@ func TestCodexWorkerBackendNewSessionWorkerUnavailableWhenManagerUnavailable(t *
 }
 
 func TestCodexWorkerBackendNewSessionWorkerUnavailableWhenSessionIDEmpty(t *testing.T) {
+	t.Setenv(appServerUnsafeHumanloopRoutingEnv, "1")
+
 	b, err := agentbackend.New(agentbackend.Config{
 		Kind:       agentbackend.KindCodex,
 		Bin:        "codex",
@@ -848,6 +872,38 @@ func TestAppServerTerminalEventDrainsQueuedHumanloopPayload(t *testing.T) {
 	}
 }
 
+func TestAppServerTerminalEventWaitsForInFlightHumanloopPayload(t *testing.T) {
+	payloads := newAppServerHumanloopPayloadBuffer(1)
+	payloads.beginTurn()
+	defer payloads.endTurn()
+
+	payloads.flightMu.Lock()
+	payloads.inFlight++
+	payloads.flightMu.Unlock()
+
+	drainDone := make(chan *executorpkg.AskUserPayload, 1)
+	go func() {
+		drainDone <- payloads.drainTerminal(nil)
+	}()
+
+	select {
+	case got := <-drainDone:
+		t.Fatalf("terminal drain returned before in-flight delivery settled: %+v", got)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	payloads.ch <- humanloop.Payload{Kind: "ask_user", Question: "settled at terminal"}
+	payloads.flightMu.Lock()
+	payloads.inFlight--
+	payloads.flightCond.Broadcast()
+	payloads.flightMu.Unlock()
+
+	got := receiveWithin(t, drainDone, "terminal humanloop drain")
+	if got == nil || got.Question != "settled at terminal" {
+		t.Fatalf("AwaitingUser=%+v, want settled terminal payload", got)
+	}
+}
+
 func TestAppServerWorkerCompletionWithoutHumanloopPayloadDoesNotWaitGracePeriod(t *testing.T) {
 	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
 		if req.Method != "turn/start" {
@@ -1000,6 +1056,52 @@ func TestAppServerWorkerRejectsInboundServerRequestAndFailsTurn(t *testing.T) {
 	}
 	if resp.Method != "" {
 		t.Fatalf("response method=%q, want empty", resp.Method)
+	}
+	if resp.Error == nil || resp.Error.Code != -32601 || !strings.Contains(resp.Error.Message, "approval/request") {
+		t.Fatalf("response error=%+v, want unsupported approval/request error", resp.Error)
+	}
+}
+
+func TestAppServerWorkerUnscopedInboundServerRequestDoesNotFailActiveTurn(t *testing.T) {
+	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
+		if req.Method == "turn/start" {
+			writeFakeAppServerResult(t, w, *req.ID, fakeAppServerResultFor(req.Method))
+			writeFakeAppServerRequest(t, w, "77", "approval/request", `{}`)
+			return true
+		}
+		if req.Method == "" && req.ID != nil && strings.TrimSpace(string(*req.ID)) == "77" {
+			writeFakeAppServerNotification(t, w, "turn/completed", `{"threadId":"thr-1","turn":{"id":"turn-1","status":"completed"}}`)
+			return true
+		}
+		return false
+	})
+	cfg := agentbackend.Config{Kind: agentbackend.KindCodex, Bin: "codex", WorkDir: "/repo"}
+	m := newAppServerManager(cfg, nil)
+	m.starter = fake.starter
+	wb := &workerBackend{Backend: New(cfg, nil), manager: m}
+
+	worker, err := wb.NewSessionWorker(context.Background(), agentbackend.Session{
+		ID:         "thr-1",
+		Kind:       agentbackend.KindCodex,
+		WorkingDir: "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Close()
+
+	res, err := worker.Run(context.Background(), "continue", &appServerWorkerTestSink{})
+	if err != nil {
+		t.Fatalf("Run error = %v, want unscoped request ignored after response", err)
+	}
+	if res.SessionID != "thr-1" || res.AwaitingUser != nil {
+		t.Fatalf("result=%+v, want completed thr-1 turn without AwaitingUser", res)
+	}
+
+	reqs := fake.takeRequests(t, 5)
+	resp := reqs[4]
+	if resp.ID == nil || strings.TrimSpace(string(*resp.ID)) != "77" {
+		t.Fatalf("response id=%v, want 77", resp.ID)
 	}
 	if resp.Error == nil || resp.Error.Code != -32601 || !strings.Contains(resp.Error.Message, "approval/request") {
 		t.Fatalf("response error=%+v, want unsupported approval/request error", resp.Error)

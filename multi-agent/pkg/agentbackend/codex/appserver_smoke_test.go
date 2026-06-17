@@ -16,6 +16,7 @@ func TestCodexAppServerSmoke(t *testing.T) {
 	if os.Getenv("LOOM_CODEX_APPSERVER_SMOKE") != "1" {
 		t.Skip("set LOOM_CODEX_APPSERVER_SMOKE=1 to run against local codex app-server")
 	}
+	t.Setenv(appServerUnsafeHumanloopRoutingEnv, "1")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -80,6 +81,8 @@ func ensureCodexAppServerSmokeBackend(ctx context.Context, b agentbackend.Backen
 }
 
 func TestCodexAppServerSmokeBackendEnsureFailsWhenBinaryUnavailable(t *testing.T) {
+	t.Setenv(appServerUnsafeHumanloopRoutingEnv, "1")
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
