@@ -71,15 +71,83 @@ codexSessionWorker
   - workDir
   - thread handle/subscription
   - Run(ctx, prompt, sink)
-  - Healthy()
   - Close()
+  - implements agentbackend.HealthySessionWorker
 ```
 
-`codex.Backend` may add a `NewSessionWorker` method, which means it will always
-satisfy `agentbackend.SessionWorkerBackend` at the Go type level. The method is
-still runtime-gated: if the mode is disabled, or if startup probe fails,
-`NewSessionWorker` returns `agentbackend.ErrSessionWorkerUnavailable` so
-Commander falls back to the existing `RunResume` path.
+Do not make the disabled/off path perform extra session reads. Today the
+Commander handler returns immediately when the backend does not implement
+`agentbackend.SessionWorkerBackend`; if Codex always implements that interface,
+`SessionTurn` would call `GetSession` before discovering `worker_mode: off`.
+Preserve the off-mode hot path by either:
+
+- returning a plain backend that does not implement `SessionWorkerBackend` unless
+  app-server mode is enabled, or
+- adding a cheap capability check that the handler can evaluate before
+  `GetSession`.
+
+The preferred implementation is a small wrapper returned by the backend builder
+only when `worker_mode: app_server` is enabled:
+
+```text
+codexBackend                         // existing stable backend; no worker method
+codexWorkerBackend { *codexBackend } // adds NewSessionWorker only when enabled
+```
+
+If startup probe fails after the interface is exposed, `NewSessionWorker` returns
+`agentbackend.ErrSessionWorkerUnavailable` so Commander falls back to the
+existing `RunResume` path.
+
+## Runtime context parity
+
+The app-server path must preserve the effective runtime context of the existing
+`codex exec resume` path. A hot worker is only a transport/process reuse
+optimization; it must not change what Codex can see, which tools are available,
+or how a resumed thread is configured.
+
+Parity requirements:
+
+- Resume the same Codex thread/session ID that `RunResume` would resume.
+- Use the historical session working directory resolved by `resumeWorkDir`, not
+  the daemon default directory, when a session has cwd metadata.
+- Start Codex with the same environment inherited by the existing executor,
+  including the same `CODEX_HOME` and authentication/config discovery behavior.
+- Preserve `agent.extra_args` or an app-server equivalent for model/profile,
+  sandbox, approval, and config overrides.
+- Preserve Codex's own runtime skill/plugin discovery. Commander
+  `discovery.skills` are routing/advertisement metadata and are not injected as
+  Codex runtime skills; Codex skills come from Codex configuration and skill
+  locations discovered under the effective `CODEX_HOME`/cwd.
+- Preserve the humanloop MCP server used for `ask_user` and
+  `request_permission`. If app-server cannot provide equivalent MCP wiring, the
+  app-server worker must report `ErrSessionWorkerUnavailable` before executing a
+  turn and let `RunResume` handle it.
+- Preserve the existing resume prompt semantics unless an app-server API offers
+  a direct user-turn equivalent that produces the same conversation state.
+
+The implementation should expose this parity as tests or startup probes where
+possible. If any required context cannot be mapped safely into app-server, the
+Codex backend remains on the stable `RunResume` fallback.
+
+The existing `RunResume` path is also part of this contract, not just the
+fallback implementation. Before adding app-server workers, keep or add tests
+that prove `RunResume`:
+
+- resolves the historical session cwd before setting `cmd.Dir`
+- preserves `agent.extra_args`
+- inherits the same environment and `CODEX_HOME` discovery behavior as ordinary
+  Codex CLI runs
+- injects the humanloop MCP server for every resume turn
+- does not treat Commander `discovery.skills` as Codex runtime skills
+
+Because `RunResume` starts a fresh Codex process for every turn, it naturally
+re-reads Codex config, skills, plugins, and MCP configuration each time. A
+long-lived app-server worker must not silently keep stale runtime context after a
+configuration change. The worker cache key or health check should include a
+runtime context fingerprint covering at least effective cwd, `CODEX_HOME`,
+`agent.extra_args`, and the app-server/MCP configuration inputs owned by Loom. If
+that fingerprint changes, the existing worker is closed and the next turn creates
+a new app-server worker or falls back to `RunResume`.
 
 ## Configuration
 
@@ -88,14 +156,25 @@ Add an explicit opt-in field to the driver config:
 ```yaml
 agent:
   kind: codex
-  worker_mode: app_server   # off | app_server
-  worker_max: 10            # optional; maps to commander Handler.WorkerMax
-  worker_idle_timeout: 10m  # optional; maps to WorkerIdleTimeout
+  worker_mode: app_server   # off | app_server; only codex consumes app_server
 ```
 
-Initial implementation may read only `worker_mode`; if `worker_max` and
-`worker_idle_timeout` already have a daemon-level configuration home, use that
-existing home instead of duplicating settings.
+`worker_mode` is the backend opt-in and is intentionally separate from daemon
+cache limits. Add it as a generic field on the existing flat `AgentConfig` /
+`agentbackend.Config` carrier. Other backends should accept only the default
+`off` behavior; `app_server` is valid only for `agent.kind: codex`.
+
+Hot worker cache limits are daemon-level settings because they control the
+Commander handler cache, not Codex itself:
+
+```yaml
+daemon:
+  worker_max: 10
+  worker_idle_timeout: 10m
+```
+
+If these settings are not implemented in the first app-server PR, leave the
+existing handler defaults in place.
 
 Default:
 
@@ -170,18 +249,22 @@ If steps 2-5 fail before a turn starts, return
 
 ```text
 worker.Run(ctx, prompt, sink)
-  1. Emit status_code=starting.
+  1. Emit status_code=starting through the status sink helper.
   2. Send the prompt as a new turn on the resumed app-server thread.
   3. Emit status_code=answering once the turn is accepted/running.
   4. Map agent message deltas to sink.Write("chunk", text).
   5. Map approval/user-input requests to Result.AwaitingUser.
-  6. Map terminal turn result to executor.Result.
+  6. Accumulate final assistant text and run agentbackend.SplitCapability.
+  7. Emit sink.Write("capability", change) when SplitCapability finds a change.
+  8. Map terminal turn result to executor.Result, including Summary,
+     CapabilityChange, SessionID, and AwaitingUser.
 ```
 
 After the app-server has accepted a turn, ordinary errors must not fall back to
 `RunResume`; retrying would duplicate execution and can duplicate billing or
-session writes. The worker should return the error and be removed from the
-cache.
+session writes. The worker should return the error; the Commander handler is
+responsible for removing the failed worker from the cache and refusing fallback
+after accepted execution.
 
 ### Close
 
@@ -192,7 +275,10 @@ daemon shutdown closes it after all worker refs finish.
 
 ### Health
 
-`Healthy()` should be cheap and conservative:
+`Healthy()` is not part of `agentbackend.SessionWorker`; it is the optional
+`agentbackend.HealthySessionWorker` interface. `codexSessionWorker` should
+implement it so the Commander handler can discard stale workers before sending a
+turn. The check should be cheap and conservative:
 
 - false if the app-server process exited
 - false if the JSON-RPC connection is closed
@@ -208,11 +294,38 @@ Extend `commander.EventPayload` for status events:
 
 ```go
 type EventPayload struct {
-    EventKind  string `json:"event_kind"`
-    Text       string `json:"text,omitempty"`
-    StatusCode string `json:"status_code,omitempty"`
+    EventKind  string          `json:"event_kind"`
+    Text       string          `json:"text,omitempty"`
+    Extra      json.RawMessage `json:"extra,omitempty"`
+    StatusCode string          `json:"status_code,omitempty"`
 }
 ```
+
+This is an additive change. Preserve the existing `Extra` field; app-server and
+future backend events may already rely on it.
+
+`Sink.Write(eventType, data string)` cannot carry structured status metadata by
+itself. Add an optional status writer interface plus helper near the existing
+sink abstraction, and expose it through `pkg/agentbackend` so backend packages
+can call it without importing `internal/commander`:
+
+```go
+type StatusSink interface {
+    WriteStatus(statusCode, text string)
+}
+
+func WriteStatus(s Sink, statusCode, text string) {
+    if ss, ok := s.(StatusSink); ok {
+        ss.WriteStatus(statusCode, text)
+        return
+    }
+    s.Write("status", text)
+}
+```
+
+The Commander `wsSink` and `sseSink` should implement `WriteStatus` and encode
+both `text` and `status_code`. Backend executors and workers should call the
+helper instead of raw `sink.Write("status", ...)` for status transitions.
 
 Status codes:
 
@@ -231,9 +344,14 @@ values remain accepted for backward compatibility:
 - `queued on daemon`
 - `queued-on-daemon`
 - `accepted by daemon`
+- `starting codex`
+- `codex running`
 
 This status-code change can land before the app-server worker and improves the
-current "queued -> done" jump for Codex exec as well.
+current "queued -> done" jump for Codex exec as well. The first rollout step
+must update the existing Codex exec path from raw `sink.Write("status", ...)` to
+the status helper so there is a producer before observer/frontend consumers rely
+on `status_code`.
 
 ## Humanloop and approval handling
 
@@ -309,17 +427,22 @@ currently running".
 - `NewSessionWorker` resumes the requested session ID
 - `Run` maps agent-message deltas to chunk events
 - `Run` maps terminal result to `executor.Result`
+- `Run` preserves `SplitCapability` behavior and emits capability events
 - app-server error before turn accepted falls back
 - app-server error after turn accepted does not fall back
 - `Healthy` reflects process/connection death
 - `Close` releases subscription without deleting the session
+- `RunResume` preserves historical cwd, `agent.extra_args`, environment,
+  `CODEX_HOME` discovery, and humanloop MCP injection
 
 ### Commander tests
 
 - Handler uses app-server worker when backend implements
   `SessionWorkerBackend`
+- `worker_mode: off` does not force an extra `GetSession` before `RunResume`
 - Handler falls back only for pre-run unavailable errors
 - active worker marker appears after a successful worker turn
+- EventPayload status-code serialization preserves the existing `Extra` field
 - status-code events move observer/frontend through queued -> starting ->
   answering -> done
 
@@ -358,7 +481,8 @@ These should be opt-in or CI-gated on Codex availability:
 
 ## Acceptance criteria
 
-- With `worker_mode: off`, behavior is unchanged.
+- With `worker_mode: off`, behavior is unchanged, including no extra session
+  file read before `RunResume`.
 - With `worker_mode: app_server` and supported Codex CLI, two Commander turns on
   the same session reuse a cached `SessionWorker`.
 - If app-server startup/probe fails, the turn still succeeds through
