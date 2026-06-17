@@ -22,7 +22,9 @@ type codexSessionWorker struct {
 	workDir   string
 	healthy   atomic.Bool
 
-	runTurn func(ctx context.Context, prompt string, emit func(appServerRPCMessage)) error
+	// runTurn must call markSubmitted once the turn/start request may have
+	// reached app-server; after that, Run must not allow RunResume fallback.
+	runTurn func(ctx context.Context, prompt string, emit func(appServerRPCMessage), markSubmitted func()) error
 	closeFn func() error
 }
 
@@ -32,6 +34,7 @@ func (w *codexSessionWorker) Run(ctx context.Context, prompt string, sink agentb
 	var (
 		mu              sync.Mutex
 		text            strings.Builder
+		submitted       bool
 		accepted        bool
 		answeringStatus bool
 		notifyErr       error
@@ -45,6 +48,12 @@ func (w *codexSessionWorker) Run(ctx context.Context, prompt string, sink agentb
 			answeringStatus = true
 			agentbackend.WriteStatus(sink, agentbackend.StatusAnswering, "codex app-server running")
 		}
+	}
+
+	markSubmitted := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		submitted = true
 	}
 
 	emit := func(msg appServerRPCMessage) {
@@ -86,12 +95,12 @@ func (w *codexSessionWorker) Run(ctx context.Context, prompt string, sink agentb
 
 	runErr := agentbackend.ErrSessionWorkerUnavailable
 	if w.runTurn != nil {
-		runErr = w.runTurn(ctx, prompt, emit)
+		runErr = w.runTurn(ctx, prompt, emit, markSubmitted)
 	}
 
 	mu.Lock()
 	full := text.String()
-	wasAccepted := accepted
+	unsafeForFallback := accepted || submitted
 	if runErr == nil {
 		runErr = notifyErr
 	}
@@ -106,7 +115,7 @@ func (w *codexSessionWorker) Run(ctx context.Context, prompt string, sink agentb
 		CapabilityChange: change,
 		SessionID:        w.sessionID,
 	}
-	if runErr != nil && !wasAccepted {
+	if runErr != nil && !unsafeForFallback {
 		return agentbackend.Result{}, agentbackend.ErrSessionWorkerUnavailable
 	}
 	if runErr != nil {
@@ -154,7 +163,7 @@ func (w *codexSessionWorker) appServerErrorForSession(msg appServerRPCMessage) b
 
 func nonFallbackWorkerRunError(err error) error {
 	if errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
-		return fmt.Errorf("codex app-server accepted execution before worker became unavailable: %v", err)
+		return fmt.Errorf("codex app-server turn may have executed before worker became unavailable: %v", err)
 	}
 	return err
 }

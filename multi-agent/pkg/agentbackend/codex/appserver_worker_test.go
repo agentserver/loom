@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yourorg/multi-agent/internal/commander"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
@@ -133,7 +134,7 @@ func TestCodexSessionWorkerStreamsDeltasAndCapability(t *testing.T) {
 	w := &codexSessionWorker{
 		sessionID: "thr-1",
 		workDir:   t.TempDir(),
-		runTurn: func(_ context.Context, prompt string, emit func(appServerRPCMessage)) error {
+		runTurn: func(_ context.Context, prompt string, emit func(appServerRPCMessage), _ func()) error {
 			gotPrompt = prompt
 			emit(appServerWorkerNotification("turn/started", `{"threadId":"thr-1","turn":{"id":"turn-1","status":"running"}}`))
 			emit(appServerWorkerNotification("item/agentMessage/delta", `{"threadId":"thr-1","turnId":"turn-1","itemId":"i1","delta":"hello"}`))
@@ -180,7 +181,7 @@ func TestCodexSessionWorkerReturnsUnavailableBeforeAcceptedExecution(t *testing.
 	w := &codexSessionWorker{
 		sessionID: "thr-1",
 		workDir:   t.TempDir(),
-		runTurn: func(context.Context, string, func(appServerRPCMessage)) error {
+		runTurn: func(context.Context, string, func(appServerRPCMessage), func()) error {
 			return runErr
 		},
 	}
@@ -209,7 +210,7 @@ func TestCodexSessionWorkerReturnsNonSentinelErrorAfterAcceptedUnavailable(t *te
 	w := &codexSessionWorker{
 		sessionID: "thr-1",
 		workDir:   t.TempDir(),
-		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage)) error {
+		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage), _ func()) error {
 			emit(appServerWorkerNotification("turn/started", `{"threadId":"thr-1","turn":{"id":"turn-1","status":"running"}}`))
 			emit(appServerWorkerNotification("item/agentMessage/delta", `{"threadId":"thr-1","turnId":"turn-1","itemId":"i1","delta":"partial"}`))
 			return agentbackend.ErrSessionWorkerUnavailable
@@ -234,13 +235,100 @@ func TestCodexSessionWorkerReturnsNonSentinelErrorAfterAcceptedUnavailable(t *te
 	}
 }
 
+func TestCodexSessionWorkerSubmittedUnavailableDoesNotFallbackThroughCommander(t *testing.T) {
+	worker := &codexSessionWorker{
+		sessionID: "thr-1",
+		workDir:   t.TempDir(),
+		runTurn: func(_ context.Context, _ string, _ func(appServerRPCMessage), markSubmitted func()) error {
+			markSubmitted()
+			return agentbackend.ErrSessionWorkerUnavailable
+		},
+	}
+	worker.healthy.Store(true)
+	var fallbackCalls int
+	backend := &appServerWorkerCommanderBackend{
+		worker: worker,
+		resumeFn: func(context.Context, string, string, agentbackend.Sink) (agentbackend.Result, error) {
+			fallbackCalls++
+			return agentbackend.Result{Summary: "fallback"}, nil
+		},
+	}
+	h := &commander.Handler{Backend: backend}
+	defer h.Close()
+
+	sink := &appServerWorkerTestSink{}
+	res, err := h.SessionTurn(context.Background(), "thr-1", "prompt", sink)
+	if err == nil {
+		t.Fatal("SessionTurn error = nil, want submitted worker error")
+	}
+	if errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
+		t.Fatalf("SessionTurn error = %v, should not match ErrSessionWorkerUnavailable after submission", err)
+	}
+	if !strings.Contains(err.Error(), agentbackend.ErrSessionWorkerUnavailable.Error()) {
+		t.Fatalf("SessionTurn error = %v, want unavailable detail preserved", err)
+	}
+	if fallbackCalls != 0 {
+		t.Fatalf("RunResume calls=%d, want 0", fallbackCalls)
+	}
+	if res.SessionID != "thr-1" {
+		t.Fatalf("result=%+v, want session ID from worker", res)
+	}
+	if !sink.closed {
+		t.Fatal("sink not closed after submitted non-fallback error")
+	}
+}
+
+func TestCodexSessionWorkerUnsubmittedUnavailableFallsBackThroughCommander(t *testing.T) {
+	worker := &codexSessionWorker{
+		sessionID: "thr-1",
+		workDir:   t.TempDir(),
+		runTurn: func(context.Context, string, func(appServerRPCMessage), func()) error {
+			return agentbackend.ErrSessionWorkerUnavailable
+		},
+	}
+	worker.healthy.Store(true)
+	var fallbackCalls int
+	backend := &appServerWorkerCommanderBackend{
+		worker: worker,
+		resumeFn: func(_ context.Context, id, answer string, sink agentbackend.Sink) (agentbackend.Result, error) {
+			fallbackCalls++
+			if id != "thr-1" || answer != "prompt" {
+				t.Fatalf("RunResume id=%q answer=%q, want thr-1/prompt", id, answer)
+			}
+			sink.Write("chunk", "fallback")
+			sink.Close()
+			return agentbackend.Result{Summary: "fallback", SessionID: id}, nil
+		},
+	}
+	h := &commander.Handler{Backend: backend}
+	defer h.Close()
+
+	sink := &appServerWorkerTestSink{}
+	res, err := h.SessionTurn(context.Background(), "thr-1", "prompt", sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fallbackCalls != 1 {
+		t.Fatalf("RunResume calls=%d, want 1", fallbackCalls)
+	}
+	if res.Summary != "fallback" || res.SessionID != "thr-1" {
+		t.Fatalf("result=%+v, want fallback result", res)
+	}
+	if sink.writesAfterClose != 0 {
+		t.Fatalf("fallback wrote after close %d times", sink.writesAfterClose)
+	}
+	if !equalAppServerWorkerEvents(sink.events, []appServerWorkerTestEvent{{kind: "chunk", data: "fallback"}}) {
+		t.Fatalf("events=%+v, want fallback chunk", sink.events)
+	}
+}
+
 func TestCodexSessionWorkerReturnsRealErrorAfterDeltaAcceptedExecution(t *testing.T) {
 	runErr := errors.New("lost app-server")
 	sink := &appServerWorkerTestSink{}
 	w := &codexSessionWorker{
 		sessionID: "thr-1",
 		workDir:   t.TempDir(),
-		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage)) error {
+		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage), _ func()) error {
 			emit(appServerWorkerNotification("item/agentMessage/delta", `{"threadId":"thr-1","turnId":"turn-1","itemId":"i1","delta":"partial"}`))
 			return runErr
 		},
@@ -267,7 +355,7 @@ func TestCodexSessionWorkerIgnoresOtherSessionNotificationsBeforeFallback(t *tes
 	w := &codexSessionWorker{
 		sessionID: "thr-1",
 		workDir:   t.TempDir(),
-		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage)) error {
+		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage), _ func()) error {
 			emit(appServerWorkerNotification("turn/started", `{"threadId":"other","turn":{"id":"turn-x","status":"running"}}`))
 			emit(appServerWorkerNotification("item/agentMessage/delta", `{"threadId":"other","turnId":"turn-x","itemId":"i1","delta":"ignored"}`))
 			emit(appServerWorkerNotification("turn/completed", `{"threadId":"other","turn":{"id":"turn-x","status":"completed"}}`))
@@ -295,7 +383,7 @@ func TestCodexSessionWorkerErrorNotificationBeforeAcceptedExecutionReturnsUnavai
 	w := &codexSessionWorker{
 		sessionID: "thr-1",
 		workDir:   t.TempDir(),
-		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage)) error {
+		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage), _ func()) error {
 			emit(appServerWorkerNotification("error", `{"threadId":"thr-1","message":"turn rejected"}`))
 			return nil
 		},
@@ -325,7 +413,7 @@ func TestCodexSessionWorkerErrorNotificationAfterAcceptedExecutionReturnsRealErr
 	w := &codexSessionWorker{
 		sessionID: "thr-1",
 		workDir:   t.TempDir(),
-		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage)) error {
+		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage), _ func()) error {
 			emit(appServerWorkerNotification("item/agentMessage/delta", `{"threadId":"thr-1","turnId":"turn-1","itemId":"i1","delta":"partial"}`))
 			emit(appServerWorkerNotification("error", `{"threadId":"thr-1","message":"lost worker"}`))
 			return nil
@@ -402,4 +490,48 @@ func equalAppServerWorkerStatuses(a, b []appServerWorkerTestStatus) bool {
 		}
 	}
 	return true
+}
+
+type appServerWorkerCommanderBackend struct {
+	worker   agentbackend.SessionWorker
+	resumeFn func(context.Context, string, string, agentbackend.Sink) (agentbackend.Result, error)
+}
+
+func (b *appServerWorkerCommanderBackend) Kind() agentbackend.Kind {
+	return agentbackend.KindCodex
+}
+
+func (b *appServerWorkerCommanderBackend) Run(context.Context, agentbackend.Task, agentbackend.Sink) (agentbackend.Result, error) {
+	return agentbackend.Result{}, nil
+}
+
+func (b *appServerWorkerCommanderBackend) RunResume(ctx context.Context, id, answer string, sink agentbackend.Sink) (agentbackend.Result, error) {
+	if b.resumeFn == nil {
+		return agentbackend.Result{}, nil
+	}
+	return b.resumeFn(ctx, id, answer, sink)
+}
+
+func (b *appServerWorkerCommanderBackend) LLM() agentbackend.LLMRunner {
+	return nil
+}
+
+func (b *appServerWorkerCommanderBackend) Permissions() agentbackend.PermissionsStore {
+	return nil
+}
+
+func (b *appServerWorkerCommanderBackend) Detect(context.Context) error {
+	return nil
+}
+
+func (b *appServerWorkerCommanderBackend) ListSessions(context.Context) ([]agentbackend.Session, error) {
+	return nil, nil
+}
+
+func (b *appServerWorkerCommanderBackend) GetSession(context.Context, string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+	return agentbackend.Session{ID: "thr-1", Kind: agentbackend.KindCodex, WorkingDir: "/repo"}, nil, nil
+}
+
+func (b *appServerWorkerCommanderBackend) NewSessionWorker(context.Context, agentbackend.Session) (agentbackend.SessionWorker, error) {
+	return b.worker, nil
 }
