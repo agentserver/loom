@@ -581,6 +581,47 @@ func TestHandler_SessionTurnDoesNotFallbackAfterWorkerRunError(t *testing.T) {
 	}
 }
 
+func TestHandler_SessionTurnDoesNotFallbackAfterWorkerRunUnavailableDetail(t *testing.T) {
+	runErr := errors.New("worker executed before becoming unavailable: " + agentbackend.ErrSessionWorkerUnavailable.Error())
+	worker := &fakeSessionWorker{healthy: true}
+	worker.runFn = func(_ context.Context, prompt string, sink executor.Sink) (executor.Result, error) {
+		sink.Write("chunk", "partial "+prompt)
+		return executor.Result{SessionID: "s1"}, runErr
+	}
+	var fallback atomic.Int32
+	h := &Handler{Backend: &fakeBackend{
+		getFn: func(context.Context, string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+			return agentbackend.Session{ID: "s1", Kind: agentbackend.KindClaude, WorkingDir: "/repo"}, nil, nil
+		},
+		workerFn: func(context.Context, agentbackend.Session) (agentbackend.SessionWorker, error) {
+			return worker, nil
+		},
+		resumeFn: func(context.Context, string, string, executor.Sink) (executor.Result, error) {
+			fallback.Add(1)
+			return executor.Result{Summary: "fallback"}, nil
+		},
+	}}
+	defer h.Close()
+
+	sink := &captureSink{}
+	res, err := h.SessionTurn(context.Background(), "s1", "go", sink)
+	if !errors.Is(err, runErr) {
+		t.Fatalf("err=%v want %v", err, runErr)
+	}
+	if errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
+		t.Fatalf("err=%v should not match ErrSessionWorkerUnavailable after worker execution", err)
+	}
+	if got := fallback.Load(); got != 0 {
+		t.Fatalf("RunResume calls=%d want 0 after worker.Run execution", got)
+	}
+	if res.SessionID != "s1" {
+		t.Fatalf("result=%+v want worker result", res)
+	}
+	if len(sink.events) != 1 || sink.events[0] != (captured{kind: "chunk", data: "partial go"}) {
+		t.Fatalf("sink events=%+v want only partial worker output", sink.events)
+	}
+}
+
 func TestHandler_CloseWaitsForInFlightWorkerRun(t *testing.T) {
 	worker := &closeObservingWorker{
 		runStarted: make(chan struct{}),
