@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"strconv"
 	"sync"
-	"time"
 
 	executorpkg "github.com/yourorg/multi-agent/internal/executor"
 	"github.com/yourorg/multi-agent/internal/humanloop"
@@ -20,8 +19,6 @@ var (
 	_ agentbackend.Backend              = (*workerBackend)(nil)
 	_ agentbackend.SessionWorkerBackend = (*workerBackend)(nil)
 )
-
-const appServerHumanloopCompletionGrace = 25 * time.Millisecond
 
 type workerBackend struct {
 	*Backend
@@ -58,7 +55,7 @@ func (b *workerBackend) NewSessionWorker(ctx context.Context, session agentbacke
 		_ = os.RemoveAll(sockDir)
 		return nil, agentbackend.ErrSessionWorkerUnavailable
 	}
-	payloads := make(chan humanloop.Payload, 16)
+	payloads := newAppServerHumanloopPayloadBuffer(16)
 	receiveDone := make(chan struct{})
 	go func() {
 		defer close(receiveDone)
@@ -67,10 +64,7 @@ func (b *workerBackend) NewSessionWorker(ctx context.Context, session agentbacke
 			if err != nil {
 				return
 			}
-			select {
-			case payloads <- p:
-			default:
-			}
+			payloads.deliver(p)
 		}
 	}()
 
@@ -127,15 +121,57 @@ func (b *workerBackend) NewSessionWorker(ctx context.Context, session agentbacke
 	return w, nil
 }
 
+type appServerHumanloopPayloadBuffer struct {
+	mu     sync.Mutex
+	active bool
+	ch     chan humanloop.Payload
+}
+
+func newAppServerHumanloopPayloadBuffer(size int) *appServerHumanloopPayloadBuffer {
+	return &appServerHumanloopPayloadBuffer{ch: make(chan humanloop.Payload, size)}
+}
+
+func (b *appServerHumanloopPayloadBuffer) beginTurn() {
+	b.mu.Lock()
+	b.active = true
+	b.mu.Unlock()
+	drainHumanloopPayloads(b.ch)
+}
+
+func (b *appServerHumanloopPayloadBuffer) endTurn() {
+	b.mu.Lock()
+	b.active = false
+	b.mu.Unlock()
+	drainHumanloopPayloads(b.ch)
+}
+
+func (b *appServerHumanloopPayloadBuffer) deliver(p humanloop.Payload) {
+	b.mu.Lock()
+	active := b.active
+	b.mu.Unlock()
+	if !active {
+		return
+	}
+	select {
+	case b.ch <- p:
+	default:
+	}
+}
+
+func (b *appServerHumanloopPayloadBuffer) C() <-chan humanloop.Payload {
+	return b.ch
+}
+
 func (b *workerBackend) runAppServerTurn(
 	ctx context.Context,
 	w *codexSessionWorker,
 	prompt string,
-	payloads <-chan humanloop.Payload,
+	payloads *appServerHumanloopPayloadBuffer,
 	emit func(appServerRPCMessage),
 	markSubmitted func(),
 ) (appServerTurnResult, error) {
-	drainHumanloopPayloads(payloads)
+	payloads.beginTurn()
+	defer payloads.endTurn()
 
 	sub, err := b.manager.subscribe(w.sessionID, w.generation)
 	if err != nil {
@@ -151,7 +187,11 @@ func (b *workerBackend) runAppServerTurn(
 			Text: "User answered: " + prompt,
 		}},
 	}
-	startResult, err := b.manager.startTurn(ctx, w.generation, params, markSubmitted)
+	submitted := false
+	startResult, err := b.manager.startTurn(ctx, w.generation, params, func() {
+		submitted = true
+		markSubmitted()
+	})
 	turnID := startResult.Turn.ID
 	if turnID != "" {
 		emit(appServerSyntheticTurnStarted(w.sessionID, turnID, startResult.Turn.Status))
@@ -160,15 +200,20 @@ func (b *workerBackend) runAppServerTurn(
 		if appServerMethodNotFound(err, "turn/start") {
 			return appServerTurnResult{AllowFallback: true}, agentbackend.ErrSessionWorkerUnavailable
 		}
+		if submitted && ctx.Err() != nil {
+			_ = b.manager.close()
+		}
 		return appServerTurnResult{}, err
 	}
 
 	var result appServerTurnResult
+	var pendingAwaitingUser *executorpkg.AskUserPayload
 	for {
 		select {
-		case p := <-payloads:
-			result.AwaitingUser = humanloopPayloadToAwaitingUser(p)
-			return result, nil
+		case p := <-payloads.C():
+			if pendingAwaitingUser == nil {
+				pendingAwaitingUser = humanloopPayloadToAwaitingUser(p)
+			}
 		case msg, ok := <-sub.ch:
 			if !ok {
 				return result, agentbackend.ErrSessionWorkerUnavailable
@@ -179,15 +224,15 @@ func (b *workerBackend) runAppServerTurn(
 			}
 			emit(msg)
 			if msg.Method == "error" && !appServerErrorWillRetry(msg) && appServerNotificationRelevantToTurn(meta, w.sessionID, turnID) {
+				result.AwaitingUser = pendingAwaitingUser
 				return result, nil
 			}
 			if msg.Method == "turn/completed" && appServerNotificationRelevantToTurn(meta, w.sessionID, turnID) {
-				if result.AwaitingUser == nil {
-					result.AwaitingUser = waitForHumanloopPayload(ctx, payloads, appServerHumanloopCompletionGrace)
-				}
+				result.AwaitingUser = pendingAwaitingUser
 				return result, nil
 			}
 		case <-ctx.Done():
+			_ = b.manager.close()
 			return result, ctx.Err()
 		}
 	}
@@ -200,19 +245,6 @@ func drainHumanloopPayloads(payloads <-chan humanloop.Payload) {
 		default:
 			return
 		}
-	}
-}
-
-func waitForHumanloopPayload(ctx context.Context, payloads <-chan humanloop.Payload, grace time.Duration) *executorpkg.AskUserPayload {
-	timer := time.NewTimer(grace)
-	defer timer.Stop()
-	select {
-	case p := <-payloads:
-		return humanloopPayloadToAwaitingUser(p)
-	case <-timer.C:
-		return nil
-	case <-ctx.Done():
-		return nil
 	}
 }
 
@@ -284,6 +316,8 @@ type appServerManager struct {
 
 	mu         sync.Mutex
 	started    bool
+	starting   bool
+	startDone  chan struct{}
 	rpc        *appServerRPC
 	cmd        *exec.Cmd
 	conn       *appServerConnection
@@ -303,32 +337,60 @@ func newAppServerManager(cfg agentbackend.Config, env []string) *appServerManage
 }
 
 func (m *appServerManager) ensure(ctx context.Context) error {
-	m.mu.Lock()
-	if m.started && m.rpc != nil && m.rpc.terminalError() == nil {
+	for {
+		m.mu.Lock()
+		if m.started && m.rpc != nil && m.rpc.terminalError() == nil {
+			m.mu.Unlock()
+			return nil
+		}
+		if m.started {
+			conn := m.clearLocked()
+			m.mu.Unlock()
+			_ = closeAppServerConnection(conn)
+			continue
+		}
+		if m.starting {
+			done := m.startDone
+			m.mu.Unlock()
+			select {
+			case <-done:
+				m.mu.Lock()
+				running := m.started && m.rpc != nil && m.rpc.terminalError() == nil
+				m.mu.Unlock()
+				if running {
+					return nil
+				}
+				return agentbackend.ErrSessionWorkerUnavailable
+			case <-ctx.Done():
+				return agentbackend.ErrSessionWorkerUnavailable
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			m.mu.Unlock()
+			return agentbackend.ErrSessionWorkerUnavailable
+		}
+		startDone := make(chan struct{})
+		lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
+		m.starting = true
+		m.startDone = startDone
+		m.lifecycleCancel = lifecycleCancel
+		m.generation++
 		m.mu.Unlock()
-		return nil
-	}
-	if m.started {
-		conn := m.clearLocked()
-		m.mu.Unlock()
-		_ = closeAppServerConnection(conn)
-		return m.ensure(ctx)
-	}
-	if err := ctx.Err(); err != nil {
-		m.mu.Unlock()
-		return agentbackend.ErrSessionWorkerUnavailable
-	}
 
-	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
+		return m.startAndInitialize(ctx, startDone, lifecycleCancel, lifecycleCtx)
+	}
+}
+
+func (m *appServerManager) startAndInitialize(ctx context.Context, startDone chan struct{}, lifecycleCancel context.CancelFunc, lifecycleCtx context.Context) error {
 	conn, err := m.starter(lifecycleCtx, m.cfg, m.env)
 	if err != nil {
 		lifecycleCancel()
-		m.mu.Unlock()
+		m.finishFailedStart(startDone)
 		return agentbackend.ErrSessionWorkerUnavailable
 	}
 	if conn == nil || conn.rpc == nil {
 		lifecycleCancel()
-		m.mu.Unlock()
+		m.finishFailedStart(startDone)
 		_ = closeAppServerConnection(conn)
 		return agentbackend.ErrSessionWorkerUnavailable
 	}
@@ -358,39 +420,46 @@ func (m *appServerManager) ensure(ctx context.Context) error {
 		router.close()
 	}()
 
-	m.started = true
+	m.mu.Lock()
+	if !m.starting || m.startDone != startDone {
+		m.mu.Unlock()
+		_ = closeAppServerConnection(conn)
+		return agentbackend.ErrSessionWorkerUnavailable
+	}
 	m.rpc = conn.rpc
 	m.conn = conn
 	m.cmd = conn.cmd
 	m.router = router
 	m.lifecycleCancel = lifecycleCancel
-	m.generation++
 	rpc := m.rpc
+	m.mu.Unlock()
 
 	if err := ctx.Err(); err != nil {
-		conn := m.clearLocked()
-		m.mu.Unlock()
-		_ = closeAppServerConnection(conn)
+		m.closeFailedStart(startDone, conn)
 		return agentbackend.ErrSessionWorkerUnavailable
 	}
 	if err := rpc.call(ctx, "initialize", initializeParams(), nil); err != nil {
-		conn := m.clearLocked()
-		m.mu.Unlock()
-		_ = closeAppServerConnection(conn)
+		m.closeFailedStart(startDone, conn)
 		return agentbackend.ErrSessionWorkerUnavailable
 	}
 	if err := ctx.Err(); err != nil {
-		conn := m.clearLocked()
-		m.mu.Unlock()
-		_ = closeAppServerConnection(conn)
+		m.closeFailedStart(startDone, conn)
 		return agentbackend.ErrSessionWorkerUnavailable
 	}
 	if err := rpc.notify("initialized", map[string]any{}); err != nil {
-		conn := m.clearLocked()
+		m.closeFailedStart(startDone, conn)
+		return agentbackend.ErrSessionWorkerUnavailable
+	}
+
+	m.mu.Lock()
+	if !m.starting || m.startDone != startDone || m.conn != conn {
 		m.mu.Unlock()
 		_ = closeAppServerConnection(conn)
 		return agentbackend.ErrSessionWorkerUnavailable
 	}
+	m.started = true
+	m.starting = false
+	m.closeStartDoneLocked()
 	m.mu.Unlock()
 	return nil
 }
@@ -402,6 +471,32 @@ func (m *appServerManager) close() error {
 	return closeAppServerConnection(conn)
 }
 
+func (m *appServerManager) finishFailedStart(startDone chan struct{}) {
+	m.mu.Lock()
+	if m.starting && m.startDone == startDone {
+		if m.lifecycleCancel != nil {
+			m.lifecycleCancel()
+		}
+		m.starting = false
+		m.started = false
+		m.lifecycleCancel = nil
+		m.closeStartDoneLocked()
+		m.generation++
+	}
+	m.mu.Unlock()
+}
+
+func (m *appServerManager) closeFailedStart(startDone chan struct{}, conn *appServerConnection) {
+	m.mu.Lock()
+	if m.starting && m.startDone == startDone && m.conn == conn {
+		conn = m.clearLocked()
+	} else {
+		conn = nil
+	}
+	m.mu.Unlock()
+	_ = closeAppServerConnection(conn)
+}
+
 func (m *appServerManager) clearLocked() *appServerConnection {
 	conn := m.conn
 	if m.router != nil {
@@ -410,7 +505,9 @@ func (m *appServerManager) clearLocked() *appServerConnection {
 	if m.lifecycleCancel != nil {
 		m.lifecycleCancel()
 	}
+	m.closeStartDoneLocked()
 	m.started = false
+	m.starting = false
 	m.rpc = nil
 	m.cmd = nil
 	m.conn = nil
@@ -418,6 +515,14 @@ func (m *appServerManager) clearLocked() *appServerConnection {
 	m.lifecycleCancel = nil
 	m.generation++
 	return conn
+}
+
+func (m *appServerManager) closeStartDoneLocked() {
+	if m.startDone == nil {
+		return
+	}
+	close(m.startDone)
+	m.startDone = nil
 }
 
 func (m *appServerManager) resumeThread(ctx context.Context, params appServerThreadResumeParams) (int64, error) {
@@ -554,10 +659,14 @@ func startAppServerProcess(ctx context.Context, cfg agentbackend.Config, env []s
 		closeOnce.Do(func() {
 			_ = stdin.Close()
 			_ = stdout.Close()
+			killed := false
 			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
+				killed = cmd.Process.Kill() == nil
 			}
 			closeErr = <-waitDone
+			if killed {
+				closeErr = nil
+			}
 		})
 		return closeErr
 	}

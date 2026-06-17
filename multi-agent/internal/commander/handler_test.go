@@ -637,6 +637,67 @@ func TestHandler_CloseWaitsForInFlightWorkerRun(t *testing.T) {
 	}
 }
 
+func TestHandler_CloseClosesBackendBeforeWaitingForActiveWorker(t *testing.T) {
+	runStarted := make(chan struct{})
+	releaseRun := make(chan struct{})
+	backendClosed := make(chan struct{})
+	var closeOnce sync.Once
+	worker := &fakeSessionWorker{healthy: true}
+	worker.runFn = func(context.Context, string, executor.Sink) (executor.Result, error) {
+		close(runStarted)
+		<-releaseRun
+		return executor.Result{Summary: "done", SessionID: "s1"}, nil
+	}
+	h := &Handler{Backend: &closingBackend{
+		fakeBackend: &fakeBackend{
+			getFn: func(context.Context, string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+				return agentbackend.Session{ID: "s1", Kind: agentbackend.KindClaude, WorkingDir: "/repo"}, nil, nil
+			},
+			workerFn: func(context.Context, agentbackend.Session) (agentbackend.SessionWorker, error) {
+				return worker, nil
+			},
+		},
+		closeFn: func() error {
+			closeOnce.Do(func() {
+				close(backendClosed)
+				close(releaseRun)
+			})
+			return nil
+		},
+	}}
+
+	turnDone := make(chan error, 1)
+	go func() {
+		_, err := h.SessionTurn(context.Background(), "s1", "go", &captureSink{})
+		turnDone <- err
+	}()
+	select {
+	case <-runStarted:
+	case <-time.After(time.Second):
+		t.Fatal("worker run did not start")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- h.Close() }()
+	select {
+	case <-backendClosed:
+	case <-time.After(200 * time.Millisecond):
+		closeOnce.Do(func() { close(releaseRun) })
+		t.Fatal("Handler.Close waited for active worker before calling backend Close")
+	}
+	if err := <-turnDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Handler.Close did not return after backend Close unblocked worker")
+	}
+}
+
 func TestHandler_WorkerCacheLazyInitNoRace(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		worker := &fakeSessionWorker{healthy: true}
