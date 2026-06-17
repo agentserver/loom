@@ -2,10 +2,13 @@ package codex
 
 import (
 	"context"
+	"os"
 
 	"github.com/yourorg/multi-agent/internal/sessioncache"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
+
+const appServerUnsafeHumanloopRoutingEnv = "LOOM_CODEX_APPSERVER_UNSAFE_HUMANLOOP_ROUTING"
 
 // Backend is the Codex implementation of agentbackend.Backend.
 type Backend struct {
@@ -74,7 +77,10 @@ func (b *Backend) executorForWorkDir(workDir string) *executor {
 func init() {
 	agentbackend.RegisterBuilder(agentbackend.KindCodex, func(cfg agentbackend.Config, env []string) (agentbackend.Backend, error) {
 		b := New(cfg, env)
-		if cfg.WorkerMode == "app_server" {
+		// Codex app-server routing for injected MCP servers has not been proven
+		// to be per-thread. Until humanloop payloads carry session/turn identity,
+		// keep hot workers behind an explicit unsafe opt-in and use RunResume.
+		if cfg.WorkerMode == "app_server" && os.Getenv(appServerUnsafeHumanloopRoutingEnv) == "1" {
 			return &workerBackend{
 				Backend: b,
 				manager: newAppServerManager(b.cfg, env),
