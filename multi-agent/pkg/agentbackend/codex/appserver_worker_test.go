@@ -240,6 +240,79 @@ func TestAppServerManagerUsesManagerOwnedLifecycleContext(t *testing.T) {
 	_ = m.close()
 }
 
+func TestAppServerManagerCloseUnblocksInitializeStartup(t *testing.T) {
+	initSeen := make(chan struct{})
+	var closeTransport func() error
+	m := newAppServerManager(agentbackend.Config{Bin: "codex", WorkDir: "/repo"}, nil)
+	m.starter = func(context.Context, agentbackend.Config, []string) (*appServerConnection, error) {
+		clientReader, serverWriter := io.Pipe()
+		serverReader, clientWriter := io.Pipe()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			sc := bufio.NewScanner(serverReader)
+			for sc.Scan() {
+				var req appServerRPCMessage
+				if err := json.Unmarshal(sc.Bytes(), &req); err != nil {
+					return
+				}
+				if req.Method == "initialize" {
+					close(initSeen)
+					continue
+				}
+				if req.ID != nil {
+					writeFakeAppServerResult(nil, serverWriter, *req.ID, fakeAppServerResultFor(req.Method))
+				}
+			}
+		}()
+		closeFn := func() error {
+			_ = clientReader.Close()
+			_ = clientWriter.Close()
+			_ = serverReader.Close()
+			_ = serverWriter.Close()
+			select {
+			case <-done:
+			case <-time.After(appServerRPCTestTimeout):
+			}
+			return nil
+		}
+		closeTransport = closeFn
+		return &appServerConnection{
+			rpc:   newAppServerRPC(clientReader, clientWriter),
+			close: closeFn,
+		}, nil
+	}
+
+	ensureDone := make(chan error, 1)
+	go func() { ensureDone <- m.ensure(context.Background()) }()
+	receiveWithin(t, initSeen, "initialize request")
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- m.close() }()
+	select {
+	case err := <-ensureDone:
+		if !errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
+			t.Fatalf("ensure error = %v, want ErrSessionWorkerUnavailable", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		if closeTransport != nil {
+			_ = closeTransport()
+		}
+		t.Fatal("manager close did not unblock ensure stuck in initialize")
+	}
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		if closeTransport != nil {
+			_ = closeTransport()
+		}
+		t.Fatal("manager close did not return after unblocking startup")
+	}
+}
+
 func TestAppServerManagerCloseInvalidatesWorkerHealth(t *testing.T) {
 	fake := newFakeAppServerTransport(t, nil)
 	cfg := agentbackend.Config{Kind: agentbackend.KindCodex, Bin: "codex", WorkDir: "/repo"}
@@ -512,6 +585,51 @@ func TestAppServerWorkerTurnStartOtherRPCErrorDoesNotFallback(t *testing.T) {
 	}
 }
 
+func TestAppServerWorkerSubmittedContextCancelInvalidatesManager(t *testing.T) {
+	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
+		if req.Method != "turn/start" {
+			return false
+		}
+		writeFakeAppServerResult(t, w, *req.ID, fakeAppServerResultFor(req.Method))
+		writeFakeAppServerNotification(nil, w, "turn/started", `{"threadId":"thr-1","turn":{"id":"turn-1","status":"running"}}`)
+		return true
+	})
+	cfg := agentbackend.Config{Kind: agentbackend.KindCodex, Bin: "codex", WorkDir: "/repo"}
+	m := newAppServerManager(cfg, nil)
+	m.starter = fake.starter
+	wb := &workerBackend{Backend: New(cfg, nil), manager: m}
+
+	worker, err := wb.NewSessionWorker(context.Background(), agentbackend.Session{
+		ID:         "thr-1",
+		Kind:       agentbackend.KindCodex,
+		WorkingDir: "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexWorker := worker.(*codexSessionWorker)
+	generation := codexWorker.generation
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() {
+		_, err := worker.Run(ctx, "continue", &appServerWorkerTestSink{})
+		runDone <- err
+	}()
+	fake.takeRequests(t, 4)
+	cancel()
+	err = receiveWithin(t, runDone, "canceled run")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want context.Canceled", err)
+	}
+	if m.healthy(generation) {
+		t.Fatal("manager remains healthy after submitted turn context cancellation")
+	}
+	if codexWorker.Healthy() {
+		t.Fatal("worker remains healthy after manager invalidated by submitted cancellation")
+	}
+}
+
 func TestAppServerWorkerReturnsAwaitingUserFromHumanloopIPC(t *testing.T) {
 	var endpoint atomic.Value
 	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
@@ -543,6 +661,7 @@ func TestAppServerWorkerReturnsAwaitingUserFromHumanloopIPC(t *testing.T) {
 				Question: "pick?",
 				Options:  []string{"a", "b"},
 			})
+			time.Sleep(10 * time.Millisecond)
 			writeFakeAppServerNotification(t, w, "turn/completed", `{"threadId":"thr-1","turn":{"id":"turn-1","status":"completed"}}`)
 			return true
 		}
@@ -572,6 +691,191 @@ func TestAppServerWorkerReturnsAwaitingUserFromHumanloopIPC(t *testing.T) {
 	}
 	if res.AwaitingUser.Kind != "ask_user" || res.AwaitingUser.Question != "pick?" || len(res.AwaitingUser.Options) != 2 {
 		t.Fatalf("AwaitingUser=%+v, want ask_user pick? options", res.AwaitingUser)
+	}
+}
+
+func TestAppServerWorkerWaitsForTerminalEventBeforeReturningAwaitingUser(t *testing.T) {
+	var endpoint atomic.Value
+	payloadSent := make(chan struct{})
+	allowCompletion := make(chan struct{})
+	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
+		switch req.Method {
+		case "thread/resume":
+			ep := endpointFromThreadResumeRequest(t, req)
+			endpoint.Store(humanloop.EndpointArg(ep))
+			return false
+		case "turn/start":
+			writeFakeAppServerResult(t, w, *req.ID, fakeAppServerResultFor(req.Method))
+			raw, ok := endpoint.Load().(string)
+			if !ok {
+				t.Error("turn/start before thread/resume endpoint captured")
+				return true
+			}
+			ep, err := humanloop.ParseEndpointArg(raw)
+			if err != nil {
+				t.Errorf("ParseEndpointArg: %v", err)
+				return true
+			}
+			c, err := humanloop.DialIPC(ep)
+			if err != nil {
+				t.Errorf("DialIPC: %v", err)
+				return true
+			}
+			_ = c.Send(humanloop.Payload{Kind: "ask_user", Question: "wait?"})
+			_ = c.Close()
+			close(payloadSent)
+			<-allowCompletion
+			writeFakeAppServerNotification(t, w, "turn/completed", `{"threadId":"thr-1","turn":{"id":"turn-1","status":"completed"}}`)
+			return true
+		}
+		return false
+	})
+	cfg := agentbackend.Config{Kind: agentbackend.KindCodex, Bin: "codex", WorkDir: "/repo"}
+	m := newAppServerManager(cfg, nil)
+	m.starter = fake.starter
+	wb := &workerBackend{Backend: New(cfg, nil), manager: m}
+
+	worker, err := wb.NewSessionWorker(context.Background(), agentbackend.Session{
+		ID:         "thr-1",
+		Kind:       agentbackend.KindCodex,
+		WorkingDir: "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Close()
+
+	type runResult struct {
+		res agentbackend.Result
+		err error
+	}
+	runDone := make(chan runResult, 1)
+	go func() {
+		res, err := worker.Run(context.Background(), "continue", &appServerWorkerTestSink{})
+		runDone <- runResult{res: res, err: err}
+	}()
+	receiveWithin(t, payloadSent, "humanloop payload send")
+	select {
+	case got := <-runDone:
+		close(allowCompletion)
+		t.Fatalf("Run returned before terminal event: result=%+v err=%v", got.res, got.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(allowCompletion)
+	got := receiveWithin(t, runDone, "run result after completion")
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if got.res.AwaitingUser == nil || got.res.AwaitingUser.Question != "wait?" {
+		t.Fatalf("AwaitingUser=%+v, want remembered wait? payload", got.res.AwaitingUser)
+	}
+}
+
+func TestAppServerWorkerCompletionWithoutHumanloopPayloadDoesNotWaitGracePeriod(t *testing.T) {
+	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
+		if req.Method != "turn/start" {
+			return false
+		}
+		writeFakeAppServerResult(t, w, *req.ID, fakeAppServerResultFor(req.Method))
+		writeFakeAppServerNotification(t, w, "turn/completed", `{"threadId":"thr-1","turn":{"id":"turn-1","status":"completed"}}`)
+		return true
+	})
+	cfg := agentbackend.Config{Kind: agentbackend.KindCodex, Bin: "codex", WorkDir: "/repo"}
+	m := newAppServerManager(cfg, nil)
+	m.starter = fake.starter
+	wb := &workerBackend{Backend: New(cfg, nil), manager: m}
+
+	worker, err := wb.NewSessionWorker(context.Background(), agentbackend.Session{
+		ID:         "thr-1",
+		Kind:       agentbackend.KindCodex,
+		WorkingDir: "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Close()
+
+	runDone := make(chan error, 1)
+	go func() {
+		res, err := worker.Run(context.Background(), "continue", &appServerWorkerTestSink{})
+		if err == nil && res.AwaitingUser != nil {
+			err = fmt.Errorf("AwaitingUser=%+v, want nil", res.AwaitingUser)
+		}
+		runDone <- err
+	}()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(20 * time.Millisecond):
+		t.Fatal("Run waited for humanloop grace period after terminal completion")
+	}
+}
+
+func TestAppServerWorkerDropsHumanloopPayloadAfterCompletedTurn(t *testing.T) {
+	var endpoint atomic.Value
+	var turnStarts atomic.Int32
+	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
+		switch req.Method {
+		case "thread/resume":
+			ep := endpointFromThreadResumeRequest(t, req)
+			endpoint.Store(humanloop.EndpointArg(ep))
+			return false
+		case "turn/start":
+			turnID := fmt.Sprintf("turn-%d", turnStarts.Add(1))
+			writeFakeAppServerResult(t, w, *req.ID, map[string]any{"turn": map[string]any{"id": turnID, "status": "running"}})
+			writeFakeAppServerNotification(t, w, "turn/completed", fmt.Sprintf(`{"threadId":"thr-1","turn":{"id":%q,"status":"completed"}}`, turnID))
+			return true
+		}
+		return false
+	})
+	cfg := agentbackend.Config{Kind: agentbackend.KindCodex, Bin: "codex", WorkDir: "/repo"}
+	m := newAppServerManager(cfg, nil)
+	m.starter = fake.starter
+	wb := &workerBackend{Backend: New(cfg, nil), manager: m}
+
+	worker, err := wb.NewSessionWorker(context.Background(), agentbackend.Session{
+		ID:         "thr-1",
+		Kind:       agentbackend.KindCodex,
+		WorkingDir: "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Close()
+
+	res, err := worker.Run(context.Background(), "first", &appServerWorkerTestSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.AwaitingUser != nil {
+		t.Fatalf("first AwaitingUser=%+v, want nil", res.AwaitingUser)
+	}
+	raw, ok := endpoint.Load().(string)
+	if !ok {
+		t.Fatal("thread/resume endpoint was not captured")
+	}
+	ep, err := humanloop.ParseEndpointArg(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := humanloop.DialIPC(ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Send(humanloop.Payload{Kind: "ask_user", Question: "stale"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.Close()
+	time.Sleep(20 * time.Millisecond)
+
+	res, err = worker.Run(context.Background(), "second", &appServerWorkerTestSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.AwaitingUser != nil {
+		t.Fatalf("second AwaitingUser=%+v, want stale payload dropped", res.AwaitingUser)
 	}
 }
 
@@ -1184,13 +1488,20 @@ func writeFakeAppServerErrorCode(t *testing.T, w io.Writer, id json.RawMessage, 
 }
 
 func writeFakeAppServerNotification(t *testing.T, w io.Writer, method string, params string) {
-	t.Helper()
+	if t != nil {
+		t.Helper()
+	}
 	body, err := json.Marshal(appServerWorkerNotification(method, params))
 	if err != nil {
-		t.Fatal(err)
+		if t != nil {
+			t.Fatal(err)
+		}
+		return
 	}
 	if _, err := fmt.Fprintln(w, string(body)); err != nil {
-		t.Fatal(err)
+		if t != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

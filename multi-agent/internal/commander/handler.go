@@ -72,11 +72,11 @@ func (h *Handler) Close() error {
 	h.workerOnce.Do(func() {})
 	cache := h.workerCache.Load()
 	var closeErr error
-	if cache != nil {
-		closeErr = cache.closeAll()
-	}
 	if backend, ok := h.Backend.(interface{ Close() error }); ok {
 		closeErr = errors.Join(closeErr, backend.Close())
+	}
+	if cache != nil {
+		closeErr = errors.Join(closeErr, cache.closeAll())
 	}
 	return closeErr
 }
