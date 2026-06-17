@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -767,6 +768,73 @@ func TestAppServerWorkerReturnsAwaitingUserFromHumanloopIPC(t *testing.T) {
 	}
 	if res.AwaitingUser.Kind != "ask_user" || res.AwaitingUser.Question != "pick?" || len(res.AwaitingUser.Options) != 2 {
 		t.Fatalf("AwaitingUser=%+v, want ask_user pick? options", res.AwaitingUser)
+	}
+}
+
+func TestAppServerWorkerCompletionAfterHumanloopSendReturnsIncludesPayload(t *testing.T) {
+	var endpoint atomic.Value
+	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
+		switch req.Method {
+		case "thread/resume":
+			ep := endpointFromThreadResumeRequest(t, req)
+			endpoint.Store(humanloop.EndpointArg(ep))
+			return false
+		case "turn/start":
+			writeFakeAppServerResult(t, w, *req.ID, fakeAppServerResultFor(req.Method))
+			raw, ok := endpoint.Load().(string)
+			if !ok {
+				t.Error("turn/start before thread/resume endpoint captured")
+				return true
+			}
+			ep, err := humanloop.ParseEndpointArg(raw)
+			if err != nil {
+				t.Errorf("ParseEndpointArg: %v", err)
+				return true
+			}
+			blocker, err := net.Dial(ep.Network, ep.Address)
+			if err != nil {
+				t.Errorf("dial blocker: %v", err)
+				return true
+			}
+			defer blocker.Close()
+			time.Sleep(20 * time.Millisecond)
+
+			c, err := humanloop.DialIPC(ep)
+			if err != nil {
+				t.Errorf("DialIPC: %v", err)
+				return true
+			}
+			defer c.Close()
+			if err := c.Send(humanloop.Payload{Kind: "ask_user", Question: "ack before terminal"}); err != nil {
+				t.Errorf("Send: %v", err)
+				return true
+			}
+			writeFakeAppServerNotification(t, w, "turn/completed", `{"threadId":"thr-1","turn":{"id":"turn-1","status":"completed"}}`)
+			return true
+		}
+		return false
+	})
+	cfg := agentbackend.Config{Kind: agentbackend.KindCodex, Bin: "codex", WorkDir: "/repo"}
+	m := newAppServerManager(cfg, nil)
+	m.starter = fake.starter
+	wb := &workerBackend{Backend: New(cfg, nil), manager: m}
+
+	worker, err := wb.NewSessionWorker(context.Background(), agentbackend.Session{
+		ID:         "thr-1",
+		Kind:       agentbackend.KindCodex,
+		WorkingDir: "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Close()
+
+	res, err := worker.Run(context.Background(), "continue", &appServerWorkerTestSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.AwaitingUser == nil || res.AwaitingUser.Question != "ack before terminal" {
+		t.Fatalf("AwaitingUser=%+v, want ack-gated payload", res.AwaitingUser)
 	}
 }
 
