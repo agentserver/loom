@@ -138,11 +138,11 @@ func (e *executor) runWithArgv(ctx context.Context, argvHead []string, prompt st
 	var stderrBuf strings.Builder
 	cmd.Stderr = &stderrBuf
 
-	sink.Write("status", "starting codex")
+	agentbackend.WriteStatus(sink, agentbackend.StatusStarting, "starting codex")
 	if err := cmd.Start(); err != nil {
 		return agentbackend.Result{}, err
 	}
-	sink.Write("status", "codex running")
+	agentbackend.WriteStatus(sink, agentbackend.StatusAnswering, "codex running")
 
 	// Send the prompt; signal completion so the pause goroutine doesn't close
 	// stdin mid-write. Codex reads PROMPT from stdin (the trailing `-` arg)

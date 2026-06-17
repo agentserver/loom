@@ -239,6 +239,25 @@ func TestEnvelope_EventStreamingShape(t *testing.T) {
 	}
 }
 
+func TestEventPayloadStatusCodePreservesExtra(t *testing.T) {
+	extra := json.RawMessage(`{"source":"test"}`)
+	payload := mustMarshal(t, EventPayload{
+		EventKind:  "status",
+		Text:       "starting codex",
+		Extra:      extra,
+		StatusCode: "starting",
+	})
+	assertJSONKeys(t, payload, "event_kind", "text", "extra", "status_code")
+
+	var got EventPayload
+	if err := json.Unmarshal(payload, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.EventKind != "status" || got.Text != "starting codex" || got.StatusCode != "starting" || string(got.Extra) != string(extra) {
+		t.Fatalf("payload=%+v extra=%s", got, got.Extra)
+	}
+}
+
 // TestEnvelope_ErrorCodesEnumerated pins the spec's error codes so typos at
 // call sites fail tests instead of silently becoming protocol drift.
 func TestEnvelope_ErrorCodesEnumerated(t *testing.T) {

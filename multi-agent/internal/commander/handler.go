@@ -56,7 +56,7 @@ func (h *Handler) SessionTurn(ctx context.Context, id, prompt string, sink execu
 		}
 		if canFallback {
 			if !errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
-				sink.Write("status", "hot worker unavailable; falling back to resume")
+				agentbackend.WriteStatus(sink, agentbackend.StatusStarting, "hot worker unavailable; falling back to resume")
 			}
 			return h.Backend.RunResume(ctx, id, prompt, sink)
 		}

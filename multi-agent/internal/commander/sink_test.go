@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
 // TestSSESink_WriteEmitsEventDataPair pins the SSE wire format: each
@@ -58,6 +60,16 @@ func TestSSESink_FlushedOnEachWrite(t *testing.T) {
 	}
 }
 
+func TestSSESinkWriteStatusIncludesStatusCode(t *testing.T) {
+	var b strings.Builder
+	sink := newSSESink(&b)
+	sink.WriteStatus(agentbackend.StatusAnswering, "codex running")
+	got := b.String()
+	if !strings.Contains(got, "event: status") || !strings.Contains(got, `"status_code":"answering"`) {
+		t.Fatalf("sse=%s", got)
+	}
+}
+
 // TestWSSink_WriteForwardsAsEventEnvelope pins that each sink Write produces
 // an event envelope with the right id and payload.
 func TestWSSink_WriteForwardsAsEventEnvelope(t *testing.T) {
@@ -83,5 +95,25 @@ func TestWSSink_WriteForwardsAsEventEnvelope(t *testing.T) {
 	}
 	if p1.EventKind != "chunk" || p1.Text != "hello" {
 		t.Errorf("payload[0]=%+v", p1)
+	}
+}
+
+func TestWSSinkWriteStatusIncludesStatusCode(t *testing.T) {
+	var sent Envelope
+	sink := newWSSink("cmd-1", func(env Envelope) error {
+		sent = env
+		return nil
+	})
+	sink.WriteStatus(agentbackend.StatusStarting, "starting codex")
+
+	if sent.Type != "event" || sent.ID != "cmd-1" {
+		t.Fatalf("envelope=%+v", sent)
+	}
+	var payload EventPayload
+	if err := json.Unmarshal(sent.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.EventKind != "status" || payload.Text != "starting codex" || payload.StatusCode != agentbackend.StatusStarting {
+		t.Fatalf("payload=%+v", payload)
 	}
 }

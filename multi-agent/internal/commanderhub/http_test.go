@@ -320,13 +320,13 @@ func TestHTTP_TurnStreamsSSE(t *testing.T) {
 	require.False(t, snap.InFlight)
 }
 
-func TestUpdateTurnStateIgnoresBackendSpecificStatusText(t *testing.T) {
+func TestUpdateTurnStateFallsBackToLegacyStatusText(t *testing.T) {
 	hub := NewHub(&fakeResolver{})
 	ch := &commanderHandlers{hub: hub}
 	key := turnKey{owner: owner{userID: "alice", workspaceID: "W1"}, daemonID: "d1", sessionID: "s1"}
 	require.True(t, hub.turns.begin(key))
 
-	payload, err := json.Marshal(commander.EventPayload{EventKind: "status", Text: "codex running"})
+	payload, err := json.Marshal(commander.EventPayload{EventKind: "status", Text: "accepted by daemon"})
 	require.NoError(t, err)
 	ch.updateTurnStateFromEnvelope(key, commander.Envelope{Type: "event", Payload: payload})
 
@@ -334,13 +334,44 @@ func TestUpdateTurnStateIgnoresBackendSpecificStatusText(t *testing.T) {
 	require.Equal(t, turnStateQueued, snap.State)
 	require.True(t, snap.InFlight)
 
-	payload, err = json.Marshal(commander.EventPayload{EventKind: "chunk", Text: "hello"})
+	payload, err = json.Marshal(commander.EventPayload{EventKind: "status", Text: "codex running"})
 	require.NoError(t, err)
 	ch.updateTurnStateFromEnvelope(key, commander.Envelope{Type: "event", Payload: payload})
 
 	snap = hub.turns.get(key)
 	require.Equal(t, turnStateAnswering, snap.State)
 	require.True(t, snap.InFlight)
+}
+
+func TestUpdateTurnStatePrefersStatusCode(t *testing.T) {
+	hub := NewHub(&fakeResolver{})
+	ch := &commanderHandlers{hub: hub}
+	key := turnKey{owner: owner{userID: "u", workspaceID: "w"}, daemonID: "d", sessionID: "s"}
+	hub.turns.begin(key)
+
+	payload, err := json.Marshal(commander.EventPayload{
+		EventKind:  "status",
+		Text:       "backend-specific text",
+		StatusCode: agentbackend.StatusStarting,
+	})
+	require.NoError(t, err)
+	ch.updateTurnStateFromEnvelope(key, commander.Envelope{Type: "event", Payload: payload})
+
+	state := hub.turns.get(key)
+	require.Equal(t, turnStateQueued, state.State)
+	require.True(t, state.InFlight)
+
+	payload, err = json.Marshal(commander.EventPayload{
+		EventKind:  "status",
+		Text:       "backend-specific text",
+		StatusCode: agentbackend.StatusAnswering,
+	})
+	require.NoError(t, err)
+	ch.updateTurnStateFromEnvelope(key, commander.Envelope{Type: "event", Payload: payload})
+
+	state = hub.turns.get(key)
+	require.Equal(t, turnStateAnswering, state.State)
+	require.True(t, state.InFlight)
 }
 
 func TestHTTP_TurnRejectsConcurrentSameSession(t *testing.T) {

@@ -99,9 +99,10 @@ type FileReadResult struct {
 
 // EventPayload is one streaming event in a session_turn flow.
 type EventPayload struct {
-	EventKind string          `json:"event_kind"`
-	Text      string          `json:"text,omitempty"`
-	Extra     json.RawMessage `json:"extra,omitempty"`
+	EventKind  string          `json:"event_kind"`
+	Text       string          `json:"text,omitempty"`
+	Extra      json.RawMessage `json:"extra,omitempty"`
+	StatusCode string          `json:"status_code,omitempty"`
 }
 
 // ErrorPayload is the body of an error envelope.
