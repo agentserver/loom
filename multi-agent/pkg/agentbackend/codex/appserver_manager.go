@@ -220,8 +220,11 @@ func (b *workerBackend) runAppServerTurn(
 				return result, agentbackend.ErrSessionWorkerUnavailable
 			}
 			meta := appServerNotificationMetaFor(msg)
-			if msg.Method == "turn/started" && meta.ThreadID == w.sessionID && meta.TurnID != "" && turnID == "" {
-				turnID = meta.TurnID
+			if meta.ThreadID == w.sessionID && meta.TurnID != "" && turnID == "" {
+				switch msg.Method {
+				case "turn/started", "item/agentMessage/delta":
+					turnID = meta.TurnID
+				}
 			}
 			emit(msg)
 			if msg.Method == "error" && !appServerErrorWillRetry(msg) && appServerNotificationRelevantToTurn(meta, w.sessionID, turnID) {
