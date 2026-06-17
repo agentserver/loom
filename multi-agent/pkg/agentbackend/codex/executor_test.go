@@ -284,6 +284,66 @@ func main() {
 	}
 }
 
+func TestCodexExecutorRunResumePreservesExtraArgsEnvAndHumanloopMCP(t *testing.T) {
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args.txt")
+	envPath := filepath.Join(dir, "env.txt")
+	script := buildFakeCodex(t, fmt.Sprintf(`package main
+import (
+	"fmt"
+	"io"
+	"os"
+	"strings"
+)
+func main() {
+	_ = os.WriteFile(%q, []byte(strings.Join(os.Args[1:], "\n")), 0600)
+	_ = os.WriteFile(%q, []byte(os.Getenv("CODEX_HOME")+"|"+os.Getenv("LOOM_TEST_ENV")), 0600)
+	_, _ = io.Copy(io.Discard, os.Stdin)
+	fmt.Println(`+"`"+`{"type":"thread.started","thread_id":"thr-resumed"}`+"`"+`)
+	fmt.Println(`+"`"+`{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}`+"`"+`)
+}
+`, argsPath, envPath))
+
+	codexHome := t.TempDir()
+	ex := newExecutor(agentbackend.Config{
+		Bin:       script,
+		WorkDir:   t.TempDir(),
+		ExtraArgs: []string{"--profile", "loom-test"},
+	}, []string{"CODEX_HOME=" + codexHome, "LOOM_TEST_ENV=present"})
+	_, err := ex.RunResume(context.Background(), "thr-1", "continue", &captureSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	argsRaw, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	argsList := strings.Split(string(argsRaw), "\n")
+	if len(argsList) < 3 || argsList[0] != "exec" || argsList[1] != "resume" || argsList[2] != "thr-1" {
+		t.Fatalf("argv head=%v want [exec resume thr-1]", argsList)
+	}
+	args := strings.Join(argsList, "\n")
+	for _, want := range []string{
+		"--profile",
+		"loom-test",
+		"mcp_servers.loom_humanloop.command",
+		"humanloop-mcp",
+	} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("argv missing %q:\n%s", want, args)
+		}
+	}
+
+	envRaw, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(envRaw), codexHome+"|present"; got != want {
+		t.Fatalf("env=%q want %q", got, want)
+	}
+}
+
 func buildFakeCodex(t *testing.T, source string) string {
 	t.Helper()
 	dir := t.TempDir()

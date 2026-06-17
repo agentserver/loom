@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -109,4 +110,15 @@ func TestNewAgentBackendReturnsUnknownKindError(t *testing.T) {
 
 	_, err := newAgentBackend(cfg)
 	require.Error(t, err)
+}
+
+func TestDriverAgentSupportsHumanloopMCPSubcommand(t *testing.T) {
+	args := []string{`{"network":"","address":""}`, "5"}
+	err := runHumanloopMCP(args)
+	if err == nil {
+		t.Fatal("runHumanloopMCP unexpectedly succeeded with invalid endpoint")
+	}
+	if !strings.Contains(err.Error(), "humanloop") && !strings.Contains(err.Error(), "endpoint") {
+		t.Fatalf("error=%v", err)
+	}
 }
