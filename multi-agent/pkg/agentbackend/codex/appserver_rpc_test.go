@@ -4,12 +4,15 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 	"testing"
 	"time"
 )
+
+const appServerRPCTestTimeout = 2 * time.Second
 
 func TestAppServerRPCRequestResponse(t *testing.T) {
 	clientReader, serverWriter := io.Pipe()
@@ -80,11 +83,11 @@ func TestAppServerRPCRequestResponse(t *testing.T) {
 	if !result.OK {
 		t.Fatalf("result=%+v", result)
 	}
-	if err := <-serverErrCh; err != nil {
+	if err := receiveWithin(t, serverErrCh, "server result"); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-readErrCh; err != nil {
-		t.Fatal(err)
+	if err := receiveWithin(t, readErrCh, "read loop result"); !errors.Is(err, io.EOF) {
+		t.Fatalf("readLoop error = %v, want EOF", err)
 	}
 }
 
@@ -94,8 +97,8 @@ func TestAppServerRPCDispatchesNotifications(t *testing.T) {
 	ch := make(chan appServerRPCMessage, 1)
 	c.onNotification = func(msg appServerRPCMessage) { ch <- msg }
 
-	if err := c.readLoop(context.Background()); err != nil {
-		t.Fatal(err)
+	if err := c.readLoop(context.Background()); !errors.Is(err, io.EOF) {
+		t.Fatalf("readLoop error = %v, want EOF", err)
 	}
 
 	select {
@@ -114,11 +117,95 @@ func TestAppServerRPCDropsUnknownResponses(t *testing.T) {
 	called := false
 	c.onNotification = func(appServerRPCMessage) { called = true }
 
-	if err := c.readLoop(context.Background()); err != nil {
-		t.Fatal(err)
+	if err := c.readLoop(context.Background()); !errors.Is(err, io.EOF) {
+		t.Fatalf("readLoop error = %v, want EOF", err)
 	}
 	if called {
 		t.Fatal("unknown response was dispatched as notification")
+	}
+}
+
+func TestAppServerRPCPendingCallReturnsErrorOnEOF(t *testing.T) {
+	clientReader, serverWriter := io.Pipe()
+	defer clientReader.Close()
+	defer serverWriter.Close()
+
+	requestWritten := make(chan struct{}, 1)
+	c := newAppServerRPC(clientReader, writerFunc(func(p []byte) (int, error) {
+		requestWritten <- struct{}{}
+		return len(p), nil
+	}))
+
+	readErrCh := make(chan error, 1)
+	go func() {
+		readErrCh <- c.readLoop(context.Background())
+	}()
+
+	callErrCh := make(chan error, 1)
+	go func() {
+		callErrCh <- c.call(context.Background(), "thread/resume", nil, nil)
+	}()
+
+	receiveWithin(t, requestWritten, "request write")
+	if err := serverWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := receiveWithin(t, callErrCh, "pending call error"); err == nil {
+		t.Fatal("call returned nil error, want terminal read error")
+	}
+	if err := receiveWithin(t, readErrCh, "read loop result"); !errors.Is(err, io.EOF) {
+		t.Fatalf("readLoop error = %v, want EOF", err)
+	}
+
+	laterCallErrCh := make(chan error, 1)
+	go func() {
+		laterCallErrCh <- c.call(context.Background(), "thread/resume", nil, nil)
+	}()
+	if err := receiveWithin(t, laterCallErrCh, "later call error"); err == nil {
+		t.Fatal("later call returned nil error, want terminal read error")
+	}
+	select {
+	case <-requestWritten:
+		t.Fatal("later call wrote a request after terminal read error")
+	default:
+	}
+}
+
+func TestAppServerRPCPendingCallReturnsErrorOnMalformedJSON(t *testing.T) {
+	clientReader, serverWriter := io.Pipe()
+	defer clientReader.Close()
+	defer serverWriter.Close()
+
+	requestWritten := make(chan struct{}, 1)
+	c := newAppServerRPC(clientReader, writerFunc(func(p []byte) (int, error) {
+		requestWritten <- struct{}{}
+		return len(p), nil
+	}))
+
+	readErrCh := make(chan error, 1)
+	go func() {
+		readErrCh <- c.readLoop(context.Background())
+	}()
+
+	callErrCh := make(chan error, 1)
+	go func() {
+		callErrCh <- c.call(context.Background(), "thread/resume", nil, nil)
+	}()
+
+	receiveWithin(t, requestWritten, "request write")
+	if _, err := serverWriter.Write([]byte("{not-json}\n")); err != nil {
+		t.Fatal(err)
+	}
+	readErr := receiveWithin(t, readErrCh, "read loop result")
+	if readErr == nil {
+		t.Fatal("readLoop returned nil error, want JSON error")
+	}
+	var syntaxErr *json.SyntaxError
+	if !errors.As(readErr, &syntaxErr) {
+		t.Fatalf("readLoop error = %T %v, want *json.SyntaxError", readErr, readErr)
+	}
+	if err := receiveWithin(t, callErrCh, "pending call error"); err == nil {
+		t.Fatal("call returned nil error, want terminal read error")
 	}
 }
 
@@ -148,5 +235,23 @@ func TestAppServerRPCNotifyWritesNotification(t *testing.T) {
 	}
 	if params.ThreadID != "thr-1" {
 		t.Fatalf("threadId=%q", params.ThreadID)
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) {
+	return f(p)
+}
+
+func receiveWithin[T any](t *testing.T, ch <-chan T, name string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(appServerRPCTestTimeout):
+		t.Fatalf("timed out waiting for %s", name)
+		var zero T
+		return zero
 	}
 }
