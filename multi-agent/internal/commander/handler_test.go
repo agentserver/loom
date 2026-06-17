@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +17,7 @@ type fakeBackend struct {
 	listFn   func(ctx context.Context) ([]agentbackend.Session, error)
 	getFn    func(ctx context.Context, id string) (agentbackend.Session, []agentbackend.SessionMessage, error)
 	resumeFn func(ctx context.Context, id, answer string, sink executor.Sink) (executor.Result, error)
+	workerFn func(ctx context.Context, sess agentbackend.Session) (agentbackend.SessionWorker, error)
 }
 
 func (f *fakeBackend) Kind() agentbackend.Kind { return agentbackend.KindClaude }
@@ -41,6 +44,44 @@ func (f *fakeBackend) GetSession(ctx context.Context, id string) (agentbackend.S
 		return agentbackend.Session{}, nil, agentbackend.ErrSessionNotFound
 	}
 	return f.getFn(ctx, id)
+}
+func (f *fakeBackend) NewSessionWorker(ctx context.Context, sess agentbackend.Session) (agentbackend.SessionWorker, error) {
+	if f.workerFn == nil {
+		return nil, agentbackend.ErrSessionWorkerUnavailable
+	}
+	return f.workerFn(ctx, sess)
+}
+
+type fakeSessionWorker struct {
+	mu      sync.Mutex
+	turns   []string
+	closed  bool
+	healthy bool
+	runFn   func(ctx context.Context, prompt string, sink executor.Sink) (executor.Result, error)
+}
+
+func (w *fakeSessionWorker) Run(ctx context.Context, prompt string, sink executor.Sink) (executor.Result, error) {
+	if w.runFn != nil {
+		return w.runFn(ctx, prompt, sink)
+	}
+	w.mu.Lock()
+	w.turns = append(w.turns, prompt)
+	w.mu.Unlock()
+	sink.Write("chunk", prompt)
+	return executor.Result{Summary: "worker", SessionID: "s1"}, nil
+}
+
+func (w *fakeSessionWorker) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.closed = true
+	return nil
+}
+
+func (w *fakeSessionWorker) Healthy() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.healthy
 }
 
 type captureSink struct {
@@ -163,5 +204,260 @@ func TestHandler_SessionTurnRespectsContextCancel(t *testing.T) {
 	_, err := h.SessionTurn(ctx, "s1", "p", &captureSink{})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestHandler_SessionTurnReusesHotWorkerAndReportsActive(t *testing.T) {
+	worker := &fakeSessionWorker{healthy: true}
+	var created atomic.Int32
+	var fallback atomic.Int32
+	h := &Handler{Backend: &fakeBackend{
+		listFn: func(context.Context) ([]agentbackend.Session, error) {
+			return []agentbackend.Session{{ID: "s1", Kind: agentbackend.KindClaude, WorkingDir: "/repo"}}, nil
+		},
+		getFn: func(context.Context, string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+			return agentbackend.Session{ID: "s1", Kind: agentbackend.KindClaude, WorkingDir: "/repo"}, nil, nil
+		},
+		workerFn: func(context.Context, agentbackend.Session) (agentbackend.SessionWorker, error) {
+			created.Add(1)
+			return worker, nil
+		},
+		resumeFn: func(context.Context, string, string, executor.Sink) (executor.Result, error) {
+			fallback.Add(1)
+			return executor.Result{Summary: "fallback"}, nil
+		},
+	}}
+	defer h.Close()
+
+	for _, prompt := range []string{"first", "second"} {
+		if _, err := h.SessionTurn(context.Background(), "s1", prompt, &captureSink{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got := created.Load(); got != 1 {
+		t.Fatalf("worker creates=%d want 1", got)
+	}
+	if got := fallback.Load(); got != 0 {
+		t.Fatalf("fallback calls=%d want 0", got)
+	}
+	worker.mu.Lock()
+	if got := append([]string(nil), worker.turns...); len(got) != 2 || got[0] != "first" || got[1] != "second" {
+		t.Fatalf("worker turns=%v", got)
+	}
+	worker.mu.Unlock()
+
+	sessions, err := h.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || !sessions[0].ActiveWorker {
+		t.Fatalf("sessions=%+v want active worker marker", sessions)
+	}
+}
+
+func TestHandler_SessionTurnEvictsLeastRecentlyUsedWorker(t *testing.T) {
+	workers := make(map[string]*fakeSessionWorker)
+	h := &Handler{
+		Backend: &fakeBackend{
+			listFn: func(context.Context) ([]agentbackend.Session, error) {
+				return []agentbackend.Session{
+					{ID: "s1", Kind: agentbackend.KindClaude, WorkingDir: "/repo/s1"},
+					{ID: "s2", Kind: agentbackend.KindClaude, WorkingDir: "/repo/s2"},
+					{ID: "s3", Kind: agentbackend.KindClaude, WorkingDir: "/repo/s3"},
+				}, nil
+			},
+			getFn: func(_ context.Context, id string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+				return agentbackend.Session{ID: id, Kind: agentbackend.KindClaude, WorkingDir: "/repo/" + id}, nil, nil
+			},
+			workerFn: func(_ context.Context, sess agentbackend.Session) (agentbackend.SessionWorker, error) {
+				w := &fakeSessionWorker{healthy: true}
+				workers[sess.ID] = w
+				return w, nil
+			},
+		},
+		WorkerMax:         2,
+		WorkerIdleTimeout: time.Hour,
+	}
+	defer h.Close()
+
+	for _, id := range []string{"s1", "s2", "s1", "s3"} {
+		if _, err := h.SessionTurn(context.Background(), id, "go", &captureSink{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if !workers["s2"].closed {
+		t.Fatalf("s2 worker was least recently used and should be closed")
+	}
+	if workers["s1"].closed || workers["s3"].closed {
+		t.Fatalf("workers closed unexpectedly: s1=%v s3=%v", workers["s1"].closed, workers["s3"].closed)
+	}
+	sessions, err := h.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := map[string]bool{}
+	for _, sess := range sessions {
+		active[sess.ID] = sess.ActiveWorker
+	}
+	if !active["s1"] || active["s2"] || !active["s3"] {
+		t.Fatalf("active=%v want s1/s3 active, s2 inactive", active)
+	}
+}
+
+func TestHandler_SessionTurnEvictsIdleWorker(t *testing.T) {
+	workers := make(map[string]*fakeSessionWorker)
+	h := &Handler{
+		Backend: &fakeBackend{
+			listFn: func(context.Context) ([]agentbackend.Session, error) {
+				return []agentbackend.Session{
+					{ID: "s1", Kind: agentbackend.KindClaude, WorkingDir: "/repo/s1"},
+					{ID: "s2", Kind: agentbackend.KindClaude, WorkingDir: "/repo/s2"},
+				}, nil
+			},
+			getFn: func(_ context.Context, id string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+				return agentbackend.Session{ID: id, Kind: agentbackend.KindClaude, WorkingDir: "/repo/" + id}, nil, nil
+			},
+			workerFn: func(_ context.Context, sess agentbackend.Session) (agentbackend.SessionWorker, error) {
+				w := &fakeSessionWorker{healthy: true}
+				workers[sess.ID] = w
+				return w, nil
+			},
+		},
+		WorkerMax:         10,
+		WorkerIdleTimeout: time.Nanosecond,
+	}
+	defer h.Close()
+
+	if _, err := h.SessionTurn(context.Background(), "s1", "go", &captureSink{}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Millisecond)
+	if _, err := h.SessionTurn(context.Background(), "s2", "go", &captureSink{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if !workers["s1"].closed {
+		t.Fatalf("idle s1 worker should be closed")
+	}
+}
+
+func TestHandler_SessionTurnFallsBackWhenWorkerUnavailable(t *testing.T) {
+	var fallback atomic.Int32
+	h := &Handler{Backend: &fakeBackend{
+		getFn: func(context.Context, string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+			return agentbackend.Session{ID: "s1", Kind: agentbackend.KindClaude, WorkingDir: "/repo"}, nil, nil
+		},
+		workerFn: func(context.Context, agentbackend.Session) (agentbackend.SessionWorker, error) {
+			return nil, agentbackend.ErrSessionWorkerUnavailable
+		},
+		resumeFn: func(context.Context, string, string, executor.Sink) (executor.Result, error) {
+			fallback.Add(1)
+			return executor.Result{Summary: "fallback", SessionID: "s1"}, nil
+		},
+	}}
+	defer h.Close()
+
+	res, err := h.SessionTurn(context.Background(), "s1", "go", &captureSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Summary != "fallback" || fallback.Load() != 1 {
+		t.Fatalf("result=%+v fallback=%d", res, fallback.Load())
+	}
+}
+
+func TestHandler_SessionTurnFallsBackWhenCachedWorkerUnhealthy(t *testing.T) {
+	worker := &fakeSessionWorker{healthy: true}
+	var fallback atomic.Int32
+	h := &Handler{Backend: &fakeBackend{
+		getFn: func(context.Context, string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+			return agentbackend.Session{ID: "s1", Kind: agentbackend.KindClaude, WorkingDir: "/repo"}, nil, nil
+		},
+		workerFn: func(context.Context, agentbackend.Session) (agentbackend.SessionWorker, error) {
+			return worker, nil
+		},
+		resumeFn: func(context.Context, string, string, executor.Sink) (executor.Result, error) {
+			fallback.Add(1)
+			return executor.Result{Summary: "fallback", SessionID: "s1"}, nil
+		},
+	}}
+	defer h.Close()
+
+	if _, err := h.SessionTurn(context.Background(), "s1", "warm", &captureSink{}); err != nil {
+		t.Fatal(err)
+	}
+	worker.mu.Lock()
+	worker.healthy = false
+	worker.mu.Unlock()
+	res, err := h.SessionTurn(context.Background(), "s1", "again", &captureSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if res.Summary != "fallback" || fallback.Load() != 1 {
+		t.Fatalf("result=%+v fallback=%d", res, fallback.Load())
+	}
+	worker.mu.Lock()
+	closed := worker.closed
+	worker.mu.Unlock()
+	if !closed {
+		t.Fatalf("unhealthy worker should be closed")
+	}
+}
+
+func TestHandler_SessionTurnSerializesSameSession(t *testing.T) {
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondStarted := make(chan struct{})
+	var calls atomic.Int32
+	worker := &fakeSessionWorker{healthy: true}
+	worker.runFn = func(_ context.Context, prompt string, _ executor.Sink) (executor.Result, error) {
+		switch calls.Add(1) {
+		case 1:
+			close(firstStarted)
+			<-releaseFirst
+		case 2:
+			close(secondStarted)
+		default:
+			t.Errorf("unexpected call for prompt %q", prompt)
+		}
+		return executor.Result{Summary: "ok", SessionID: "s1"}, nil
+	}
+	h := &Handler{Backend: &fakeBackend{
+		getFn: func(context.Context, string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+			return agentbackend.Session{ID: "s1", Kind: agentbackend.KindClaude, WorkingDir: "/repo"}, nil, nil
+		},
+		workerFn: func(context.Context, agentbackend.Session) (agentbackend.SessionWorker, error) {
+			return worker, nil
+		},
+	}}
+	defer h.Close()
+
+	errCh := make(chan error, 2)
+	go func() {
+		_, err := h.SessionTurn(context.Background(), "s1", "first", &captureSink{})
+		errCh <- err
+	}()
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first turn did not start")
+	}
+	go func() {
+		_, err := h.SessionTurn(context.Background(), "s1", "second", &captureSink{})
+		errCh <- err
+	}()
+	select {
+	case <-secondStarted:
+		t.Fatal("second same-session turn started before first completed")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseFirst)
+	for range 2 {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
 	}
 }

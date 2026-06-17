@@ -73,7 +73,10 @@ export function DaemonSessionTree({
       >
         <span className="session-title">{session.title}</span>
         <span className="session-meta">{sessionMeta(session, isSubagent)}</span>
-        <StatusBadge state={session.turn_state} />
+        <span className="session-badges">
+          {session.active_worker ? <span className="active-worker-badge">active</span> : null}
+          <StatusBadge state={session.turn_state} />
+        </span>
       </button>
     );
   }

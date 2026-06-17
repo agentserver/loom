@@ -81,3 +81,32 @@ test('labels codex exec sessions as agent tasks', () => {
   const task = screen.getByRole('button', { name: /ack/ });
   expect(within(task).getByText('agent task · /tmp/slave-workdir')).toBeInTheDocument();
 });
+
+test('marks sessions with active workers separately from turn state', () => {
+  const daemons: DaemonTree[] = [
+    {
+      daemon_id: 'd1',
+      display_name: 'prod-codex',
+      kind: 'codex',
+      status: 'ok',
+      sessions: [
+        {
+          daemon_id: 'd1',
+          session_id: 'hot-1',
+          kind: 'codex',
+          title: 'Resume work',
+          origin: 'user',
+          turn_state: 'idle',
+          active_worker: true,
+          awaiting_approval: false,
+        },
+      ],
+    },
+  ];
+
+  render(<DaemonSessionTree daemons={daemons} selected={null} onSelect={vi.fn()} />);
+
+  const row = screen.getByRole('button', { name: /Resume work/ });
+  expect(within(row).getByText('active')).toBeInTheDocument();
+  expect(within(row).getByText('idle')).toBeInTheDocument();
+});

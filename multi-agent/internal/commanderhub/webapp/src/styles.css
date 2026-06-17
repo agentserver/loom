@@ -239,6 +239,22 @@ textarea {
   font-size: 12px;
 }
 
+.session-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+}
+
+.active-worker-badge {
+  width: fit-content;
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 11px;
+  background: #dcf4ea;
+  color: #18704d;
+}
+
 .status-badge {
   width: fit-content;
   border-radius: 999px;

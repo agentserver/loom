@@ -100,7 +100,7 @@ func sessionRowFromBackend(daemonID string, sess agentbackend.Session, snap turn
 		MessageCount:     sess.MessageCount,
 		Preview:          sess.Preview,
 		TurnState:        state,
-		ActiveWorker:     snap.ActiveWorker,
+		ActiveWorker:     sess.ActiveWorker || snap.ActiveWorker,
 		AwaitingApproval: snap.AwaitingApproval,
 	}
 }
@@ -220,7 +220,7 @@ func (h *Hub) mergeCurrentTurnState(o owner, daemonID string, rows []SessionRow)
 			state = string(turnStateIdle)
 		}
 		rows[i].TurnState = state
-		rows[i].ActiveWorker = snap.ActiveWorker
+		rows[i].ActiveWorker = rows[i].ActiveWorker || snap.ActiveWorker
 		rows[i].AwaitingApproval = snap.AwaitingApproval
 	}
 }
