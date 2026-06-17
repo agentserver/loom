@@ -26,6 +26,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
+	sessionjsonl "github.com/yourorg/multi-agent/pkg/agentbackend/internal/jsonl"
 )
 
 var filenameUUIDRe = regexp.MustCompile(`-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$`)
@@ -246,7 +247,7 @@ func scanCodexSession(path, fallbackID string, withMessages bool) codexScanResul
 	var lastAssistantText string
 	rd := bufio.NewReader(f)
 	for {
-		line, readErr := rd.ReadBytes('\n')
+		line, readErr := sessionjsonl.ReadLine(rd, sessionjsonl.MaxLineBytes)
 		if len(line) > 0 {
 			var ln codexLine
 			if err := json.Unmarshal(line, &ln); err != nil {
@@ -337,7 +338,7 @@ func scanCodexSessionWorkingDir(path string) string {
 
 	rd := bufio.NewReader(f)
 	for {
-		line, readErr := rd.ReadBytes('\n')
+		line, readErr := sessionjsonl.ReadLine(rd, sessionjsonl.MaxLineBytes)
 		if len(line) == 0 && readErr != nil {
 			break
 		}

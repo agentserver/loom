@@ -32,6 +32,24 @@ func TestTurnStateStoreSnapshot(t *testing.T) {
 	}
 }
 
+func TestTurnStateStoreSetDoesNotPruneOnHotPath(t *testing.T) {
+	s := newTurnStateStore()
+	active := turnKey{owner: owner{"alice", "W1"}, daemonID: "d1", sessionID: "active"}
+	oldTerminal := turnKey{owner: owner{"alice", "W1"}, daemonID: "d1", sessionID: "old"}
+	s.m[active] = turnSnapshot{State: turnStateQueued, InFlight: true, updatedAt: time.Now()}
+	s.m[oldTerminal] = turnSnapshot{State: turnStateDone, updatedAt: time.Now().Add(-time.Hour)}
+	for i := 0; i < maxTurnStateEntries-1; i++ {
+		key := turnKey{owner: owner{"alice", "W1"}, daemonID: "d1", sessionID: fmt.Sprintf("extra-%d", i)}
+		s.m[key] = turnSnapshot{State: turnStateDone, updatedAt: time.Now()}
+	}
+
+	s.set(active, turnStateAnswering)
+
+	if got := s.get(oldTerminal); got.State != turnStateDone {
+		t.Fatalf("set pruned terminal state on chunk hot path, got %+v", got)
+	}
+}
+
 func TestTurnStateStorePrunesTerminalStatesPreservingInFlight(t *testing.T) {
 	s := newTurnStateStore()
 	inFlight := turnKey{owner: owner{"alice", "W1"}, daemonID: "d1", sessionID: "active"}

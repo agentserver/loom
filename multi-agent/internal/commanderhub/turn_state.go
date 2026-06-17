@@ -12,7 +12,6 @@ type turnState string
 const (
 	turnStateIdle             turnState = "idle"
 	turnStateQueued           turnState = "queued"
-	turnStateStarting         turnState = "starting"
 	turnStateAnswering        turnState = "answering"
 	turnStateDone             turnState = "done"
 	turnStateError            turnState = "error"
@@ -61,10 +60,9 @@ func (s *turnStateStore) set(key turnKey, state turnState) {
 	defer s.mu.Unlock()
 	cur := s.m[key]
 	cur.State = state
-	cur.InFlight = state == turnStateQueued || state == turnStateStarting || state == turnStateAnswering
+	cur.InFlight = state == turnStateQueued || state == turnStateAnswering
 	cur.updatedAt = time.Now()
 	s.m[key] = cur
-	s.pruneLocked()
 }
 
 func (s *turnStateStore) finish(key turnKey, state turnState) {

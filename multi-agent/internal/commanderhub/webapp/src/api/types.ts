@@ -1,7 +1,6 @@
 export type TurnState =
   | 'idle'
   | 'queued'
-  | 'starting'
   | 'answering'
   | 'done'
   | 'error'
