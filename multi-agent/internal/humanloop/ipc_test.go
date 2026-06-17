@@ -168,6 +168,65 @@ func TestIPCClientSendWaitsForServerAck(t *testing.T) {
 	}
 }
 
+func TestIPCReceiveAndAckWaitsForCallbackBeforeAck(t *testing.T) {
+	srv, ep, err := ListenIPC(t.TempDir())
+	if err != nil {
+		t.Fatalf("ListenIPC: %v", err)
+	}
+	defer srv.Close()
+
+	client, err := DialIPC(ep)
+	if err != nil {
+		t.Fatalf("DialIPC: %v", err)
+	}
+	defer client.Close()
+
+	sendErr := make(chan error, 1)
+	want := Payload{Kind: "ask_user", Question: "callback gated"}
+	go func() {
+		sendErr <- client.Send(want)
+	}()
+
+	callbackEntered := make(chan Payload, 1)
+	releaseCallback := make(chan struct{})
+	receiveErr := make(chan error, 1)
+	go func() {
+		receiveErr <- srv.ReceiveAndAck(func(p Payload) error {
+			callbackEntered <- p
+			<-releaseCallback
+			return nil
+		})
+	}()
+
+	got := receiveWithin(t, callbackEntered, "receive callback")
+	if !payloadJSONEqual(got, want) {
+		t.Fatalf("callback payload = %+v, want %+v", got, want)
+	}
+	select {
+	case err := <-sendErr:
+		t.Fatalf("Send returned before callback completed with error %v", err)
+	default:
+	}
+
+	close(releaseCallback)
+	select {
+	case err := <-receiveErr:
+		if err != nil {
+			t.Fatalf("ReceiveAndAck returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReceiveAndAck did not return")
+	}
+	select {
+	case err := <-sendErr:
+		if err != nil {
+			t.Fatalf("Send returned error after callback ack: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send did not return after callback ack")
+	}
+}
+
 func TestIPCRejectsInvalidSecretBeforeReceivingValidPayload(t *testing.T) {
 	srv, ep, err := ListenIPC(t.TempDir())
 	if err != nil {
@@ -348,6 +407,18 @@ func sendRawLine(ep Endpoint, line string) error {
 	defer c.Close()
 	_, err = c.Write([]byte(line))
 	return err
+}
+
+func receiveWithin[T any](t *testing.T, ch <-chan T, label string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(2 * time.Second):
+		var zero T
+		t.Fatalf("timed out waiting for %s", label)
+		return zero
+	}
 }
 
 func payloadJSONEqual(a, b Payload) bool {

@@ -136,16 +136,12 @@ func ListenIPC(baseDir string) (*IPCServer, Endpoint, error) {
 }
 
 func (s *IPCServer) Receive() (Payload, error) {
-	for {
-		pending, ok, err := s.receiveOnePending()
-		if err != nil {
-			return Payload{}, err
-		}
-		if ok {
-			_ = pending.Ack()
-			return pending.Payload, nil
-		}
-	}
+	var got Payload
+	err := s.ReceiveAndAck(func(p Payload) error {
+		got = p
+		return nil
+	})
+	return got, err
 }
 
 func (s *IPCServer) ReceivePending() (*ReceivedPayload, error) {
@@ -157,6 +153,25 @@ func (s *IPCServer) ReceivePending() (*ReceivedPayload, error) {
 		if ok {
 			return pending, nil
 		}
+	}
+}
+
+func (s *IPCServer) ReceiveAndAck(handle func(Payload) error) error {
+	for {
+		pending, ok, err := s.receiveOnePending()
+		if err != nil {
+			return err
+		}
+		if !ok {
+			continue
+		}
+		if handle != nil {
+			if err := handle(pending.Payload); err != nil {
+				_ = pending.Close()
+				return err
+			}
+		}
+		return pending.Ack()
 	}
 }
 
@@ -196,6 +211,16 @@ func (s *IPCServer) receiveOnePending() (*ReceivedPayload, bool, error) {
 		return nil, false, fmt.Errorf("humanloop unmarshal: %w", err)
 	}
 	return &ReceivedPayload{Payload: p, conn: conn}, true, nil
+}
+
+func (p *ReceivedPayload) Close() error {
+	if p == nil || p.conn == nil {
+		return nil
+	}
+	p.once.Do(func() {
+		p.err = p.conn.Close()
+	})
+	return p.err
 }
 
 func (p *ReceivedPayload) Ack() error {
