@@ -135,6 +135,11 @@ type Session struct {
 	// Preview is a short snippet from the most recent assistant message,
 	// capped at SessionPreviewMaxBytes.
 	Preview string
+
+	// ActiveWorker is true when the daemon currently has a hot worker cached
+	// for this session. It is transport/runtime metadata, not persisted backend
+	// session state.
+	ActiveWorker bool `json:"active_worker,omitempty"`
 }
 
 // SessionMessage is one turn in a session. Roles map to claude / codex /
@@ -145,6 +150,30 @@ type SessionMessage struct {
 	Ts   time.Time `json:"ts"`
 }
 
+// SessionWorker is a long-lived per-session worker owned by a backend. Backends
+// opt into commander hot-session reuse by also implementing SessionWorkerBackend.
+type SessionWorker interface {
+	Run(ctx context.Context, prompt string, sink Sink) (Result, error)
+	Close() error
+}
+
+// SessionWorkerBackend is implemented by backends that can safely keep a
+// session hot across turns. Unsupported backends should not implement it; the
+// commander handler will keep using RunResume.
+type SessionWorkerBackend interface {
+	NewSessionWorker(ctx context.Context, session Session) (SessionWorker, error)
+}
+
+// HealthySessionWorker may be implemented by SessionWorker to let commander
+// discard stale workers before sending another user turn.
+type HealthySessionWorker interface {
+	Healthy() bool
+}
+
 // ErrSessionNotFound signals GetSession was called with an id that does
 // not exist in this backend's persistence.
 var ErrSessionNotFound = errors.New("agentbackend: session not found")
+
+// ErrSessionWorkerUnavailable tells callers that a backend cannot provide a
+// hot worker for this session/turn. Commander falls back to RunResume.
+var ErrSessionWorkerUnavailable = errors.New("agentbackend: session worker unavailable")

@@ -91,6 +91,13 @@ func TestSessionRowFromBackendDefaultsIdleTurnState(t *testing.T) {
 	require.Equal(t, "idle", row.TurnState)
 }
 
+func TestSessionRowFromBackendUsesDaemonActiveWorkerMarker(t *testing.T) {
+	row := sessionRowFromBackend("d1", agentbackend.Session{ID: "s1", ActiveWorker: true}, turnSnapshot{})
+
+	require.Equal(t, "idle", row.TurnState)
+	require.True(t, row.ActiveWorker)
+}
+
 func TestCachedSessionRowsUsesTTLAndCopiesSlices(t *testing.T) {
 	resolver := &fakeResolver{mu: map[string]identity.Identity{
 		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},

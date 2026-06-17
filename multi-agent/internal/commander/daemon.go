@@ -108,6 +108,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	case retErr = <-errCh:
 	}
 	cancel()
+	if d.handler != nil {
+		_ = d.handler.Close()
+	}
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
