@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/yourorg/multi-agent/internal/commander"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
 // Mount registers all commander routes on the observerweb shared mux. hub may be
@@ -313,9 +314,28 @@ func (ch *commanderHandlers) updateTurnStateFromEnvelope(key turnKey, env comman
 		}
 		switch ep.EventKind {
 		case "status":
-			switch ep.Text {
-			case "queued on daemon", "queued-on-daemon", "accepted by daemon":
+			switch ep.StatusCode {
+			case agentbackend.StatusQueued:
 				ch.hub.turns.set(key, turnStateQueued)
+			case agentbackend.StatusStarting:
+				ch.hub.turns.set(key, turnStateQueued)
+			case agentbackend.StatusAnswering:
+				ch.hub.turns.set(key, turnStateAnswering)
+			case agentbackend.StatusAwaitingApproval:
+				ch.hub.turns.finish(key, turnStateAwaitingApproval)
+			case agentbackend.StatusDone:
+				ch.hub.turns.finish(key, turnStateDone)
+			case agentbackend.StatusError:
+				ch.hub.turns.fail(key, ep.Text)
+			default:
+				switch ep.Text {
+				case "queued on daemon", "queued-on-daemon", "accepted by daemon":
+					ch.hub.turns.set(key, turnStateQueued)
+				case "starting codex":
+					ch.hub.turns.set(key, turnStateQueued)
+				case "codex running":
+					ch.hub.turns.set(key, turnStateAnswering)
+				}
 			}
 		case "chunk":
 			ch.hub.turns.set(key, turnStateAnswering)

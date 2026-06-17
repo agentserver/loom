@@ -305,7 +305,7 @@ func (c *WSClient) dispatchCommand(ctx context.Context, env Envelope, write func
 			return
 		}
 		sink := newWSSink(env.ID, write)
-		sink.Write("status", "queued on daemon")
+		agentbackend.WriteStatus(sink, agentbackend.StatusQueued, "queued on daemon")
 		unlock := c.lockTurn(args.ID)
 		defer unlock()
 		result, err := c.cfg.Handler.SessionTurn(ctx, args.ID, args.Prompt, sink)
