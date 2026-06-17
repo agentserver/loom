@@ -13,6 +13,12 @@ function isQueuedStatusText(text: string) {
   return text === 'queued on daemon' || text === 'queued-on-daemon' || text === 'accepted by daemon';
 }
 
+function legacyStatusTextTurnState(text: string): TurnState | null {
+  if (isQueuedStatusText(text) || text === 'starting codex') return 'queued';
+  if (text === 'codex running') return 'answering';
+  return null;
+}
+
 function statusCodeTurnState(code: string): TurnState | null {
   switch (code) {
     case 'queued':
@@ -208,8 +214,9 @@ export function CommanderApp() {
           if (statusState) {
             setCurrentTurnState(statusState);
             if (statusState === 'error') turnError = new Error(statusText || 'turn failed');
-          } else if (isQueuedStatusText(statusText)) {
-            setCurrentTurnState('queued');
+          } else {
+            const legacyState = legacyStatusTextTurnState(statusText);
+            if (legacyState) setCurrentTurnState(legacyState);
           }
         } else if (event === 'chunk') {
           setCurrentTurnState('answering');

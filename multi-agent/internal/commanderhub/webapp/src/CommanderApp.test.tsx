@@ -103,7 +103,7 @@ test('keeps a session turn stream current after navigating away and back', async
   await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('已回答完毕'));
 });
 
-test('does not infer turn state from backend-specific status text', async () => {
+test('falls back from missing status code to legacy status text', async () => {
   const turn = streamResponse();
   vi.stubGlobal(
     'fetch',
@@ -155,7 +155,7 @@ test('does not infer turn state from backend-specific status text', async () => 
     turn.controller?.enqueue(new TextEncoder().encode('event: status\ndata: {"text":"codex running"}\n\n'));
   });
 
-  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('已排队'));
+  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Codex 正在回答'));
 
   await act(async () => {
     turn.controller?.enqueue(new TextEncoder().encode('event: chunk\ndata: {"text":"hello"}\n\n'));
