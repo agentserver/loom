@@ -66,7 +66,8 @@ func (b *workerBackend) NewSessionWorker(ctx context.Context, session agentbacke
 			if err != nil {
 				return
 			}
-			payloads.deliver(p)
+			delivery := payloads.beginDelivery()
+			delivery.deliver(p)
 		}
 	}()
 
@@ -124,26 +125,28 @@ func (b *workerBackend) NewSessionWorker(ctx context.Context, session agentbacke
 }
 
 type appServerHumanloopPayloadBuffer struct {
-	stateMu sync.Mutex
-	active  bool
+	mu       sync.Mutex
+	cond     *sync.Cond
+	active   bool
+	inFlight int
+	ch       chan humanloop.Payload
+}
 
-	flightMu   sync.Mutex
-	flightCond *sync.Cond
-	inFlight   int
-
-	ch chan humanloop.Payload
+type appServerHumanloopDelivery struct {
+	buffer *appServerHumanloopPayloadBuffer
+	done   bool
 }
 
 func newAppServerHumanloopPayloadBuffer(size int) *appServerHumanloopPayloadBuffer {
 	b := &appServerHumanloopPayloadBuffer{ch: make(chan humanloop.Payload, size)}
-	b.flightCond = sync.NewCond(&b.flightMu)
+	b.cond = sync.NewCond(&b.mu)
 	return b
 }
 
 func (b *appServerHumanloopPayloadBuffer) beginTurn() {
-	b.stateMu.Lock()
+	b.mu.Lock()
 	b.active = true
-	b.stateMu.Unlock()
+	b.mu.Unlock()
 	drainHumanloopPayloads(b.ch)
 }
 
@@ -153,17 +156,32 @@ func (b *appServerHumanloopPayloadBuffer) endTurn() {
 }
 
 func (b *appServerHumanloopPayloadBuffer) deliver(p humanloop.Payload) {
-	b.flightMu.Lock()
-	b.inFlight++
-	b.flightMu.Unlock()
-	defer b.finishDelivery()
+	delivery := b.beginDelivery()
+	delivery.deliver(p)
+}
 
-	b.stateMu.Lock()
-	active := b.active
-	b.stateMu.Unlock()
-	if !active {
+func (b *appServerHumanloopPayloadBuffer) beginDelivery() *appServerHumanloopDelivery {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.active {
+		return nil
+	}
+	b.inFlight++
+	return &appServerHumanloopDelivery{buffer: b}
+}
+
+func (d *appServerHumanloopDelivery) deliver(p humanloop.Payload) {
+	if d == nil || d.buffer == nil {
 		return
 	}
+	b := d.buffer
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if d.done {
+		return
+	}
+	d.done = true
+	defer b.finishDeliveryLocked()
 	select {
 	case b.ch <- p:
 	default:
@@ -176,24 +194,19 @@ func (b *appServerHumanloopPayloadBuffer) drainTerminal(pending *executorpkg.Ask
 }
 
 func (b *appServerHumanloopPayloadBuffer) deactivateAndWait() {
-	b.stateMu.Lock()
+	b.mu.Lock()
 	b.active = false
-	b.stateMu.Unlock()
-
-	b.flightMu.Lock()
 	for b.inFlight > 0 {
-		b.flightCond.Wait()
+		b.cond.Wait()
 	}
-	b.flightMu.Unlock()
+	b.mu.Unlock()
 }
 
-func (b *appServerHumanloopPayloadBuffer) finishDelivery() {
-	b.flightMu.Lock()
+func (b *appServerHumanloopPayloadBuffer) finishDeliveryLocked() {
 	b.inFlight--
 	if b.inFlight == 0 {
-		b.flightCond.Broadcast()
+		b.cond.Broadcast()
 	}
-	b.flightMu.Unlock()
 }
 
 func (b *appServerHumanloopPayloadBuffer) C() <-chan humanloop.Payload {

@@ -872,14 +872,12 @@ func TestAppServerTerminalEventDrainsQueuedHumanloopPayload(t *testing.T) {
 	}
 }
 
-func TestAppServerTerminalEventWaitsForInFlightHumanloopPayload(t *testing.T) {
+func TestAppServerTerminalEventIncludesDeliveryBegunBeforeDrain(t *testing.T) {
 	payloads := newAppServerHumanloopPayloadBuffer(1)
 	payloads.beginTurn()
 	defer payloads.endTurn()
 
-	payloads.flightMu.Lock()
-	payloads.inFlight++
-	payloads.flightMu.Unlock()
+	delivery := payloads.beginDelivery()
 
 	drainDone := make(chan *executorpkg.AskUserPayload, 1)
 	go func() {
@@ -892,11 +890,7 @@ func TestAppServerTerminalEventWaitsForInFlightHumanloopPayload(t *testing.T) {
 	case <-time.After(20 * time.Millisecond):
 	}
 
-	payloads.ch <- humanloop.Payload{Kind: "ask_user", Question: "settled at terminal"}
-	payloads.flightMu.Lock()
-	payloads.inFlight--
-	payloads.flightCond.Broadcast()
-	payloads.flightMu.Unlock()
+	delivery.deliver(humanloop.Payload{Kind: "ask_user", Question: "settled at terminal"})
 
 	got := receiveWithin(t, drainDone, "terminal humanloop drain")
 	if got == nil || got.Question != "settled at terminal" {
