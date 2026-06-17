@@ -8,6 +8,13 @@
   box-sizing: border-box;
 }
 
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
+}
+
 body {
   margin: 0;
   min-width: 320px;
@@ -26,8 +33,61 @@ textarea {
   color: #5b6678;
 }
 
+.login-panel {
+  display: grid;
+  gap: 12px;
+  width: min(360px, calc(100vw - 32px));
+  padding: 24px;
+  border: 1px solid #d9e1ec;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.login-panel h1 {
+  margin: 0;
+  color: #253348;
+  font-size: 20px;
+}
+
+.login-panel button,
+.login-panel a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  border-radius: 8px;
+  text-decoration: none;
+}
+
+.login-panel button {
+  border: 0;
+  color: #fff;
+  background: #1e7894;
+}
+
+.login-panel button:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
+
+.login-panel a {
+  color: #1e7894;
+  border: 1px solid #b9d6df;
+}
+
+.login-panel p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.login-error {
+  color: #a33b3b;
+}
+
 .commander-shell {
   height: 100vh;
+  min-height: 0;
+  overflow: hidden;
   display: grid;
   grid-template-columns: minmax(280px, 360px) minmax(420px, 1fr) minmax(280px, 380px);
   background: #f5f7fa;
@@ -36,7 +96,10 @@ textarea {
 .daemon-tree,
 .file-panel {
   min-width: 0;
-  overflow: auto;
+  min-height: 0;
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
   border-right: 1px solid #d9e1ec;
   background: #fbfcfe;
 }
@@ -96,6 +159,48 @@ textarea {
   gap: 6px;
 }
 
+.session-node {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.session-row-line {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: stretch;
+  gap: 4px;
+  min-width: 0;
+}
+
+.session-toggle,
+.session-toggle-spacer {
+  width: 24px;
+  min-width: 24px;
+}
+
+.session-toggle {
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 0;
+  color: #506074;
+}
+
+.session-toggle:hover {
+  background: #e8edf4;
+}
+
+.session-toggle-spacer {
+  display: block;
+}
+
+.session-children {
+  display: grid;
+  gap: 5px;
+  padding-left: 28px;
+}
+
 .session-row {
   display: grid;
   gap: 4px;
@@ -106,6 +211,11 @@ textarea {
   background: #fff;
   padding: 8px;
   color: #26364d;
+}
+
+.session-row.subagent-row {
+  border-style: dashed;
+  background: #fbfcfe;
 }
 
 .session-row.selected {
@@ -155,6 +265,8 @@ textarea {
 
 .chat-workspace {
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   display: grid;
   grid-template-rows: auto 1fr auto;
   background: #f7f9fc;
@@ -199,7 +311,9 @@ textarea {
 }
 
 .message-list {
-  overflow: auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding: 18px;
   display: grid;
   align-content: start;
@@ -230,6 +344,19 @@ textarea {
   padding: 10px;
 }
 
+.file-node {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.file-row-line {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 30px;
+  gap: 4px;
+  padding-left: calc(var(--depth, 0) * 16px);
+}
+
 .file-row {
   min-width: 0;
   display: grid;
@@ -245,11 +372,15 @@ textarea {
   text-align: left;
 }
 
-.file-row:disabled {
-  opacity: 0.65;
+.file-row:hover,
+.file-copy-button:hover {
+  border-color: #b9c8da;
+  background: #f4f7fb;
 }
 
 .file-kind {
+  display: inline-flex;
+  align-items: center;
   color: #69768a;
   font-size: 11px;
 }
@@ -259,6 +390,29 @@ textarea {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.file-copy-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  min-width: 30px;
+  border: 1px solid #dce4ef;
+  border-radius: 8px;
+  background: #fff;
+  color: #506074;
+}
+
+.file-children {
+  display: grid;
+  gap: 5px;
+}
+
+.file-loading {
+  margin-left: calc((var(--depth, 0) + 1) * 16px);
+  color: #69768a;
+  font-size: 12px;
 }
 
 .file-error,

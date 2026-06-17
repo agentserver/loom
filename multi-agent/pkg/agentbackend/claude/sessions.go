@@ -77,29 +77,38 @@ func (b *Backend) ListSessions(ctx context.Context) ([]agentbackend.Session, err
 		if !projectDir.IsDir() {
 			continue
 		}
-		dirPath := filepath.Join(root, projectDir.Name())
-		files, err := os.ReadDir(dirPath)
-		if err != nil {
-			continue
-		}
 		cwd := decodeCwd(projectDir.Name())
-		for _, f := range files {
+		projectPath := filepath.Join(root, projectDir.Name())
+		err = filepath.WalkDir(projectPath, func(path string, f fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return nil
+			}
 			if err := ctx.Err(); err != nil {
-				return out, err
+				return err
 			}
 			if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
-				continue
+				return nil
 			}
-			id := strings.TrimSuffix(f.Name(), ".jsonl")
-			path := filepath.Join(dirPath, f.Name())
+			rel, err := filepath.Rel(projectPath, path)
+			if err != nil {
+				return nil
+			}
+			meta, ok := claudeSessionFileMeta(rel)
+			if !ok {
+				return nil
+			}
 			info, err := f.Info()
 			if err != nil {
-				continue
+				return nil
 			}
 			seen[path] = struct{}{}
 			out = append(out, b.list.Get(path, info, func() agentbackend.Session {
-				return scanSession(path, id, cwd)
+				return scanSession(path, meta, cwd)
 			}))
+			return nil
+		})
+		if err != nil {
+			return out, err
 		}
 	}
 	b.list.Prune(seen)
@@ -126,13 +135,37 @@ func (b *Backend) GetSession(ctx context.Context, id string) (agentbackend.Sessi
 		if !projectDir.IsDir() {
 			continue
 		}
-		path := filepath.Join(root, projectDir.Name(), id+".jsonl")
-		if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
-			continue
-		} else if err != nil {
+		projectPath := filepath.Join(root, projectDir.Name())
+		var foundPath string
+		var foundMeta claudeSessionMeta
+		err := filepath.WalkDir(projectPath, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return nil
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+				return nil
+			}
+			rel, err := filepath.Rel(projectPath, path)
+			if err != nil {
+				return nil
+			}
+			meta, ok := claudeSessionFileMeta(rel)
+			if !ok || meta.id != id {
+				return nil
+			}
+			foundPath = path
+			foundMeta = meta
+			return filepath.SkipAll
+		})
+		if err != nil {
 			return agentbackend.Session{}, nil, err
 		}
-		return loadSession(path, id, decodeCwd(projectDir.Name()))
+		if foundPath != "" {
+			return loadSession(foundPath, foundMeta, decodeCwd(projectDir.Name()))
+		}
 	}
 	return agentbackend.Session{}, nil, agentbackend.ErrSessionNotFound
 }
@@ -157,22 +190,47 @@ func (b *Backend) sessionWorkingDir(ctx context.Context, id string) (string, boo
 		if !projectDir.IsDir() {
 			continue
 		}
-		path := filepath.Join(root, projectDir.Name(), id+".jsonl")
-		if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
-			continue
-		} else if err != nil {
+		projectPath := filepath.Join(root, projectDir.Name())
+		found := false
+		err := filepath.WalkDir(projectPath, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return nil
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+				return nil
+			}
+			rel, err := filepath.Rel(projectPath, path)
+			if err != nil {
+				return nil
+			}
+			meta, ok := claudeSessionFileMeta(rel)
+			if ok && meta.id == id {
+				found = true
+				return filepath.SkipAll
+			}
+			return nil
+		})
+		if err != nil {
 			return "", false, err
 		}
-		return decodeCwd(projectDir.Name()), true, nil
+		if found {
+			return decodeCwd(projectDir.Name()), true, nil
+		}
 	}
 	return "", false, nil
 }
 
 type claudeJSONLLine struct {
-	Type      string          `json:"type"`
-	Timestamp string          `json:"timestamp"`
-	SessionID string          `json:"sessionId"`
-	Message   *claudeJSONLMsg `json:"message"`
+	Type        string          `json:"type"`
+	Timestamp   string          `json:"timestamp"`
+	SessionID   string          `json:"sessionId"`
+	IsMeta      bool            `json:"isMeta"`
+	IsSidechain bool            `json:"isSidechain"`
+	AgentID     string          `json:"agentId"`
+	Message     *claudeJSONLMsg `json:"message"`
 }
 
 type claudeJSONLMsg struct {
@@ -180,21 +238,49 @@ type claudeJSONLMsg struct {
 	Content json.RawMessage `json:"content"`
 }
 
-func scanSession(path, id, cwd string) agentbackend.Session {
-	s, _ := loadSessionImpl(path, id, cwd, false)
+type claudeSessionMeta struct {
+	id       string
+	origin   agentbackend.SessionOrigin
+	parentID string
+}
+
+func claudeSessionFileMeta(rel string) (claudeSessionMeta, bool) {
+	rel = filepath.ToSlash(rel)
+	if !strings.HasSuffix(rel, ".jsonl") {
+		return claudeSessionMeta{}, false
+	}
+	base := strings.TrimSuffix(filepath.Base(rel), ".jsonl")
+	parts := strings.Split(rel, "/")
+	if len(parts) == 1 {
+		return claudeSessionMeta{id: base, origin: agentbackend.SessionOriginUser}, true
+	}
+	if len(parts) == 3 && parts[1] == "subagents" && parts[0] != "" {
+		return claudeSessionMeta{id: base, origin: agentbackend.SessionOriginSubagent, parentID: parts[0]}, true
+	}
+	return claudeSessionMeta{}, false
+}
+
+func scanSession(path string, meta claudeSessionMeta, cwd string) agentbackend.Session {
+	s, _ := loadSessionImpl(path, meta, cwd, false)
 	return s
 }
 
-func loadSession(path, id, cwd string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
-	s, msgs := loadSessionImpl(path, id, cwd, true)
+func loadSession(path string, meta claudeSessionMeta, cwd string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+	s, msgs := loadSessionImpl(path, meta, cwd, true)
 	return s, msgs, nil
 }
 
-func loadSessionImpl(path, id, cwd string, withMessages bool) (agentbackend.Session, []agentbackend.SessionMessage) {
+func loadSessionImpl(path string, meta claudeSessionMeta, cwd string, withMessages bool) (agentbackend.Session, []agentbackend.SessionMessage) {
+	origin := meta.origin
+	if origin == "" {
+		origin = agentbackend.SessionOriginUser
+	}
 	sess := agentbackend.Session{
-		ID:         id,
+		ID:         meta.id,
 		Kind:       agentbackend.KindClaude,
 		WorkingDir: cwd,
+		Origin:     origin,
+		ParentID:   meta.parentID,
 	}
 	f, err := os.Open(path)
 	if err != nil {
@@ -215,6 +301,7 @@ func loadSessionImpl(path, id, cwd string, withMessages bool) (agentbackend.Sess
 		if ln.Message == nil {
 			continue
 		}
+		applyClaudeLineMeta(&sess, ln)
 		text := extractText(ln.Message.Content)
 		if text == "" {
 			continue
@@ -228,7 +315,7 @@ func loadSessionImpl(path, id, cwd string, withMessages bool) (agentbackend.Sess
 		}
 		sess.MessageCount++
 		if ln.Message.Role == "user" && sess.Title == "" {
-			sess.Title = titleFromUserText(text)
+			sess.Title = titleFromClaudeUserText(ln, text)
 		}
 		if ln.Message.Role == "assistant" {
 			lastAssistantText = text
@@ -245,6 +332,21 @@ func loadSessionImpl(path, id, cwd string, withMessages bool) (agentbackend.Sess
 		sess.Preview = truncatePreview(lastAssistantText)
 	}
 	return sess, msgs
+}
+
+func applyClaudeLineMeta(sess *agentbackend.Session, ln claudeJSONLLine) {
+	if ln.IsSidechain || ln.AgentID != "" {
+		sess.Origin = agentbackend.SessionOriginSubagent
+		if sess.ParentID == "" {
+			sess.ParentID = ln.SessionID
+		}
+		if sess.AgentName == "" {
+			sess.AgentName = ln.AgentID
+		}
+	}
+	if sess.Origin == "" {
+		sess.Origin = agentbackend.SessionOriginUser
+	}
 }
 
 func extractText(raw json.RawMessage) string {
@@ -302,4 +404,26 @@ func titleFromUserText(s string) string {
 		return s
 	}
 	return truncatePreview(s)
+}
+
+func titleFromClaudeUserText(ln claudeJSONLLine, s string) string {
+	if ln.IsMeta || isClaudeInjectedUserText(s) {
+		return ""
+	}
+	return titleFromUserText(s)
+}
+
+func isClaudeInjectedUserText(s string) bool {
+	s = strings.TrimSpace(s)
+	for _, prefix := range []string{
+		"<local-command-caveat>",
+		"<local-command-stdout>",
+		"<command-name>",
+		"<system-reminder>",
+	} {
+		if strings.HasPrefix(s, prefix) {
+			return true
+		}
+	}
+	return false
 }

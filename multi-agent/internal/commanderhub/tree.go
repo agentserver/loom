@@ -28,6 +28,10 @@ type SessionRow struct {
 	SessionID    string    `json:"session_id"`
 	Kind         string    `json:"kind"`
 	Title        string    `json:"title"`
+	Origin       string    `json:"origin,omitempty"`
+	ParentID     string    `json:"parent_id,omitempty"`
+	AgentName    string    `json:"agent_name,omitempty"`
+	AgentRole    string    `json:"agent_role,omitempty"`
 	WorkingDir   string    `json:"working_dir,omitempty"`
 	UpdatedAt    time.Time `json:"updated_at,omitempty"`
 	MessageCount int       `json:"message_count,omitempty"`
@@ -87,6 +91,10 @@ func sessionRowFromBackend(daemonID string, sess agentbackend.Session, snap turn
 		SessionID:        sess.ID,
 		Kind:             string(sess.Kind),
 		Title:            sessionTitle(sess.Title, sess.Preview, sess.ID),
+		Origin:           string(sess.Origin),
+		ParentID:         sess.ParentID,
+		AgentName:        sess.AgentName,
+		AgentRole:        sess.AgentRole,
 		WorkingDir:       sess.WorkingDir,
 		UpdatedAt:        sess.UpdatedAt,
 		MessageCount:     sess.MessageCount,

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiGet, isTurnInFlightError, postTurn, sessionPath } from './api/client';
 import type { CommanderTree, SessionDetail, TurnState } from './api/types';
 import { ChatWorkspace } from './components/ChatWorkspace';
@@ -29,20 +29,112 @@ function turnKey(selection: { daemonID: string; sessionID: string }) {
   return `${selection.daemonID}\0${selection.sessionID}`;
 }
 
+type LoginState = {
+  phase: 'idle' | 'starting' | 'pending' | 'error';
+  loginID?: string;
+  verifyURL?: string;
+  error?: string;
+};
+
+type LoginResponse = {
+  login_id: string;
+  verification_uri_complete: string;
+};
+
+type LoginPollResponse = {
+  status: 'pending' | 'ok' | 'error';
+  error?: string;
+};
+
 export function CommanderApp() {
   const [tree, setTree] = useState<CommanderTree | null>(null);
   const [error, setError] = useState<string>('');
+  const [authRequired, setAuthRequired] = useState(false);
+  const [login, setLogin] = useState<LoginState>({ phase: 'idle' });
   const [selected, setSelected] = useState<{ daemonID: string; sessionID: string } | null>(null);
   const [sessionDetail, setSessionDetail] = useState<SessionDetail | null>(null);
   const [turnState, setTurnState] = useState<TurnState>('idle');
   const selectedRef = useRef<typeof selected>(null);
   const turnRequestsRef = useRef(new Map<string, number>());
 
-  useEffect(() => {
-    apiGet<CommanderTree>('/api/commander/tree')
-      .then(setTree)
-      .catch((err: Error) => setError(err.message));
+  const loadTree = useCallback(() => {
+    setError('');
+    return apiGet<CommanderTree>('/api/commander/tree')
+      .then((nextTree) => {
+        setTree(nextTree);
+        setAuthRequired(false);
+      })
+      .catch((err: Error) => {
+        if (err.message === 'unauthorized') {
+          setAuthRequired(true);
+          setTree(null);
+          return;
+        }
+        setError(err.message);
+      });
   }, []);
+
+  useEffect(() => {
+    void loadTree();
+  }, [loadTree]);
+
+  useEffect(() => {
+    if (login.phase !== 'pending' || !login.loginID) return;
+
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/commander/login/poll?id=${encodeURIComponent(login.loginID || '')}`, {
+          credentials: 'include',
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const body = (await res.json()) as LoginPollResponse;
+        if (body.status === 'pending') {
+          if (!cancelled) timer = window.setTimeout(poll, 1500);
+          return;
+        }
+        if (body.status === 'ok') {
+          if (!cancelled) {
+            setLogin({ phase: 'idle' });
+            void loadTree();
+          }
+          return;
+        }
+        throw new Error(body.error || 'login failed');
+      } catch (err) {
+        if (!cancelled) {
+          setLogin({
+            phase: 'error',
+            verifyURL: login.verifyURL,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    };
+
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [loadTree, login.loginID, login.phase, login.verifyURL]);
+
+  async function startLogin() {
+    setLogin({ phase: 'starting' });
+    try {
+      const res = await fetch('/api/commander/login', { method: 'POST', credentials: 'include' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body = (await res.json()) as LoginResponse;
+      setLogin({
+        phase: 'pending',
+        loginID: body.login_id,
+        verifyURL: body.verification_uri_complete,
+      });
+    } catch (err) {
+      setLogin({ phase: 'error', error: err instanceof Error ? err.message : String(err) });
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -137,7 +229,25 @@ export function CommanderApp() {
     setSelected(next);
   }
 
-  if (error === 'unauthorized') return <div className="login-shell">用 agentserver 登录</div>;
+  if (authRequired) {
+    return (
+      <div className="login-shell">
+        <section className="login-panel">
+          <h1>Commander</h1>
+          <button type="button" onClick={() => void startLogin()} disabled={login.phase === 'starting'}>
+            用 agentserver 登录
+          </button>
+          {login.verifyURL ? (
+            <a href={login.verifyURL} target="_blank" rel="noreferrer">
+              打开授权页面
+            </a>
+          ) : null}
+          {login.phase === 'pending' ? <p>授权完成后会自动进入 Commander。</p> : null}
+          {login.phase === 'error' ? <p className="login-error">登录失败: {login.error}</p> : null}
+        </section>
+      </div>
+    );
+  }
   if (error) return <div className="login-shell">加载失败: {error}</div>;
   if (!tree) return <div className="login-shell">加载中</div>;
   return (

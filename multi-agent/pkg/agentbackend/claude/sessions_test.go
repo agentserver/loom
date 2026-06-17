@@ -168,6 +168,106 @@ func TestGetSession_ReturnsMessages(t *testing.T) {
 	}
 }
 
+func TestGetSession_SkipsClaudeMetaUserMessagesForTitle(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	dir := filepath.Join(home, ".claude", "projects", "-tmp-myproj")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id := "eeee4444-ffff-5555-aaaa-666666666666"
+	body := strings.Join([]string{
+		`{"type":"user","timestamp":"2026-06-17T01:00:00Z","sessionId":"` + id + `","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>ignore generated local command messages</local-command-caveat>"}}`,
+		`{"type":"user","timestamp":"2026-06-17T01:00:01Z","sessionId":"` + id + `","message":{"role":"user","content":"<command-name>/status</command-name>\n<command-message>status</command-message>"}}`,
+		`{"type":"user","timestamp":"2026-06-17T01:00:02Z","sessionId":"` + id + `","message":{"role":"user","content":"实现 commander session 标题优化"}}`,
+		`{"type":"assistant","timestamp":"2026-06-17T01:00:03Z","sessionId":"` + id + `","message":{"role":"assistant","content":[{"type":"text","text":"可以。"}]}}`,
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(dir, id+".jsonl"), []byte(body+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	b := New(agentbackend.Config{Bin: "claude", WorkDir: t.TempDir()}, nil)
+	listed, err := b.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("len(ListSessions)=%d want 1", len(listed))
+	}
+	if listed[0].Title != "实现 commander session 标题优化" {
+		t.Fatalf("ListSessions title=%q want first real user prompt", listed[0].Title)
+	}
+
+	sess, msgs, err := b.GetSession(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Title != "实现 commander session 标题优化" {
+		t.Fatalf("GetSession title=%q want first real user prompt", sess.Title)
+	}
+	if len(msgs) != 4 {
+		t.Fatalf("len(msgs)=%d want 4", len(msgs))
+	}
+}
+
+func TestListSessions_IncludesClaudeSubagents(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	projectDir := filepath.Join(home, ".claude", "projects", "-tmp-myproj")
+	parentID := "11111111-2222-3333-4444-555555555555"
+	parentFile := filepath.Join(projectDir, parentID+".jsonl")
+	subagentID := "agent-abcdef1234567890"
+	subagentDir := filepath.Join(projectDir, parentID, "subagents")
+	if err := os.MkdirAll(subagentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	parentBody := `{"type":"user","timestamp":"2026-06-17T02:00:00Z","sessionId":"` + parentID + `","message":{"role":"user","content":"父会话"}}` + "\n"
+	if err := os.WriteFile(parentFile, []byte(parentBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	subagentBody := strings.Join([]string{
+		`{"type":"user","timestamp":"2026-06-17T02:00:01Z","sessionId":"` + parentID + `","isSidechain":true,"agentId":"abcdef1234567890","message":{"role":"user","content":"审查父会话实现"}}`,
+		`{"type":"assistant","timestamp":"2026-06-17T02:00:02Z","sessionId":"` + parentID + `","isSidechain":true,"agentId":"abcdef1234567890","message":{"role":"assistant","content":[{"type":"text","text":"审查完成"}]}}`,
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(subagentDir, subagentID+".jsonl"), []byte(subagentBody+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	b := New(agentbackend.Config{Bin: "claude", WorkDir: t.TempDir()}, nil)
+	listed, err := b.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 2 {
+		t.Fatalf("len(ListSessions)=%d want 2", len(listed))
+	}
+	byID := map[string]agentbackend.Session{}
+	for _, sess := range listed {
+		byID[sess.ID] = sess
+	}
+	if byID[parentID].Origin != agentbackend.SessionOriginUser {
+		t.Fatalf("parent Origin=%q want user", byID[parentID].Origin)
+	}
+	sub := byID[subagentID]
+	if sub.Origin != agentbackend.SessionOriginSubagent {
+		t.Fatalf("subagent Origin=%q want subagent", sub.Origin)
+	}
+	if sub.ParentID != parentID || sub.AgentName != "abcdef1234567890" {
+		t.Fatalf("subagent metadata mismatch: %+v", sub)
+	}
+
+	detail, msgs, err := b.GetSession(context.Background(), subagentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Origin != agentbackend.SessionOriginSubagent || detail.ParentID != parentID {
+		t.Fatalf("GetSession subagent metadata mismatch: %+v", detail)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("len(msgs)=%d want 2", len(msgs))
+	}
+}
+
 func TestGetSession_UnknownIDReturnsErrSessionNotFound(t *testing.T) {
 	home := copyFixtureToHOME(t)
 	setTestHome(t, home)
