@@ -64,8 +64,8 @@ export function ChatWorkspace({
       </header>
       <div data-testid="message-list" className="message-list" ref={messageListRef}>
         {messages.map((msg, index) => {
-          const role = msg.Role || msg.role || 'assistant';
-          const text = msg.Text || msg.text || '';
+          const role = msg.role || 'assistant';
+          const text = msg.text || '';
           return (
             <article key={index} className={`message message-${role}`}>
               <MessageRenderer text={text} />

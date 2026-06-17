@@ -11,7 +11,7 @@ function renderWorkspace(props: Partial<Parameters<typeof ChatWorkspace>[0]> = {
       sessionID="s1"
       session={{
         session: { ID: 's1', Title: 'Fix cache', WorkingDir: '/repo' },
-        messages: [{ Role: 'assistant', Text: 'real codex answer' }],
+        messages: [{ role: 'assistant', text: 'real codex answer' }],
       }}
       turnState="idle"
       onSend={async () => {}}

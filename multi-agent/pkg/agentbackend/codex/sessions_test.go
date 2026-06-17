@@ -188,6 +188,37 @@ func TestGetSession_CurrentRolloutResponseItemsReturnMessages(t *testing.T) {
 	}
 }
 
+func TestGetSession_ContinuesAfterOversizedCodexLine(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	dir := filepath.Join(home, ".codex", "sessions", "2026", "06", "17")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id := "11111111-2222-3333-4444-555555555555"
+	body := strings.Repeat("{", 4*1024*1024+1) + "\n" +
+		`{"timestamp":"2026-06-17T03:00:00.000Z","type":"session_meta","payload":{"id":"` + id + `","cwd":"/tmp/codex-huge-line"}}` + "\n" +
+		`{"timestamp":"2026-06-17T03:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"still parsed after huge line"}]}}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "rollout-2026-06-17T03-00-00-"+id+".jsonl"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir()}, nil)
+	sess, msgs, err := b.GetSession(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.WorkingDir != "/tmp/codex-huge-line" {
+		t.Fatalf("WorkingDir=%q want /tmp/codex-huge-line", sess.WorkingDir)
+	}
+	if sess.Title != "still parsed after huge line" {
+		t.Fatalf("Title=%q want later valid line", sess.Title)
+	}
+	if len(msgs) != 1 || msgs[0].Text != "still parsed after huge line" {
+		t.Fatalf("msgs=%+v want later valid line", msgs)
+	}
+}
+
 func TestGetSession_CodexMetaSourceStringPreservesWorkingDir(t *testing.T) {
 	home := t.TempDir()
 	setTestHome(t, home)

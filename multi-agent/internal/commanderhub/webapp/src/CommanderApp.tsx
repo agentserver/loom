@@ -9,10 +9,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-function statusTurnState(text: string): TurnState {
-  if (text === 'starting codex') return 'starting';
-  if (text === 'codex running') return 'answering';
-  return 'queued';
+function isQueuedStatusText(text: string) {
+  return text === 'queued on daemon' || text === 'queued-on-daemon' || text === 'accepted by daemon';
 }
 
 function doneTurnState(data: unknown): TurnState {
@@ -187,7 +185,7 @@ export function CommanderApp() {
         if (!isCurrentTurn()) return;
         if (event === 'status') {
           const statusText = isRecord(data) && typeof data.text === 'string' ? data.text : '';
-          setCurrentTurnState(statusTurnState(statusText));
+          if (isQueuedStatusText(statusText)) setCurrentTurnState('queued');
         } else if (event === 'chunk') {
           setCurrentTurnState('answering');
         } else if (event === 'done') {

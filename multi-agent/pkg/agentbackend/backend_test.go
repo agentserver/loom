@@ -2,13 +2,33 @@ package agentbackend
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
+	"time"
 )
 
 func TestInterfacesCompile(t *testing.T) {
 	var _ Backend = (*nilBackend)(nil)
 	var _ LLMRunner = (*nilLLM)(nil)
 	var _ PermissionsStore = (*nilPerm)(nil)
+}
+
+func TestSessionMessageJSONUsesSnakeCase(t *testing.T) {
+	msg := SessionMessage{
+		Role: "assistant",
+		Text: "hello",
+		Ts:   time.Date(2026, 6, 17, 1, 2, 3, 0, time.UTC),
+	}
+
+	body, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := `{"role":"assistant","text":"hello","ts":"2026-06-17T01:02:03Z"}`
+	if string(body) != want {
+		t.Fatalf("json=%s want %s", body, want)
+	}
 }
 
 type nilBackend struct{}

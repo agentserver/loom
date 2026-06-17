@@ -42,11 +42,8 @@ export interface CommanderTree {
 }
 
 export interface SessionMessage {
-  Role?: string;
-  role?: string;
-  Text?: string;
-  text?: string;
-  Ts?: string;
+  role: string;
+  text: string;
   ts?: string;
 }
 
