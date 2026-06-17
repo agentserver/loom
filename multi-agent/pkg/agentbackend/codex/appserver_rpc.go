@@ -91,7 +91,7 @@ func (c *appServerRPC) call(ctx context.Context, method string, params any, out 
 		c.mu.Unlock()
 		return err
 	}
-	if err := c.writeMessageChecked(req, ctx.Err); err != nil {
+	if err := c.writeMessageChecked(req, c.callBeforeWrite(ctx)); err != nil {
 		c.mu.Lock()
 		if c.wait[id] == ch {
 			delete(c.wait, id)
@@ -241,6 +241,15 @@ func (c *appServerRPC) terminalError() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.terminalErr
+}
+
+func (c *appServerRPC) callBeforeWrite(ctx context.Context) func() error {
+	return func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return c.terminalError()
+	}
 }
 
 func (msg appServerRPCMessage) numericID() (int64, bool) {

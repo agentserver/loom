@@ -267,6 +267,51 @@ func TestAppServerRPCCallCanceledBeforeWriteDoesNotWriteRequest(t *testing.T) {
 	}
 }
 
+func TestAppServerRPCCallQueuedBeforeTerminalReadDoesNotWriteRequest(t *testing.T) {
+	clientReader, serverWriter := io.Pipe()
+	defer clientReader.Close()
+	defer serverWriter.Close()
+
+	wroteRequest := make(chan struct{}, 1)
+	c := newAppServerRPC(clientReader, writerFunc(func(p []byte) (int, error) {
+		wroteRequest <- struct{}{}
+		return len(p), nil
+	}))
+
+	readErrCh := make(chan error, 1)
+	go func() {
+		readErrCh <- c.readLoop(context.Background())
+	}()
+
+	c.writeMu.Lock()
+	callErrCh := make(chan error, 1)
+	go func() {
+		callErrCh <- c.call(context.Background(), "thread/resume", nil, nil)
+	}()
+
+	waitUntil(t, "registered waiter", func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return len(c.wait) == 1
+	})
+	if err := serverWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := receiveWithin(t, readErrCh, "read loop result"); !errors.Is(err, io.EOF) {
+		t.Fatalf("readLoop error = %v, want EOF", err)
+	}
+	c.writeMu.Unlock()
+
+	if err := receiveWithin(t, callErrCh, "call error"); !errors.Is(err, io.EOF) {
+		t.Fatalf("call error = %v, want EOF", err)
+	}
+	select {
+	case <-wroteRequest:
+		t.Fatal("call wrote a request after terminal read error")
+	default:
+	}
+}
+
 func TestAppServerRPCNotifyWritesNotification(t *testing.T) {
 	var out strings.Builder
 	c := newAppServerRPC(strings.NewReader(""), &out)
