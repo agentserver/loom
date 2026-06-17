@@ -28,9 +28,11 @@ func newSSEWriter(w http.ResponseWriter) *sseWriter {
 }
 
 // writeEnvelope emits one daemon frame:
-//   event            → "event: <event_kind>\ndata: {"text":...}"   (decoded)
-//   command_result   → "event: done\ndata: <payload verbatim>"      (forwarded)
-//   error            → "event: error\ndata: <payload verbatim>"     (forwarded)
+//
+//	event            → "event: <event_kind>\ndata: {"text":...}"        (decoded)
+//	command_result   → "event: done\ndata: <payload verbatim>"          (forwarded)
+//	error            → "event: error\ndata: <payload verbatim>"         (forwarded)
+//
 // command_result/error payloads are produced by the daemon (PR-2) — observer
 // forwards them as-is, so it never imports marshalTurnResult (PR-2 frozen).
 func (s *sseWriter) writeEnvelope(env commander.Envelope) {
@@ -40,7 +42,11 @@ func (s *sseWriter) writeEnvelope(env commander.Envelope) {
 		if err := json.Unmarshal(env.Payload, &ep); err != nil {
 			return
 		}
-		data, _ := json.Marshal(map[string]string{"text": ep.Text})
+		data, _ := json.Marshal(struct {
+			Text       string          `json:"text,omitempty"`
+			Extra      json.RawMessage `json:"extra,omitempty"`
+			StatusCode string          `json:"status_code,omitempty"`
+		}{Text: ep.Text, Extra: ep.Extra, StatusCode: ep.StatusCode})
 		s.emit(ep.EventKind, data)
 	case "command_result":
 		s.emit("done", env.Payload)

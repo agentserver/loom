@@ -374,6 +374,55 @@ func TestUpdateTurnStatePrefersStatusCode(t *testing.T) {
 	require.True(t, state.InFlight)
 }
 
+func TestHTTP_TerminalStatusEventEndsTurnWithoutDisconnectOverwrite(t *testing.T) {
+	statusWritten := make(chan struct{})
+	releaseBackend := make(chan struct{})
+	var closeRelease sync.Once
+	closeReleaseBackend := func() { closeRelease.Do(func() { close(releaseBackend) }) }
+	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
+	srv, hub, _, o, cookie, cleanup := commanderSetup(t, resolver, "tok-alice", &tbBackend{
+		resumeFn: func(ctx context.Context, _, _ string, sink executor.Sink) (executor.Result, error) {
+			agentbackend.WriteStatus(sink, agentbackend.StatusDone, "backend says done")
+			close(statusWritten)
+			select {
+			case <-releaseBackend:
+			case <-ctx.Done():
+			}
+			return executor.Result{Summary: "late command result"}, nil
+		},
+	})
+	defer cleanup()
+	defer closeReleaseBackend()
+
+	dis := hub.reg.daemons(o)
+	require.NotEmpty(t, dis)
+	daemonID := dis[0].DaemonID
+	url := srv.URL + "/api/commander/daemons/" + daemonID + "/sessions/s1/turn"
+
+	req, _ := http.NewRequest(http.MethodPost, url, strings.NewReader(`{"prompt":"go"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Contains(t, string(body), "event: status")
+	require.Contains(t, string(body), `"status_code":"done"`)
+	require.NotContains(t, string(body), "daemon disconnected")
+
+	select {
+	case <-statusWritten:
+	case <-time.After(2 * time.Second):
+		t.Fatal("backend did not emit terminal status")
+	}
+	snap := hub.turns.get(turnKey{owner: o, daemonID: daemonID, sessionID: "s1"})
+	require.Equal(t, turnStateDone, snap.State)
+	require.False(t, snap.InFlight)
+}
+
 func TestHTTP_TurnRejectsConcurrentSameSession(t *testing.T) {
 	block := make(chan struct{})
 	started := make(chan struct{})

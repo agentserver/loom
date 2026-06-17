@@ -268,7 +268,7 @@ func (ch *commanderHandlers) turn(w http.ResponseWriter, r *http.Request, daemon
 			if writeSSE {
 				sse.writeEnvelope(env)
 			}
-			if env.Type == "command_result" || env.Type == "error" {
+			if isTerminalEnvelope(env) {
 				terminal = true
 			}
 		case <-reqDone:

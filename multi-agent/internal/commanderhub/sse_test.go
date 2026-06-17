@@ -1,6 +1,7 @@
 package commanderhub
 
 import (
+	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -8,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/yourorg/multi-agent/internal/commander"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
 func TestSSE_EventChunkDecoded(t *testing.T) {
@@ -19,6 +21,25 @@ func TestSSE_EventChunkDecoded(t *testing.T) {
 	body := rec.Body.String()
 	require.Contains(t, body, "event: chunk\n")
 	require.Contains(t, body, `data: {"text":"hello"}`)
+}
+
+func TestSSE_StatusPreservesStatusCodeAndExtra(t *testing.T) {
+	rec := httptest.NewRecorder()
+	s := newSSEWriter(rec)
+	extra := json.RawMessage(`{"source":"daemon"}`)
+	payload, _ := jsonMarshal(commander.EventPayload{
+		EventKind:  "status",
+		Text:       "codex running",
+		Extra:      extra,
+		StatusCode: agentbackend.StatusAnswering,
+	})
+	s.writeEnvelope(commander.Envelope{Type: "event", ID: "c1", Payload: payload})
+
+	body := rec.Body.String()
+	require.Contains(t, body, "event: status\n")
+	require.Contains(t, body, `"text":"codex running"`)
+	require.Contains(t, body, `"status_code":"answering"`)
+	require.Contains(t, body, `"extra":{"source":"daemon"}`)
 }
 
 func TestSSE_CommandResultForwardedAsDone(t *testing.T) {

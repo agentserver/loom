@@ -246,7 +246,7 @@ func (dc *daemonConn) routeFrame(env commander.Envelope) {
 	if pe == nil {
 		return // unknown id (stale/late, or removed by a cancelling consumer): drop
 	}
-	terminal := env.Type == "command_result" || env.Type == "error"
+	terminal := isTerminalEnvelope(env)
 	if !sendOrDrop(pe.ch, env, terminal, pe.cancel, dc.done) {
 		return
 	}

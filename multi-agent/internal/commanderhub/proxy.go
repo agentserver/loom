@@ -117,7 +117,7 @@ func (h *Hub) SendCommandStream(ctx context.Context, o owner, daemonID, command 
 				case <-dc.done:
 					return
 				}
-				if env.Type == "command_result" || env.Type == "error" {
+				if isTerminalEnvelope(env) {
 					return
 				}
 			case <-ctx.Done():
