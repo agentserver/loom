@@ -20,7 +20,8 @@ type appServerRPC struct {
 	wait        map[int64]chan appServerRPCResult
 	terminalErr error
 
-	writeMu        sync.Mutex
+	writeMu sync.Mutex
+	// onNotification runs on the readLoop goroutine and must not block.
 	onNotification func(appServerRPCMessage)
 }
 
@@ -51,6 +52,9 @@ func newAppServerRPC(r io.Reader, w io.Writer) *appServerRPC {
 }
 
 func (c *appServerRPC) call(ctx context.Context, method string, params any, out any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := c.terminalError(); err != nil {
 		return err
 	}
@@ -65,6 +69,9 @@ func (c *appServerRPC) call(ctx context.Context, method string, params any, out 
 		}
 		req.Params = b
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	ch := make(chan appServerRPCResult, 1)
 	c.mu.Lock()
@@ -76,7 +83,15 @@ func (c *appServerRPC) call(ctx context.Context, method string, params any, out 
 	c.wait[id] = ch
 	c.mu.Unlock()
 
-	if err := c.writeMessage(req); err != nil {
+	if err := ctx.Err(); err != nil {
+		c.mu.Lock()
+		if c.wait[id] == ch {
+			delete(c.wait, id)
+		}
+		c.mu.Unlock()
+		return err
+	}
+	if err := c.writeMessageChecked(req, ctx.Err); err != nil {
 		c.mu.Lock()
 		if c.wait[id] == ch {
 			delete(c.wait, id)
@@ -109,6 +124,10 @@ func (c *appServerRPC) call(ctx context.Context, method string, params any, out 
 }
 
 func (c *appServerRPC) notify(method string, params any) error {
+	if err := c.terminalError(); err != nil {
+		return err
+	}
+
 	msg := appServerRPCMessage{Method: method}
 	if params != nil {
 		b, err := json.Marshal(params)
@@ -117,7 +136,7 @@ func (c *appServerRPC) notify(method string, params any) error {
 		}
 		msg.Params = b
 	}
-	return c.writeMessage(msg)
+	return c.writeMessageChecked(msg, c.terminalError)
 }
 
 func (c *appServerRPC) readLoop(ctx context.Context) error {
@@ -166,6 +185,10 @@ func (c *appServerRPC) readLoop(ctx context.Context) error {
 }
 
 func (c *appServerRPC) writeMessage(msg appServerRPCMessage) error {
+	return c.writeMessageChecked(msg, nil)
+}
+
+func (c *appServerRPC) writeMessageChecked(msg appServerRPCMessage, beforeWrite func() error) error {
 	b, err := json.Marshal(msg)
 	if err != nil {
 		return err
@@ -174,6 +197,11 @@ func (c *appServerRPC) writeMessage(msg appServerRPCMessage) error {
 
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	if beforeWrite != nil {
+		if err := beforeWrite(); err != nil {
+			return err
+		}
+	}
 	_, err = c.w.Write(b)
 	return err
 }

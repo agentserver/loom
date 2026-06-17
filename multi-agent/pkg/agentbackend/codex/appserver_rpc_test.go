@@ -209,6 +209,64 @@ func TestAppServerRPCPendingCallReturnsErrorOnMalformedJSON(t *testing.T) {
 	}
 }
 
+func TestAppServerRPCCallWithCanceledContextDoesNotWriteRequest(t *testing.T) {
+	wroteRequest := make(chan struct{}, 1)
+	c := newAppServerRPC(strings.NewReader(""), writerFunc(func(p []byte) (int, error) {
+		wroteRequest <- struct{}{}
+		return len(p), nil
+	}))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := c.call(ctx, "thread/resume", nil, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("call error = %v, want context canceled", err)
+	}
+	select {
+	case <-wroteRequest:
+		t.Fatal("call wrote a request with canceled context")
+	default:
+	}
+}
+
+func TestAppServerRPCCallCanceledBeforeWriteDoesNotWriteRequest(t *testing.T) {
+	wroteRequest := make(chan struct{}, 1)
+	c := newAppServerRPC(strings.NewReader(""), writerFunc(func(p []byte) (int, error) {
+		wroteRequest <- struct{}{}
+		return len(p), nil
+	}))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	c.writeMu.Lock()
+	callErrCh := make(chan error, 1)
+	go func() {
+		callErrCh <- c.call(ctx, "thread/resume", nil, nil)
+	}()
+
+	waitUntil(t, "registered waiter", func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return len(c.wait) == 1
+	})
+	cancel()
+	c.writeMu.Unlock()
+
+	if err := receiveWithin(t, callErrCh, "call error"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("call error = %v, want context canceled", err)
+	}
+	select {
+	case <-wroteRequest:
+		t.Fatal("call wrote a request after context canceled before write")
+	default:
+	}
+	c.mu.Lock()
+	waiters := len(c.wait)
+	c.mu.Unlock()
+	if waiters != 0 {
+		t.Fatalf("waiters = %d, want 0", waiters)
+	}
+}
+
 func TestAppServerRPCNotifyWritesNotification(t *testing.T) {
 	var out strings.Builder
 	c := newAppServerRPC(strings.NewReader(""), &out)
@@ -238,6 +296,26 @@ func TestAppServerRPCNotifyWritesNotification(t *testing.T) {
 	}
 }
 
+func TestAppServerRPCNotifyAfterTerminalReadErrorDoesNotWrite(t *testing.T) {
+	wroteRequest := make(chan struct{}, 1)
+	c := newAppServerRPC(strings.NewReader(""), writerFunc(func(p []byte) (int, error) {
+		wroteRequest <- struct{}{}
+		return len(p), nil
+	}))
+
+	if err := c.readLoop(context.Background()); !errors.Is(err, io.EOF) {
+		t.Fatalf("readLoop error = %v, want EOF", err)
+	}
+	if err := c.notify("thread/interrupt", nil); !errors.Is(err, io.EOF) {
+		t.Fatalf("notify error = %v, want EOF", err)
+	}
+	select {
+	case <-wroteRequest:
+		t.Fatal("notify wrote after terminal read error")
+	default:
+	}
+}
+
 type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) {
@@ -253,5 +331,22 @@ func receiveWithin[T any](t *testing.T, ch <-chan T, name string) T {
 		t.Fatalf("timed out waiting for %s", name)
 		var zero T
 		return zero
+	}
+}
+
+func waitUntil(t *testing.T, name string, fn func() bool) {
+	t.Helper()
+	deadline := time.After(appServerRPCTestTimeout)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if fn() {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s", name)
+		case <-tick.C:
+		}
 	}
 }
