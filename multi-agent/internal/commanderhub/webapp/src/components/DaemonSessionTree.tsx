@@ -74,7 +74,11 @@ export function DaemonSessionTree({
         <span className="session-title">{session.title}</span>
         <span className="session-meta">{sessionMeta(session, isSubagent)}</span>
         <span className="session-badges">
-          {session.active_worker ? <span className="active-worker-badge">active</span> : null}
+          {session.active_worker ? (
+            <span className="active-worker-badge" title="Daemon has a hot worker cached for this session">
+              active
+            </span>
+          ) : null}
           <StatusBadge state={session.turn_state} />
         </span>
       </button>

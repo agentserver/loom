@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yourorg/multi-agent/internal/executor"
@@ -23,7 +24,8 @@ type Handler struct {
 	WorkerIdleTimeout time.Duration
 
 	workerOnce  sync.Once
-	workerCache *sessionWorkerCache
+	workerCache atomic.Pointer[sessionWorkerCache]
+	closed      atomic.Bool
 
 	turnMu    sync.Mutex
 	turnLocks map[string]*turnLock
@@ -48,17 +50,17 @@ func (h *Handler) GetSession(ctx context.Context, id string) (agentbackend.Sessi
 func (h *Handler) SessionTurn(ctx context.Context, id, prompt string, sink executor.Sink) (executor.Result, error) {
 	unlock := h.lockTurn(id)
 	defer unlock()
-	if res, ok, err := h.trySessionWorker(ctx, id, prompt, sink); ok {
+	if res, ok, canFallback, err := h.trySessionWorker(ctx, id, prompt, sink); ok {
 		if err == nil {
 			return res, nil
 		}
-		if errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
+		if canFallback {
+			if !errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
+				sink.Write("status", "hot worker unavailable; falling back to resume")
+			}
 			return h.Backend.RunResume(ctx, id, prompt, sink)
 		}
-		if ctx.Err() != nil {
-			return res, err
-		}
-		sink.Write("status", "hot worker failed; falling back to resume")
+		return res, err
 	}
 	return h.Backend.RunResume(ctx, id, prompt, sink)
 }
@@ -66,20 +68,23 @@ func (h *Handler) SessionTurn(ctx context.Context, id, prompt string, sink execu
 // Close releases daemon-owned hot workers. Daemon.Run calls it during shutdown;
 // tests may call it directly when using Handler without Daemon.
 func (h *Handler) Close() error {
-	if h.workerCache == nil {
+	h.closed.Store(true)
+	h.workerOnce.Do(func() {})
+	cache := h.workerCache.Load()
+	if cache == nil {
 		return nil
 	}
-	return h.workerCache.closeAll()
+	return cache.closeAll()
 }
 
-func (h *Handler) trySessionWorker(ctx context.Context, id, prompt string, sink executor.Sink) (executor.Result, bool, error) {
+func (h *Handler) trySessionWorker(ctx context.Context, id, prompt string, sink executor.Sink) (executor.Result, bool, bool, error) {
 	workerBackend, ok := h.Backend.(agentbackend.SessionWorkerBackend)
 	if !ok {
-		return executor.Result{}, false, nil
+		return executor.Result{}, false, false, nil
 	}
 	sess, _, err := h.Backend.GetSession(ctx, id)
 	if err != nil {
-		return executor.Result{}, true, agentbackend.ErrSessionWorkerUnavailable
+		return executor.Result{}, true, true, agentbackend.ErrSessionWorkerUnavailable
 	}
 	if sess.ID == "" {
 		sess.ID = id
@@ -89,42 +94,50 @@ func (h *Handler) trySessionWorker(ctx context.Context, id, prompt string, sink 
 	}
 	key := h.workerKey(sess)
 	cache := h.ensureWorkerCache()
+	if cache == nil {
+		return executor.Result{}, true, true, agentbackend.ErrSessionWorkerUnavailable
+	}
 	entry, err := cache.acquire(ctx, key, func(ctx context.Context) (agentbackend.SessionWorker, error) {
 		return workerBackend.NewSessionWorker(ctx, sess)
 	})
 	if err != nil {
-		return executor.Result{}, true, err
+		return executor.Result{}, true, true, err
 	}
 	defer cache.release(entry)
 
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
 	if !cache.isCurrent(entry) {
-		return executor.Result{}, true, agentbackend.ErrSessionWorkerUnavailable
+		return executor.Result{}, true, true, agentbackend.ErrSessionWorkerUnavailable
 	}
 	if health, ok := entry.worker.(agentbackend.HealthySessionWorker); ok && !health.Healthy() {
 		cache.remove(entry)
-		return executor.Result{}, true, agentbackend.ErrSessionWorkerUnavailable
+		return executor.Result{}, true, true, agentbackend.ErrSessionWorkerUnavailable
 	}
 	res, err := entry.worker.Run(ctx, prompt, sink)
 	if err != nil {
 		cache.remove(entry)
 	}
-	return res, true, err
+	return res, true, false, err
 }
 
 func (h *Handler) ensureWorkerCache() *sessionWorkerCache {
 	h.workerOnce.Do(func() {
-		h.workerCache = newSessionWorkerCache(h.WorkerMax, h.WorkerIdleTimeout)
+		if h.closed.Load() || h.WorkerMax < 0 {
+			return
+		}
+		h.workerCache.Store(newSessionWorkerCache(h.WorkerMax, h.WorkerIdleTimeout))
 	})
-	return h.workerCache
+	return h.workerCache.Load()
 }
 
 func (h *Handler) markActiveWorkers(sessions []agentbackend.Session) {
-	if h.workerCache == nil {
+	if _, ok := h.Backend.(agentbackend.SessionWorkerBackend); !ok {
 		return
 	}
-	active := h.workerCache.activeKeys()
+	cache := h.workerCache.Load()
+	if cache == nil {
+		return
+	}
+	active := cache.activeKeys()
 	for i := range sessions {
 		sessions[i].ActiveWorker = active[h.workerKey(sessions[i])]
 	}
