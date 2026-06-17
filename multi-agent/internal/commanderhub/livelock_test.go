@@ -34,7 +34,7 @@ func TestSendOrDrop_TerminalUnblocksOnCancel(t *testing.T) {
 		done:    make(chan struct{}), // open: simulates a live connection (NOT closing it)
 	}
 	const cmdID = "cmd-1"
-	pe := dc.registerPending(cmdID)
+	pe := dc.registerPending(cmdID, true)
 
 	// Fill the data channel to its cap so a further send blocks. ch is cap 16.
 	for i := 0; i < 16; i++ {

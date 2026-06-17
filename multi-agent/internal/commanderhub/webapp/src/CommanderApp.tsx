@@ -13,6 +13,24 @@ function isQueuedStatusText(text: string) {
   return text === 'queued on daemon' || text === 'queued-on-daemon' || text === 'accepted by daemon';
 }
 
+function statusCodeTurnState(code: string): TurnState | null {
+  switch (code) {
+    case 'queued':
+    case 'starting':
+      return 'queued';
+    case 'answering':
+      return 'answering';
+    case 'awaiting_approval':
+      return 'awaiting_approval';
+    case 'done':
+      return 'done';
+    case 'error':
+      return 'error';
+    default:
+      return null;
+  }
+}
+
 function doneTurnState(data: unknown): TurnState {
   if (!isRecord(data) || !isRecord(data.result)) return 'done';
   return data.result.awaiting_user == null ? 'done' : 'awaiting_approval';
@@ -185,7 +203,14 @@ export function CommanderApp() {
         if (!isCurrentTurn()) return;
         if (event === 'status') {
           const statusText = isRecord(data) && typeof data.text === 'string' ? data.text : '';
-          if (isQueuedStatusText(statusText)) setCurrentTurnState('queued');
+          const statusCode = isRecord(data) && typeof data.status_code === 'string' ? data.status_code : '';
+          const statusState = statusCodeTurnState(statusCode);
+          if (statusState) {
+            setCurrentTurnState(statusState);
+            if (statusState === 'error') turnError = new Error(statusText || 'turn failed');
+          } else if (isQueuedStatusText(statusText)) {
+            setCurrentTurnState('queued');
+          }
         } else if (event === 'chunk') {
           setCurrentTurnState('answering');
         } else if (event === 'done') {

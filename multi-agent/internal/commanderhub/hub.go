@@ -162,19 +162,22 @@ func (dc *daemonConn) writeEnvelope(env commander.Envelope) error {
 // escape hatch other than dc.done (which is closed only AFTER the read loop
 // returns — and the read loop is exactly the stuck goroutine).
 type pendingEntry struct {
-	ch     chan commander.Envelope // data channel; NEVER closed (GC reclaims it)
-	cancel chan struct{}           // closed by removePending to unblock a stuck terminal send
+	ch        chan commander.Envelope // data channel; NEVER closed (GC reclaims it)
+	cancel    chan struct{}           // closed by removePending to unblock a stuck terminal send
+	streaming bool                    // streaming commands may terminate on status_code terminal events
 }
 
 // registerPending reserves a reply entry for cmdID and returns it. The data
 // channel ch is NEVER closed (see pendingEntry); the per-entry cancel channel is
 // closed by removePending. Consumers read from entry.ch and detect completion
-// without a ch-close: terminal via env.Type == "command_result"/"error",
-// disconnect via <-dc.done, cancel via <-ctx.Done().
-func (dc *daemonConn) registerPending(cmdID string) *pendingEntry {
+// without a ch-close: terminal command_result/error frames for all commands,
+// terminal status events for streaming commands, disconnect via <-dc.done, and
+// cancel via <-ctx.Done().
+func (dc *daemonConn) registerPending(cmdID string, streaming bool) *pendingEntry {
 	pe := &pendingEntry{
-		ch:     make(chan commander.Envelope, 16),
-		cancel: make(chan struct{}),
+		ch:        make(chan commander.Envelope, 16),
+		cancel:    make(chan struct{}),
+		streaming: streaming,
 	}
 	dc.pendingMu.Lock()
 	dc.pending[cmdID] = pe
@@ -246,7 +249,7 @@ func (dc *daemonConn) routeFrame(env commander.Envelope) {
 	if pe == nil {
 		return // unknown id (stale/late, or removed by a cancelling consumer): drop
 	}
-	terminal := isTerminalEnvelope(env)
+	terminal := isTerminalEnvelope(env) || (pe.streaming && isTerminalStatusEnvelope(env))
 	if !sendOrDrop(pe.ch, env, terminal, pe.cancel, dc.done) {
 		return
 	}
