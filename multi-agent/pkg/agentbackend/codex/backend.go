@@ -73,6 +73,13 @@ func (b *Backend) executorForWorkDir(workDir string) *executor {
 
 func init() {
 	agentbackend.RegisterBuilder(agentbackend.KindCodex, func(cfg agentbackend.Config, env []string) (agentbackend.Backend, error) {
-		return New(cfg, env), nil
+		b := New(cfg, env)
+		if cfg.WorkerMode == "app_server" {
+			return &workerBackend{
+				Backend: b,
+				manager: newAppServerManager(b.cfg, env),
+			}, nil
+		}
+		return b, nil
 	})
 }
