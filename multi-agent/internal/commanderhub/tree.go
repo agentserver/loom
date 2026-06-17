@@ -149,7 +149,6 @@ func (h *Hub) daemonTree(ctx context.Context, o owner, info DaemonInfo) DaemonTr
 			row.ActiveCount++
 		}
 		if session.TurnState == string(turnStateQueued) ||
-			session.TurnState == string(turnStateStarting) ||
 			session.TurnState == string(turnStateAnswering) {
 			row.TurnCount++
 		}

@@ -5,7 +5,6 @@ import type { SessionDetail, TurnState } from '../api/types';
 const turnStateLabels: Record<TurnState, string> = {
   idle: '',
   queued: '已排队',
-  starting: '正在启动 Codex',
   answering: 'Codex 正在回答',
   awaiting_approval: '需人工审批',
   done: '已回答完毕',
@@ -41,7 +40,7 @@ export function ChatWorkspace({
 }) {
   const title = sessionString(session?.session, 'Title', 'title') || 'Session';
   const cwd = sessionString(session?.session, 'WorkingDir', 'working_dir');
-  const disabled = ['queued', 'starting', 'answering', 'awaiting_approval'].includes(turnState);
+  const disabled = ['queued', 'answering', 'awaiting_approval'].includes(turnState);
   const messages = session?.messages || [];
   const messageListRef = useRef<HTMLDivElement>(null);
 

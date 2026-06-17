@@ -28,6 +28,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
+	sessionjsonl "github.com/yourorg/multi-agent/pkg/agentbackend/internal/jsonl"
 )
 
 func sessionsRoot() string {
@@ -292,7 +293,7 @@ func loadSessionImpl(path string, meta claudeSessionMeta, cwd string, withMessag
 	var lastAssistantText string
 	rd := bufio.NewReader(f)
 	for {
-		line, readErr := rd.ReadBytes('\n')
+		line, readErr := sessionjsonl.ReadLine(rd, sessionjsonl.MaxLineBytes)
 		if len(line) > 0 {
 			var ln claudeJSONLLine
 			if err := json.Unmarshal(line, &ln); err == nil && ln.Message != nil {
