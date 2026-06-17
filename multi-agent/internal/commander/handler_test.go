@@ -455,6 +455,57 @@ func TestHandler_SessionTurnFallsBackWhenCachedWorkerUnhealthy(t *testing.T) {
 	}
 }
 
+func TestHandler_SessionTurnFallsBackWhenHotWorkerRunUnavailable(t *testing.T) {
+	worker := &fakeSessionWorker{healthy: true}
+	var runCalls atomic.Int32
+	worker.runFn = func(_ context.Context, prompt string, sink executor.Sink) (executor.Result, error) {
+		switch runCalls.Add(1) {
+		case 1:
+			sink.Write("chunk", "warm")
+			return executor.Result{Summary: "warm", SessionID: "s1"}, nil
+		case 2:
+			return executor.Result{}, agentbackend.ErrSessionWorkerUnavailable
+		default:
+			t.Fatalf("unexpected worker run for prompt %q", prompt)
+			return executor.Result{}, nil
+		}
+	}
+	var fallback atomic.Int32
+	h := &Handler{Backend: &fakeBackend{
+		getFn: func(context.Context, string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+			return agentbackend.Session{ID: "s1", Kind: agentbackend.KindClaude, WorkingDir: "/repo"}, nil, nil
+		},
+		workerFn: func(context.Context, agentbackend.Session) (agentbackend.SessionWorker, error) {
+			return worker, nil
+		},
+		resumeFn: func(_ context.Context, id, answer string, _ executor.Sink) (executor.Result, error) {
+			fallback.Add(1)
+			if id != "s1" || answer != "again" {
+				t.Fatalf("RunResume id=%q answer=%q, want s1/again", id, answer)
+			}
+			return executor.Result{Summary: "fallback", SessionID: "s1"}, nil
+		},
+	}}
+	defer h.Close()
+
+	if _, err := h.SessionTurn(context.Background(), "s1", "warm", &captureSink{}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := h.SessionTurn(context.Background(), "s1", "again", &captureSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Summary != "fallback" || fallback.Load() != 1 {
+		t.Fatalf("result=%+v fallback=%d", res, fallback.Load())
+	}
+	worker.mu.Lock()
+	closed := worker.closed
+	worker.mu.Unlock()
+	if !closed {
+		t.Fatalf("unavailable worker should be removed and closed")
+	}
+}
+
 func TestHandler_SessionTurnDoesNotFallbackAfterWorkerRunError(t *testing.T) {
 	runErr := errors.New("worker failed after starting")
 	worker := &fakeSessionWorker{healthy: true}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
@@ -248,6 +249,62 @@ func TestCodexSessionWorkerIgnoresOtherSessionNotificationsBeforeFallback(t *tes
 	}
 	if !equalAppServerWorkerStatuses(sink.statuses, wantStatuses) {
 		t.Fatalf("statuses=%+v, want %+v", sink.statuses, wantStatuses)
+	}
+}
+
+func TestCodexSessionWorkerErrorNotificationBeforeAcceptedExecutionReturnsUnavailable(t *testing.T) {
+	sink := &appServerWorkerTestSink{}
+	w := &codexSessionWorker{
+		sessionID: "thr-1",
+		workDir:   t.TempDir(),
+		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage)) error {
+			emit(appServerWorkerNotification("error", `{"threadId":"thr-1","message":"turn rejected"}`))
+			return nil
+		},
+	}
+
+	res, err := w.Run(context.Background(), "prompt", sink)
+	if !errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
+		t.Fatalf("Run error = %v, want ErrSessionWorkerUnavailable", err)
+	}
+	if res != (agentbackend.Result{}) {
+		t.Fatalf("result=%+v, want zero result", res)
+	}
+	if !sink.closed {
+		t.Fatal("sink not closed")
+	}
+	if len(sink.events) != 0 {
+		t.Fatalf("events=%+v, want none", sink.events)
+	}
+}
+
+func TestCodexSessionWorkerErrorNotificationAfterAcceptedExecutionReturnsRealError(t *testing.T) {
+	sink := &appServerWorkerTestSink{}
+	w := &codexSessionWorker{
+		sessionID: "thr-1",
+		workDir:   t.TempDir(),
+		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage)) error {
+			emit(appServerWorkerNotification("item/agentMessage/delta", `{"threadId":"thr-1","turnId":"turn-1","itemId":"i1","delta":"partial"}`))
+			emit(appServerWorkerNotification("error", `{"threadId":"thr-1","message":"lost worker"}`))
+			return nil
+		},
+	}
+
+	res, err := w.Run(context.Background(), "prompt", sink)
+	if err == nil {
+		t.Fatal("Run error = nil, want app-server error")
+	}
+	if errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
+		t.Fatalf("Run error = %v, should not allow fallback after accepted execution", err)
+	}
+	if !strings.Contains(err.Error(), "lost worker") {
+		t.Fatalf("Run error = %v, want lost worker detail", err)
+	}
+	if res.Summary != "partial" || res.SessionID != "thr-1" {
+		t.Fatalf("result=%+v", res)
+	}
+	if !sink.closed {
+		t.Fatal("sink not closed")
 	}
 }
 
