@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
 
 	"github.com/yourorg/multi-agent/internal/commander"
@@ -96,6 +97,54 @@ func TestProxy_SendCommandListSessions(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(payload), "s1")
 	require.Contains(t, string(payload), "s2")
+}
+
+func TestProxy_SendCommandIgnoresTerminalStatusEventBeforeResult(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{
+		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
+	}}
+	hub := NewHub(resolver)
+	srv := httptest.NewServer(hub)
+	defer srv.Close()
+
+	wsURL := "ws" + srv.URL[len("http"):] + "/api/daemon-link"
+	conn, _, err := websocket.DefaultDialer.DialContext(context.Background(), wsURL, wsDialHeader("tok-alice"))
+	require.NoError(t, err)
+	defer conn.Close()
+
+	reg, _ := jsonMarshal(commander.RegisterPayload{SchemaVersion: commander.SchemaVersion, Kind: "claude", DisplayName: "raw"})
+	require.NoError(t, conn.WriteJSON(commander.Envelope{Type: "register", Payload: reg}))
+	var ack commander.Envelope
+	require.NoError(t, conn.ReadJSON(&ack))
+	require.Equal(t, "ack", ack.Type)
+
+	o := owner{userID: "alice", workspaceID: "W1"}
+	di := hub.reg.daemons(o)
+	require.Len(t, di, 1)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var cmdEnv commander.Envelope
+		if err := conn.ReadJSON(&cmdEnv); err != nil {
+			return
+		}
+		statusPayload, _ := jsonMarshal(commander.EventPayload{
+			EventKind:  "status",
+			Text:       "non-stream status",
+			StatusCode: agentbackend.StatusDone,
+		})
+		_ = conn.WriteJSON(commander.Envelope{Type: "event", ID: cmdEnv.ID, Payload: statusPayload})
+		resultPayload := []byte(`{"sessions":[{"ID":"s1"}]}`)
+		_ = conn.WriteJSON(commander.Envelope{Type: "command_result", ID: cmdEnv.ID, Payload: resultPayload})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	payload, err := hub.SendCommand(ctx, o, di[0].DaemonID, "list_sessions", nil)
+	require.NoError(t, err)
+	require.Contains(t, string(payload), "s1")
+	<-done
 }
 
 // TestProxy_SendCommandCrossOwner404: looking up another owner's daemon fails.

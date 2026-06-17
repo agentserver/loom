@@ -166,6 +166,126 @@ test('does not infer turn state from backend-specific status text', async () => 
   await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('已回答完毕'));
 });
 
+test('updates turn state from backend-neutral status code', async () => {
+  const turn = streamResponse();
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), 'http://commander.test');
+      if (url.pathname === '/api/commander/tree') {
+        return jsonResponse({
+          daemons: [
+            {
+              daemon_id: 'd1',
+              display_name: 'prod-codex',
+              kind: 'codex',
+              status: 'ok',
+              sessions: [
+                {
+                  daemon_id: 'd1',
+                  session_id: 'a',
+                  kind: 'codex',
+                  title: 'Session A',
+                  turn_state: 'idle',
+                  active_worker: false,
+                  awaiting_approval: false,
+                },
+              ],
+            },
+          ],
+        });
+      }
+      if (url.pathname.endsWith('/files')) {
+        return jsonResponse({ root: '/repo', path: '.', entries: [] });
+      }
+      if (url.pathname.endsWith('/turn') && init?.method === 'POST') {
+        return turn.response;
+      }
+      if (url.pathname.endsWith('/sessions/a')) {
+        return jsonResponse({ session: { ID: 'a', Title: 'Session A' }, messages: [] });
+      }
+      return jsonResponse({});
+    }),
+  );
+
+  render(<CommanderApp />);
+  fireEvent.click(await screen.findByRole('button', { name: /Session A/ }));
+  fireEvent.change(screen.getByRole('textbox', { name: '输入提示词' }), { target: { value: 'go' } });
+  fireEvent.submit((screen.getByRole('textbox', { name: '输入提示词' }) as HTMLTextAreaElement).form!);
+  await waitFor(() => expect(turn.controller).not.toBeNull());
+
+  await act(async () => {
+    turn.controller?.enqueue(new TextEncoder().encode('event: status\ndata: {"text":"backend text","status_code":"answering"}\n\n'));
+  });
+  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Codex 正在回答'));
+
+  await act(async () => {
+    turn.controller?.enqueue(new TextEncoder().encode('event: status\ndata: {"text":"backend text","status_code":"awaiting_approval"}\n\n'));
+  });
+  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('需人工审批'));
+
+  await act(async () => {
+    turn.controller?.enqueue(new TextEncoder().encode('event: status\ndata: {"text":"backend text","status_code":"done"}\n\n'));
+    turn.controller?.close();
+  });
+  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('已回答完毕'));
+});
+
+test('updates turn state from backend-neutral error status code', async () => {
+  const turn = streamResponse();
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), 'http://commander.test');
+      if (url.pathname === '/api/commander/tree') {
+        return jsonResponse({
+          daemons: [
+            {
+              daemon_id: 'd1',
+              display_name: 'prod-codex',
+              kind: 'codex',
+              status: 'ok',
+              sessions: [
+                {
+                  daemon_id: 'd1',
+                  session_id: 'a',
+                  kind: 'codex',
+                  title: 'Session A',
+                  turn_state: 'idle',
+                  active_worker: false,
+                  awaiting_approval: false,
+                },
+              ],
+            },
+          ],
+        });
+      }
+      if (url.pathname.endsWith('/files')) {
+        return jsonResponse({ root: '/repo', path: '.', entries: [] });
+      }
+      if (url.pathname.endsWith('/turn') && init?.method === 'POST') {
+        return turn.response;
+      }
+      if (url.pathname.endsWith('/sessions/a')) {
+        return jsonResponse({ session: { ID: 'a', Title: 'Session A' }, messages: [] });
+      }
+      return jsonResponse({});
+    }),
+  );
+
+  render(<CommanderApp />);
+  fireEvent.click(await screen.findByRole('button', { name: /Session A/ }));
+  fireEvent.change(screen.getByRole('textbox', { name: '输入提示词' }), { target: { value: 'go' } });
+  fireEvent.submit((screen.getByRole('textbox', { name: '输入提示词' }) as HTMLTextAreaElement).form!);
+  await waitFor(() => expect(turn.controller).not.toBeNull());
+
+  await act(async () => {
+    turn.controller?.enqueue(new TextEncoder().encode('event: status\ndata: {"text":"backend failed","status_code":"error"}\n\n'));
+    turn.controller?.close();
+  });
+  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('出错'));
+});
+
 test('shows login action and starts device flow when commander API is unauthorized', async () => {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), 'http://commander.test');

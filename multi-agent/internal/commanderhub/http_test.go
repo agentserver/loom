@@ -182,6 +182,63 @@ func TestHTTP_TreeInvalidatesDaemonCacheAfterTurnCompletes(t *testing.T) {
 	require.Equal(t, 2, calls)
 }
 
+func TestHTTP_TreeInvalidatesDaemonCacheAfterTerminalStatus(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
+	var mu sync.Mutex
+	var calls int
+	completed := false
+	releaseBackend := make(chan struct{})
+	var closeRelease sync.Once
+	closeReleaseBackend := func() { closeRelease.Do(func() { close(releaseBackend) }) }
+	srv, hub, _, o, cookie, cleanup := commanderSetup(t, resolver, "tok-alice", &tbBackend{
+		listFn: func(context.Context) ([]agentbackend.Session, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			calls++
+			title := "before terminal status"
+			if completed {
+				title = "after terminal status"
+			}
+			return []agentbackend.Session{{ID: "s1", Kind: agentbackend.KindClaude, Title: title}}, nil
+		},
+		resumeFn: func(ctx context.Context, _ string, _ string, sink executor.Sink) (executor.Result, error) {
+			mu.Lock()
+			completed = true
+			mu.Unlock()
+			agentbackend.WriteStatus(sink, agentbackend.StatusDone, "backend says done")
+			select {
+			case <-releaseBackend:
+			case <-ctx.Done():
+			}
+			return executor.Result{Summary: "late result"}, nil
+		},
+	})
+	defer cleanup()
+	defer closeReleaseBackend()
+
+	first := getCommanderTree(t, srv, cookie)
+	require.Equal(t, "before terminal status", first.Daemons[0].Sessions[0].Title)
+	require.True(t, sessionCacheHasEntry(hub, o, first.Daemons[0].DaemonID))
+
+	dis := hub.reg.daemons(o)
+	require.NotEmpty(t, dis)
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/commander/daemons/"+dis[0].DaemonID+"/sessions/s1/turn", strings.NewReader(`{"prompt":"go"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body, _ := io.ReadAll(resp.Body)
+	require.Contains(t, string(body), `"status_code":"done"`)
+
+	second := getCommanderTree(t, srv, cookie)
+	require.Equal(t, "after terminal status", second.Daemons[0].Sessions[0].Title)
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, 2, calls)
+}
+
 func TestHTTP_TreeMergesTurnState(t *testing.T) {
 	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
 	srv, hub, _, o, cookie, cleanup := commanderSetup(t, resolver, "tok-alice", &tbBackend{

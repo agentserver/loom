@@ -268,7 +268,7 @@ func (ch *commanderHandlers) turn(w http.ResponseWriter, r *http.Request, daemon
 			if writeSSE {
 				sse.writeEnvelope(env)
 			}
-			if isTerminalEnvelope(env) {
+			if isTerminalStreamEnvelope(env) {
 				terminal = true
 			}
 		case <-reqDone:
@@ -323,10 +323,13 @@ func (ch *commanderHandlers) updateTurnStateFromEnvelope(key turnKey, env comman
 				ch.hub.turns.set(key, turnStateAnswering)
 			case agentbackend.StatusAwaitingApproval:
 				ch.hub.turns.finish(key, turnStateAwaitingApproval)
+				ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
 			case agentbackend.StatusDone:
 				ch.hub.turns.finish(key, turnStateDone)
+				ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
 			case agentbackend.StatusError:
 				ch.hub.turns.fail(key, ep.Text)
+				ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
 			default:
 				switch ep.Text {
 				case "queued on daemon", "queued-on-daemon", "accepted by daemon":

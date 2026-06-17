@@ -48,7 +48,7 @@ func (h *Hub) SendCommand(ctx context.Context, o owner, daemonID, command string
 	default:
 	}
 	cmdID := h.nextCmdID()
-	pe := dc.registerPending(cmdID)
+	pe := dc.registerPending(cmdID, false)
 	ch := pe.ch
 	defer dc.removePending(cmdID)
 	if err := dc.writeEnvelope(commandEnvelope(cmdID, command, args)); err != nil {
@@ -79,8 +79,8 @@ func (h *Hub) SendCommand(ctx context.Context, o owner, daemonID, command string
 }
 
 // SendCommandStream runs a streaming command (session_turn). Events and the
-// terminal command_result/error are forwarded on the returned channel, which is
-// closed when the turn ends or the daemon/ctx is done.
+// terminal command_result/error or terminal status event are forwarded on the
+// returned channel, which is closed when the turn ends or the daemon/ctx is done.
 func (h *Hub) SendCommandStream(ctx context.Context, o owner, daemonID, command string, args json.RawMessage) (<-chan commander.Envelope, error) {
 	dc, ok := h.reg.lookup(o, daemonID)
 	if !ok {
@@ -92,7 +92,7 @@ func (h *Hub) SendCommandStream(ctx context.Context, o owner, daemonID, command 
 	default:
 	}
 	cmdID := h.nextCmdID()
-	pe := dc.registerPending(cmdID)
+	pe := dc.registerPending(cmdID, true)
 	ch := pe.ch
 	if err := dc.writeEnvelope(commandEnvelope(cmdID, command, args)); err != nil {
 		dc.removePending(cmdID)
@@ -117,7 +117,7 @@ func (h *Hub) SendCommandStream(ctx context.Context, o owner, daemonID, command 
 				case <-dc.done:
 					return
 				}
-				if isTerminalEnvelope(env) {
+				if isTerminalStreamEnvelope(env) {
 					return
 				}
 			case <-ctx.Done():
