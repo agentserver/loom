@@ -97,3 +97,92 @@ test('ignores stale file preview responses after session changes', async () => {
 
   expect(screen.queryByText('old content')).not.toBeInTheDocument();
 });
+
+test('expands directories lazily', async () => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = new URL(String(input), 'http://commander.test');
+    if (url.pathname.endsWith('/files') && url.searchParams.get('path') === '.') {
+      return jsonResponse({
+        root: '/repo',
+        path: '.',
+        entries: [{ name: 'src', path: 'src', kind: 'dir', size: 0 }],
+      });
+    }
+    if (url.pathname.endsWith('/files') && url.searchParams.get('path') === 'src') {
+      return jsonResponse({
+        root: '/repo',
+        path: 'src',
+        entries: [{ name: 'main.go', path: 'src/main.go', kind: 'file', size: 12 }],
+      });
+    }
+    return jsonResponse({ path: 'src/main.go', size: 12, content: 'package main' });
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<FileExplorerPanel daemonID="d1" sessionID="s1" />);
+
+  fireEvent.click(await screen.findByRole('button', { name: /展开目录 src/ }));
+
+  expect(await screen.findByText('main.go')).toBeInTheDocument();
+  expect(fetchMock).toHaveBeenCalledWith(
+    '/api/commander/daemons/d1/sessions/s1/files?path=src',
+    expect.objectContaining({ credentials: 'include' }),
+  );
+});
+
+test('copies file and directory paths', async () => {
+  const writeText = vi.fn(async () => {});
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText },
+  });
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), 'http://commander.test');
+      if (url.pathname.endsWith('/files')) {
+        return jsonResponse({
+          root: '/repo',
+          path: '.',
+          entries: [
+            { name: 'src', path: 'src', kind: 'dir', size: 0 },
+            { name: 'README.md', path: 'README.md', kind: 'file', size: 8 },
+          ],
+        });
+      }
+      return jsonResponse({ path: 'README.md', size: 8, content: 'readme' });
+    }),
+  );
+
+  render(<FileExplorerPanel daemonID="d1" sessionID="s1" />);
+
+  fireEvent.click(await screen.findByRole('button', { name: '复制路径 src' }));
+  fireEvent.click(await screen.findByRole('button', { name: '复制路径 README.md' }));
+
+  expect(writeText).toHaveBeenNthCalledWith(1, '/repo/src');
+  expect(writeText).toHaveBeenNthCalledWith(2, '/repo/README.md');
+});
+
+test('copies full paths for windows roots', async () => {
+  const writeText = vi.fn(async () => {});
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText },
+  });
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () =>
+      jsonResponse({
+        root: 'C:\\repo',
+        path: '.',
+        entries: [{ name: 'main.go', path: 'src/main.go', kind: 'file', size: 8 }],
+      }),
+    ),
+  );
+
+  render(<FileExplorerPanel daemonID="d1" sessionID="s1" />);
+
+  fireEvent.click(await screen.findByRole('button', { name: '复制路径 src/main.go' }));
+
+  expect(writeText).toHaveBeenCalledWith('C:\\repo\\src\\main.go');
+});

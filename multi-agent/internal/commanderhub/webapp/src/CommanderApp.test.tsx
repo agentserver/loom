@@ -15,6 +15,10 @@ function jsonResponse(body: unknown) {
   });
 }
 
+function textResponse(status: number, body: string) {
+  return new Response(body, { status });
+}
+
 function streamResponse() {
   let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
   const response = new Response(
@@ -97,4 +101,32 @@ test('keeps a session turn stream current after navigating away and back', async
   });
 
   await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('已回答完毕'));
+});
+
+test('shows login action and starts device flow when commander API is unauthorized', async () => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input), 'http://commander.test');
+    if (url.pathname === '/api/commander/tree') {
+      return textResponse(401, 'unauthorized');
+    }
+    if (url.pathname === '/api/commander/login' && init?.method === 'POST') {
+      return jsonResponse({
+        login_id: 'login-1',
+        verification_uri_complete: 'https://agent.example/device?user_code=ABC',
+        expires_in: 600,
+      });
+    }
+    return jsonResponse({});
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<CommanderApp />);
+
+  fireEvent.click(await screen.findByRole('button', { name: '用 agentserver 登录' }));
+
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/commander/login', expect.objectContaining({ method: 'POST' })));
+  expect(await screen.findByRole('link', { name: '打开授权页面' })).toHaveAttribute(
+    'href',
+    'https://agent.example/device?user_code=ABC',
+  );
 });

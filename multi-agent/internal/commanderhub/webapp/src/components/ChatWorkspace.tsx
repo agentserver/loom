@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef } from 'react';
 import { MessageRenderer } from './MessageRenderer';
 import type { SessionDetail, TurnState } from '../api/types';
 
@@ -41,6 +42,14 @@ export function ChatWorkspace({
   const title = sessionString(session?.session, 'Title', 'title') || 'Session';
   const cwd = sessionString(session?.session, 'WorkingDir', 'working_dir');
   const disabled = ['queued', 'starting', 'answering', 'awaiting_approval'].includes(turnState);
+  const messages = session?.messages || [];
+  const messageListRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const list = messageListRef.current;
+    if (!list) return;
+    list.scrollTop = list.scrollHeight;
+  }, [sessionString(session?.session, 'ID', 'id'), messages.length]);
 
   return (
     <main className="chat-workspace" data-testid="chat-workspace">
@@ -53,8 +62,8 @@ export function ChatWorkspace({
           {displayTurnState(turnState)}
         </span>
       </header>
-      <div data-testid="message-list" className="message-list">
-        {(session?.messages || []).map((msg, index) => {
+      <div data-testid="message-list" className="message-list" ref={messageListRef}>
+        {messages.map((msg, index) => {
           const role = msg.Role || msg.role || 'assistant';
           const text = msg.Text || msg.text || '';
           return (

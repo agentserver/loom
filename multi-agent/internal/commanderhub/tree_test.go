@@ -55,6 +55,10 @@ func TestSessionRowFromBackendMergesTurnState(t *testing.T) {
 		Kind:         agentbackend.KindCodex,
 		WorkingDir:   "/repo",
 		Title:        "investigate",
+		Origin:       agentbackend.SessionOriginSubagent,
+		ParentID:     "parent-1",
+		AgentName:    "Lovelace",
+		AgentRole:    "reviewer",
 		UpdatedAt:    updatedAt,
 		MessageCount: 7,
 		Preview:      "latest answer",
@@ -68,6 +72,10 @@ func TestSessionRowFromBackendMergesTurnState(t *testing.T) {
 	require.Equal(t, "s1", row.SessionID)
 	require.Equal(t, "codex", row.Kind)
 	require.Equal(t, "investigate", row.Title)
+	require.Equal(t, "subagent", row.Origin)
+	require.Equal(t, "parent-1", row.ParentID)
+	require.Equal(t, "Lovelace", row.AgentName)
+	require.Equal(t, "reviewer", row.AgentRole)
 	require.Equal(t, "/repo", row.WorkingDir)
 	require.Equal(t, updatedAt, row.UpdatedAt)
 	require.Equal(t, 7, row.MessageCount)

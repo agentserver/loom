@@ -13,6 +13,7 @@ package codex
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -177,8 +178,41 @@ type codexLine struct {
 }
 
 type codexMetaPayload struct {
-	ID  string `json:"id"`
-	Cwd string `json:"cwd"`
+	ID             string          `json:"id"`
+	Cwd            string          `json:"cwd"`
+	Originator     string          `json:"originator"`
+	ParentThreadID string          `json:"parent_thread_id"`
+	ThreadSource   string          `json:"thread_source"`
+	AgentNickname  string          `json:"agent_nickname"`
+	AgentRole      string          `json:"agent_role"`
+	Source         codexMetaSource `json:"source"`
+}
+
+type codexMetaSource struct {
+	Kind     string
+	Subagent codexMetaSubagent `json:"subagent"`
+}
+
+func (s *codexMetaSource) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
+		return nil
+	}
+	if data[0] == '"' {
+		return json.Unmarshal(data, &s.Kind)
+	}
+	type alias codexMetaSource
+	return json.Unmarshal(data, (*alias)(s))
+}
+
+type codexMetaSubagent struct {
+	ThreadSpawn codexThreadSpawn `json:"thread_spawn"`
+}
+
+type codexThreadSpawn struct {
+	ParentThreadID string `json:"parent_thread_id"`
+	AgentNickname  string `json:"agent_nickname"`
+	AgentRole      string `json:"agent_role"`
 }
 
 type codexTextPayload struct {
@@ -198,8 +232,9 @@ type codexResponseItemContent struct {
 
 func scanCodexSession(path, fallbackID string, withMessages bool) codexScanResult {
 	res := codexScanResult{session: agentbackend.Session{
-		ID:   fallbackID,
-		Kind: agentbackend.KindCodex,
+		ID:     fallbackID,
+		Kind:   agentbackend.KindCodex,
+		Origin: agentbackend.SessionOriginUser,
 	}}
 
 	f, err := os.Open(path)
@@ -230,6 +265,7 @@ func scanCodexSession(path, fallbackID string, withMessages bool) codexScanResul
 			if p.Cwd != "" {
 				res.session.WorkingDir = p.Cwd
 			}
+			applyCodexSessionMeta(&res.session, p)
 			if res.session.StartedAt.IsZero() && !ts.IsZero() {
 				res.session.StartedAt = ts
 			}
@@ -267,6 +303,25 @@ func scanCodexSession(path, fallbackID string, withMessages bool) codexScanResul
 		res.session.Preview = truncatePreview(lastAssistantText)
 	}
 	return res
+}
+
+func applyCodexSessionMeta(sess *agentbackend.Session, p codexMetaPayload) {
+	spawn := p.Source.Subagent.ThreadSpawn
+	parentID := firstNonEmpty(p.ParentThreadID, spawn.ParentThreadID)
+	if p.ThreadSource == "subagent" || parentID != "" || p.AgentNickname != "" || spawn.AgentNickname != "" {
+		sess.Origin = agentbackend.SessionOriginSubagent
+		sess.ParentID = parentID
+		sess.AgentName = firstNonEmpty(p.AgentNickname, spawn.AgentNickname)
+		sess.AgentRole = firstNonEmpty(p.AgentRole, spawn.AgentRole)
+		return
+	}
+	if p.Originator == "codex_exec" || p.Source.Kind == "exec" {
+		sess.Origin = agentbackend.SessionOriginAgentTask
+		return
+	}
+	if sess.Origin == "" {
+		sess.Origin = agentbackend.SessionOriginUser
+	}
 }
 
 func scanCodexSessionWorkingDir(path string) string {
@@ -367,6 +422,10 @@ func truncatePreview(s string) string {
 }
 
 func titleFromUserText(s string) string {
+	s = stripCodexInjectedUserPrefix(s)
+	if s == "" {
+		return ""
+	}
 	s = strings.TrimSpace(strings.Join(strings.Fields(s), " "))
 	if s == "" {
 		return ""
@@ -375,4 +434,43 @@ func titleFromUserText(s string) string {
 		return s
 	}
 	return truncatePreview(s)
+}
+
+func stripCodexInjectedUserPrefix(s string) string {
+	s = strings.TrimSpace(s)
+	for {
+		switch {
+		case strings.HasPrefix(s, "<environment_context>"):
+			next, ok := stripThroughEndTag(s, "</environment_context>")
+			if !ok {
+				return s
+			}
+			s = next
+		case strings.HasPrefix(s, "<USER_FILES_MANIFEST"):
+			next, ok := stripThroughEndTag(s, "</USER_FILES_MANIFEST>")
+			if !ok {
+				return s
+			}
+			s = next
+		default:
+			return s
+		}
+	}
+}
+
+func stripThroughEndTag(s, endTag string) (string, bool) {
+	end := strings.Index(s, endTag)
+	if end < 0 {
+		return "", false
+	}
+	return strings.TrimSpace(s[end+len(endTag):]), true
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

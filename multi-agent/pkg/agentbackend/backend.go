@@ -16,6 +16,15 @@ const (
 	KindOpencode Kind = "opencode"
 )
 
+type SessionOrigin string
+
+const (
+	SessionOriginUser      SessionOrigin = "user"
+	SessionOriginSubagent  SessionOrigin = "subagent"
+	SessionOriginAgentTask SessionOrigin = "agent_task"
+	SessionOriginUnknown   SessionOrigin = "unknown"
+)
+
 // Re-exports so callers can depend on agentbackend only.
 type (
 	Task   = executor.Task
@@ -98,6 +107,19 @@ type Session struct {
 	// Title is a short human-readable name for the session. Backends set it to
 	// the first user prompt when available. UIs may fall back to Preview or ID.
 	Title string
+
+	// Origin classifies whether this session was started directly by the user
+	// or spawned as a subagent/sidechain by another session.
+	Origin SessionOrigin
+
+	// ParentID links subagent sessions back to the session that spawned them.
+	// Empty for user sessions or when the backend does not expose the parent.
+	ParentID string
+
+	// AgentName and AgentRole carry backend-provided subagent labels when
+	// available. They are empty for normal user sessions.
+	AgentName string
+	AgentRole string
 
 	// StartedAt is when the first message in the session was recorded.
 	// Zero value means unknown.

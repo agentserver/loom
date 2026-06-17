@@ -81,3 +81,75 @@ test('mobile prioritizes chat without horizontal overflow', async ({ page }, tes
     expect(overflow).toBe(false);
   }
 });
+
+test('desktop panes own vertical scrolling and chat opens at bottom', async ({ page }, testInfo) => {
+  if (!testInfo.project.name.includes('desktop')) return;
+
+  const sessions = Array.from({ length: 80 }, (_, index) => ({
+    ...treePayload.daemons[0].sessions[0],
+    session_id: `s${index + 1}`,
+    title: `Session ${index + 1} with enough text to fill the sidebar`,
+  }));
+  await page.route('**/api/commander/tree', async (route) => {
+    await route.fulfill({
+      json: {
+        daemons: [{ ...treePayload.daemons[0], sessions }],
+      },
+    });
+  });
+  await page.route('**/api/commander/daemons/d1/sessions/s1', async (route) => {
+    await route.fulfill({
+      json: {
+        session: {
+          ID: 's1',
+          Title: sessions[0].title,
+          WorkingDir: sessions[0].working_dir,
+        },
+        messages: Array.from({ length: 70 }, (_, index) => ({
+          Role: index % 2 === 0 ? 'user' : 'assistant',
+          Text: `message ${index + 1}\n\n` + 'content line\n'.repeat(5),
+        })),
+      },
+    });
+  });
+  await page.route('**/api/commander/daemons/d1/sessions/s1/files?path=.', async (route) => {
+    await route.fulfill({
+      json: {
+        root: '/root/project',
+        path: '.',
+        entries: Array.from({ length: 90 }, (_, index) => ({
+          name: `file-${String(index + 1).padStart(2, '0')}.txt`,
+          path: `file-${String(index + 1).padStart(2, '0')}.txt`,
+          kind: 'file',
+          size: 40,
+        })),
+      },
+    });
+  });
+
+  await page.goto('/commander/');
+  await page.getByRole('button', { name: /Session 1 with enough text/ }).first().click();
+  await expect(page.getByText('message 70')).toBeVisible();
+
+  const metrics = await page.evaluate(() => {
+    const daemonTree = document.querySelector('[data-testid="daemon-tree"]') as HTMLElement;
+    const messages = document.querySelector('[data-testid="message-list"]') as HTMLElement;
+    const files = document.querySelector('[data-testid="file-panel"]') as HTMLElement;
+    const html = document.documentElement;
+    return {
+      pageScrolls: html.scrollHeight > html.clientHeight,
+      daemonScrollable: daemonTree.scrollHeight > daemonTree.clientHeight,
+      messagesScrollable: messages.scrollHeight > messages.clientHeight,
+      filesScrollable: files.scrollHeight > files.clientHeight,
+      messagesAtBottom: messages.scrollTop + messages.clientHeight >= messages.scrollHeight - 2,
+    };
+  });
+
+  expect(metrics).toEqual({
+    pageScrolls: false,
+    daemonScrollable: true,
+    messagesScrollable: true,
+    filesScrollable: true,
+    messagesAtBottom: true,
+  });
+});

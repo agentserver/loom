@@ -188,6 +188,169 @@ func TestGetSession_CurrentRolloutResponseItemsReturnMessages(t *testing.T) {
 	}
 }
 
+func TestGetSession_CodexMetaSourceStringPreservesWorkingDir(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	dir := filepath.Join(home, ".codex", "sessions", "2026", "06", "17")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id := "cccccccc-1111-2222-3333-dddddddddddd"
+	body := strings.Join([]string{
+		`{"timestamp":"2026-06-17T03:00:00.000Z","type":"session_meta","payload":{"id":"` + id + `","cwd":"/tmp/codex-cli-source","source":"cli","thread_source":"user"}}`,
+		`{"timestamp":"2026-06-17T03:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"open existing session"}]}}`,
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(dir, "rollout-2026-06-17T03-00-00-"+id+".jsonl"), []byte(body+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir()}, nil)
+	listed, err := b.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("len(ListSessions)=%d want 1", len(listed))
+	}
+	if listed[0].WorkingDir != "/tmp/codex-cli-source" {
+		t.Fatalf("ListSessions WorkingDir=%q want /tmp/codex-cli-source", listed[0].WorkingDir)
+	}
+
+	sess, _, err := b.GetSession(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.WorkingDir != "/tmp/codex-cli-source" {
+		t.Fatalf("GetSession WorkingDir=%q want /tmp/codex-cli-source", sess.WorkingDir)
+	}
+}
+
+func TestGetSession_CodexExecManifestIsAgentTaskAndTitleSkipsManifest(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	dir := filepath.Join(home, ".codex", "sessions", "2026", "06", "17")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id := "abababab-1111-2222-3333-cdcdcdcdcdcd"
+	body := strings.Join([]string{
+		`{"timestamp":"2026-06-17T04:00:00.000Z","type":"session_meta","payload":{"id":"` + id + `","cwd":"/tmp/codex-agent-task","originator":"codex_exec","source":"exec","thread_source":"user"}}`,
+		`{"timestamp":"2026-06-17T04:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<USER_FILES_MANIFEST version=1>\n{\"files\":[],\"writes\":[]}\n</USER_FILES_MANIFEST>\n\nack\n\n=== CAPABILITY ===\ne2e marker"}]}}`,
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(dir, "rollout-2026-06-17T04-00-00-"+id+".jsonl"), []byte(body+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir()}, nil)
+	listed, err := b.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("len(ListSessions)=%d want 1", len(listed))
+	}
+	if listed[0].Origin != agentbackend.SessionOriginAgentTask {
+		t.Fatalf("ListSessions Origin=%q want agent_task", listed[0].Origin)
+	}
+	if listed[0].Title != "ack === CAPABILITY === e2e marker" {
+		t.Fatalf("ListSessions Title=%q", listed[0].Title)
+	}
+
+	sess, _, err := b.GetSession(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Origin != agentbackend.SessionOriginAgentTask {
+		t.Fatalf("GetSession Origin=%q want agent_task", sess.Origin)
+	}
+	if sess.Title != "ack === CAPABILITY === e2e marker" {
+		t.Fatalf("GetSession Title=%q", sess.Title)
+	}
+}
+
+func TestGetSession_SkipsEnvironmentContextForTitle(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	dir := filepath.Join(home, ".codex", "sessions", "2026", "06", "17")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id := "eeeeeeee-1111-2222-3333-ffffffffffff"
+	body := strings.Join([]string{
+		`{"timestamp":"2026-06-17T01:00:00.000Z","type":"session_meta","payload":{"id":"` + id + `","cwd":"/tmp/codex-env-title"}}`,
+		`{"timestamp":"2026-06-17T01:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>/tmp/codex-env-title</cwd>\n  <shell>zsh</shell>\n</environment_context>"}]}}`,
+		`{"timestamp":"2026-06-17T01:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"实现 commander session 标题优化"}]}}`,
+		`{"timestamp":"2026-06-17T01:00:03.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"我会调整标题逻辑。"}]}}`,
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(dir, "rollout-2026-06-17T01-00-00-"+id+".jsonl"), []byte(body+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir()}, nil)
+	listed, err := b.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("len(ListSessions)=%d want 1", len(listed))
+	}
+	if listed[0].Title != "实现 commander session 标题优化" {
+		t.Fatalf("ListSessions title=%q want first real user prompt", listed[0].Title)
+	}
+
+	sess, msgs, err := b.GetSession(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Title != "实现 commander session 标题优化" {
+		t.Fatalf("GetSession title=%q want first real user prompt", sess.Title)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("len(msgs)=%d want 3", len(msgs))
+	}
+}
+
+func TestGetSession_CodexSubagentMetadata(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	dir := filepath.Join(home, ".codex", "sessions", "2026", "06", "17")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	parentID := "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
+	id := "ffffffff-1111-2222-3333-eeeeeeeeeeee"
+	body := strings.Join([]string{
+		`{"timestamp":"2026-06-17T02:00:00.000Z","type":"session_meta","payload":{"id":"` + id + `","parent_thread_id":"` + parentID + `","cwd":"/tmp/codex-subagent","thread_source":"subagent","agent_nickname":"Lovelace","agent_role":"reviewer","source":{"subagent":{"thread_spawn":{"parent_thread_id":"` + parentID + `","depth":1,"agent_nickname":"Lovelace","agent_role":"reviewer"}}}}}`,
+		`{"timestamp":"2026-06-17T02:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"检查实现质量"}]}}`,
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(dir, "rollout-2026-06-17T02-00-00-"+id+".jsonl"), []byte(body+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir()}, nil)
+	listed, err := b.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("len(ListSessions)=%d want 1", len(listed))
+	}
+	if listed[0].Origin != agentbackend.SessionOriginSubagent {
+		t.Fatalf("Origin=%q want subagent", listed[0].Origin)
+	}
+	if listed[0].ParentID != parentID || listed[0].AgentName != "Lovelace" || listed[0].AgentRole != "reviewer" {
+		t.Fatalf("subagent metadata mismatch: %+v", listed[0])
+	}
+
+	sess, _, err := b.GetSession(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Origin != agentbackend.SessionOriginSubagent || sess.ParentID != parentID {
+		t.Fatalf("GetSession subagent metadata mismatch: %+v", sess)
+	}
+}
+
 func TestGetSession_UnknownIDReturnsErrSessionNotFound(t *testing.T) {
 	home := copyFixtureToHOME(t)
 	setTestHome(t, home)

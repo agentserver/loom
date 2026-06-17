@@ -13,6 +13,10 @@ export interface SessionRow {
   session_id: string;
   kind: string;
   title: string;
+  origin?: 'user' | 'subagent' | 'agent_task' | 'unknown' | string;
+  parent_id?: string;
+  agent_name?: string;
+  agent_role?: string;
   working_dir?: string;
   updated_at?: string;
   message_count?: number;
