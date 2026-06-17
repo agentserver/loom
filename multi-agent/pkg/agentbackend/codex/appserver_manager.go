@@ -18,6 +18,8 @@ import (
 var (
 	_ agentbackend.Backend              = (*workerBackend)(nil)
 	_ agentbackend.SessionWorkerBackend = (*workerBackend)(nil)
+
+	errAppServerUncorrelatedDelta = errors.New("received app-server delta before turn ID; current-turn correlation is unsupported")
 )
 
 type workerBackend struct {
@@ -222,8 +224,11 @@ func (b *workerBackend) runAppServerTurn(
 			meta := appServerNotificationMetaFor(msg)
 			if meta.ThreadID == w.sessionID && meta.TurnID != "" && turnID == "" {
 				switch msg.Method {
-				case "turn/started", "item/agentMessage/delta":
+				case "turn/started":
 					turnID = meta.TurnID
+				case "item/agentMessage/delta":
+					_ = b.manager.close()
+					return result, errAppServerUncorrelatedDelta
 				}
 			}
 			emit(msg)

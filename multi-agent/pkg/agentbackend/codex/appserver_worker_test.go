@@ -188,7 +188,7 @@ func TestAppServerManagerSendsInitializeResumeAndTurnWithContext(t *testing.T) {
 	assertTurnStartRequest(t, reqs[3], "thr-1", "/session-cwd", "User answered: continue")
 }
 
-func TestAppServerManagerLearnsTurnIDFromDelta(t *testing.T) {
+func TestAppServerManagerRejectsUncorrelatedDeltaBeforeTurnStarted(t *testing.T) {
 	cfg := agentbackend.Config{Kind: agentbackend.KindCodex, Bin: "codex", WorkDir: "/repo"}
 	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
 		if req.Method != "turn/start" {
@@ -196,9 +196,10 @@ func TestAppServerManagerLearnsTurnIDFromDelta(t *testing.T) {
 		}
 		writeFakeAppServerResult(t, w, *req.ID, map[string]any{"turn": map[string]any{"status": "running"}})
 		writeFakeAppServerNotification(t, w, "item/agentMessage/delta", `{"threadId":"other","turnId":"turn-x","itemId":"other","delta":"ignored"}`)
-		writeFakeAppServerNotification(t, w, "item/agentMessage/delta", `{"threadId":"thr-1","turnId":"turn-1","itemId":"i1","delta":"ok"}`)
-		writeFakeAppServerNotification(t, w, "item/agentMessage/delta", `{"threadId":"thr-1","turnId":"turn-2","itemId":"stale","delta":"stale"}`)
-		writeFakeAppServerNotification(t, w, "turn/completed", `{"threadId":"thr-1","turn":{"id":"turn-1","status":"completed"}}`)
+		writeFakeAppServerNotification(t, w, "item/agentMessage/delta", `{"threadId":"thr-1","turnId":"turn-stale","itemId":"old","delta":"stale"}`)
+		writeFakeAppServerNotification(nil, w, "item/agentMessage/delta", `{"threadId":"thr-1","turnId":"turn-current","itemId":"i1","delta":"ok"}`)
+		writeFakeAppServerNotification(nil, w, "turn/completed", `{"threadId":"thr-1","turn":{"id":"turn-current","status":"completed"}}`)
+		writeFakeAppServerNotification(nil, w, "turn/completed", `{"threadId":"thr-1","turn":{"id":"turn-stale","status":"completed"}}`)
 		return true
 	})
 	m := newAppServerManager(cfg, nil)
@@ -219,14 +220,23 @@ func TestAppServerManagerLearnsTurnIDFromDelta(t *testing.T) {
 	defer cancel()
 	sink := &appServerWorkerTestSink{}
 	res, err := worker.Run(ctx, "continue", sink)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatalf("Run error = nil, want non-fallback correlation error; result=%+v events=%+v", res, sink.events)
 	}
-	if res.Summary != "ok" || res.SessionID != "thr-1" {
-		t.Fatalf("result=%+v, want summary ok and session thr-1", res)
+	if errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
+		t.Fatalf("Run error = %v, should not allow fallback after submitted uncorrelated delta", err)
 	}
-	if got := sink.events; len(got) != 1 || got[0] != (appServerWorkerTestEvent{kind: "chunk", data: "ok"}) {
-		t.Fatalf("events=%+v, want only ok chunk", got)
+	if !strings.Contains(err.Error(), "received app-server delta before turn ID") {
+		t.Fatalf("Run error = %v, want uncorrelated delta detail", err)
+	}
+	if res.Summary != "" || res.SessionID != "thr-1" {
+		t.Fatalf("result=%+v, want empty summary and session thr-1", res)
+	}
+	if len(sink.events) != 0 {
+		t.Fatalf("events=%+v, want no stale or current chunks", sink.events)
+	}
+	if !sink.closed {
+		t.Fatal("sink not closed after non-fallback error")
 	}
 }
 
