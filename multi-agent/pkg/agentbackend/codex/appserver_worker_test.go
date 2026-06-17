@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -835,6 +836,20 @@ func TestAppServerWorkerCompletionAfterHumanloopSendReturnsIncludesPayload(t *te
 	}
 	if res.AwaitingUser == nil || res.AwaitingUser.Question != "ack before terminal" {
 		t.Fatalf("AwaitingUser=%+v, want ack-gated payload", res.AwaitingUser)
+	}
+}
+
+func TestAppServerWorkerReceiveLoopUsesCallbackGatedHumanloopIPC(t *testing.T) {
+	source, err := os.ReadFile("appserver_manager.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	if strings.Contains(text, "srv.ReceivePending()") {
+		t.Fatal("app-server receive loop must not split ReceivePending from payload recording")
+	}
+	if !strings.Contains(text, "srv.ReceiveAndAck(func(p humanloop.Payload) error") {
+		t.Fatal("app-server receive loop must record payload inside ReceiveAndAck callback")
 	}
 }
 
