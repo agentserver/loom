@@ -104,8 +104,8 @@ func validateEndpoint(ep Endpoint) error {
 	}
 }
 
-// IPCServer listens for a single Payload from the humanloop
-// MCP subcommand and then closes.
+// IPCServer accepts one Payload per IPC connection from the humanloop MCP
+// subcommand. Callers can receive a single payload or loop over ReceiveAndAck.
 type IPCServer struct {
 	ln      net.Listener
 	cleanup func()
