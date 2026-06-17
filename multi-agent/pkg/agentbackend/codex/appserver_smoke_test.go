@@ -3,7 +3,9 @@ package codex
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -35,9 +37,12 @@ func TestCodexAppServerSmoke(t *testing.T) {
 		}()
 	}
 
-	wb, ok := b.(agentbackend.SessionWorkerBackend)
-	if !ok {
-		t.Fatalf("app_server codex backend does not implement SessionWorkerBackend")
+	wb, err := ensureCodexAppServerSmokeBackend(ctx, b)
+	if err != nil {
+		if ctx.Err() != nil {
+			t.Fatalf("codex app-server handshake timed out with error %v", err)
+		}
+		t.Fatalf("codex app-server handshake failed: %v", err)
 	}
 
 	worker, err := wb.NewSessionWorker(ctx, agentbackend.Session{
@@ -57,5 +62,52 @@ func TestCodexAppServerSmoke(t *testing.T) {
 	}
 	if !errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
 		t.Fatalf("NewSessionWorker error = %v, want ErrSessionWorkerUnavailable", err)
+	}
+}
+
+func ensureCodexAppServerSmokeBackend(ctx context.Context, b agentbackend.Backend) (*workerBackend, error) {
+	wb, ok := b.(*workerBackend)
+	if !ok {
+		return nil, fmt.Errorf("app_server codex backend has type %T, want *workerBackend", b)
+	}
+	if wb.manager == nil {
+		return nil, agentbackend.ErrSessionWorkerUnavailable
+	}
+	if err := wb.manager.ensure(ctx); err != nil {
+		return nil, err
+	}
+	return wb, nil
+}
+
+func TestCodexAppServerSmokeBackendEnsureFailsWhenBinaryUnavailable(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	b, err := agentbackend.New(agentbackend.Config{
+		Kind:       agentbackend.KindCodex,
+		Bin:        filepath.Join(t.TempDir(), "missing-codex"),
+		WorkDir:    t.TempDir(),
+		WorkerMode: "app_server",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closer, ok := b.(interface{ Close() error }); ok {
+		defer func() {
+			if err := closer.Close(); err != nil {
+				t.Logf("closing codex app-server backend: %v", err)
+			}
+		}()
+	}
+
+	wb, err := ensureCodexAppServerSmokeBackend(ctx, b)
+	if err == nil {
+		if wb != nil {
+			_ = wb.Close()
+		}
+		t.Fatal("ensureCodexAppServerSmokeBackend error = nil, want unavailable for missing binary")
+	}
+	if !errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
+		t.Fatalf("ensureCodexAppServerSmokeBackend error = %v, want ErrSessionWorkerUnavailable", err)
 	}
 }
