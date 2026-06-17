@@ -1097,6 +1097,64 @@ func TestCodexSessionWorkerReturnsNonSentinelErrorAfterAcceptedUnavailable(t *te
 	}
 }
 
+func TestCodexSessionWorkerTurnStartedAlonePreventsUnavailableFallback(t *testing.T) {
+	sink := &appServerWorkerTestSink{}
+	w := &codexSessionWorker{
+		sessionID: "thr-1",
+		workDir:   t.TempDir(),
+		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage), _ func()) (appServerTurnResult, error) {
+			emit(appServerWorkerNotification("turn/started", `{"threadId":"thr-1","turn":{"id":"turn-1","status":"running"}}`))
+			return appServerTurnResult{}, agentbackend.ErrSessionWorkerUnavailable
+		},
+	}
+
+	res, err := w.Run(context.Background(), "prompt", sink)
+	if err == nil {
+		t.Fatal("Run error = nil, want non-sentinel unavailable detail")
+	}
+	if errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
+		t.Fatalf("Run error = %v, should not match ErrSessionWorkerUnavailable after turn/started", err)
+	}
+	if !strings.Contains(err.Error(), agentbackend.ErrSessionWorkerUnavailable.Error()) {
+		t.Fatalf("Run error = %v, want unavailable detail preserved", err)
+	}
+	if res.Summary != "" || res.SessionID != "thr-1" {
+		t.Fatalf("result=%+v, want empty summary for session thr-1", res)
+	}
+	if !sink.closed {
+		t.Fatal("sink not closed")
+	}
+}
+
+func TestCodexSessionWorkerDeltaAlonePreventsUnavailableFallback(t *testing.T) {
+	sink := &appServerWorkerTestSink{}
+	w := &codexSessionWorker{
+		sessionID: "thr-1",
+		workDir:   t.TempDir(),
+		runTurn: func(_ context.Context, _ string, emit func(appServerRPCMessage), _ func()) (appServerTurnResult, error) {
+			emit(appServerWorkerNotification("item/agentMessage/delta", `{"threadId":"thr-1","turnId":"turn-1","itemId":"i1","delta":"partial"}`))
+			return appServerTurnResult{}, agentbackend.ErrSessionWorkerUnavailable
+		},
+	}
+
+	res, err := w.Run(context.Background(), "prompt", sink)
+	if err == nil {
+		t.Fatal("Run error = nil, want non-sentinel unavailable detail")
+	}
+	if errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
+		t.Fatalf("Run error = %v, should not match ErrSessionWorkerUnavailable after delta", err)
+	}
+	if !strings.Contains(err.Error(), agentbackend.ErrSessionWorkerUnavailable.Error()) {
+		t.Fatalf("Run error = %v, want unavailable detail preserved", err)
+	}
+	if res.Summary != "partial" || res.SessionID != "thr-1" {
+		t.Fatalf("result=%+v, want partial summary for session thr-1", res)
+	}
+	if !sink.closed {
+		t.Fatal("sink not closed")
+	}
+}
+
 func TestCodexSessionWorkerSubmittedUnavailableDoesNotFallbackThroughCommander(t *testing.T) {
 	worker := &codexSessionWorker{
 		sessionID: "thr-1",

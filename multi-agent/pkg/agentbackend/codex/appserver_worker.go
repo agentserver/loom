@@ -91,7 +91,13 @@ func (w *codexSessionWorker) Run(ctx context.Context, prompt string, sink agentb
 			if err := json.Unmarshal(msg.Params, &p); err != nil {
 				return
 			}
-			if p.ThreadID != w.sessionID || p.Delta == "" || activeTurnID == "" || p.TurnID != activeTurnID {
+			if p.ThreadID != w.sessionID || p.Delta == "" || p.TurnID == "" {
+				return
+			}
+			if activeTurnID == "" {
+				activeTurnID = p.TurnID
+			}
+			if p.TurnID != activeTurnID {
 				return
 			}
 			markAccepted()
