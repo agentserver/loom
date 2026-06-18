@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strconv"
 	"sync"
+	"time"
 
 	executorpkg "github.com/yourorg/multi-agent/internal/executor"
 	"github.com/yourorg/multi-agent/internal/humanloop"
@@ -20,6 +22,11 @@ var (
 	_ agentbackend.SessionWorkerBackend = (*workerBackend)(nil)
 
 	errAppServerUncorrelatedDelta = errors.New("received app-server delta before turn ID; current-turn correlation is unsupported")
+)
+
+const (
+	initialAppServerStartBackoff = 250 * time.Millisecond
+	maxAppServerStartBackoff     = 5 * time.Second
 )
 
 type workerBackend struct {
@@ -93,7 +100,7 @@ func (b *workerBackend) NewSessionWorker(ctx context.Context, session agentbacke
 		_ = srv.Close()
 		<-receiveDone
 		_ = os.RemoveAll(sockDir)
-		return nil, agentbackend.ErrSessionWorkerUnavailable
+		return nil, err
 	}
 
 	var closeOnce sync.Once
@@ -130,7 +137,8 @@ type appServerHumanloopPayloadBuffer struct {
 	cond     *sync.Cond
 	active   bool
 	inFlight int
-	ch       chan humanloop.Payload
+	queue    []humanloop.Payload
+	notify   chan struct{}
 }
 
 type appServerHumanloopDelivery struct {
@@ -138,8 +146,8 @@ type appServerHumanloopDelivery struct {
 	done   bool
 }
 
-func newAppServerHumanloopPayloadBuffer(size int) *appServerHumanloopPayloadBuffer {
-	b := &appServerHumanloopPayloadBuffer{ch: make(chan humanloop.Payload, size)}
+func newAppServerHumanloopPayloadBuffer(_ int) *appServerHumanloopPayloadBuffer {
+	b := &appServerHumanloopPayloadBuffer{notify: make(chan struct{}, 1)}
 	b.cond = sync.NewCond(&b.mu)
 	return b
 }
@@ -147,13 +155,13 @@ func newAppServerHumanloopPayloadBuffer(size int) *appServerHumanloopPayloadBuff
 func (b *appServerHumanloopPayloadBuffer) beginTurn() {
 	b.mu.Lock()
 	b.active = true
+	b.queue = nil
 	b.mu.Unlock()
-	drainHumanloopPayloads(b.ch)
+	b.drainNotifications()
 }
 
 func (b *appServerHumanloopPayloadBuffer) endTurn() {
-	b.deactivateAndWait()
-	drainHumanloopPayloads(b.ch)
+	b.deactivateAndDrain(nil)
 }
 
 func (b *appServerHumanloopPayloadBuffer) deliver(p humanloop.Payload) {
@@ -177,30 +185,33 @@ func (d *appServerHumanloopDelivery) deliver(p humanloop.Payload) {
 	}
 	b := d.buffer
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if d.done {
+		b.mu.Unlock()
 		return
 	}
 	d.done = true
-	defer b.finishDeliveryLocked()
-	select {
-	case b.ch <- p:
-	default:
-	}
+	b.queue = append(b.queue, p)
+	b.finishDeliveryLocked()
+	b.signalLocked()
+	b.mu.Unlock()
 }
 
 func (b *appServerHumanloopPayloadBuffer) drainTerminal(pending *executorpkg.AskUserPayload) *executorpkg.AskUserPayload {
-	b.deactivateAndWait()
-	return appServerRememberQueuedHumanloopPayload(b.ch, pending)
+	return b.deactivateAndDrain(pending)
 }
 
-func (b *appServerHumanloopPayloadBuffer) deactivateAndWait() {
+func (b *appServerHumanloopPayloadBuffer) deactivateAndDrain(pending *executorpkg.AskUserPayload) *executorpkg.AskUserPayload {
 	b.mu.Lock()
 	b.active = false
-	for b.inFlight > 0 {
+	for {
+		pending = b.rememberQueuedLocked(pending)
+		if b.inFlight == 0 {
+			b.mu.Unlock()
+			b.drainNotifications()
+			return pending
+		}
 		b.cond.Wait()
 	}
-	b.mu.Unlock()
 }
 
 func (b *appServerHumanloopPayloadBuffer) finishDeliveryLocked() {
@@ -210,8 +221,44 @@ func (b *appServerHumanloopPayloadBuffer) finishDeliveryLocked() {
 	}
 }
 
-func (b *appServerHumanloopPayloadBuffer) C() <-chan humanloop.Payload {
-	return b.ch
+func (b *appServerHumanloopPayloadBuffer) C() <-chan struct{} {
+	return b.notify
+}
+
+func (b *appServerHumanloopPayloadBuffer) rememberQueued(pending *executorpkg.AskUserPayload) *executorpkg.AskUserPayload {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.rememberQueuedLocked(pending)
+}
+
+func (b *appServerHumanloopPayloadBuffer) rememberQueuedLocked(pending *executorpkg.AskUserPayload) *executorpkg.AskUserPayload {
+	for len(b.queue) > 0 {
+		p := b.queue[0]
+		copy(b.queue, b.queue[1:])
+		b.queue[len(b.queue)-1] = humanloop.Payload{}
+		b.queue = b.queue[:len(b.queue)-1]
+		if pending == nil {
+			pending = humanloopPayloadToAwaitingUser(p)
+		}
+	}
+	return pending
+}
+
+func (b *appServerHumanloopPayloadBuffer) signalLocked() {
+	select {
+	case b.notify <- struct{}{}:
+	default:
+	}
+}
+
+func (b *appServerHumanloopPayloadBuffer) drainNotifications() {
+	for {
+		select {
+		case <-b.notify:
+		default:
+			return
+		}
+	}
 }
 
 func (b *workerBackend) runAppServerTurn(
@@ -239,9 +286,7 @@ func (b *workerBackend) runAppServerTurn(
 			Text: "User answered: " + prompt,
 		}},
 	}
-	submitted := false
 	startResult, err := b.manager.startTurn(ctx, w.generation, params, func() {
-		submitted = true
 		markSubmitted()
 	})
 	turnID := startResult.Turn.ID
@@ -252,21 +297,16 @@ func (b *workerBackend) runAppServerTurn(
 		if appServerMethodNotFound(err, "turn/start") {
 			return appServerTurnResult{AllowFallback: true}, agentbackend.ErrSessionWorkerUnavailable
 		}
-		if submitted && ctx.Err() != nil {
-			_ = b.manager.close()
-		}
 		return appServerTurnResult{}, err
 	}
 
 	var result appServerTurnResult
 	var pendingAwaitingUser *executorpkg.AskUserPayload
 	for {
-		pendingAwaitingUser = appServerRememberQueuedHumanloopPayload(payloads.C(), pendingAwaitingUser)
+		pendingAwaitingUser = payloads.rememberQueued(pendingAwaitingUser)
 		select {
-		case p := <-payloads.C():
-			if pendingAwaitingUser == nil {
-				pendingAwaitingUser = humanloopPayloadToAwaitingUser(p)
-			}
+		case <-payloads.C():
+			pendingAwaitingUser = payloads.rememberQueued(pendingAwaitingUser)
 		case msg, ok := <-sub.ch:
 			if !ok {
 				return result, agentbackend.ErrSessionWorkerUnavailable
@@ -277,7 +317,6 @@ func (b *workerBackend) runAppServerTurn(
 				case "turn/started":
 					turnID = meta.TurnID
 				case "item/agentMessage/delta":
-					_ = b.manager.close()
 					return result, errAppServerUncorrelatedDelta
 				}
 			}
@@ -293,31 +332,7 @@ func (b *workerBackend) runAppServerTurn(
 				return result, nil
 			}
 		case <-ctx.Done():
-			_ = b.manager.close()
 			return result, ctx.Err()
-		}
-	}
-}
-
-func appServerRememberQueuedHumanloopPayload(payloads <-chan humanloop.Payload, pending *executorpkg.AskUserPayload) *executorpkg.AskUserPayload {
-	for {
-		select {
-		case p := <-payloads:
-			if pending == nil {
-				pending = humanloopPayloadToAwaitingUser(p)
-			}
-		default:
-			return pending
-		}
-	}
-}
-
-func drainHumanloopPayloads(payloads <-chan humanloop.Payload) {
-	for {
-		select {
-		case <-payloads:
-		default:
-			return
 		}
 	}
 }
@@ -400,7 +415,10 @@ type appServerManager struct {
 	generation int64
 	starter    appServerStarter
 
-	lifecycleCancel context.CancelFunc
+	lifecycleCancel  context.CancelFunc
+	lastStartFailure time.Time
+	startBackoff     time.Duration
+	now              func() time.Time
 }
 
 func newAppServerManager(cfg agentbackend.Config, env []string) *appServerManager {
@@ -420,6 +438,7 @@ func (m *appServerManager) ensure(ctx context.Context) error {
 		}
 		if m.started {
 			conn := m.clearLocked()
+			m.recordStartFailureLocked()
 			m.mu.Unlock()
 			_ = closeAppServerConnection(conn)
 			continue
@@ -441,6 +460,10 @@ func (m *appServerManager) ensure(ctx context.Context) error {
 			}
 		}
 		if err := ctx.Err(); err != nil {
+			m.mu.Unlock()
+			return agentbackend.ErrSessionWorkerUnavailable
+		}
+		if m.startBackoffRemainingLocked() > 0 {
 			m.mu.Unlock()
 			return agentbackend.ErrSessionWorkerUnavailable
 		}
@@ -532,6 +555,7 @@ func (m *appServerManager) startAndInitialize(ctx context.Context, startDone cha
 		_ = closeAppServerConnection(conn)
 		return agentbackend.ErrSessionWorkerUnavailable
 	}
+	m.resetStartBackoffLocked()
 	m.started = true
 	m.starting = false
 	m.closeStartDoneLocked()
@@ -557,6 +581,7 @@ func (m *appServerManager) finishFailedStart(startDone chan struct{}) {
 		m.lifecycleCancel = nil
 		m.closeStartDoneLocked()
 		m.generation++
+		m.recordStartFailureLocked()
 	}
 	m.mu.Unlock()
 }
@@ -565,6 +590,7 @@ func (m *appServerManager) closeFailedStart(startDone chan struct{}, conn *appSe
 	m.mu.Lock()
 	if m.starting && m.startDone == startDone && m.conn == conn {
 		conn = m.clearLocked()
+		m.recordStartFailureLocked()
 	} else {
 		conn = nil
 	}
@@ -609,7 +635,7 @@ func (m *appServerManager) resumeThread(ctx context.Context, params appServerThr
 		return 0, agentbackend.ErrSessionWorkerUnavailable
 	}
 	if err := rpc.call(ctx, "thread/resume", params, nil); err != nil {
-		return 0, agentbackend.ErrSessionWorkerUnavailable
+		return 0, fmt.Errorf("%w: thread/resume: %v", agentbackend.ErrSessionWorkerUnavailable, err)
 	}
 	return generation, nil
 }
@@ -644,6 +670,41 @@ func (m *appServerManager) healthy(generation int64) bool {
 		m.generation == generation &&
 		m.rpc != nil &&
 		m.rpc.terminalError() == nil
+}
+
+func (m *appServerManager) startBackoffRemainingLocked() time.Duration {
+	if m.lastStartFailure.IsZero() || m.startBackoff <= 0 {
+		return 0
+	}
+	remaining := m.startBackoff - m.nowLocked().Sub(m.lastStartFailure)
+	if remaining <= 0 {
+		return 0
+	}
+	return remaining
+}
+
+func (m *appServerManager) recordStartFailureLocked() {
+	m.lastStartFailure = m.nowLocked()
+	if m.startBackoff <= 0 {
+		m.startBackoff = initialAppServerStartBackoff
+		return
+	}
+	m.startBackoff *= 2
+	if m.startBackoff > maxAppServerStartBackoff {
+		m.startBackoff = maxAppServerStartBackoff
+	}
+}
+
+func (m *appServerManager) resetStartBackoffLocked() {
+	m.lastStartFailure = time.Time{}
+	m.startBackoff = 0
+}
+
+func (m *appServerManager) nowLocked() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
 }
 
 func initializeParams() map[string]any {
@@ -703,6 +764,10 @@ func appServerProcessArgs(cfg agentbackend.Config) []string {
 	return append(args, cfg.ExtraArgs...)
 }
 
+func appServerProcessStderr() io.Writer {
+	return os.Stderr
+}
+
 func startAppServerProcess(ctx context.Context, cfg agentbackend.Config, env []string) (*appServerConnection, error) {
 	cmd := exec.CommandContext(ctx, cfg.Bin, appServerProcessArgs(cfg)...)
 	cmd.Dir = cfg.WorkDir
@@ -716,7 +781,7 @@ func startAppServerProcess(ctx context.Context, cfg agentbackend.Config, env []s
 		_ = stdin.Close()
 		return nil, err
 	}
-	cmd.Stderr = io.Discard
+	cmd.Stderr = appServerProcessStderr()
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
 		_ = stdout.Close()
