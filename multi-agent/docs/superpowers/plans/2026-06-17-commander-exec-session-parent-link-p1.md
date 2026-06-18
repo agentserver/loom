@@ -665,8 +665,11 @@ func New(cfg agentbackend.Config, env []string) *Backend {
 // withCodexHome resolves the final CODEX_HOME from the ORIGINAL cfg/env (do
 // NOT strip the env slice before resolving), then returns an env slice with
 // any existing CODEX_HOME removed (case-insensitive) and the final value
-// inserted when it differs from the default $HOME/.codex. The caller still
-// merges this with os.Environ() via mergeEnv at subprocess spawn time.
+// ALWAYS inserted when non-empty — including when it equals the default
+// $HOME/.codex. Injecting even the default is required so that mergeEnv at
+// subprocess spawn overrides a stale CODEX_HOME in os.Environ(); otherwise
+// the codex subprocess would write to the stale dir while the scanner reads
+// the default dir. The caller merges this with os.Environ() via mergeEnv.
 func withCodexHome(cfg agentbackend.Config, env []string) []string {
 	final := resolveCodexHome(cfg, env)
 	out := make([]string, 0, len(env)+1)
@@ -678,11 +681,7 @@ func withCodexHome(cfg agentbackend.Config, env []string) []string {
 		out = append(out, kv)
 	}
 	if final == "" {
-		return out
-	}
-	// Only inject when final is not the default $HOME/.codex (avoid no-op override).
-	if home, err := os.UserHomeDir(); err == nil && home != "" && final == filepath.Join(home, ".codex") {
-		return out
+		return out // nothing resolved; scanner/subprocess fall back to $HOME/.codex
 	}
 	out = append(out, "CODEX_HOME="+final)
 	return out
@@ -934,13 +933,16 @@ func applyLoomMeta(base string, sess *agentbackend.Session) {
 	if sess.Origin != agentbackend.SessionOriginAgentTask {
 		return // only enrich genuine agent_task sessions
 	}
+	// Parent link is a tuple: only apply when the sidecar has a parent
+	// session id. A sidecar with ParentAgentID but no ParentSessionID is
+	// malformed — set nothing (matches spec: ParentAgentID is empty when
+	// ParentID is empty). Never overwrite codex-native subagent ParentID.
+	if m.ParentSessionID == "" {
+		return
+	}
 	if sess.ParentID == "" {
 		sess.ParentID = m.ParentSessionID
-	}
-	if sess.ParentAgentID == "" {
 		sess.ParentAgentID = m.ParentAgentID
-	}
-	if sess.ParentDisplayName == "" {
 		sess.ParentDisplayName = m.ParentDisplayName
 	}
 }
@@ -998,18 +1000,19 @@ func TestListCache_InvalidatedBySidecarRewrite(t *testing.T) {
 	_ = os.WriteFile(rollout, []byte(`{"timestamp":"2026-06-17T13:00:00Z","type":"session_meta","payload":{"id":"`+threadID+`","cwd":"/p","originator":"codex_exec"}}`+"\n"), 0o600)
 
 	first, _ := b.ListSessions(context.Background())
-	if first[0].ParentAgentID != "" {
-		t.Fatalf("precondition: no sidecar yet, got %q", first[0].ParentAgentID)
+	if first[0].ParentID != "" || first[0].ParentAgentID != "" {
+		t.Fatalf("precondition: no sidecar yet, got ParentID=%q ParentAgentID=%q", first[0].ParentID, first[0].ParentAgentID)
 	}
-	_ = writeLoomMeta(home, loomMeta{Schema: loomMetaSchema, SessionID: threadID, ParentAgentID: "drv-xyz", Origin: "agent_task", Kind: "codex", CreatedAt: "2026-06-17T13:00:00Z"})
+	// Sidecar carries the full parent tuple (ParentSessionID + agent + name).
+	_ = writeLoomMeta(home, loomMeta{Schema: loomMetaSchema, SessionID: threadID, ParentSessionID: "parent-xyz", ParentAgentID: "drv-xyz", ParentDisplayName: "prod-driver", Origin: "agent_task", Kind: "codex", CreatedAt: "2026-06-17T13:00:00Z"})
 	second, _ := b.ListSessions(context.Background())
-	if second[0].ParentAgentID != "drv-xyz" {
-		t.Fatalf("cache not invalidated by sidecar write: ParentAgentID=%q", second[0].ParentAgentID)
+	if second[0].ParentID != "parent-xyz" || second[0].ParentAgentID != "drv-xyz" {
+		t.Fatalf("cache not invalidated by sidecar write: ParentID=%q ParentAgentID=%q", second[0].ParentID, second[0].ParentAgentID)
 	}
-	// Third call must hit cache (not re-scan) and still see the parent.
+	// Third call must hit cache (not re-scan) and still see the parent tuple.
 	third, _ := b.ListSessions(context.Background())
-	if third[0].ParentAgentID != "drv-xyz" {
-		t.Fatalf("cache lost the row on re-scan (Prune key mismatch?): %q", third[0].ParentAgentID)
+	if third[0].ParentID != "parent-xyz" || third[0].ParentAgentID != "drv-xyz" {
+		t.Fatalf("cache lost the row on re-scan (Prune key mismatch?): ParentID=%q", third[0].ParentID)
 	}
 }
 ```
@@ -1164,21 +1167,7 @@ Update the two callers:
 
 - [ ] **Step 4: Capture the event timestamp and write the sidecar only when `newSession`**
 
-Above the `for sc.Scan()` loop, declare:
-
-```go
-	var lastEventTimestamp string
-```
-
-Inside the loop, right after `json.Unmarshal(line, &ev)` succeeds (before the `switch`/event-type checks), capture the timestamp from `ev`:
-
-```go
-			if ev.Timestamp != "" {
-				lastEventTimestamp = ev.Timestamp
-			}
-```
-
-Change the thread-capture block (the loop variable is `ev`):
+The thread-capture block (loop variable is `ev`) writes the sidecar only when `newSession`. Use the **thread.started event's own** `ev.Timestamp` for `created_at` (not a "last seen event" timestamp — if codex ever emits a timestamped event before thread.started, a last-seen value would misattribute the time); fall back to `time.Now()` only when the thread.started event has no timestamp:
 
 ```go
 		if ev.Type == "thread.started" && sessionID == "" && ev.ThreadID != "" {
@@ -1188,7 +1177,7 @@ Change the thread-capture block (the loop variable is `ev`):
 				// path (Run), NEVER RunResume — a resume emits thread.started
 				// too and must not be mislabeled agent_task. Failure is
 				// non-fatal: the session still lists, just without a parent.
-				created := lastEventTimestamp
+				created := ev.Timestamp // thread.started's own timestamp
 				if created == "" {
 					created = timeNow().UTC().Format(time.RFC3339Nano)
 				}
@@ -1314,12 +1303,58 @@ func main() {
 		t.Fatalf("subprocess env CODEX_HOME lines = %q, want exactly one CODEX_HOME=%s", string(got), home)
 	}
 }
+
+// TestCodexExecutorSubprocessEnvDefaultOverridesStale: cfg.CodexHome unset,
+// process env has CODEX_HOME=/stale. resolveCodexHome falls back to
+// $HOME/.codex; withCodexHome MUST inject CODEX_HOME=<HOME>/.codex so that
+// mergeEnv overrides /stale (not leave /stale in place). Otherwise the
+// subprocess writes to /stale while the scanner reads <HOME>/.codex.
+func TestCodexExecutorSubprocessEnvDefaultOverridesStale(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)                       // resolveCodexHome falls back to home/.codex
+	t.Setenv("CODEX_HOME", "/stale-from-process") // stale value that must be overridden
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, "env.txt")
+	bin := buildFakeCodex(t, fmt.Sprintf(`package main
+import ("fmt";"io";"os";"strings")
+func main() {
+	var lines []string
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "CODEX_HOME=") {
+			lines = append(lines, e)
+		}
+	}
+	_ = os.WriteFile(%q, []byte(strings.Join(lines, "\n")), 0600)
+	_, _ = io.Copy(io.Discard, os.Stdin)
+	fmt.Println(%q)
+}
+`, envPath, `{"type":"thread.started","thread_id":"thr-def","timestamp":"2026-06-17T10:00:00Z"}`))
+	// cfg.CodexHome unset → final resolves to home/.codex; withCodexHome injects it.
+	b := New(agentbackend.Config{Bin: bin, WorkDir: t.TempDir()}, nil)
+	if _, err := b.Run(context.Background(), agentbackend.Task{Prompt: "hi"}, &captureSink{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	got, _ := os.ReadFile(envPath)
+	want := "CODEX_HOME=" + filepath.Join(home, ".codex")
+	count := 0
+	for _, l := range strings.Split(string(got), "\n") {
+		if l == want {
+			count++
+		}
+		if l == "CODEX_HOME=/stale-from-process" {
+			t.Fatalf("stale CODEX_HOME survived in subprocess env: %s", got)
+		}
+	}
+	if count != 1 {
+		t.Fatalf("want exactly one %q, got %q", want, got)
+	}
+}
 ```
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `go test ./pkg/agentbackend/codex/ -run 'SubprocessEnvHasSingleCodexHome' -v`
-Expected: FAIL — `runWithArgv` does `append(cmd.Environ(), e.env...)`, leaving the process `CODEX_HOME=/stale-from-process` AND adding `CODEX_HOME=<home>` (two entries).
+Run: `go test ./pkg/agentbackend/codex/ -run 'SubprocessEnvHasSingleCodexHome|SubprocessEnvDefaultOverridesStale' -v`
+Expected: FAIL — `runWithArgv` does `append(cmd.Environ(), e.env...)`. For the first test, two CODEX_HOME entries; for the second (before withCodexHome injects the default), the stale `/stale-from-process` survives.
 
 - [ ] **Step 3: Switch executor + llm + app-server to `mergeEnv`**
 
@@ -1351,10 +1386,10 @@ with:
 
 (The app-server manager receives the **resolved** `b.env` from `workerBackend` per Task 5, so `env` here already carries the single `CODEX_HOME=<resolved>`; `mergeEnv` ensures the process's own stale `CODEX_HOME` (if any) is overridden rather than duplicated.)
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `go test ./pkg/agentbackend/codex/ -run 'SubprocessEnvHasSingleCodexHome' -v -race`
-Expected: PASS — exactly one `CODEX_HOME=<home>`.
+Run: `go test ./pkg/agentbackend/codex/ -run 'SubprocessEnvHasSingleCodexHome|SubprocessEnvDefaultOverridesStale' -v -race`
+Expected: PASS — exactly one `CODEX_HOME=<home>`; default case overrides `/stale-from-process`.
 
 - [ ] **Step 5: Full package + race**
 
@@ -1364,7 +1399,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add pkg/agentbackend/codex/executor.go pkg/agentbackend/codex/llm.go pkg/agentbackend/codex/executor_test.go
+git add pkg/agentbackend/codex/executor.go pkg/agentbackend/codex/llm.go pkg/agentbackend/codex/appserver_manager.go pkg/agentbackend/codex/executor_test.go
 git commit -m "fix(codex): mergeEnv for subprocess env — single CODEX_HOME, no dup (#24)"
 ```
 
