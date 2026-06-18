@@ -36,7 +36,7 @@ Commander 现在已经能区分直连 user session、本地 subagent、以及 `c
 - **`agent_id` = `ShortID`**（per-agent-instance、稳定、唯一；非 machine 维度）。标签用 `display_name`。
 - **scanner root 是 backend 实例状态**（`b.effectiveCodexHome()`），**不是进程级 env**；`resolveCodexHome(cfg, env)` 同时看 `cfg.CodexHome`、传入的 `env` slice、进程 env（防 caller 传 `[]string{"CODEX_HOME=…"}` 被漏掉）；scanner 不直接读 env。
 - **`CodexHome` vs `LoomHome` 位置**：`agentbackend.Config` **只**加 `CodexHome`（backend 只需要最终路径，**不**需要 `ShortID`/`LoomHome`）；`<loom_state_dir>/<short_id>/.codex` 的 short_id 默认**只在 launcher 解析**（launcher 知道 `cfg.Credentials.ShortID`），解析后把绝对路径填进 `cfg.Agent.CodexHome` → `agentbackend.Config.CodexHome`。`loom_home` 是 deploy 级输入，加到 `internal/{config,driver}.AgentConfig`（**不**进 `agentbackend.Config`）。
-- **`effectiveCodexHome(cfg, env)`** = `resolveCodexHome(cfg, env)`，为空时回退 `$HOME/.codex`（**永不为空**）；scanner 与 sidecar writer **都用它**。子进程 env 仅在解析值 ≠ 默认 `$HOME/.codex` 时才注入 `CODEX_HOME=…`（避免无谓覆盖）。
+- **`effectiveCodexHome(cfg, env)`** = `resolveCodexHome(cfg, env)`，为空时回退 `$HOME/.codex`；仅当 `os.UserHomeDir()` 也失败时返回 `""`（极罕见，scanner no-op、sidecar writer skip，不静默写 temp）。scanner 与 sidecar writer **都用它**。子进程 env 用 `withCodexHome` **替换**（去重 + 大小写不敏感）既有 `CODEX_HOME`，仅在解析值 ≠ 默认 `$HOME/.codex` 时注入（避免重复/跨平台不清）。
 - **app-server env 贯通**：`New(cfg, env)` 把 `withCodexHome` 解析后的 env **存为 backend 实例状态**；`workerBackend` 用这个 **resolved env**（不是原始 `env`）建 `newAppServerManager`，确保 exec 与 app-server 两路径同 `CODEX_HOME`（修当前 `backend.go:86` 传原始 env 的漏）。
 - **持久化 = sidecar**（`<effectiveCodexHome>/loom-meta/<thread_id>.json`），codex executor 捕获 thread id 后写，scanner 合并；校验 `schema==1 && kind=="codex" && origin=="agent_task" && session_id==文件名`（见 §6）。
 - **`ParentDisplayName` 必须进 `Session` 并贯通到前端**（parent 离线时 observer 无法 live 回查，只能靠 sidecar denormalized 字段）。
@@ -98,22 +98,27 @@ func resolveCodexHome(cfg agentbackend.Config, env []string) string {
     return os.Getenv("CODEX_HOME")
 }
 
-// effectiveCodexHome: resolveCodexHome，为空回退 $HOME/.codex —— 永不为空。
+// effectiveCodexHome: resolveCodexHome，为空回退 $HOME/.codex。
 // scanner 与 sidecar writer 都用它（major：fallback 对 sidecar 闭环）。
+// 失败行为（minor）：若 resolve 为空且 os.UserHomeDir() 也失败（极罕见），
+// 返回 "" —— scanner 走 no-op（ListSessions 返空、不报错），sidecar writer
+// best-effort skip（不写、不影响 codex run）。不 fallback 到 temp dir（避免
+// 静默写到意外位置）。
 func effectiveCodexHome(cfg, env) string {
     if r := resolveCodexHome(cfg, env); r != "" { return r }
-    home, _ := os.UserHomeDir()
+    home, err := os.UserHomeDir()
+    if err != nil || home == "" { return "" }
     return filepath.Join(home, ".codex")
 }
 ```
 
 **scanner root = backend 实例状态（review #4）**：
 
-- `sessionsRoot` 改 `*Backend` 方法：`func (b *Backend) sessionsRoot() string { return filepath.Join(b.effectiveCodexHome(), "sessions") }`。**不读 `os.Getenv`**（env 已在 `New` 时解析进实例状态）。
-- `loomMetaDir(base)` / `loomMetaPath(base, id)` 接受解析后 base（不读 env）。scanner 传 `b.effectiveCodexHome()`，executor 传 `effectiveCodexHome(e.cfg, e.env)`。
-- 子进程 env：`withCodexHome(cfg, env)` 仅当 `effectiveCodexHome(cfg,env) != 默认 $HOME/.codex` 时 append `CODEX_HOME=<resolved>`（避免无谓覆盖默认）。
+- `sessionsRoot` 改 `*Backend` 方法：`func (b *Backend) sessionsRoot() string { base := b.effectiveCodexHome(); if base == "" { return "" /* no-op */ }; return filepath.Join(base, "sessions") }`。**不读 `os.Getenv`**（env 已在 `New` 时解析进实例状态）。
+- `loomMetaDir(base)` / `loomMetaPath(base, id)` 接受解析后 base（不读 env）。scanner 传 `b.effectiveCodexHome()`，executor 传 `effectiveCodexHome(e.cfg, e.env)`；`base==""` 时 loom-meta 写入 skip。
+- 子进程 env：`withCodexHome(cfg, env)` **替换而非追加**（major）—— 先用 helper 删除 env slice 里既有的 `CODEX_HOME=…`（Windows 下键名大小写不敏感：`Codex_Home`/`CODEX_HOME` 视作同键），再按优先级解析出最终值；仅当最终值 ≠ 默认 `$HOME/.codex` 时才插入 `CODEX_HOME=<resolved>`，避免重复 env 与跨平台行为不清。
 - **app-server env 贯通（major）**：`New(cfg, env)` 先 `env = withCodexHome(cfg, env)` 得 **resolved env**，**存为 `b.env` 实例字段**；`exec`/`llm` 用它；`workerBackend` 用 `b.env`（**不是**原始 `env`）建 `newAppServerManager(b.cfg, b.env)`，修当前 `backend.go:86` 传原始 env 的漏 → exec 与 app-server 两路径同 `CODEX_HOME`。
-- 测试：设 `cfg.CodexHome = t.TempDir()` 即可，**无需 `t.Setenv`**，不污染进程 env、不冲突同进程多 backend；也可传 `[]string{"CODEX_HOME=…"}` 验证 env-slice 解析。
+- 测试：设 `cfg.CodexHome = t.TempDir()` 即可，**无需 `t.Setenv`**，不污染进程 env、不冲突同进程多 backend；也测 `withCodexHome` 去重（env slice 已有 `CODEX_HOME=/old` + `cfg.CodexHome=/new` → 结果只有一条 `CODEX_HOME=/new`；大小写变体只保留一条）。
 
 **配置层贯通（review #3）**：`codex_home` + `loom_home` 加到：`internal/config/config.go` 的 `AgentConfig`、`internal/driver/config.go` 的 `AgentConfig`、driver/slave YAML schema、`deploy/{linux,windows}/{driver,slave}/config.yaml.template`，launcher 据其填 `agentbackend.Config.CodexHome`（short_id 默认）或直传 `codex_home`。**`agentbackend.Config` 只加 `CodexHome`，不加 `LoomHome`/`ShortID`。** 此贯通属 P2（wiring），config 字段定义可与 P1 同期。
 
@@ -147,9 +152,10 @@ func effectiveCodexHome(cfg, env) string {
 
 ### 5. Sidecar 持久化（含校验，review #6/#7/#8）
 
-codex executor 捕获新 `sessionID`（`executor.go:191`）后写 sidecar：
+codex executor 在 `Run`（新建 session 路径）捕获新 `sessionID`（`executor.go:191`）后写 sidecar：
 
-- 路径：`<effectiveCodexHome>/loom-meta/<thread_id>.json`（base = `effectiveCodexHome(e.cfg, e.env)`，永不为空）。
+- 路径：`<effectiveCodexHome>/loom-meta/<thread_id>.json`（base = `effectiveCodexHome(e.cfg, e.env)`；`base==""` 时 skip 写入）。
+- **只在新 session 路径写，RunResume 绝不写（major）**：`Run` 与 `RunResume` 共享 `runWithArgv`（`executor.go:106`），两者都会收 `thread.started`。sidecar 写入**必须放在 `Run` 专属逻辑里**（或 runWithArgv 接收一个 `newSession bool` 参数，仅 `Run` 传 true），**不能**放在共享的 thread-capture 分支里——否则 resume 的交互 session 会被误标成 `agent_task`。测试钉死：`RunResume` 后无 loom-meta 生成/修改。
 - 内容：
   ```json
   {
@@ -177,7 +183,7 @@ codex executor 捕获新 `sessionID`（`executor.go:191`）后写 sidecar：
 - `scanCodexSession` 构出 descriptor 后，合并 sidecar（base = `b.effectiveCodexHome()`）：
   - **校验**：仅当 sidecar `schema==1` && `kind=="codex"` && `origin=="agent_task"` && `sidecar.session_id == sess.ID` 时才合并；否则 skip（坏/陈旧 sidecar 不影响）。
   - **origin 规则**：sidecar **只补 parent 字段，不改 `Origin`**。`Origin` 由 `applyCodexSessionMeta`（codex 原生 `parent_thread_id`/`originator`）决定。仅当 `sess.Origin == agent_task`（rollout 确为 codex_exec）时才把 sidecar 的 `ParentID`/`ParentAgentID`/`ParentDisplayName` 叠上（仅填空位，不覆盖 codex 原生 subagent 的 `ParentID`）。→ **sidecar 永远不会把 user session 重标成 agent_task**。
-- 现有 `b.list`/`Prune` 文件缓存（`sessions.go:82,91`）以 rollout (path,size,mtime) 为 key，**把 sidecar mtime 并入 cache key**，sidecar 重写即让该 row 失效。
+- 现有 `b.list`/`Prune` 文件缓存（`sessions.go:82,91`；`internal/sessioncache/file_cache.go:29,55`）：`Get(path, info, scan)` 与 `Prune(seen)` 用**同一个 key**。若把 sidecar mtime 拼进 `Get` 的 key，**`seen` 也必须用同一 composite key**，否则 `Prune` 每次扫都把该条目裁掉（major，见 `file_cache.go:55`）。两种等价实现任选其一并加测试：(a) `Get` 与 `seen` 都用 `path + "|" + sidecarMtime` 作 key；(b) 扩展 `FileCache` 支持 salt（`Get(path, salt, info, scan)` + `Prune(seen)` where seen key = `path|salt`）。sidecar 重写 → mtime 变 → key 变 → row 失效。
 
 ### 7. 反向链路：slave 结果 → driver journal
 
@@ -202,8 +208,8 @@ Observer（`internal/commanderhub/tree.go`）：
 
 ### 分阶段（3 PR）
 
-1. **P1 — 后端记录 + scanner + 隔离（无 UI、无传播；测试手填 sidecar）。** `Session.ParentAgentID`/`ParentDisplayName`；`agentbackend.Config.CodexHome`（**不**含 `LoomHome`/`ShortID`）；`internal/{config,driver}.AgentConfig` 加 `codex_home`/`loom_home`；codex executor 写 sidecar（含校验/created_at fallback）+ 注入 `CODEX_HOME`；codex scanner 用 `b.effectiveCodexHome()`（实例状态）合并 sidecar（含校验）+ cache key + reaper（30d）；`Task` parent 字段。
-2. **P2 — 传播 + 配置贯通。** register→DaemonInfo→SessionRow 带 `ShortID`/`DisplayName`/`ParentDisplayName`；driver 当前 session-id 接线 + `<loom_origin>` 打标；slave 解析进 `Task`；反向 marker + `driver-tasks.jsonl` child 字段；**launcher 在 `EnsureRegistered` 后解析 `codex_home` 并移 `agentbackend.New` 到注册之后**；`internal/config`/`internal/driver`/YAML/deploy 模板加 `codex_home` 并传入。
+1. **P1 — 后端记录 + scanner + 隔离（无 UI、无传播；测试手填 sidecar）。** `Session.ParentAgentID`/`ParentDisplayName`；`agentbackend.Config.CodexHome`（**不**含 `LoomHome`/`ShortID`）；**`internal/{config,driver}.AgentConfig` 只加 `codex_home`/`loom_home` struct 字段（定义，不接线）**；codex executor 仅 `Run`（非 `RunResume`）写 sidecar（含校验/created_at fallback）+ `withCodexHome` 替换式注入 `CODEX_HOME`（去重+大小写不敏感）+ `b.env` 贯通 app-server；codex scanner 用 `b.effectiveCodexHome()`（实例状态）合并 sidecar（含校验）+ cache key（`Get`/`seen` 一致）+ reaper（30d）；`Task` parent 字段。
+2. **P2 — 传播 + launcher wiring。** register→DaemonInfo→SessionRow 带 `ShortID`/`DisplayName`/`ParentDisplayName`；driver 当前 session-id 接线 + `<loom_origin>` 打标；slave 解析进 `Task`；反向 marker + `driver-tasks.jsonl` child 字段；**launcher 在 `EnsureRegistered` 后解析 `codex_home`（用 `cfg.Agent.LoomHome`/`cfg.Credentials.ShortID`）并移 `agentbackend.New` 到注册之后**；YAML schema + `deploy/` 模板 + `dev/configs` 填 `codex_home`/`loom_home` 并传入 `agentbackend.Config.CodexHome`。
 3. **P3 — Commander 嵌套。** observer 全局 parent 索引；前端跨 daemon `buildSessionNodes` 重写、`remote`/`parent offline` badge（display_name）、默认折叠；Playwright。
 
 ### 关键文件
@@ -230,8 +236,10 @@ Observer（`internal/commanderhub/tree.go`）：
 - **scanner 实例状态（review #4）**：同进程内两个 `Backend`（不同 `cfg.CodexHome`）各自 `ListSessions` 互不串扰（验证不读进程 env）。
 - **Sidecar 校验（review #6）**：坏 sidecar（schema/kind/origin/session_id 不符）→ skip，session 不受影响；sidecar 不把 `user` session 重标 `agent_task`；`agent_task` session 才叠 parent；codex 原生 subagent 的 `ParentID` 不被 sidecar 覆盖。
 - **env-slice 解析（major）**：`resolveCodexHome(cfg, []string{"CODEX_HOME=/x"})` 返回 `/x`（验证不漏 caller 传入的 env）；`effectiveCodexHome` 为空时回退 `$HOME/.codex`（sidecar 有落点）。
-- **Scanner**：fixture rollout + sidecar → `Origin=agent_task`、`ParentID`/`ParentAgentID`/`ParentDisplayName` 非空；无 sidecar → parent 空（不失败）；sidecar mtime 变 → cache 失效；reaper 删孤儿 + 删 30d 前。
+- **`withCodexHome` 去重（major）**：env slice 已有 `CODEX_HOME=/old` 且 `cfg.CodexHome=/new` → resolved env 只含一条 `CODEX_HOME=/new`（无重复）；大小写变体（`Codex_Home`）也只保留一条；解析值 == 默认 `$HOME/.codex` 时不注入。
+- **Scanner**：fixture rollout + sidecar → `Origin=agent_task`、`ParentID`/`ParentAgentID`/`ParentDisplayName` 非空；无 sidecar → parent 空（不失败）；sidecar mtime 变 → cache 失效；reaper 删孤儿 + 删 30d 前。**cache key 一致性（major）**：`Get` 与 `seen`/`Prune` 用同一 composite key，连续两次 `ListSessions` 第二次命中 cache（不被 `Prune` 误删）。
 - **Executor**：`thread.started` 后写正确字段 sidecar（parent 字段取自 `Task`；owner 由扫该 `CODEX_HOME` 的 daemon 隐式决定）；`created_at` 在事件无 ts 时 fallback `time.Now()`；best-effort 写失败不破 run；marker 解析进 `Task` 且从 prompt 剥离。
+- **RunResume 不写 sidecar（major）**：`RunResume` 后 `loom-meta/<id>.json` 不生成、不被修改（钉死 sidecar 写入只在 `Run` 新建路径，不落共享 `runWithArgv` 的 thread-capture 分支）。
 - **传播**：driver 打 `SystemContext`；slave 解析 + 剥离；JSON-prompt skill 仍解析（`tools.go:506` 保护保持绿）。
 - **反向链路**：`sessionIDFromMarker` 取 child session + agent_id；`driver-tasks.jsonl` 多出 child 字段。
 - **ParentDisplayName 传输（review #1）**：sidecar `parent_display_name` → `Session.ParentDisplayName` → `SessionRow` → 前端；parent daemon 离线时 badge 仍显示该名。
@@ -281,6 +289,7 @@ Observer（`internal/commanderhub/tree.go`）：
 ### Pre-flight probes（写 P1/P2 代码前）
 
 - 确认目标 codex 版本认 `CODEX_HOME` 且 session 落 `<CODEX_HOME>/sessions/`（`codex --help` / 实跑 exec 看 rollout 落点）。
+- **确认 `Backend.Run` 产生的 rollout 被 scanner 识别为 `OriginAgentTask`（minor，关键前提）**：实跑一次 `codex exec`，看 `session_meta.originator` 是否为 `codex_exec`（或 `source.kind=="exec"`），使 `applyCodexSessionMeta` 归类 `agent_task`。否则 sidecar 即使存在也不会合并 parent（合并门控 `sess.Origin==agent_task`）。若该版本 codex 不写 `originator`，P1 需先补这个识别，否则整个链路落空。
 - 确认 `thread.started` 事件是否带 timestamp（决定 `created_at` 是否需 `time.Now()` fallback）。
 - 确认 driver/slave prod_test config `ShortID` 非空、重启持久；一机多 agent 各自 `ShortID` 不同。
 - 确认 codex backend executor 是 driver/slave 上创建 `codex_exec` rollout 的唯一路径。
