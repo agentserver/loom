@@ -773,7 +773,7 @@ func appServerProcessStderr() io.Writer {
 func startAppServerProcess(ctx context.Context, cfg agentbackend.Config, env []string) (*appServerConnection, error) {
 	cmd := exec.CommandContext(ctx, cfg.Bin, appServerProcessArgs(cfg)...)
 	cmd.Dir = cfg.WorkDir
-	cmd.Env = append(cmd.Environ(), env...)
+	cmd.Env = mergeEnv(os.Environ(), env)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
