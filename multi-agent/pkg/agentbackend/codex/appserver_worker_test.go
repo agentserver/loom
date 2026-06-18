@@ -589,6 +589,57 @@ func main() {
 	}
 }
 
+func TestAppServerProcessPWDMatchesWorkDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PWD is Unix-specific")
+	}
+	workDir := t.TempDir()
+	outPath := filepath.Join(t.TempDir(), "pwd.txt")
+	t.Setenv("PWD", "/stale-parent-pwd")
+	bin := buildFakeCodex(t, fmt.Sprintf(`package main
+import (
+	"os"
+	"os/signal"
+	"syscall"
+)
+func main() {
+	cwd, err := os.Getwd()
+	if err != nil {
+		panic(err)
+	}
+	_ = os.WriteFile(%q, []byte(os.Getenv("PWD")+"\n"+cwd), 0o600)
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGTERM)
+	<-ch
+}
+`, outPath))
+	conn, err := startAppServerProcess(context.Background(), agentbackend.Config{
+		Bin:     bin,
+		WorkDir: workDir,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForFile(t, outPath)
+	if err := conn.close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(raw), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("pwd output = %q, want two lines", raw)
+	}
+	if lines[1] != workDir {
+		t.Fatalf("cwd=%q want %q", lines[1], workDir)
+	}
+	if lines[0] != lines[1] {
+		t.Fatalf("PWD=%q cwd=%q, want PWD to match app-server working directory", lines[0], lines[1])
+	}
+}
+
 func waitForFile(t *testing.T, path string) {
 	t.Helper()
 	deadline := time.After(appServerRPCTestTimeout)

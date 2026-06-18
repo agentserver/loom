@@ -54,6 +54,8 @@ func (b *Backend) ListSessions(ctx context.Context) ([]agentbackend.Session, err
 	}
 	base := b.effectiveCodexHome()
 	if _, err := os.Stat(root); errors.Is(err, fs.ErrNotExist) {
+		reaper(base, nil)
+		b.list.Prune(nil)
 		return nil, nil
 	} else if err != nil {
 		return nil, err

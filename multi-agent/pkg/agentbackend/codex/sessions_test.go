@@ -547,6 +547,31 @@ func TestListSessionsReapsLoomMetaOrphansAndAged(t *testing.T) {
 	}
 }
 
+func TestListSessionsReapsLoomMetaWhenSessionsRootMissing(t *testing.T) {
+	home := t.TempDir()
+	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir(), CodexHome: home}, nil)
+	if err := writeLoomMeta(home, loomMeta{
+		Schema:    loomMetaSchema,
+		SessionID: "orphan",
+		Origin:    "agent_task",
+		Kind:      "codex",
+		CreatedAt: "2026-06-17T14:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := b.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("len(ListSessions)=%d want 0", len(got))
+	}
+	if _, ok := readLoomMeta(home, "orphan"); ok {
+		t.Fatal("orphan sidecar was not reaped with missing sessions root")
+	}
+}
+
 func TestGetSession_SkipsEnvironmentContextForTitle(t *testing.T) {
 	home := t.TempDir()
 	setTestHome(t, home)

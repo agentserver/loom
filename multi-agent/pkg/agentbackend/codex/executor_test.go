@@ -515,6 +515,50 @@ func main() {
 	}
 }
 
+func TestCodexExecutorSubprocessPWDMatchesWorkDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PWD is Unix-specific")
+	}
+	workDir := t.TempDir()
+	outPath := filepath.Join(t.TempDir(), "pwd.txt")
+	t.Setenv("PWD", "/stale-parent-pwd")
+	bin := buildFakeCodex(t, fmt.Sprintf(`package main
+import (
+	"fmt"
+	"io"
+	"os"
+)
+func main() {
+	cwd, err := os.Getwd()
+	if err != nil {
+		panic(err)
+	}
+	_ = os.WriteFile(%q, []byte(os.Getenv("PWD")+"\n"+cwd), 0o600)
+	_, _ = io.Copy(io.Discard, os.Stdin)
+	fmt.Println(%q)
+	fmt.Println(%q)
+}
+`, outPath, `{"type":"thread.started","thread_id":"thr-pwd","timestamp":"2026-06-17T10:00:00Z"}`, `{"type":"item.completed","item":{"type":"agent_message","text":"done"}}`))
+	ex := newExecutor(agentbackend.Config{Bin: bin, WorkDir: workDir}, nil)
+	if _, err := ex.Run(context.Background(), agentbackend.Task{Prompt: "hi"}, &captureSink{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	raw, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(raw), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("pwd output = %q, want two lines", raw)
+	}
+	if lines[1] != workDir {
+		t.Fatalf("cwd=%q want %q", lines[1], workDir)
+	}
+	if lines[0] != lines[1] {
+		t.Fatalf("PWD=%q cwd=%q, want PWD to match command working directory", lines[0], lines[1])
+	}
+}
+
 func buildFakeCodex(t *testing.T, source string) string {
 	t.Helper()
 	dir := t.TempDir()
