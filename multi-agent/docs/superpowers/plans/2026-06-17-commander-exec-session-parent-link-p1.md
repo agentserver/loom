@@ -721,7 +721,7 @@ func (b *Backend) effectiveCodexHome() string {
 }
 ```
 
-Add `"os"`, `"path/filepath"`, `"strings"` to imports if missing.
+Add `"strings"` to `backend.go`'s imports if missing (`withCodexHome` uses `strings.EqualFold`). `os` is already imported (for `appServerUnsafeHumanloopRoutingEnv`); `path/filepath` is NOT needed here — `effectiveCodexHome`/`filepath.Join` live in `codexenv.go`, not `backend.go`.
 
 Update the builder so `workerBackend` uses `b.env` (not raw `env`):
 
@@ -1462,7 +1462,7 @@ git commit -m "chore: gofmt loom-meta additions"
 - `New` resolves `CODEX_HOME` once (resolve-then-strip + full dedup of env slice AND `os.Environ`, case-insensitive) into `b.env`, shared by exec/llm/app-server (`workerBackend` uses `b.env`).
 - Scanner root is backend-instance state (`b.effectiveCodexHome()`, no `os.Getenv`); merges a validated `$CODEX_HOME/loom-meta/<thread_id>.json` sidecar to set `ParentID`/`ParentAgentID`/`ParentDisplayName` **only for `agent_task` sessions** (never relabels user sessions; never overwrites codex-native subagent `ParentID`).
 - Cache `Get`/`seen` use the same composite key (path + sidecar mtime); sidecar rewrite invalidates; orphans + 30d-aged sidecars reaped.
-- Codex executor writes the sidecar **only on `Run`** (never `RunResume`); subprocess env has exactly one `CODEX_HOME` (or zero when == default).
+- Codex executor writes the sidecar **only on `Run`** (never `RunResume`); subprocess env has exactly one `CODEX_HOME=<final>` when the effective home is resolvable — **including the default `$HOME/.codex`** (so it overrides any stale `CODEX_HOME` in `os.Environ()`); zero only when home is unresolvable (extremely rare).
 - `go test ./... -race` green.
 
 ## Out of scope (follow-on plans)
