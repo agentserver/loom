@@ -31,12 +31,12 @@ import (
 
 var filenameUUIDRe = regexp.MustCompile(`-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$`)
 
-func sessionsRoot() string {
-	home, _ := os.UserHomeDir()
-	if home == "" {
+func (b *Backend) sessionsRoot() string {
+	base := b.effectiveCodexHome()
+	if base == "" {
 		return ""
 	}
-	return filepath.Join(home, ".codex", "sessions")
+	return filepath.Join(base, "sessions")
 }
 
 func sessionIDFromFilename(name string) string {
@@ -48,7 +48,7 @@ func sessionIDFromFilename(name string) string {
 }
 
 func (b *Backend) ListSessions(ctx context.Context) ([]agentbackend.Session, error) {
-	root := sessionsRoot()
+	root := b.sessionsRoot()
 	if root == "" {
 		return nil, nil
 	}
@@ -93,7 +93,7 @@ func (b *Backend) ListSessions(ctx context.Context) ([]agentbackend.Session, err
 }
 
 func (b *Backend) GetSession(ctx context.Context, id string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
-	root := sessionsRoot()
+	root := b.sessionsRoot()
 	if root == "" {
 		return agentbackend.Session{}, nil, agentbackend.ErrSessionNotFound
 	}
@@ -131,7 +131,7 @@ func (b *Backend) GetSession(ctx context.Context, id string) (agentbackend.Sessi
 }
 
 func (b *Backend) sessionWorkingDir(ctx context.Context, id string) (string, bool, error) {
-	root := sessionsRoot()
+	root := b.sessionsRoot()
 	if root == "" {
 		return "", false, nil
 	}

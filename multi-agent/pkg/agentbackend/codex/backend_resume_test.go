@@ -17,9 +17,10 @@ func TestBackendRunResumeUsesSessionWorkingDir(t *testing.T) {
 	setTestHome(t, home)
 	sessionDir := t.TempDir()
 	configDir := t.TempDir()
+	codexHome := t.TempDir()
 
 	id := "dddddddd-1111-2222-3333-eeeeeeeeeeee"
-	sessionRoot := filepath.Join(home, ".codex", "sessions", "2026", "06", "16")
+	sessionRoot := filepath.Join(codexHome, "sessions", "2026", "06", "16")
 	if err := os.MkdirAll(sessionRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +60,6 @@ func main() {
 }
 `, cwdPath, argsPath, envPath))
 
-	codexHome := t.TempDir()
 	b := New(agentbackend.Config{
 		Bin:       fakeBin,
 		WorkDir:   configDir,

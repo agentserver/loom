@@ -114,6 +114,31 @@ func TestListSessions_ToleratesCorruptFile(t *testing.T) {
 	}
 }
 
+func TestSessionsRootInstanceScopedNotEnv(t *testing.T) {
+	t.Setenv("CODEX_HOME", "/stale-process")
+	b1 := New(agentbackend.Config{CodexHome: "/h1"}, nil)
+	b2 := New(agentbackend.Config{CodexHome: "/h2"}, nil)
+	if b1.sessionsRoot() == b2.sessionsRoot() {
+		t.Fatalf("two backends share root %q", b1.sessionsRoot())
+	}
+	if want := filepath.Join("/h1", "sessions"); b1.sessionsRoot() != want {
+		t.Fatalf("b1 root = %q, want %q", b1.sessionsRoot(), want)
+	}
+	if want := filepath.Join("/h2", "sessions"); b2.sessionsRoot() != want {
+		t.Fatalf("b2 root = %q, want %q", b2.sessionsRoot(), want)
+	}
+}
+
+func TestSessionsRootFallbackHome(t *testing.T) {
+	t.Setenv("CODEX_HOME", "/stale-process")
+	home := t.TempDir()
+	setTestHome(t, home)
+	b := New(agentbackend.Config{}, nil)
+	if want := filepath.Join(home, ".codex", "sessions"); b.sessionsRoot() != want {
+		t.Fatalf("root = %q, want %q", b.sessionsRoot(), want)
+	}
+}
+
 func TestGetSession_ReturnsMessages(t *testing.T) {
 	home := copyFixtureToHOME(t)
 	setTestHome(t, home)
