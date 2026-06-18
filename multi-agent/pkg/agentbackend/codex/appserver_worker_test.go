@@ -539,6 +539,56 @@ func main() {
 	}
 }
 
+func TestAppServerProcessEnvHasSingleCodexHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows environment variables are case-insensitive")
+	}
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, "env.txt")
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", "/stale-from-process")
+	t.Setenv("Codex_Home", "/stale-case-variant")
+	bin := buildFakeCodex(t, fmt.Sprintf(`package main
+import (
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+)
+func main() {
+	var lines []string
+	for _, e := range os.Environ() {
+		k, _, ok := strings.Cut(e, "=")
+		if ok && strings.EqualFold(k, "CODEX_HOME") {
+			lines = append(lines, e)
+		}
+	}
+	_ = os.WriteFile(%q, []byte(strings.Join(lines, "\n")), 0o600)
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGTERM)
+	<-ch
+}
+`, envPath))
+	conn, err := startAppServerProcess(context.Background(), agentbackend.Config{
+		Bin:     bin,
+		WorkDir: t.TempDir(),
+	}, []string{"CODEX_HOME=" + home})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForFile(t, envPath)
+	if err := conn.close(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "CODEX_HOME="+home {
+		t.Fatalf("app-server subprocess CODEX_HOME lines = %q, want exactly CODEX_HOME=%s", got, home)
+	}
+}
+
 func waitForFile(t *testing.T, path string) {
 	t.Helper()
 	deadline := time.After(appServerRPCTestTimeout)

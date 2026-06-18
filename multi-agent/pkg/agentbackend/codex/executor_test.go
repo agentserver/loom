@@ -416,6 +416,105 @@ func main() {
 	}
 }
 
+func TestCodexExecutorSubprocessEnvHasSingleCodexHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", "/stale-from-process")
+	t.Setenv("Codex_Home", "/stale-case-variant")
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, "env.txt")
+	bin := buildFakeCodex(t, fmt.Sprintf(`package main
+import (
+	"fmt"
+	"io"
+	"os"
+	"strings"
+)
+func main() {
+	var lines []string
+	for _, e := range os.Environ() {
+		k, _, ok := strings.Cut(e, "=")
+		if ok && strings.EqualFold(k, "CODEX_HOME") {
+			lines = append(lines, e)
+		}
+	}
+	_ = os.WriteFile(%q, []byte(strings.Join(lines, "\n")), 0o600)
+	_, _ = io.Copy(io.Discard, os.Stdin)
+	fmt.Println(%q)
+}
+`, envPath, `{"type":"thread.started","thread_id":"thr-env","timestamp":"2026-06-17T10:00:00Z"}`))
+	b := New(agentbackend.Config{Bin: bin, WorkDir: t.TempDir(), CodexHome: home}, nil)
+	if _, err := b.Run(context.Background(), agentbackend.Task{Prompt: "hi"}, &captureSink{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	got, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(got), "\n")
+	count := 0
+	for _, line := range lines {
+		if line == "Codex_Home=/stale-case-variant" {
+			t.Fatalf("case-variant stale CODEX_HOME survived: %q", got)
+		}
+		if line == "CODEX_HOME="+home {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("subprocess env CODEX_HOME lines = %q, want exactly one CODEX_HOME=%s", got, home)
+	}
+}
+
+func TestCodexExecutorSubprocessEnvDefaultOverridesStale(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", "/stale-from-process")
+	t.Setenv("Codex_Home", "/stale-case-variant")
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, "env.txt")
+	bin := buildFakeCodex(t, fmt.Sprintf(`package main
+import (
+	"fmt"
+	"io"
+	"os"
+	"strings"
+)
+func main() {
+	var lines []string
+	for _, e := range os.Environ() {
+		k, _, ok := strings.Cut(e, "=")
+		if ok && strings.EqualFold(k, "CODEX_HOME") {
+			lines = append(lines, e)
+		}
+	}
+	_ = os.WriteFile(%q, []byte(strings.Join(lines, "\n")), 0o600)
+	_, _ = io.Copy(io.Discard, os.Stdin)
+	fmt.Println(%q)
+}
+`, envPath, `{"type":"thread.started","thread_id":"thr-def","timestamp":"2026-06-17T10:00:00Z"}`))
+	b := New(agentbackend.Config{Bin: bin, WorkDir: t.TempDir()}, nil)
+	if _, err := b.Run(context.Background(), agentbackend.Task{Prompt: "hi"}, &captureSink{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	got, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "CODEX_HOME=" + filepath.Join(home, ".codex")
+	count := 0
+	for _, line := range strings.Split(string(got), "\n") {
+		switch line {
+		case want:
+			count++
+		case "CODEX_HOME=/stale-from-process", "Codex_Home=/stale-case-variant":
+			t.Fatalf("stale CODEX_HOME survived: %q", got)
+		}
+	}
+	if count != 1 {
+		t.Fatalf("want exactly one %q, got %q", want, got)
+	}
+}
+
 func buildFakeCodex(t *testing.T, source string) string {
 	t.Helper()
 	dir := t.TempDir()

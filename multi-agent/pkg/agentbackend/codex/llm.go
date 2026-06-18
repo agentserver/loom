@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -24,7 +25,7 @@ func (r *llmRunner) Run(ctx context.Context, stdinPrompt string) (string, error)
 		args = append(args, r.cfg.ExtraArgs...)
 	}
 	cmd := exec.CommandContext(ctx, r.cfg.Bin, args...)
-	cmd.Env = append(cmd.Environ(), r.env...)
+	cmd.Env = mergeEnv(os.Environ(), r.env)
 	cmd.Stdin = strings.NewReader(stdinPrompt)
 	var stderrBuf strings.Builder
 	cmd.Stderr = &stderrBuf
