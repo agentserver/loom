@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -491,6 +493,66 @@ func TestAppServerProcessArgsIncludeExtraArgs(t *testing.T) {
 func TestAppServerProcessStderrIsNotDiscarded(t *testing.T) {
 	if appServerProcessStderr() == io.Discard {
 		t.Fatal("app-server stderr is discarded")
+	}
+}
+
+func TestAppServerProcessCloseTerminatesGracefullyBeforeKill(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows process termination does not expose SIGTERM")
+	}
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "ready.txt")
+	marker := filepath.Join(dir, "sigterm.txt")
+	bin := buildFakeCodex(t, `package main
+import (
+	"os"
+	"os/signal"
+	"syscall"
+)
+
+func main() {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGTERM)
+	_ = os.WriteFile(os.Getenv("LOOM_READY_MARKER"), []byte("ready"), 0o600)
+	<-ch
+	_ = os.WriteFile(os.Getenv("LOOM_SIGTERM_MARKER"), []byte("terminated"), 0o600)
+}
+`)
+	conn, err := startAppServerProcess(context.Background(), agentbackend.Config{
+		Bin:     bin,
+		WorkDir: t.TempDir(),
+	}, []string{"LOOM_READY_MARKER=" + ready, "LOOM_SIGTERM_MARKER=" + marker})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForFile(t, ready)
+	if err := conn.close(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("expected graceful SIGTERM marker: %v", err)
+	}
+	if string(got) != "terminated" {
+		t.Fatalf("marker=%q, want terminated", got)
+	}
+}
+
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.After(appServerRPCTestTimeout)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s", path)
+		case <-tick.C:
+		}
 	}
 }
 
