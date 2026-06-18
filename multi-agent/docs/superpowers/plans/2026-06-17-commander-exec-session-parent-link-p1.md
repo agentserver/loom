@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Persist a parent link for `codex_exec` agent-task sessions in a per-agent-`CODEX_HOME` sidecar, and have the Codex scanner merge it into `agentbackend.Session` so downstream (P2 propagation, P3 Commander nesting) can render remote tasks under their originating session.
+**Goal:** Add backend-agnostic parent-link fields to the agent backend contract, then implement the P1 recovery path for Codex `codex_exec` agent-task sessions via a per-agent-`CODEX_HOME` sidecar.
 
-**Architecture:** Each agent runs its own `CODEX_HOME`. The codex executor writes a `$CODEX_HOME/loom-meta/<thread_id>.json` sidecar **only on the `Run` (new-session) path, never `RunResume`**, right after it captures the new codex thread id. The codex scanner derives its root from backend-instance state (`effectiveCodexHome`, not process env) and merges any matching sidecar into the scanned `Session`, setting `ParentID` + `ParentAgentID` + `ParentDisplayName` (only for `agent_task` sessions). `CODEX_HOME` is resolved once in `New` (resolve-then-strip + full dedup of env slice AND `os.Environ`, case-insensitive) and shared by exec/llm/app-server. No driver/slave wiring or UI here — propagation (P2) and nesting (P3) are separate follow-on plans. P1 is fully testable with hand-seeded fixtures.
+**Architecture:** `agentbackend.Session` and `executor.Task` get generic parent tuple fields; they do not know about Codex storage, `CODEX_HOME`, or sidecars. The Codex backend adapter supplies those generic fields by writing a `$CODEX_HOME/loom-meta/<thread_id>.json` sidecar **only on the `Run` (new-session) path, never `RunResume`**, then having the Codex scanner merge matching sidecars into `agentbackend.Session` for sessions already classified as `agent_task`. `CODEX_HOME` is Codex-private runtime state resolved once in `New` (resolve-then-strip + full dedup of env slice AND `os.Environ`, case-insensitive) and shared by Codex exec/llm/app-server. No driver/slave wiring or UI here — propagation (P2) and nesting (P3) are separate follow-on plans. P1 is fully testable with hand-seeded fixtures.
 
 **Tech Stack:** Go (stdlib only — `encoding/json`, `os`, `path/filepath`, `strings`, `time`), table-driven tests, `go test -race`.
 
-**Spec:** `multi-agent/docs/superpowers/specs/2026-06-17-commander-exec-session-parent-link-design.md` (revision `5926e9c`)
+**Spec:** `multi-agent/docs/superpowers/specs/2026-06-17-commander-exec-session-parent-link-design.md` (use the current checked-out revision; do not work from an older hash copied into this plan).
 
 ---
 
@@ -24,9 +24,58 @@
 - `pkg/agentbackend/codex/backend.go` — `New` resolves env once into `b.env`; `b.effectiveCodexHome()`; `workerBackend` uses `b.env`.
 - `pkg/agentbackend/codex/executor.go` — `runWithArgv` gains `newSession bool`; writes sidecar only when `newSession`; uses `mergeEnv(os.Environ(), e.env)`.
 - `pkg/agentbackend/codex/llm.go` — switch to `mergeEnv(os.Environ(), r.env)`.
+- `pkg/agentbackend/codex/appserver_manager.go` — switch app-server subprocess env to `mergeEnv(os.Environ(), env)`.
 - `pkg/agentbackend/codex/sessions.go` — `sessionsRoot` → `*Backend` method using `b.effectiveCodexHome()`; merge sidecar (validated) in List/Get; cache key = `Get`/`seen` consistent composite; reaper (orphan + 30d mtime).
 - `pkg/agentbackend/codex/sessions_test.go` — sidecar-merge + instance-state + cache-consistency tests.
 - `internal/config/config.go` + `internal/driver/config.go` — `AgentConfig` adds `codex_home`/`loom_home` **struct fields only** (no wiring; wiring is P2).
+
+---
+
+## Boundary: Generic Parent Contract vs Codex Adapter
+
+P1 deliberately splits generic data contract from Codex-specific recovery:
+
+- **Generic:** `agentbackend.Session.ParentID` + `ParentAgentID` + `ParentDisplayName` and `executor.Task.ParentSessionID` + `ParentAgentID` + `ParentDisplayName`. These fields are backend-agnostic and are the only shape downstream P2/P3 should depend on.
+- **Codex-specific:** `CODEX_HOME`, rollout JSONL scanning, `thread.started`, `originator=="codex_exec"` / `source.kind=="exec"`, `$CODEX_HOME/loom-meta`, and app-server env propagation. These stay inside `pkg/agentbackend/codex`.
+- **Do not generalize yet:** Do not introduce a cross-backend `AgentHome`, generic sidecar package, or shared storage abstraction in P1. Other backends can fill the generic parent contract differently later.
+
+---
+
+## Task 0: Pre-flight Codex storage probes
+
+**Files:**
+- No code changes.
+
+- [ ] **Step 1: Confirm the codex binary and version**
+
+Run:
+
+```bash
+command -v codex
+codex --version
+```
+
+Expected: `codex` is present. Record the version in the task notes/commit message if this probe reveals a compatibility problem.
+
+- [ ] **Step 2: Confirm `CODEX_HOME` controls rollout storage and exec metadata**
+
+Run this probe from `multi-agent/`:
+
+```bash
+tmp="$(mktemp -d)"
+CODEX_HOME="$tmp" codex exec --json --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "reply with exactly: loom-probe" >"$tmp/events.ndjson"
+find "$tmp" -maxdepth 5 -type f | sort
+rg -n '"type":"thread.started"|"originator":"codex_exec"|"kind":"exec"' "$tmp" "$tmp/events.ndjson"
+```
+
+Expected:
+- At least one rollout exists under `$tmp/sessions/.../rollout-...jsonl`.
+- The JSON event stream contains `thread.started` with a non-empty `thread_id`.
+- The rollout metadata lets the current scanner classify `Backend.Run` output as `agent_task`: either `originator:"codex_exec"` or `source.kind:"exec"` appears. If not, stop and adjust Task 7 to add whatever current Codex metadata shape is needed before the sidecar merge gate.
+
+- [ ] **Step 3: No commit**
+
+This task is a compatibility probe only. Do not commit generated files; the temp dir is outside the repo.
 
 ---
 
@@ -79,10 +128,11 @@ In `pkg/agentbackend/config.go`, inside `type Config struct`, after `WorkerMode`
 
 ```go
 	// CodexHome overrides the codex data directory passed as CODEX_HOME to
-	// the codex subprocess and read by the session scanner. Per-agent
-	// isolation (loom #24). Empty = resolve CODEX_HOME from env / fall back
-	// to $HOME/.codex. The short_id-based default is resolved by the
-	// LAUNCHER (which has ShortID), not the backend.
+	// Codex subprocesses and read by the Codex session scanner. Per-agent
+	// isolation (loom #24). Empty = resolve CODEX_HOME from the backend env
+	// slice, or fall back to $HOME/.codex. Process env CODEX_HOME is not a
+	// source of truth. The short_id-based default is resolved by the LAUNCHER
+	// (which has ShortID), not the backend.
 	CodexHome string `yaml:"codex_home"`
 ```
 
@@ -1283,8 +1333,10 @@ git commit -m "feat(codex): write loom-meta sidecar only on Run, never RunResume
 - Modify: `pkg/agentbackend/codex/llm.go`
 - Modify: `pkg/agentbackend/codex/appserver_manager.go` (`startAppServerProcess`, line ~776)
 - Test: `pkg/agentbackend/codex/executor_test.go`
+- Test: `pkg/agentbackend/codex/llm_test.go`
+- Test: `pkg/agentbackend/codex/appserver_worker_test.go`
 
-> **Why all three:** `withCodexHome` runs in `New` and stores the resolved env in `b.env`; `b.env` is what each subprocess must receive. Today executor (`:128`), llm (`:27`), AND app-server (`:776`) all do `append(cmd.Environ(), env...)`, so a stale `CODEX_HOME` in the process env survives alongside the resolved one. All three must switch to `mergeEnv(os.Environ(), <resolved env>)`.
+> **Why all three:** `withCodexHome` runs in `New` and stores the resolved env in `b.env`; `b.env` is what each subprocess must receive. Today executor (`:128`), llm (`:27`), AND app-server (`:776`) all do `append(cmd.Environ(), env...)`. Go's `os/exec` collapses exact duplicate keys by taking the last value, but it does not give us the case-insensitive `CODEX_HOME` policy this backend needs (`Codex_Home` vs `CODEX_HOME`), and it leaves each call site to get the override order right. All three must switch to `mergeEnv(os.Environ(), <resolved env>)`.
 
 - [ ] **Step 1: Write the failing test (uses `New`, not `newExecutor(..., nil)`)**
 
@@ -1296,6 +1348,7 @@ Append:
 func TestCodexExecutorSubprocessEnvHasSingleCodexHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", "/stale-from-process") // process env already has a stale value
+	t.Setenv("Codex_Home", "/stale-case-variant") // Unix keeps this distinct; our policy must not.
 	dir := t.TempDir()
 	envPath := filepath.Join(dir, "env.txt")
 	bin := buildFakeCodex(t, fmt.Sprintf(`package main
@@ -1303,7 +1356,8 @@ import ("fmt";"io";"os";"strings")
 func main() {
 	var lines []string
 	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "CODEX_HOME=") || strings.HasPrefix(e, "Codex_Home=") {
+		k, _, ok := strings.Cut(e, "=")
+		if ok && strings.EqualFold(k, "CODEX_HOME") {
 			lines = append(lines, e)
 		}
 	}
@@ -1322,6 +1376,9 @@ func main() {
 	lines := strings.Split(string(got), "\n")
 	count := 0
 	for _, l := range lines {
+		if strings.HasPrefix(l, "Codex_Home=") {
+			t.Fatalf("case-variant stale CODEX_HOME survived in subprocess env: %q", got)
+		}
 		if l == "CODEX_HOME="+home {
 			count++
 		}
@@ -1340,6 +1397,7 @@ func TestCodexExecutorSubprocessEnvDefaultOverridesStale(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)                       // resolveCodexHome falls back to home/.codex
 	t.Setenv("CODEX_HOME", "/stale-from-process") // stale value that must be overridden
+	t.Setenv("Codex_Home", "/stale-case-variant") // must also be removed by case-insensitive merge
 	dir := t.TempDir()
 	envPath := filepath.Join(dir, "env.txt")
 	bin := buildFakeCodex(t, fmt.Sprintf(`package main
@@ -1347,7 +1405,8 @@ import ("fmt";"io";"os";"strings")
 func main() {
 	var lines []string
 	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "CODEX_HOME=") {
+		k, _, ok := strings.Cut(e, "=")
+		if ok && strings.EqualFold(k, "CODEX_HOME") {
 			lines = append(lines, e)
 		}
 	}
@@ -1371,6 +1430,9 @@ func main() {
 		if l == "CODEX_HOME=/stale-from-process" {
 			t.Fatalf("stale CODEX_HOME survived in subprocess env: %s", got)
 		}
+		if l == "Codex_Home=/stale-case-variant" {
+			t.Fatalf("case-variant stale CODEX_HOME survived in subprocess env: %s", got)
+		}
 	}
 	if count != 1 {
 		t.Fatalf("want exactly one %q, got %q", want, got)
@@ -1378,10 +1440,97 @@ func main() {
 }
 ```
 
+Append to `pkg/agentbackend/codex/llm_test.go`:
+
+```go
+func TestLLMRunnerSubprocessEnvHasSingleCodexHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", "/stale-from-process")
+	t.Setenv("Codex_Home", "/stale-case-variant")
+	bin := buildFakeCodex(t, `package main
+import (
+	"fmt"
+	"io"
+	"os"
+	"strings"
+)
+func main() {
+	_, _ = io.Copy(io.Discard, os.Stdin)
+	var lines []string
+	for _, e := range os.Environ() {
+		k, _, ok := strings.Cut(e, "=")
+		if ok && strings.EqualFold(k, "CODEX_HOME") {
+			lines = append(lines, e)
+		}
+	}
+	fmt.Print(strings.Join(lines, "\n"))
+}
+`)
+	llm := newLLM(agentbackend.Config{Bin: bin}, []string{"CODEX_HOME=" + home})
+	got, err := llm.Run(context.Background(), "ping")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "CODEX_HOME="+home {
+		t.Fatalf("llm subprocess CODEX_HOME lines = %q, want exactly CODEX_HOME=%s", got, home)
+	}
+}
+```
+
+Ensure `llm_test.go` imports `"strings"` only if needed by the surrounding file; the generated fake binary's imports do not affect the test file imports.
+
+Append to `pkg/agentbackend/codex/appserver_worker_test.go` near the existing app-server process tests:
+
+```go
+func TestAppServerProcessEnvHasSingleCodexHome(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, "env.txt")
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", "/stale-from-process")
+	t.Setenv("Codex_Home", "/stale-case-variant")
+	bin := buildFakeCodex(t, fmt.Sprintf(`package main
+import (
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+)
+func main() {
+	var lines []string
+	for _, e := range os.Environ() {
+		k, _, ok := strings.Cut(e, "=")
+		if ok && strings.EqualFold(k, "CODEX_HOME") {
+			lines = append(lines, e)
+		}
+	}
+	_ = os.WriteFile(%q, []byte(strings.Join(lines, "\n")), 0o600)
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGTERM)
+	<-ch
+}
+`, envPath))
+	conn, err := startAppServerProcess(context.Background(), agentbackend.Config{
+		Bin:     bin,
+		WorkDir: t.TempDir(),
+	}, []string{"CODEX_HOME=" + home})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForFile(t, envPath)
+	if err := conn.close(); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(envPath)
+	if string(got) != "CODEX_HOME="+home {
+		t.Fatalf("app-server subprocess CODEX_HOME lines = %q, want exactly CODEX_HOME=%s", got, home)
+	}
+}
+```
+
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `go test ./pkg/agentbackend/codex/ -run 'SubprocessEnvHasSingleCodexHome|SubprocessEnvDefaultOverridesStale' -v`
-Expected: FAIL — `runWithArgv` does `append(cmd.Environ(), e.env...)`. For the first test, two CODEX_HOME entries; for the second (before withCodexHome injects the default), the stale `/stale-from-process` survives.
+Run: `go test ./pkg/agentbackend/codex/ -run 'SubprocessEnvHasSingleCodexHome|SubprocessEnvDefaultOverridesStale|LLMRunnerSubprocessEnvHasSingleCodexHome|AppServerProcessEnvHasSingleCodexHome' -v`
+Expected: FAIL — old call sites use `append(cmd.Environ(), env...)`, so the case-variant `Codex_Home=/stale-case-variant` survives alongside `CODEX_HOME=<resolved>` on Unix-like environments. (Exact duplicate `CODEX_HOME` may already be collapsed by `os/exec`; the case-variant assertion is the reliable red test.)
 
 - [ ] **Step 3: Switch executor + llm + app-server to `mergeEnv`**
 
@@ -1415,8 +1564,8 @@ with:
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `go test ./pkg/agentbackend/codex/ -run 'SubprocessEnvHasSingleCodexHome|SubprocessEnvDefaultOverridesStale' -v -race`
-Expected: PASS — exactly one `CODEX_HOME=<home>`; default case overrides `/stale-from-process`.
+Run: `go test ./pkg/agentbackend/codex/ -run 'SubprocessEnvHasSingleCodexHome|SubprocessEnvDefaultOverridesStale|LLMRunnerSubprocessEnvHasSingleCodexHome|AppServerProcessEnvHasSingleCodexHome' -v -race`
+Expected: PASS — each subprocess path sees exactly one `CODEX_HOME=<final>` and no `Codex_Home` case variant.
 
 - [ ] **Step 5: Full package + race**
 
@@ -1426,7 +1575,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add pkg/agentbackend/codex/executor.go pkg/agentbackend/codex/llm.go pkg/agentbackend/codex/appserver_manager.go pkg/agentbackend/codex/executor_test.go
+git add pkg/agentbackend/codex/executor.go pkg/agentbackend/codex/llm.go pkg/agentbackend/codex/appserver_manager.go pkg/agentbackend/codex/executor_test.go pkg/agentbackend/codex/llm_test.go pkg/agentbackend/codex/appserver_worker_test.go
 git commit -m "fix(codex): mergeEnv for subprocess env — single CODEX_HOME, no dup (#24)"
 ```
 
