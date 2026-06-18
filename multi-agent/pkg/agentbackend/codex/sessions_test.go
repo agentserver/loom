@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
@@ -440,6 +441,109 @@ func TestListSessionsCorruptSidecarSkipped(t *testing.T) {
 	}
 	if got[0].ParentID != "" || got[0].ParentAgentID != "" {
 		t.Fatalf("corrupt sidecar must be skipped: %+v", got[0])
+	}
+}
+
+func TestListCacheInvalidatedBySidecarRewrite(t *testing.T) {
+	home := t.TempDir()
+	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir(), CodexHome: home}, nil)
+	id := "deadbeef-0000-0000-0000-000000000004"
+	writeCodexRollout(t, home, id, `{"id":"`+id+`","cwd":"/proj","originator":"codex_exec"}`, "2026-06-17T13:00:00Z")
+
+	first, err := b.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 {
+		t.Fatalf("want 1, got %d", len(first))
+	}
+	if first[0].ParentID != "" || first[0].ParentAgentID != "" {
+		t.Fatalf("precondition: no sidecar yet: %+v", first[0])
+	}
+
+	if err := writeLoomMeta(home, loomMeta{
+		Schema:            loomMetaSchema,
+		SessionID:         id,
+		ParentSessionID:   "parent-xyz",
+		ParentAgentID:     "drv-xyz",
+		ParentDisplayName: "prod-driver",
+		Origin:            "agent_task",
+		Kind:              "codex",
+		CreatedAt:         "2026-06-17T13:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	future := timeNow().Add(time.Second)
+	if err := os.Chtimes(loomMetaPath(home, id), future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := b.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second[0].ParentID != "parent-xyz" || second[0].ParentAgentID != "drv-xyz" {
+		t.Fatalf("cache not invalidated by sidecar write: %+v", second[0])
+	}
+	third, err := b.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third[0].ParentID != "parent-xyz" || third[0].ParentAgentID != "drv-xyz" {
+		t.Fatalf("cache lost row after prune mismatch: %+v", third[0])
+	}
+}
+
+func TestListSessionsReapsLoomMetaOrphansAndAged(t *testing.T) {
+	home := t.TempDir()
+	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir(), CodexHome: home}, nil)
+	liveID := "deadbeef-0000-0000-0000-000000000006"
+	writeCodexRollout(t, home, liveID, `{"id":"`+liveID+`","cwd":"/proj","originator":"codex_exec"}`, "2026-06-17T14:00:00Z")
+	if err := writeLoomMeta(home, loomMeta{
+		Schema:    loomMetaSchema,
+		SessionID: liveID,
+		Origin:    "agent_task",
+		Kind:      "codex",
+		CreatedAt: "2026-06-17T14:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeLoomMeta(home, loomMeta{
+		Schema:    loomMetaSchema,
+		SessionID: "orphan",
+		Origin:    "agent_task",
+		Kind:      "codex",
+		CreatedAt: "2026-06-17T14:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	agedID := "deadbeef-0000-0000-0000-000000000007"
+	writeCodexRollout(t, home, agedID, `{"id":"`+agedID+`","cwd":"/proj","originator":"codex_exec"}`, "2026-06-17T15:00:00Z")
+	if err := writeLoomMeta(home, loomMeta{
+		Schema:    loomMetaSchema,
+		SessionID: agedID,
+		Origin:    "agent_task",
+		Kind:      "codex",
+		CreatedAt: "2026-06-17T15:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	past := timeNow().Add(-(loomMetaMaxAge + time.Hour))
+	if err := os.Chtimes(loomMetaPath(home, agedID), past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := b.ListSessions(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := readLoomMeta(home, liveID); !ok {
+		t.Fatal("live fresh sidecar was reaped")
+	}
+	if _, ok := readLoomMeta(home, "orphan"); ok {
+		t.Fatal("orphan sidecar was not reaped")
+	}
+	if _, ok := readLoomMeta(home, agedID); ok {
+		t.Fatal("aged sidecar was not reaped")
 	}
 }
 
