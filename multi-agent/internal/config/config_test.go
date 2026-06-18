@@ -72,6 +72,22 @@ discovery: {display_name: "daemon", description: "test", skills: []}
 	require.Equal(t, "app_server", cfg.Agent.WorkerMode)
 }
 
+func TestLoadAgentCodexAndLoomHomeFields(t *testing.T) {
+	cfg, err := loadFromString(t, `
+server: {url: "http://observer", name: "test"}
+agent:
+  kind: codex
+  bin: codex
+  workdir: /tmp/repo
+  codex_home: /tmp/agent/.codex
+  loom_home: /tmp/loom
+discovery: {display_name: "daemon", description: "test", skills: []}
+`)
+	require.NoError(t, err)
+	require.Equal(t, "/tmp/agent/.codex", cfg.Agent.CodexHome)
+	require.Equal(t, "/tmp/loom", cfg.Agent.LoomHome)
+}
+
 func TestLoad_MissingURL(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "c.yaml")

@@ -109,6 +109,32 @@ discovery: {display_name: drv}
 	}
 }
 
+func TestLoadConfigAgentCodexAndLoomHomeFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "driver.yaml")
+	if err := os.WriteFile(path, []byte(`
+server: {url: https://x, name: drv}
+agent:
+  kind: codex
+  bin: codex
+  workdir: /tmp/proj
+  codex_home: /tmp/agent/.codex
+  loom_home: /tmp/loom
+discovery: {display_name: drv}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if c.Agent.CodexHome != "/tmp/agent/.codex" {
+		t.Fatalf("agent.codex_home = %q, want /tmp/agent/.codex", c.Agent.CodexHome)
+	}
+	if c.Agent.LoomHome != "/tmp/loom" {
+		t.Fatalf("agent.loom_home = %q, want /tmp/loom", c.Agent.LoomHome)
+	}
+}
+
 func TestLoadConfigAgentWorkerMode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "driver.yaml")
 	if err := os.WriteFile(path, []byte(`

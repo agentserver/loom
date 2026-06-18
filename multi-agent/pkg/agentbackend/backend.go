@@ -116,6 +116,14 @@ type Session struct {
 	// Empty for user sessions or when the backend does not expose the parent.
 	ParentID string
 
+	// ParentAgentID is the stable agent instance ID that owns ParentID.
+	// Empty when ParentID is empty.
+	ParentAgentID string
+
+	// ParentDisplayName is the denormalized display name for the parent agent.
+	// It lets callers label a parent even when that agent is offline.
+	ParentDisplayName string
+
 	// AgentName and AgentRole carry backend-provided subagent labels when
 	// available. They are empty for normal user sessions.
 	AgentName string
