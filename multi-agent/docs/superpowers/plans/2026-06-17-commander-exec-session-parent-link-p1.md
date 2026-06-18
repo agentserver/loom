@@ -158,10 +158,16 @@ func TestResolveCodexHome_EnvSliceBeforeProcessEnv(t *testing.T) {
 	}
 }
 
-func TestResolveCodexHome_ProcessEnvFallback(t *testing.T) {
-	t.Setenv("CODEX_HOME", "/proc")
-	if got := resolveCodexHome(agentbackend.Config{}, nil); got != "/proc" {
-		t.Fatalf("got %q, want /proc", got)
+func TestResolveCodexHome_IgnoresProcessEnv(t *testing.T) {
+	// Process-env CODEX_HOME is deliberately NOT consulted (ambient/stale;
+	// trusting it would break per-agent isolation). Only cfg + env slice count.
+	t.Setenv("CODEX_HOME", "/proc-stale")
+	if got := resolveCodexHome(agentbackend.Config{}, nil); got != "" {
+		t.Fatalf("got %q, want empty (process env must be ignored)", got)
+	}
+	// env slice still wins over process env.
+	if got := resolveCodexHome(agentbackend.Config{}, []string{"CODEX_HOME=/env"}); got != "/env" {
+		t.Fatalf("got %q, want /env", got)
 	}
 }
 
@@ -248,10 +254,14 @@ func envValue(env []string, key string) string {
 	return ""
 }
 
-// resolveCodexHome resolves the effective codex data dir from cfg then env
-// slice then process env. Returns "" when none is set (caller falls back to
-// $HOME/.codex via effectiveCodexHome). Does NOT read ShortID — the
-// short_id-based default is the launcher's job.
+// resolveCodexHome resolves the codex data dir from cfg then the env SLICE
+// only. It deliberately does NOT consult os.Getenv("CODEX_HOME"): a process
+// env CODEX_HOME is an ambient/accidental value (e.g. the operator's shell)
+// that, if trusted, would silently break per-agent isolation. The launcher
+// is the single source of truth — it sets cfg.CodexHome (or passes an env
+// slice). Returns "" when neither is set; effectiveCodexHome then falls back
+// to $HOME/.codex. Does NOT read ShortID — the short_id-based default is the
+// launcher's job.
 func resolveCodexHome(cfg agentbackend.Config, env []string) string {
 	if cfg.CodexHome != "" {
 		return cfg.CodexHome
@@ -259,7 +269,7 @@ func resolveCodexHome(cfg agentbackend.Config, env []string) string {
 	if v := envValue(env, "CODEX_HOME"); v != "" {
 		return v
 	}
-	return os.Getenv("CODEX_HOME")
+	return ""
 }
 
 // effectiveCodexHome returns resolveCodexHome, or $HOME/.codex when unresolved.
@@ -404,24 +414,39 @@ func TestReadLoomMeta_CorruptSkipped(t *testing.T) {
 	}
 }
 
-func TestReaper_RemovesOrphansAndAged(t *testing.T) {
+func TestReaper_RemovesOrphanEvenWhenNotAged(t *testing.T) {
+	// Orphan (no matching rollout) is removed regardless of age.
 	dir := t.TempDir()
 	_ = os.MkdirAll(loomMetaDir(dir), 0o755)
-	live := loomMeta{Schema: loomMetaSchema, SessionID: "live", Origin: "agent_task", Kind: "codex", CreatedAt: "2026-06-17T00:00:00Z"}
-	dead := loomMeta{Schema: loomMetaSchema, SessionID: "dead", Origin: "agent_task", Kind: "codex", CreatedAt: "2026-06-17T00:00:00Z"}
-	_ = writeLoomMeta(dir, live)
-	_ = writeLoomMeta(dir, dead)
-	// Backdate the "dead" file's mtime beyond loomMetaMaxAge.
-	old := loomMetaPath(dir, "dead")
-	past := timeNow().Add(-(loomMetaMaxAge + time.Hour))
-	_ = os.Chtimes(old, past, past)
-
-	reaper(dir, []string{"live"}) // only "live" still has a rollout
-	if _, ok := readLoomMeta(dir, "live"); !ok {
-		t.Fatal("live sidecar must survive")
+	_ = writeLoomMeta(dir, loomMeta{Schema: loomMetaSchema, SessionID: "orphan", Origin: "agent_task", Kind: "codex", CreatedAt: "2026-06-17T00:00:00Z"})
+	reaper(dir, []string{"live-only"}) // "orphan" not in live set
+	if _, ok := readLoomMeta(dir, "orphan"); ok {
+		t.Fatal("orphan (not aged) must be removed")
 	}
-	if _, ok := readLoomMeta(dir, "dead"); ok {
-		t.Fatal("orphaned+aged sidecar must be removed")
+}
+
+func TestReaper_RemovesAgedEvenWhenLive(t *testing.T) {
+	// A sidecar whose thread id IS live but whose file mtime exceeds
+	// loomMetaMaxAge is still removed (aged branch is independent of orphan).
+	dir := t.TempDir()
+	_ = os.MkdirAll(loomMetaDir(dir), 0o755)
+	_ = writeLoomMeta(dir, loomMeta{Schema: loomMetaSchema, SessionID: "stale-live", Origin: "agent_task", Kind: "codex", CreatedAt: "2026-06-17T00:00:00Z"})
+	past := timeNow().Add(-(loomMetaMaxAge + time.Hour))
+	_ = os.Chtimes(loomMetaPath(dir, "stale-live"), past, past)
+	reaper(dir, []string{"stale-live"}) // live, but aged
+	if _, ok := readLoomMeta(dir, "stale-live"); ok {
+		t.Fatal("aged sidecar must be removed even when its thread id is live")
+	}
+}
+
+func TestReaper_KeepsLiveAndFresh(t *testing.T) {
+	// Live + fresh mtime → kept.
+	dir := t.TempDir()
+	_ = os.MkdirAll(loomMetaDir(dir), 0o755)
+	_ = writeLoomMeta(dir, loomMeta{Schema: loomMetaSchema, SessionID: "live", Origin: "agent_task", Kind: "codex", CreatedAt: "2026-06-17T00:00:00Z"})
+	reaper(dir, []string{"live"})
+	if _, ok := readLoomMeta(dir, "live"); !ok {
+		t.Fatal("live+fresh sidecar must survive")
 	}
 }
 ```
@@ -665,13 +690,15 @@ func New(cfg agentbackend.Config, env []string) *Backend {
 // withCodexHome resolves the final CODEX_HOME from the ORIGINAL cfg/env (do
 // NOT strip the env slice before resolving), then returns an env slice with
 // any existing CODEX_HOME removed (case-insensitive) and the final value
-// ALWAYS inserted when non-empty — including when it equals the default
-// $HOME/.codex. Injecting even the default is required so that mergeEnv at
-// subprocess spawn overrides a stale CODEX_HOME in os.Environ(); otherwise
-// the codex subprocess would write to the stale dir while the scanner reads
-// the default dir. The caller merges this with os.Environ() via mergeEnv.
+// ALWAYS inserted — including when it equals the default $HOME/.codex. Uses
+// effectiveCodexHome (not resolveCodexHome) so that the default is injected
+// too; this is required so mergeEnv at subprocess spawn overrides a stale
+// CODEX_HOME in os.Environ() (otherwise the codex subprocess writes to the
+// stale dir while the scanner reads the default dir). Returns the env
+// unchanged (no CODEX_HOME) only when effectiveCodexHome is "" (home
+// unresolvable — extremely rare).
 func withCodexHome(cfg agentbackend.Config, env []string) []string {
-	final := resolveCodexHome(cfg, env)
+	final := effectiveCodexHome(cfg, env)
 	out := make([]string, 0, len(env)+1)
 	for _, kv := range env {
 		k, _, ok := splitEnv(kv)
@@ -681,7 +708,7 @@ func withCodexHome(cfg agentbackend.Config, env []string) []string {
 		out = append(out, kv)
 	}
 	if final == "" {
-		return out // nothing resolved; scanner/subprocess fall back to $HOME/.codex
+		return out // home unresolvable; scanner no-ops, sidecar skipped
 	}
 	out = append(out, "CODEX_HOME="+final)
 	return out
