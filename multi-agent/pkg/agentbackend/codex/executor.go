@@ -32,6 +32,12 @@ type executor struct {
 	socketHookForTest func(string)
 }
 
+type parentLink struct {
+	sessionID   string
+	agentID     string
+	displayName string
+}
+
 func newExecutor(cfg agentbackend.Config, env []string) *executor {
 	return &executor{
 		cfg:              cfg,
@@ -55,9 +61,10 @@ func newExecutorWithSocketHook(cfg agentbackend.Config, env []string, hook func(
 //   - `{"type":"item.completed","item":{"type":"agent_message","text":"…"}}`
 //     — assistant text (item.text is a flat string, NOT item.content[]).
 type codexEvent struct {
-	Type     string `json:"type"`
-	ThreadID string `json:"thread_id"`
-	Item     struct {
+	Type      string `json:"type"`
+	Timestamp string `json:"timestamp"`
+	ThreadID  string `json:"thread_id"`
+	Item      struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	} `json:"item"`
@@ -78,7 +85,12 @@ func (e *executor) Run(ctx context.Context, t agentbackend.Task, sink agentbacke
 		"--dangerously-bypass-approvals-and-sandbox",
 		"--skip-git-repo-check",
 	}, e.cfg.ExtraArgs...)
-	return e.runWithArgv(ctx, args, prompt, sink)
+	parent := parentLink{
+		sessionID:   t.ParentSessionID,
+		agentID:     t.ParentAgentID,
+		displayName: t.ParentDisplayName,
+	}
+	return e.runWithArgv(ctx, args, prompt, sink, true, parent)
 }
 
 // RunResume re-invokes the codex backend with `exec resume <sessionID>` so the
@@ -98,13 +110,13 @@ func (e *executor) RunResume(ctx context.Context, sessionID, answer string, sink
 		"--skip-git-repo-check",
 	}, e.cfg.ExtraArgs...)
 	prompt := "User answered: " + answer
-	return e.runWithArgv(ctx, args, prompt, sink)
+	return e.runWithArgv(ctx, args, prompt, sink, false, parentLink{})
 }
 
 // runWithArgv is the shared pipeline: spawn codex with the given argv head
 // (mcp injection + trailing `-` are appended here), feed `prompt` via stdin,
 // parse stream-json, and handle pause-via-IPC with grace shutdown.
-func (e *executor) runWithArgv(ctx context.Context, argvHead []string, prompt string, sink agentbackend.Sink) (agentbackend.Result, error) {
+func (e *executor) runWithArgv(ctx context.Context, argvHead []string, prompt string, sink agentbackend.Sink, newSession bool, parent parentLink) (agentbackend.Result, error) {
 	sockDir, err := os.MkdirTemp("", "humanloop-")
 	if err != nil {
 		return agentbackend.Result{}, err
@@ -190,6 +202,22 @@ func (e *executor) runWithArgv(ctx context.Context, argvHead []string, prompt st
 		}
 		if ev.Type == "thread.started" && sessionID == "" && ev.ThreadID != "" {
 			sessionID = ev.ThreadID
+			if newSession {
+				createdAt := ev.Timestamp
+				if createdAt == "" {
+					createdAt = timeNow().UTC().Format(time.RFC3339Nano)
+				}
+				_ = writeLoomMeta(effectiveCodexHome(e.cfg, e.env), loomMeta{
+					Schema:            loomMetaSchema,
+					SessionID:         sessionID,
+					ParentSessionID:   parent.sessionID,
+					ParentAgentID:     parent.agentID,
+					ParentDisplayName: parent.displayName,
+					Origin:            string(agentbackend.SessionOriginAgentTask),
+					Kind:              "codex",
+					CreatedAt:         createdAt,
+				})
+			}
 			continue
 		}
 		if ev.Type != "item.completed" {

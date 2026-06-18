@@ -124,6 +124,78 @@ func TestCodexExecutorCapturesThreadID(t *testing.T) {
 	}
 }
 
+func TestCodexExecutorRunWritesLoomMetaSidecar(t *testing.T) {
+	home := t.TempDir()
+	bin := writeFakeCodex(t, []string{
+		`{"type":"thread.started","thread_id":"thr-new","timestamp":"2026-06-17T10:00:00Z"}`,
+		`{"type":"item.completed","item":{"type":"agent_message","text":"done"}}`,
+	})
+	ex := newExecutor(agentbackend.Config{Bin: bin, WorkDir: t.TempDir(), CodexHome: home}, []string{"CODEX_HOME=" + home})
+	res, err := ex.Run(context.Background(), agentbackend.Task{
+		Prompt:            "hi",
+		ParentSessionID:   "parent-thread",
+		ParentAgentID:     "drv-1",
+		ParentDisplayName: "prod-driver",
+	}, &captureSink{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.SessionID != "thr-new" {
+		t.Fatalf("SessionID = %q, want thr-new", res.SessionID)
+	}
+	m, ok := readLoomMeta(home, "thr-new")
+	if !ok {
+		t.Fatal("sidecar not written on Run")
+	}
+	if m.ParentSessionID != "parent-thread" || m.ParentAgentID != "drv-1" || m.ParentDisplayName != "prod-driver" {
+		t.Fatalf("sidecar parent mismatch: %+v", m)
+	}
+	if m.CreatedAt != "2026-06-17T10:00:00Z" {
+		t.Fatalf("CreatedAt = %q, want event timestamp", m.CreatedAt)
+	}
+}
+
+func TestCodexExecutorRunResumeDoesNotWriteSidecar(t *testing.T) {
+	home := t.TempDir()
+	bin := writeFakeCodex(t, []string{
+		`{"type":"thread.started","thread_id":"thr-resume","timestamp":"2026-06-17T10:00:00Z"}`,
+		`{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}`,
+	})
+	ex := newExecutor(agentbackend.Config{Bin: bin, WorkDir: t.TempDir(), CodexHome: home}, []string{"CODEX_HOME=" + home})
+	if _, err := ex.RunResume(context.Background(), "thr-resume", "continue", &captureSink{}); err != nil {
+		t.Fatalf("RunResume: %v", err)
+	}
+	if _, ok := readLoomMeta(home, "thr-resume"); ok {
+		t.Fatal("RunResume must not write a sidecar")
+	}
+}
+
+func TestCodexExecutorSidecarCreatedAtFallback(t *testing.T) {
+	home := t.TempDir()
+	bin := writeFakeCodex(t, []string{
+		`{"type":"thread.started","thread_id":"thr-nots"}`,
+		`{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}`,
+	})
+	ex := newExecutor(agentbackend.Config{Bin: bin, WorkDir: t.TempDir(), CodexHome: home}, []string{"CODEX_HOME=" + home})
+	if _, err := ex.Run(context.Background(), agentbackend.Task{
+		Prompt:          "hi",
+		ParentSessionID: "parent-thread",
+		ParentAgentID:   "drv",
+	}, &captureSink{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	m, ok := readLoomMeta(home, "thr-nots")
+	if !ok {
+		t.Fatal("sidecar not written")
+	}
+	if m.CreatedAt == "" {
+		t.Fatal("CreatedAt empty")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, m.CreatedAt); err != nil {
+		t.Fatalf("CreatedAt %q is not RFC3339Nano: %v", m.CreatedAt, err)
+	}
+}
+
 func TestCodexExecutorPausesOnHumanloopIPC(t *testing.T) {
 	bin := writeFakeCodexReadsStdinThenExits(t, "thr-pause")
 	sockHook := func(arg string) {
