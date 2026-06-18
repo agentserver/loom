@@ -263,6 +263,59 @@ func TestAppServerManagerRejectsUncorrelatedDeltaBeforeTurnStarted(t *testing.T)
 	if !sink.closed {
 		t.Fatal("sink not closed after non-fallback error")
 	}
+	if !m.healthy(worker.(*codexSessionWorker).generation) {
+		t.Fatal("manager unhealthy after one turn received an uncorrelated delta")
+	}
+	if got := fake.closeCount.Load(); got != 0 {
+		t.Fatalf("transport close count = %d, want manager to stay running", got)
+	}
+}
+
+func TestCodexSessionWorkerContextCancelDoesNotCloseSharedAppServer(t *testing.T) {
+	turnStarted := make(chan struct{})
+	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
+		if req.Method != "turn/start" {
+			return false
+		}
+		writeFakeAppServerResult(t, w, *req.ID, fakeAppServerResultFor(req.Method))
+		close(turnStarted)
+		return true
+	})
+	cfg := agentbackend.Config{Kind: agentbackend.KindCodex, Bin: "codex", WorkDir: "/repo"}
+	m := newAppServerManager(cfg, nil)
+	m.starter = fake.starter
+	wb := &workerBackend{Backend: New(cfg, nil), manager: m}
+
+	worker, err := wb.NewSessionWorker(context.Background(), agentbackend.Session{
+		ID:         "thr-1",
+		Kind:       agentbackend.KindCodex,
+		WorkingDir: "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Close()
+	generation := worker.(*codexSessionWorker).generation
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() {
+		_, err := worker.Run(ctx, "continue", &appServerWorkerTestSink{})
+		runDone <- err
+	}()
+	receiveWithin(t, turnStarted, "turn/start")
+	cancel()
+
+	err = receiveWithin(t, runDone, "cancelled worker run")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want context.Canceled", err)
+	}
+	if !m.healthy(generation) {
+		t.Fatal("manager unhealthy after one turn context cancellation")
+	}
+	if got := fake.closeCount.Load(); got != 0 {
+		t.Fatalf("transport close count = %d, want manager to stay running", got)
+	}
 }
 
 func TestAppServerManagerUsesManagerOwnedLifecycleContext(t *testing.T) {
@@ -435,6 +488,12 @@ func TestAppServerProcessArgsIncludeExtraArgs(t *testing.T) {
 	}
 }
 
+func TestAppServerProcessStderrIsNotDiscarded(t *testing.T) {
+	if appServerProcessStderr() == io.Discard {
+		t.Fatal("app-server stderr is discarded")
+	}
+}
+
 func TestAppServerManagerEnsureUnavailableAndClosesTransportWhenInitializeFails(t *testing.T) {
 	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
 		if req.Method == "initialize" && req.ID != nil {
@@ -452,6 +511,59 @@ func TestAppServerManagerEnsureUnavailableAndClosesTransportWhenInitializeFails(
 	}
 	if got := fake.closeCount.Load(); got == 0 {
 		t.Fatal("transport close count = 0, want cleanup on initialize failure")
+	}
+}
+
+func TestAppServerManagerBacksOffAfterFailedStart(t *testing.T) {
+	now := time.Unix(100, 0)
+	var starterCalls atomic.Int32
+	var failStart atomic.Bool
+	failStart.Store(true)
+	fake := newFakeAppServerTransport(t, nil)
+	m := newAppServerManager(agentbackend.Config{Bin: "codex", WorkDir: "/repo"}, nil)
+	m.now = func() time.Time { return now }
+	m.starter = func(ctx context.Context, cfg agentbackend.Config, env []string) (*appServerConnection, error) {
+		starterCalls.Add(1)
+		if failStart.Load() {
+			return nil, errors.New("spawn failed")
+		}
+		return fake.starter(ctx, cfg, env)
+	}
+
+	err := m.ensure(context.Background())
+	if !errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
+		t.Fatalf("first ensure error = %v, want ErrSessionWorkerUnavailable", err)
+	}
+	err = m.ensure(context.Background())
+	if !errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
+		t.Fatalf("second ensure error = %v, want ErrSessionWorkerUnavailable", err)
+	}
+	if got := starterCalls.Load(); got != 1 {
+		t.Fatalf("starter calls = %d, want immediate retry suppressed by backoff", got)
+	}
+
+	now = now.Add(initialAppServerStartBackoff)
+	failStart.Store(false)
+	if err := m.ensure(context.Background()); err != nil {
+		t.Fatalf("ensure after backoff error = %v, want successful restart", err)
+	}
+	if got := starterCalls.Load(); got != 2 {
+		t.Fatalf("starter calls = %d, want retry after backoff", got)
+	}
+	if !m.healthy(m.generation) {
+		t.Fatal("manager unhealthy after successful retry")
+	}
+
+	if err := m.close(); err != nil {
+		t.Fatal(err)
+	}
+	failStart.Store(true)
+	err = m.ensure(context.Background())
+	if !errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
+		t.Fatalf("ensure after successful reset error = %v, want ErrSessionWorkerUnavailable", err)
+	}
+	if got := starterCalls.Load(); got != 3 {
+		t.Fatalf("starter calls = %d, want successful start to reset prior backoff", got)
 	}
 }
 
@@ -475,6 +587,9 @@ func TestCodexWorkerBackendNewSessionWorkerUnavailableWhenResumeRejectsConfig(t 
 	})
 	if !errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
 		t.Fatalf("NewSessionWorker error = %v, want ErrSessionWorkerUnavailable", err)
+	}
+	if !strings.Contains(err.Error(), "bad mcp config") {
+		t.Fatalf("NewSessionWorker error = %v, want resume rejection detail", err)
 	}
 	if worker != nil {
 		t.Fatalf("worker=%#v, want nil", worker)
@@ -662,7 +777,7 @@ func TestAppServerWorkerTurnStartOtherRPCErrorDoesNotFallback(t *testing.T) {
 	}
 }
 
-func TestAppServerWorkerSubmittedContextCancelInvalidatesManager(t *testing.T) {
+func TestAppServerWorkerSubmittedContextCancelDoesNotInvalidateManager(t *testing.T) {
 	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
 		if req.Method != "turn/start" {
 			return false
@@ -699,11 +814,11 @@ func TestAppServerWorkerSubmittedContextCancelInvalidatesManager(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run error = %v, want context.Canceled", err)
 	}
-	if m.healthy(generation) {
-		t.Fatal("manager remains healthy after submitted turn context cancellation")
+	if !m.healthy(generation) {
+		t.Fatal("manager unhealthy after submitted turn context cancellation")
 	}
-	if codexWorker.Healthy() {
-		t.Fatal("worker remains healthy after manager invalidated by submitted cancellation")
+	if !codexWorker.Healthy() {
+		t.Fatal("worker unhealthy after submitted turn context cancellation")
 	}
 }
 
@@ -929,14 +1044,55 @@ func TestAppServerTerminalEventDrainsQueuedHumanloopPayload(t *testing.T) {
 		t.Fatal("terminal notification is not relevant to turn")
 	}
 
-	got := appServerRememberQueuedHumanloopPayload(payloads.C(), nil)
+	got := payloads.rememberQueued(nil)
 	if got == nil || got.Question != "ready at terminal" {
 		t.Fatalf("AwaitingUser=%+v, want queued terminal-time payload", got)
 	}
+	payloads.mu.Lock()
+	queued := len(payloads.queue)
+	payloads.mu.Unlock()
+	if queued != 0 {
+		t.Fatalf("queued payload count=%d, want 0 after drain", queued)
+	}
+}
+
+func TestAppServerHumanloopPayloadBufferQueuesWithoutBlocking(t *testing.T) {
+	payloads := newAppServerHumanloopPayloadBuffer(1)
+	payloads.beginTurn()
+	defer payloads.endTurn()
+
+	payloads.deliver(humanloop.Payload{Kind: "ask_user", Question: "first"})
+	secondDone := make(chan struct{})
+	go func() {
+		payloads.deliver(humanloop.Payload{Kind: "ask_user", Question: "second"})
+		close(secondDone)
+	}()
+	receiveWithin(t, secondDone, "second payload delivery")
+
+	payloads.mu.Lock()
+	gotQuestions := make([]string, 0, len(payloads.queue))
+	for _, p := range payloads.queue {
+		gotQuestions = append(gotQuestions, p.Question)
+	}
+	payloads.mu.Unlock()
+	if strings.Join(gotQuestions, ",") != "first,second" {
+		t.Fatalf("queued questions=%v, want first,second", gotQuestions)
+	}
+
 	select {
-	case stale := <-payloads.C():
-		t.Fatalf("payload remained queued after terminal drain: %+v", stale)
-	default:
+	case <-payloads.C():
+	case <-time.After(appServerRPCTestTimeout):
+		t.Fatal("payload delivery did not signal waiting turn")
+	}
+	pending := payloads.rememberQueued(nil)
+	if pending == nil || pending.Question != "first" {
+		t.Fatalf("pending payload=%+v, want first", pending)
+	}
+	payloads.mu.Lock()
+	queued := len(payloads.queue)
+	payloads.mu.Unlock()
+	if queued != 0 {
+		t.Fatalf("queued payload count=%d, want 0 after rememberQueued", queued)
 	}
 }
 
