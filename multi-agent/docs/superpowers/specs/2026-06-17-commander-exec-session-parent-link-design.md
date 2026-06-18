@@ -120,7 +120,7 @@ func effectiveCodexHome(cfg, env) string {
 - `loomMetaDir(base)` / `loomMetaPath(base, id)` 接受解析后 base（不读 env）。scanner 传 `b.effectiveCodexHome()`，executor 传 `effectiveCodexHome(e.cfg, e.env)`；`base==""` 时 loom-meta 写入 skip。
 - 子进程 env 构造（major，**resolve-then-strip 顺序 + 全量去重**）：
   - 当前 executor/llm/app-server 都是 `cmd.Env = append(cmd.Environ(), <env>...)`（`executor.go:128`、`llm.go:27`）——若进程环境已有 `CODEX_HOME=/old` 而 resolved env 给 `/new`，子进程会有**重复 key**（OS 取最后一条，脆弱且跨平台不清）。
-  - `New` 先用**原始** `cfg, env` 调 `resolveCodexHome` 得最终值 `final`（**不能先删 env slice**——否则 `env=[]string{"CODEX_HOME=/x"}` + `cfg` 空时会被删成空、fallback `$HOME/.codex`，丢了 caller 传入的值）。
+  - `New`（经 `withCodexHome`）先用**原始** `cfg, env` 调 `effectiveCodexHome` 得最终值 `final`（`effectiveCodexHome` = `resolveCodexHome`，空时回退 `$HOME/.codex`；**不能先删 env slice 再解析**——否则 `env=[]string{"CODEX_HOME=/x"}` + `cfg` 空时会被删成空，丢了 caller 传入的值）。用 `effectiveCodexHome` 而非 `resolveCodexHome` 是为了让默认目录也被注入（见下）。
   - 再构造 resolved env：从传入 `env` slice **和** `cmd.Environ()`/`os.Environ()` 里**都**移除既有的 `CODEX_HOME=…`（大小写不敏感：`Codex_Home`/`CODEX_HOME` 同键），然后**始终** append 一条 `CODEX_HOME=<final>`（`final = effectiveCodexHome(cfg, env)`，**含默认 `$HOME/.codex`**——否则 `os.Environ()` 里的 stale `CODEX_HOME` 不会被覆盖，子进程写 stale 目录而 scanner 读默认目录，二者不一致）。仅当 home 不可解（`effectiveCodexHome` 返回 `""`，极罕见）时不注入。
   - 落地方式：`New` 把 resolved env **存为 `b.env`**；executor/llm/app-server 改为 `cmd.Env = mergeEnv(os.Environ(), b.env)`（`mergeEnv` 去重：b.env 的键覆盖 os.Environ 同键，大小写不敏感），而不是裸 `append(cmd.Environ(), env...)`。
   - 结果：子进程恰好一条 `CODEX_HOME=<final>`（含默认），与 scanner 读的目录一致；exec / app-server / llm 三路径一致。
