@@ -61,6 +61,7 @@ func (b *Backend) ListSessions(ctx context.Context) ([]agentbackend.Session, err
 
 	var out []agentbackend.Session
 	seen := map[string]struct{}{}
+	liveThreadIDs := make([]string, 0)
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return nil
@@ -79,8 +80,14 @@ func (b *Backend) ListSessions(ctx context.Context) ([]agentbackend.Session, err
 		if err != nil {
 			return nil
 		}
-		seen[path] = struct{}{}
-		session := b.list.Get(path, info, func() agentbackend.Session {
+		sidecarMtime := ""
+		if sidecarInfo, err := os.Stat(loomMetaPath(base, id)); err == nil {
+			sidecarMtime = sidecarInfo.ModTime().Format(time.RFC3339Nano)
+		}
+		cacheKey := path + "|" + sidecarMtime
+		seen[cacheKey] = struct{}{}
+		liveThreadIDs = append(liveThreadIDs, id)
+		session := b.list.Get(cacheKey, info, func() agentbackend.Session {
 			return scanCodexSession(path, id, false, base).session
 		})
 		out = append(out, session)
@@ -89,6 +96,7 @@ func (b *Backend) ListSessions(ctx context.Context) ([]agentbackend.Session, err
 	if err != nil {
 		return nil, err
 	}
+	reaper(base, liveThreadIDs)
 	b.list.Prune(seen)
 	return out, nil
 }
