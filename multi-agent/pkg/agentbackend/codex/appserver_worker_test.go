@@ -607,6 +607,21 @@ func TestCodexWorkerBackendNewSessionWorkerUnavailableWhenResumeRejectsConfig(t 
 	}
 }
 
+func TestAppServerManagerResumeThreadPreservesInnerErrorChain(t *testing.T) {
+	m := newAppServerManager(agentbackend.Config{Bin: "codex", WorkDir: "/repo"}, nil)
+	m.rpc = newAppServerRPC(strings.NewReader(""), io.Discard)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := m.resumeThread(ctx, appServerThreadResumeParams{ThreadID: "thr-1"})
+	if !errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
+		t.Fatalf("resumeThread error = %v, want ErrSessionWorkerUnavailable", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("resumeThread error = %v, want context.Canceled in unwrap chain", err)
+	}
+}
+
 func TestAppServerWorkerTurnStartSubmissionPreventsFallbackOnLostResponse(t *testing.T) {
 	fake := newFakeAppServerTransport(t, func(req appServerRPCMessage, w io.Writer) bool {
 		if req.Method == "turn/start" {

@@ -635,7 +635,7 @@ func (m *appServerManager) resumeThread(ctx context.Context, params appServerThr
 		return 0, agentbackend.ErrSessionWorkerUnavailable
 	}
 	if err := rpc.call(ctx, "thread/resume", params, nil); err != nil {
-		return 0, fmt.Errorf("%w: thread/resume: %v", agentbackend.ErrSessionWorkerUnavailable, err)
+		return 0, fmt.Errorf("%w: thread/resume: %w", agentbackend.ErrSessionWorkerUnavailable, err)
 	}
 	return generation, nil
 }
