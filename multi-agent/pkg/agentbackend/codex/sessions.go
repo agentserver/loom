@@ -52,6 +52,7 @@ func (b *Backend) ListSessions(ctx context.Context) ([]agentbackend.Session, err
 	if root == "" {
 		return nil, nil
 	}
+	base := b.effectiveCodexHome()
 	if _, err := os.Stat(root); errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	} else if err != nil {
@@ -80,7 +81,7 @@ func (b *Backend) ListSessions(ctx context.Context) ([]agentbackend.Session, err
 		}
 		seen[path] = struct{}{}
 		session := b.list.Get(path, info, func() agentbackend.Session {
-			return scanCodexSession(path, id, false).session
+			return scanCodexSession(path, id, false, base).session
 		})
 		out = append(out, session)
 		return nil
@@ -97,6 +98,7 @@ func (b *Backend) GetSession(ctx context.Context, id string) (agentbackend.Sessi
 	if root == "" {
 		return agentbackend.Session{}, nil, agentbackend.ErrSessionNotFound
 	}
+	base := b.effectiveCodexHome()
 	if _, err := os.Stat(root); errors.Is(err, fs.ErrNotExist) {
 		return agentbackend.Session{}, nil, agentbackend.ErrSessionNotFound
 	} else if err != nil {
@@ -126,7 +128,7 @@ func (b *Backend) GetSession(ctx context.Context, id string) (agentbackend.Sessi
 	if found == "" {
 		return agentbackend.Session{}, nil, agentbackend.ErrSessionNotFound
 	}
-	res := scanCodexSession(found, id, true)
+	res := scanCodexSession(found, id, true, base)
 	return res.session, res.messages, nil
 }
 
@@ -231,7 +233,7 @@ type codexResponseItemContent struct {
 	Text string `json:"text"`
 }
 
-func scanCodexSession(path, fallbackID string, withMessages bool) codexScanResult {
+func scanCodexSession(path, fallbackID string, withMessages bool, base string) codexScanResult {
 	res := codexScanResult{session: agentbackend.Session{
 		ID:     fallbackID,
 		Kind:   agentbackend.KindCodex,
@@ -307,6 +309,7 @@ func scanCodexSession(path, fallbackID string, withMessages bool) codexScanResul
 	if lastAssistantText != "" {
 		res.session.Preview = truncatePreview(lastAssistantText)
 	}
+	applyLoomMeta(base, &res.session)
 	return res
 }
 
@@ -327,6 +330,25 @@ func applyCodexSessionMeta(sess *agentbackend.Session, p codexMetaPayload) {
 	if sess.Origin == "" {
 		sess.Origin = agentbackend.SessionOriginUser
 	}
+}
+
+func applyLoomMeta(base string, sess *agentbackend.Session) {
+	if base == "" || sess == nil {
+		return
+	}
+	m, ok := readLoomMeta(base, sess.ID)
+	if !ok {
+		return
+	}
+	if m.Schema != loomMetaSchema || m.Kind != "codex" || m.Origin != "agent_task" || m.SessionID != sess.ID {
+		return
+	}
+	if sess.Origin != agentbackend.SessionOriginAgentTask || m.ParentSessionID == "" || sess.ParentID != "" {
+		return
+	}
+	sess.ParentID = m.ParentSessionID
+	sess.ParentAgentID = m.ParentAgentID
+	sess.ParentDisplayName = m.ParentDisplayName
 }
 
 func scanCodexSessionWorkingDir(path string) string {

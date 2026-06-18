@@ -49,6 +49,26 @@ func setTestHome(t *testing.T, home string) {
 	t.Setenv("USERPROFILE", home)
 }
 
+func writeCodexRollout(t *testing.T, codexHome, id, metaPayload, ts string) string {
+	t.Helper()
+	day := ts[:10]
+	parts := strings.Split(day, "-")
+	if len(parts) != 3 {
+		t.Fatalf("bad timestamp %q", ts)
+	}
+	dir := filepath.Join(codexHome, "sessions", parts[0], parts[1], parts[2])
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fileTS := strings.NewReplacer(":", "-", ".", "-").Replace(ts)
+	path := filepath.Join(dir, "rollout-"+fileTS+"-"+id+".jsonl")
+	body := `{"timestamp":"` + ts + `","type":"session_meta","payload":` + metaPayload + "}\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestListSessions_EmptyDir(t *testing.T) {
 	setTestHome(t, t.TempDir())
 
@@ -324,6 +344,105 @@ func TestGetSession_CodexExecManifestIsAgentTaskAndTitleSkipsManifest(t *testing
 	}
 }
 
+func TestListSessionsMergesLoomMetaSidecar(t *testing.T) {
+	home := t.TempDir()
+	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir(), CodexHome: home}, nil)
+	id := "deadbeef-0000-0000-0000-000000000001"
+	writeCodexRollout(t, home, id, `{"id":"`+id+`","cwd":"/proj","originator":"codex_exec"}`, "2026-06-17T10:00:00Z")
+	if err := writeLoomMeta(home, loomMeta{
+		Schema:            loomMetaSchema,
+		SessionID:         id,
+		ParentSessionID:   "parent-aaa",
+		ParentAgentID:     "drv-abc",
+		ParentDisplayName: "prod-driver",
+		Origin:            "agent_task",
+		Kind:              "codex",
+		CreatedAt:         "2026-06-17T10:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := b.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 session, got %d", len(got))
+	}
+	s := got[0]
+	if s.Origin != agentbackend.SessionOriginAgentTask {
+		t.Fatalf("Origin = %q, want agent_task", s.Origin)
+	}
+	if s.ParentID != "parent-aaa" || s.ParentAgentID != "drv-abc" || s.ParentDisplayName != "prod-driver" {
+		t.Fatalf("parent fields mismatch: %+v", s)
+	}
+
+	sess, _, err := b.GetSession(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.ParentID != "parent-aaa" || sess.ParentAgentID != "drv-abc" || sess.ParentDisplayName != "prod-driver" {
+		t.Fatalf("GetSession parent fields mismatch: %+v", sess)
+	}
+}
+
+func TestListSessionsSidecarDoesNotRelabelUserSession(t *testing.T) {
+	home := t.TempDir()
+	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir(), CodexHome: home}, nil)
+	id := "deadbeef-0000-0000-0000-000000000002"
+	writeCodexRollout(t, home, id, `{"id":"`+id+`","cwd":"/proj"}`, "2026-06-17T11:00:00Z")
+	if err := writeLoomMeta(home, loomMeta{
+		Schema:            loomMetaSchema,
+		SessionID:         id,
+		ParentSessionID:   "parent",
+		ParentAgentID:     "drv",
+		ParentDisplayName: "driver",
+		Origin:            "agent_task",
+		Kind:              "codex",
+		CreatedAt:         "2026-06-17T00:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := b.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1, got %d", len(got))
+	}
+	if got[0].Origin == agentbackend.SessionOriginAgentTask {
+		t.Fatalf("sidecar must not relabel a user session: %+v", got[0])
+	}
+	if got[0].ParentID != "" || got[0].ParentAgentID != "" || got[0].ParentDisplayName != "" {
+		t.Fatalf("parent fields must stay empty for user session: %+v", got[0])
+	}
+}
+
+func TestListSessionsCorruptSidecarSkipped(t *testing.T) {
+	home := t.TempDir()
+	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir(), CodexHome: home}, nil)
+	id := "deadbeef-0000-0000-0000-000000000003"
+	writeCodexRollout(t, home, id, `{"id":"`+id+`","cwd":"/proj","originator":"codex_exec"}`, "2026-06-17T12:00:00Z")
+	if err := os.MkdirAll(loomMetaDir(home), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(loomMetaPath(home, id), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := b.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1, got %d", len(got))
+	}
+	if got[0].ParentID != "" || got[0].ParentAgentID != "" {
+		t.Fatalf("corrupt sidecar must be skipped: %+v", got[0])
+	}
+}
+
 func TestGetSession_SkipsEnvironmentContextForTitle(t *testing.T) {
 	home := t.TempDir()
 	setTestHome(t, home)
@@ -404,6 +523,40 @@ func TestGetSession_CodexSubagentMetadata(t *testing.T) {
 	}
 	if sess.Origin != agentbackend.SessionOriginSubagent || sess.ParentID != parentID {
 		t.Fatalf("GetSession subagent metadata mismatch: %+v", sess)
+	}
+}
+
+func TestListSessionsLoomMetaDoesNotOverwriteSubagentParent(t *testing.T) {
+	home := t.TempDir()
+	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir(), CodexHome: home}, nil)
+	parentID := "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
+	id := "deadbeef-0000-0000-0000-000000000005"
+	payload := `{"id":"` + id + `","parent_thread_id":"` + parentID + `","cwd":"/tmp/codex-subagent","thread_source":"subagent","agent_nickname":"Lovelace"}`
+	writeCodexRollout(t, home, id, payload, "2026-06-17T12:30:00Z")
+	if err := writeLoomMeta(home, loomMeta{
+		Schema:          loomMetaSchema,
+		SessionID:       id,
+		ParentSessionID: "wrong-parent",
+		ParentAgentID:   "drv",
+		Origin:          "agent_task",
+		Kind:            "codex",
+		CreatedAt:       "2026-06-17T12:30:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := b.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1, got %d", len(got))
+	}
+	if got[0].Origin != agentbackend.SessionOriginSubagent || got[0].ParentID != parentID {
+		t.Fatalf("sidecar changed subagent metadata: %+v", got[0])
+	}
+	if got[0].ParentAgentID != "" {
+		t.Fatalf("sidecar should not enrich subagent ParentAgentID: %+v", got[0])
 	}
 }
 
