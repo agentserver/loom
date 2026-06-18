@@ -233,7 +233,8 @@ Observer（`internal/commanderhub/tree.go`）：
 - `internal/commanderhub/registry.go` + `hub.go` + `tree.go` — 贯通 `ShortID`/`ParentAgentID`/`ParentDisplayName`；`agent_id → daemonConn` 映射；全局 parent 索引；`SessionRow.OwnerAgentID` 上报填自身。
 - `internal/commanderhub/webapp/src/api/types.ts` + `components/DaemonSessionTree.tsx` — 跨 daemon 嵌套 + badge（display_name）。
 - `internal/driver/tools.go`（含 `contract_tools.go`/`slave_tools.go`/`register_mcp_tool.go`/`slave_file_tools.go`）— current-session 接线 + `<loom_origin>` 打标；反向 marker 解析；扩 `delegatedTaskRecord`。
-- `cmd/slave-agent/main.go` + `cmd/driver-agent/main.go` — `agentbackend.New` 移到 `EnsureRegistered` 之后；解析 `codex_home` 传入 `Config.CodexHome`（P2）。
+- `cmd/slave-agent/main.go`（P2）— `agentbackend.New` 移到 `EnsureRegistered` 之后，用已知 short_id 解析 `codex_home` 传入 `Config.CodexHome`。
+- `cmd/driver-agent/main.go`（P2）— driver **无** `EnsureRegistered` 流程（`register` 是独立子命令、ShortID 已持久化进 config）；`serve-mcp`/`serve-daemon` 启动时从 config 读 `ShortID` 解析 `codex_home`，空则报"先跑 register"或 fallback `$HOME/.codex`。**不**移 `New` 到注册之后。
 - `deploy/{linux,windows}/{driver,slave}/config.yaml.template` + `dev/configs/*.example.yaml` — 加 `codex_home`（P2）。
 
 ### 测试
