@@ -139,6 +139,7 @@ Create `pkg/agentbackend/codex/codexenv_test.go`:
 package codex
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
@@ -231,6 +232,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
 // envValue returns the value of key in the env slice (e.g.
@@ -444,7 +447,7 @@ import (
 	"time"
 )
 
-const loomMetaSchema = "1"
+const loomMetaSchema = 1 // JSON number, per spec — NOT a string
 
 var loomMetaMaxAge = 30 * 24 * time.Hour
 
@@ -458,8 +461,9 @@ func timeNow() time.Time { return time.Now() }
 // Session descriptor carries ParentID / ParentAgentID / ParentDisplayName.
 //
 // Path: <effectiveCodexHome>/loom-meta/<thread_id>.json  (loom #24 spec §5).
+// Schema is a JSON number (schema: 1), matching the spec's on-disk contract.
 type loomMeta struct {
-	Schema            string `json:"schema"`
+	Schema            int    `json:"schema"`
 	SessionID         string `json:"session_id"`
 	ParentSessionID   string `json:"parent_session_id,omitempty"`
 	ParentAgentID     string `json:"parent_agent_id,omitempty"`
@@ -581,10 +585,6 @@ Create/append `pkg/agentbackend/codex/backend_test.go`:
 package codex
 
 import (
-	"context"
-	"fmt"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
@@ -1125,33 +1125,60 @@ func TestCodexExecutorRunResumeDoesNotWriteSidecar(t *testing.T) {
 Run: `go test ./pkg/agentbackend/codex/ -run 'RunWritesLoomMetaSidecar|RunResumeDoesNotWriteSidecar' -v`
 Expected: FAIL — no sidecar written on Run yet (first test fails); once you add unconditional writing in `runWithArgv`, the RunResume test will fail (proving the hazard).
 
-- [ ] **Step 3: Add `newSession bool` to `runWithArgv`; write sidecar only when true**
+- [ ] **Step 3: Add `Timestamp` to `codexEvent`; add `newSession bool` + `parent parentLink` to `runWithArgv`**
 
-In `pkg/agentbackend/codex/executor.go`, change the `runWithArgv` signature to accept `newSession bool`:
+First, give `codexEvent` a `Timestamp` field (the loop variable is `ev`, not `ln`; codex stream-json events carry a top-level `timestamp`). In `pkg/agentbackend/codex/executor.go`:
 
 ```go
-func (e *executor) runWithArgv(ctx context.Context, argvHead []string, prompt string, sink agentbackend.Sink, newSession bool) (agentbackend.Result, error) {
+type codexEvent struct {
+	Type      string `json:"type"`
+	Timestamp string `json:"timestamp"`
+	ThreadID  string `json:"thread_id"`
+	Item      struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"item"`
+}
+```
+
+Add a small bundle type near `executor`:
+
+```go
+// parentLink carries the origin fields from a Task into runWithArgv so the
+// sidecar can be written on the new-session path. Zero-valued for RunResume
+// (which never writes a sidecar).
+type parentLink struct {
+	sessionID, agentID, displayName string
+}
+```
+
+Change `runWithArgv`'s signature to accept `newSession bool` and `parent parentLink`:
+
+```go
+func (e *executor) runWithArgv(ctx context.Context, argvHead []string, prompt string, sink agentbackend.Sink, newSession bool, parent parentLink) (agentbackend.Result, error) {
 ```
 
 Update the two callers:
-- `Run` (line 81): `return e.runWithArgv(ctx, args, prompt, sink, true)`
-- `RunResume` (line 101): `return e.runWithArgv(ctx, args, prompt, sink, false)`
+- `Run` (line 81): `return e.runWithArgv(ctx, args, prompt, sink, true, parentLink{t.ParentSessionID, t.ParentAgentID, t.ParentDisplayName})`
+- `RunResume` (line 101): `return e.runWithArgv(ctx, args, prompt, sink, false, parentLink{})`
 
-In the scan loop, the thread id is captured around line 191. Declare a timestamp capture above the loop and write the sidecar only when `newSession`:
+- [ ] **Step 4: Capture the event timestamp and write the sidecar only when `newSession`**
+
+Above the `for sc.Scan()` loop, declare:
 
 ```go
-	var lastLineTimestamp string
+	var lastEventTimestamp string
 ```
 
-Inside the loop, after `json.Unmarshal` of `ln`, capture the timestamp:
+Inside the loop, right after `json.Unmarshal(line, &ev)` succeeds (before the `switch`/event-type checks), capture the timestamp from `ev`:
 
 ```go
-			if ln.Timestamp != "" {
-				lastLineTimestamp = ln.Timestamp
+			if ev.Timestamp != "" {
+				lastEventTimestamp = ev.Timestamp
 			}
 ```
 
-Change the thread-capture block:
+Change the thread-capture block (the loop variable is `ev`):
 
 ```go
 		if ev.Type == "thread.started" && sessionID == "" && ev.ThreadID != "" {
@@ -1161,48 +1188,70 @@ Change the thread-capture block:
 				// path (Run), NEVER RunResume — a resume emits thread.started
 				// too and must not be mislabeled agent_task. Failure is
 				// non-fatal: the session still lists, just without a parent.
+				created := lastEventTimestamp
+				if created == "" {
+					created = timeNow().UTC().Format(time.RFC3339Nano)
+				}
 				_ = writeLoomMeta(effectiveCodexHome(e.cfg, e.env), loomMeta{
 					Schema:            loomMetaSchema,
 					SessionID:         sessionID,
-					ParentSessionID:   t.ParentSessionID,
-					ParentAgentID:     t.ParentAgentID,
-					ParentDisplayName: t.ParentDisplayName,
+					ParentSessionID:   parent.sessionID,
+					ParentAgentID:     parent.agentID,
+					ParentDisplayName: parent.displayName,
 					Origin:            string(agentbackend.SessionOriginAgentTask),
 					Kind:              "codex",
-					CreatedAt:         lastLineTimestamp,
+					CreatedAt:         created,
 				})
 			}
 			continue
 		}
 ```
 
-(`t` is the `agentbackend.Task` in scope for `Run`; `runWithArgv` does not receive `t` — see Step 4.)
+Add `"time"` to the executor's imports (for `time.RFC3339Nano`).
 
-- [ ] **Step 4: Thread parent fields into `runWithArgv`**
+- [ ] **Step 5: Add a no-timestamp-fallback test**
 
-`runWithArgv` is called by both `Run` (has `t`) and `RunResume` (has no `Task`). Since sidecar is only written on `Run`, pass the parent fields from `Run`. Add a small struct or three params. Minimal: add `parent loomMeta` (zero-value for RunResume) — but cleaner to pass the `Task`-derived fields only when `newSession`. Change `runWithArgv` to also accept the parent fields bundled:
+Append to `executor_test.go`:
 
 ```go
-type parentLink struct {
-	sessionID, agentID, displayName string
+func TestCodexExecutorSidecarCreatedAteFallback(t *testing.T) {
+	home := t.TempDir()
+	// thread.started event with NO timestamp field → created_at must fall
+	// back to time.Now() (non-empty RFC3339Nano), not stay empty.
+	bin := writeFakeCodex(t, []string{
+		`{"type":"thread.started","thread_id":"thr-nots"}`,
+		`{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}`,
+	})
+	ex := newExecutor(agentbackend.Config{Bin: bin, WorkDir: t.TempDir(), CodexHome: home}, nil)
+	if _, err := ex.Run(context.Background(), agentbackend.Task{Prompt: "hi", ParentAgentID: "drv"}, &captureSink{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	m, ok := readLoomMeta(home, "thr-nots")
+	if !ok {
+		t.Fatal("sidecar not written")
+	}
+	if m.CreatedAt == "" {
+		t.Fatal("CreatedAt empty — expected time.Now() fallback when thread.started has no timestamp")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, m.CreatedAt); err != nil {
+		t.Fatalf("CreatedAt %q is not RFC3339Nano: %v", m.CreatedAt, err)
+	}
 }
 ```
 
-Add `parent parentLink` to `runWithArgv`'s signature. `Run` passes `parentLink{t.ParentSessionID, t.ParentAgentID, t.ParentDisplayName}`; `RunResume` passes `parentLink{}` (zero, unused since `newSession=false`). Use `parent.*` in the sidecar write.
+Add `"time"` to the test file imports if absent.
 
-(Adjust the signature and both call sites accordingly; the RunResume test still passes because `newSession=false` skips the write.)
+- [ ] **Step 6: Run the tests to verify they pass**
 
-- [ ] **Step 5: Run the tests to verify they pass**
+Run: `go test ./pkg/agentbackend/codex/ -run 'RunWritesLoomMetaSidecar|RunResumeDoesNotWriteSidecar|SidecarCreatedAteFallback' -v -race`
+Expected: PASS (Run writes; RunResume does not; no-timestamp event still yields a valid `created_at`).
 
-Run: `go test ./pkg/agentbackend/codex/ -run 'RunWritesLoomMetaSidecar|RunResumeDoesNotWriteSidecar' -v -race`
-Expected: PASS (Run writes; RunResume does not).
-
-- [ ] **Step 6: Full package + race**
+- [ ] **Step 7: Full package + race**
 
 Run: `go test ./pkg/agentbackend/codex/ -race -count=1`
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add pkg/agentbackend/codex/executor.go pkg/agentbackend/codex/executor_test.go
@@ -1211,14 +1260,19 @@ git commit -m "feat(codex): write loom-meta sidecar only on Run, never RunResume
 
 ---
 
-## Task 10: Subprocess env via `mergeEnv` (full dedup across `os.Environ`)
+## Task 10: Subprocess env via `mergeEnv` (full dedup across `os.Environ`) — exec + llm + app-server
 
 **Files:**
 - Modify: `pkg/agentbackend/codex/executor.go` (`runWithArgv`)
 - Modify: `pkg/agentbackend/codex/llm.go`
+- Modify: `pkg/agentbackend/codex/appserver_manager.go` (`startAppServerProcess`, line ~776)
 - Test: `pkg/agentbackend/codex/executor_test.go`
 
-- [ ] **Step 1: Write the failing test**
+> **Why all three:** `withCodexHome` runs in `New` and stores the resolved env in `b.env`; `b.env` is what each subprocess must receive. Today executor (`:128`), llm (`:27`), AND app-server (`:776`) all do `append(cmd.Environ(), env...)`, so a stale `CODEX_HOME` in the process env survives alongside the resolved one. All three must switch to `mergeEnv(os.Environ(), <resolved env>)`.
+
+- [ ] **Step 1: Write the failing test (uses `New`, not `newExecutor(..., nil)`)**
+
+> The test MUST go through `New` so `withCodexHome` actually populates `b.env` with `CODEX_HOME=<home>`. Calling `newExecutor(cfg, nil)` directly leaves `e.env` nil and the subprocess never sees `cfg.CodexHome`.
 
 Append:
 
@@ -1242,8 +1296,9 @@ func main() {
 	fmt.Println(%q)
 }
 `, envPath, `{"type":"thread.started","thread_id":"thr-env","timestamp":"2026-06-17T10:00:00Z"}`))
-	ex := newExecutor(agentbackend.Config{Bin: bin, WorkDir: t.TempDir(), CodexHome: home}, nil)
-	if _, err := ex.Run(context.Background(), agentbackend.Task{Prompt: "hi"}, &captureSink{}); err != nil {
+	// Go through New so withCodexHome resolves CODEX_HOME=<home> into b.env.
+	b := New(agentbackend.Config{Bin: bin, WorkDir: t.TempDir(), CodexHome: home}, nil)
+	if _, err := b.Run(context.Background(), agentbackend.Task{Prompt: "hi"}, &captureSink{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	got, _ := os.ReadFile(envPath)
@@ -1264,9 +1319,9 @@ func main() {
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `go test ./pkg/agentbackend/codex/ -run 'SubprocessEnvHasSingleCodexHome' -v`
-Expected: FAIL — current `cmd.Env = append(cmd.Environ(), e.env...)` leaves the process `CODEX_HOME=/stale-from-process` AND adds `CODEX_HOME=<home>`, so two entries.
+Expected: FAIL — `runWithArgv` does `append(cmd.Environ(), e.env...)`, leaving the process `CODEX_HOME=/stale-from-process` AND adding `CODEX_HOME=<home>` (two entries).
 
-- [ ] **Step 3: Switch executor + llm to `mergeEnv`**
+- [ ] **Step 3: Switch executor + llm + app-server to `mergeEnv`**
 
 In `pkg/agentbackend/codex/executor.go` `runWithArgv`, replace:
 
@@ -1282,10 +1337,24 @@ with:
 
 In `pkg/agentbackend/codex/llm.go` (line 27), replace `cmd.Env = append(cmd.Environ(), r.env...)` with `cmd.Env = mergeEnv(os.Environ(), r.env)`.
 
+In `pkg/agentbackend/codex/appserver_manager.go` `startAppServerProcess` (line ~776), replace:
+
+```go
+	cmd.Env = append(cmd.Environ(), env...)
+```
+
+with:
+
+```go
+	cmd.Env = mergeEnv(os.Environ(), env)
+```
+
+(The app-server manager receives the **resolved** `b.env` from `workerBackend` per Task 5, so `env` here already carries the single `CODEX_HOME=<resolved>`; `mergeEnv` ensures the process's own stale `CODEX_HOME` (if any) is overridden rather than duplicated.)
+
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `go test ./pkg/agentbackend/codex/ -run 'SubprocessEnvHasSingleCodexHome' -v -race`
-Expected: PASS.
+Expected: PASS — exactly one `CODEX_HOME=<home>`.
 
 - [ ] **Step 5: Full package + race**
 
