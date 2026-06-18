@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"os"
+	"strings"
 
 	"github.com/yourorg/multi-agent/internal/sessioncache"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
@@ -13,6 +14,7 @@ const appServerUnsafeHumanloopRoutingEnv = "LOOM_CODEX_APPSERVER_UNSAFE_HUMANLOO
 // Backend is the Codex implementation of agentbackend.Backend.
 type Backend struct {
 	cfg  agentbackend.Config
+	env  []string
 	exec *executor
 	perm *Store
 	llm  *llmRunner
@@ -28,8 +30,10 @@ func New(cfg agentbackend.Config, env []string) *Backend {
 	if cfg.Bin == "" {
 		cfg.Bin = "codex"
 	}
+	env = withCodexHome(cfg, env)
 	return &Backend{
 		cfg:  cfg,
+		env:  env,
 		exec: newExecutor(cfg, env),
 		perm: NewStore(cfg.WorkDir),
 		llm:  newLLM(cfg, env),
@@ -51,6 +55,26 @@ func (b *Backend) RunResume(ctx context.Context, sessionID, answer string, s age
 func (b *Backend) LLM() agentbackend.LLMRunner                { return b.llm }
 func (b *Backend) Permissions() agentbackend.PermissionsStore { return b.perm }
 func (b *Backend) Detect(ctx context.Context) error           { return detect(ctx, b.cfg.Bin) }
+
+func withCodexHome(cfg agentbackend.Config, env []string) []string {
+	final := effectiveCodexHome(cfg, env)
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		k, _, ok := splitEnv(kv)
+		if ok && strings.EqualFold(k, "CODEX_HOME") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	if final != "" {
+		out = append(out, "CODEX_HOME="+final)
+	}
+	return out
+}
+
+func (b *Backend) effectiveCodexHome() string {
+	return effectiveCodexHome(b.cfg, b.env)
+}
 
 func (b *Backend) resumeWorkDir(ctx context.Context, sessionID string) (string, error) {
 	workDir, ok, err := b.sessionWorkingDir(ctx, sessionID)
@@ -83,7 +107,7 @@ func init() {
 		if cfg.WorkerMode == "app_server" && os.Getenv(appServerUnsafeHumanloopRoutingEnv) == "1" {
 			return &workerBackend{
 				Backend: b,
-				manager: newAppServerManager(b.cfg, env),
+				manager: newAppServerManager(b.cfg, b.env),
 			}, nil
 		}
 		return b, nil
