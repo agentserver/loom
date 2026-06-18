@@ -8,6 +8,10 @@ type Task struct {
 	Prompt        string
 	SystemContext string
 	TimeoutSec    int
+
+	ParentSessionID   string
+	ParentAgentID     string
+	ParentDisplayName string
 }
 
 type Result struct {
@@ -20,7 +24,7 @@ type Result struct {
 // AskUserPayload mirrors humanloop.Payload but lives here so chat-skill
 // callers in this package can build a Result without importing humanloop.
 type AskUserPayload struct {
-	Kind     string   `json:"kind"`              // "ask_user" | "request_permission"
+	Kind     string   `json:"kind"` // "ask_user" | "request_permission"
 	Question string   `json:"question,omitempty"`
 	Options  []string `json:"options,omitempty"`
 	Context  string   `json:"context,omitempty"`

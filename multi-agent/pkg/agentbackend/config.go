@@ -15,6 +15,7 @@ type Config struct {
 	WorkDir    string   `yaml:"workdir"`
 	ExtraArgs  []string `yaml:"extra_args"`
 	WorkerMode string   `yaml:"worker_mode"`
+	CodexHome  string   `yaml:"codex_home"`
 }
 
 // Deprecated: ClaudeConfig is a type alias for Config, retained as a

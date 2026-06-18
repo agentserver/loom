@@ -39,6 +39,8 @@ type Agent struct {
 	WorkDir    string   `yaml:"workdir"`
 	ExtraArgs  []string `yaml:"extra_args"`
 	WorkerMode string   `yaml:"worker_mode"`
+	CodexHome  string   `yaml:"codex_home,omitempty"`
+	LoomHome   string   `yaml:"loom_home,omitempty"`
 }
 
 type Server struct {
