@@ -137,7 +137,7 @@ func (e *executor) runWithArgv(ctx context.Context, argvHead []string, prompt st
 
 	cmd := exec.CommandContext(ctx, e.cfg.Bin, args...)
 	cmd.Dir = e.cfg.WorkDir
-	cmd.Env = mergeEnv(os.Environ(), e.env)
+	cmd.Env = mergeEnv(cmd.Environ(), e.env)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
