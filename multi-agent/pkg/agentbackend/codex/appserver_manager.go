@@ -14,6 +14,7 @@ import (
 
 	executorpkg "github.com/yourorg/multi-agent/internal/executor"
 	"github.com/yourorg/multi-agent/internal/humanloop"
+	"github.com/yourorg/multi-agent/internal/platform"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
@@ -27,6 +28,7 @@ var (
 const (
 	initialAppServerStartBackoff = 250 * time.Millisecond
 	maxAppServerStartBackoff     = 5 * time.Second
+	appServerProcessGrace        = 5 * time.Second
 )
 
 type workerBackend struct {
@@ -799,13 +801,32 @@ func startAppServerProcess(ctx context.Context, cfg agentbackend.Config, env []s
 		closeOnce.Do(func() {
 			_ = stdin.Close()
 			_ = stdout.Close()
-			killed := false
-			if cmd.Process != nil {
-				killed = cmd.Process.Kill() == nil
+			select {
+			case closeErr = <-waitDone:
+				return
+			default:
 			}
-			closeErr = <-waitDone
-			if killed {
+
+			if cmd.Process == nil {
+				closeErr = <-waitDone
+				return
+			}
+
+			termErr := platform.TerminateProcess(cmd.Process)
+			timer := time.NewTimer(appServerProcessGrace)
+			defer timer.Stop()
+
+			select {
+			case <-waitDone:
 				closeErr = nil
+			case <-timer.C:
+				if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+					closeErr = err
+				}
+				<-waitDone
+			}
+			if closeErr == nil && termErr != nil && !errors.Is(termErr, os.ErrProcessDone) {
+				closeErr = termErr
 			}
 		})
 		return closeErr
