@@ -153,11 +153,15 @@ func (d *Dispatcher) Run(ctx context.Context, t executor.Task) (executor.Result,
 		if b, jerr := json.Marshal(wrapper); jerr == nil {
 			stored = string(b)
 			// Surface the wrapped marker on the result so the poller can
-			// forward it as the agentserver `result` field. Without this
-			// the wrapper would live only in the local slave store +
-			// observer relay, and `recordTerminalChild` (#24 P2) would
-			// silently no-op when observer is unavailable.
-			res.WrappedOutput = stored
+			// forward it as the agentserver `result` field. Only when the
+			// envelope actually carries info downstream needs (session id
+			// for reverse parent link, or awaiting_user question for resume)
+			// — otherwise leave the wire format as the raw summary so we
+			// don't break consumers that expect a string there (orchestrator
+			// taskOutput, contract test, agentserver clients). #24 P2 review.
+			if res.AwaitingUser != nil || res.SessionID != "" {
+				res.WrappedOutput = stored
+			}
 		}
 	}
 	if err := d.store.Complete(t.ID, stored); err != nil {
@@ -202,7 +206,17 @@ func (d *Dispatcher) replayExistingTask(t executor.Task) (executor.Result, error
 	}
 	switch row.Status {
 	case "completed":
-		return executor.Result{Summary: row.Output}, nil
+		// For chat skills row.Output is the kind-marker JSON envelope (see
+		// the wrapping block in Run above); surface it via WrappedOutput so
+		// the poller forwards it verbatim and doesn't double-JSON-encode it
+		// through the raw-summary fallback. For non-chat skills row.Output
+		// is the raw summary string; WrappedOutput stays empty and the
+		// poller's fallback handles it correctly.
+		res := executor.Result{Summary: row.Output}
+		if (t.Skill == "" || t.Skill == "chat" || t.Skill == "chat_resume") && json.Valid([]byte(row.Output)) {
+			res.WrappedOutput = row.Output
+		}
+		return res, nil
 	case "failed":
 		if row.Error == "" {
 			return executor.Result{}, fmt.Errorf("task %s previously failed", t.ID)

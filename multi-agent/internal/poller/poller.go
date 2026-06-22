@@ -252,8 +252,20 @@ func (p *Poller) drainPendingAcks(ctx context.Context) {
 		if a.Status == "failed" {
 			body["failure_reason"] = a.Reason
 		} else {
-			enc, _ := json.Marshal(a.Reason)
-			body["result"] = json.RawMessage(enc)
+			// a.Reason is row.Output (see store.PopPendingAcks). For chat
+			// skills that is the kind-marker JSON envelope, which must be
+			// forwarded raw so info.Result reads as the structured object
+			// downstream code (sessionIDFromMarker, contract tests) expects.
+			// For raw-string outputs, JSON-encode so it round-trips as a
+			// JSON string. Treat valid-JSON outputs as already-encoded.
+			var result json.RawMessage
+			if json.Valid([]byte(a.Reason)) {
+				result = json.RawMessage(a.Reason)
+			} else {
+				enc, _ := json.Marshal(a.Reason)
+				result = json.RawMessage(enc)
+			}
+			body["result"] = result
 		}
 		if p.putStatus(ctx, a.TaskID, body) == nil {
 			_ = p.s.DeletePendingAck(a.TaskID)

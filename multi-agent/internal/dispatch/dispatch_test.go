@@ -17,9 +17,9 @@ import (
 )
 
 type stubExec struct {
-	res    executor.Result
-	err    error
-	called bool
+	res     executor.Result
+	err     error
+	called  bool
 	gotTask executor.Task
 }
 
@@ -418,4 +418,40 @@ func TestRespectsTaskTimeout(t *testing.T) {
 	require.Error(t, err, "expected timeout error")
 	require.Less(t, elapsed, 5*time.Second, "timeout took longer than expected")
 	require.Greater(t, elapsed, 500*time.Millisecond, "timeout fired too early")
+}
+
+func TestDispatcher_ReplayCompletedChatTaskSurfacesWrappedOutput(t *testing.T) {
+	// Replay path returns row.Output as Summary; for chat skills that's the
+	// kind-marker JSON envelope. The poller must forward it as raw JSON,
+	// not re-encode via the raw-summary fallback. WrappedOutput is how
+	// dispatch signals "this is already a JSON envelope, forward verbatim".
+	s := newStore(t)
+	// Seed the store with a completed chat task whose Output is the wrapped
+	// envelope (the shape dispatch.Run produces for chat results).
+	envelope := `{"kind":"final","summary":"hello","session_id":"thr-7"}`
+	_, err := s.InsertIfAbsent(store.Task{ID: "t-replay-chat", Skill: "chat", Prompt: "hi"})
+	require.NoError(t, err)
+	require.NoError(t, s.Complete("t-replay-chat", envelope))
+
+	d := New(map[string]executor.Executor{"": &stubExec{}}, &stubJournal{}, s, nil)
+	res, err := d.Run(context.Background(), executor.Task{ID: "t-replay-chat", Skill: "chat", Prompt: "hi"})
+	require.NoError(t, err)
+	require.Equal(t, envelope, res.Summary, "Summary preserves the envelope for legacy callers")
+	require.Equal(t, envelope, res.WrappedOutput, "WrappedOutput must be set so the poller forwards raw JSON instead of double-encoding")
+}
+
+func TestDispatcher_ReplayCompletedNonChatTaskLeavesWrappedOutputEmpty(t *testing.T) {
+	// Non-chat skills (e.g. bash) store the raw summary string in row.Output.
+	// WrappedOutput must stay empty so the poller's raw-summary fallback
+	// JSON-encodes it correctly (the contract path agentserver expects).
+	s := newStore(t)
+	_, err := s.InsertIfAbsent(store.Task{ID: "t-replay-bash", Skill: "bash", Prompt: "ls"})
+	require.NoError(t, err)
+	require.NoError(t, s.Complete("t-replay-bash", "raw-bash-output"))
+
+	d := New(map[string]executor.Executor{"bash": &stubExec{}}, &stubJournal{}, s, nil)
+	res, err := d.Run(context.Background(), executor.Task{ID: "t-replay-bash", Skill: "bash", Prompt: "ls"})
+	require.NoError(t, err)
+	require.Equal(t, "raw-bash-output", res.Summary)
+	require.Empty(t, res.WrappedOutput, "non-chat replay must not pretend to have a JSON envelope")
 }
