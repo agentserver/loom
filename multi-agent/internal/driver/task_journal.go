@@ -28,6 +28,9 @@ type TaskRecord struct {
 	Status            string `json:"status,omitempty"`
 	Wait              bool   `json:"wait"`
 	TimeoutSec        int    `json:"timeout_sec,omitempty"`
+	ChildSessionID    string `json:"child_session_id,omitempty"`
+	ChildAgentID      string `json:"child_agent_id,omitempty"`
+	Terminal          bool   `json:"terminal,omitempty"`
 }
 
 type TaskJournal struct {
@@ -76,6 +79,17 @@ func (j *TaskJournal) Recent(limit int, taskID string) ([]TaskRecord, error) {
 	return records, err
 }
 
+// LatestByTaskID returns the most recent record for taskID (newest-first scan),
+// or ok=false if none. Used at result time to read the delegation-time
+// ChildAgentID/Tool/TargetID/Skill when appending the terminal record.
+func (j *TaskJournal) LatestByTaskID(taskID string) (TaskRecord, bool) {
+	recs, err := j.Recent(500, taskID)
+	if err != nil || len(recs) == 0 {
+		return TaskRecord{}, false
+	}
+	return recs[0], true // Recent is newest-first
+}
+
 func (j *TaskJournal) RecentWithWarnings(limit int, taskID string) ([]TaskRecord, []string, error) {
 	limit = normalizeTaskJournalLimit(limit)
 	j.mu.Lock()
@@ -110,6 +124,28 @@ func (j *TaskJournal) RecentWithWarnings(limit int, taskID string) ([]TaskRecord
 	if err := scanner.Err(); err != nil {
 		return nil, warnings, fmt.Errorf("read task journal: %w", err)
 	}
+
+	// Scoped dedup: if any record for a given task_id has Terminal=true, drop
+	// the non-terminal records for that same task_id. Records for task_ids that
+	// have no terminal counterpart (e.g. multiple resume_task rows still running)
+	// are NOT affected — they all remain visible.
+	terminalTaskIDs := make(map[string]bool)
+	for _, rec := range records {
+		if rec.Terminal && rec.TaskID != "" {
+			terminalTaskIDs[rec.TaskID] = true
+		}
+	}
+	if len(terminalTaskIDs) > 0 {
+		filtered := records[:0]
+		for _, rec := range records {
+			if !rec.Terminal && terminalTaskIDs[rec.TaskID] {
+				continue // hide non-terminal when terminal exists for same task_id
+			}
+			filtered = append(filtered, rec)
+		}
+		records = filtered
+	}
+
 	for i, k := 0, len(records)-1; i < k; i, k = i+1, k-1 {
 		records[i], records[k] = records[k], records[i]
 	}

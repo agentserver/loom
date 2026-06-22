@@ -88,7 +88,7 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 		})
 	}
 
-	targetID, targetName, skill, route, err := s.selectTarget(ctx, cards, tc, args.TargetDisplayName, args.Skill)
+	targetID, targetName, targetShortID, skill, route, err := s.selectTarget(ctx, cards, tc, args.TargetDisplayName, args.Skill)
 	if err != nil {
 		return nil, err
 	}
@@ -121,6 +121,7 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 		Response:          resp,
 		TargetID:          targetID,
 		TargetDisplayName: targetName,
+		ChildAgentID:      targetShortID,
 		Skill:             skill,
 		Wait:              false,
 		TimeoutSec:        timeout,
@@ -148,7 +149,7 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 	})
 }
 
-func (s *submitContractTaskTool) selectTarget(ctx context.Context, cards []agentsdk.AgentCard, tc contract.TaskContract, targetOverride, skillOverride string) (targetID, targetName, skill, route string, err error) {
+func (s *submitContractTaskTool) selectTarget(ctx context.Context, cards []agentsdk.AgentCard, tc contract.TaskContract, targetOverride, skillOverride string) (targetID, targetName, targetShortID, skill, route string, err error) {
 	if targetOverride == "" && tc.ExecutionPolicy.Routing == contract.RoutingDirectFirst {
 		matches := directContractCapabilityMatches(cards, s.t.cfg.Credentials.SandboxID, tc)
 		if len(matches) == 1 {
@@ -156,30 +157,30 @@ func (s *submitContractTaskTool) selectTarget(ctx context.Context, cards []agent
 			if skill == "" {
 				skill = "chat"
 			}
-			return matches[0].AgentID, matches[0].DisplayName, skill, routeDirectSlave, nil
+			return matches[0].AgentID, matches[0].DisplayName, cardShortID(matches[0]), skill, routeDirectSlave, nil
 		}
 	}
-	targetID, targetName, _, targetRole, err := s.t.resolveTarget(ctx, targetOverride)
+	targetID, targetName, targetShortID, targetRole, err := s.t.resolveTarget(ctx, targetOverride)
 	if err != nil {
-		return "", "", "", "", err
+		return "", "", "", "", "", err
 	}
 	if targetRole == observer.RoleMaster && !tc.ExecutionPolicy.AllowsMaster() {
-		return "", "", "", "", &MCPToolError{Message: "master fallback is not allowed by contract"}
+		return "", "", "", "", "", &MCPToolError{Message: "master fallback is not allowed by contract"}
 	}
 	if !targetAllowed(targetID, tc.ExecutionPolicy.AllowedTargets) {
-		return "", "", "", "", &MCPToolError{Message: "target is not allowed by contract: " + targetID}
+		return "", "", "", "", "", &MCPToolError{Message: "target is not allowed by contract: " + targetID}
 	}
 	skill = skillOverride
 	if targetRole == observer.RoleMaster {
 		if skill == "" {
 			skill = "fanout"
 		}
-		return targetID, targetName, skill, routeMasterFanout, nil
+		return targetID, targetName, targetShortID, skill, routeMasterFanout, nil
 	}
 	if skill == "" {
 		skill = "chat"
 	}
-	return targetID, targetName, skill, routeDirectSlave, nil
+	return targetID, targetName, targetShortID, skill, routeDirectSlave, nil
 }
 
 func directContractMatches(cards []agentsdk.AgentCard, selfID string, requiredSkills, allowedTargets []string) []agentsdk.AgentCard {
