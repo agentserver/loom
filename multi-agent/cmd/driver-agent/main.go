@@ -356,6 +356,7 @@ func runServeDaemon(args []string) {
 				AgentWorkDir:  cfg.Agent.WorkDir,
 				DisplayName:   cfg.Discovery.DisplayName,
 				DriverVersion: driverVersion,
+				ShortID:       cfg.Credentials.ShortID,
 			},
 			HeartbeatInt:   time.Duration(cfg.Daemon.HeartbeatIntervalSec) * time.Second,
 			InitialBackoff: time.Duration(cfg.Daemon.InitialBackoffMs) * time.Millisecond,

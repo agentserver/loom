@@ -318,3 +318,18 @@ func keys(m map[string]json.RawMessage) []string {
 	slices.Sort(out)
 	return out
 }
+
+func TestRegisterPayloadShortIDRoundTrip(t *testing.T) {
+	in := RegisterPayload{SchemaVersion: SchemaVersion, Kind: "codex", ShortID: "drv-1"}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out RegisterPayload
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.ShortID != "drv-1" {
+		t.Fatalf("ShortID = %q, want drv-1", out.ShortID)
+	}
+}
