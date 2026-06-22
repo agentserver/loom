@@ -41,6 +41,12 @@ type SessionRow struct {
 	// in-flight turns are represented by TurnState and daemon TurnCount.
 	ActiveWorker     bool `json:"active_worker"`
 	AwaitingApproval bool `json:"awaiting_approval"`
+
+	// OwnerAgentID is the ShortID of the daemon that owns this session.
+	// ParentAgentID / ParentDisplayName are set when Origin == agent_task.
+	OwnerAgentID      string `json:"owner_agent_id,omitempty"`
+	ParentAgentID     string `json:"parent_agent_id,omitempty"`
+	ParentDisplayName string `json:"parent_display_name,omitempty"`
 }
 
 type sessionListCache struct {
@@ -81,27 +87,30 @@ func sessionTitle(title, preview, id string) string {
 	return id[:8]
 }
 
-func sessionRowFromBackend(daemonID string, sess agentbackend.Session, snap turnSnapshot) SessionRow {
+func sessionRowFromBackend(daemonID, ownerAgentID string, sess agentbackend.Session, snap turnSnapshot) SessionRow {
 	state := string(snap.State)
 	if state == "" {
 		state = string(turnStateIdle)
 	}
 	return SessionRow{
-		DaemonID:         daemonID,
-		SessionID:        sess.ID,
-		Kind:             string(sess.Kind),
-		Title:            sessionTitle(sess.Title, sess.Preview, sess.ID),
-		Origin:           string(sess.Origin),
-		ParentID:         sess.ParentID,
-		AgentName:        sess.AgentName,
-		AgentRole:        sess.AgentRole,
-		WorkingDir:       sess.WorkingDir,
-		UpdatedAt:        sess.UpdatedAt,
-		MessageCount:     sess.MessageCount,
-		Preview:          sess.Preview,
-		TurnState:        state,
-		ActiveWorker:     sess.ActiveWorker || snap.ActiveWorker,
-		AwaitingApproval: snap.AwaitingApproval,
+		DaemonID:          daemonID,
+		SessionID:         sess.ID,
+		Kind:              string(sess.Kind),
+		Title:             sessionTitle(sess.Title, sess.Preview, sess.ID),
+		Origin:            string(sess.Origin),
+		ParentID:          sess.ParentID,
+		AgentName:         sess.AgentName,
+		AgentRole:         sess.AgentRole,
+		WorkingDir:        sess.WorkingDir,
+		UpdatedAt:         sess.UpdatedAt,
+		MessageCount:      sess.MessageCount,
+		Preview:           sess.Preview,
+		TurnState:         state,
+		ActiveWorker:      sess.ActiveWorker || snap.ActiveWorker,
+		AwaitingApproval:  snap.AwaitingApproval,
+		OwnerAgentID:      ownerAgentID,
+		ParentAgentID:     sess.ParentAgentID,
+		ParentDisplayName: sess.ParentDisplayName,
 	}
 }
 
@@ -206,7 +215,7 @@ func (h *Hub) refreshSessionRows(ctx context.Context, o owner, info DaemonInfo) 
 	rows := make([]SessionRow, 0, len(body.Sessions))
 	for _, sess := range body.Sessions {
 		snap := h.turns.get(turnKey{owner: o, daemonID: info.DaemonID, sessionID: sess.ID})
-		rows = append(rows, sessionRowFromBackend(info.DaemonID, sess, snap))
+		rows = append(rows, sessionRowFromBackend(info.DaemonID, info.ShortID, sess, snap))
 	}
 	sortSessionRows(rows)
 	return rows, nil

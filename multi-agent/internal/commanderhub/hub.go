@@ -108,6 +108,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		conn.Close()
 		return
 	}
+	dc.shortID = rp.ShortID
 	dc.displayName = rp.DisplayName
 	dc.kind = rp.Kind
 	dc.driverVersion = rp.DriverVersion

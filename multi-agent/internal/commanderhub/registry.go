@@ -22,6 +22,7 @@ type owner struct {
 // DaemonInfo is the JSON snapshot of an online daemon, returned to the web.
 type DaemonInfo struct {
 	DaemonID      string   `json:"daemon_id"`
+	ShortID       string   `json:"short_id,omitempty"`
 	DisplayName   string   `json:"display_name"`
 	Kind          string   `json:"kind"`
 	DriverVersion string   `json:"driver_version"`
@@ -38,6 +39,7 @@ type DaemonInfo struct {
 type daemonConn struct {
 	id            string
 	owner         owner
+	shortID       string
 	displayName   string
 	kind          string
 	driverVersion string
@@ -71,6 +73,7 @@ func (dc *daemonConn) info() DaemonInfo {
 
 	return DaemonInfo{
 		DaemonID:      dc.id,
+		ShortID:       dc.shortID,
 		DisplayName:   dc.displayName,
 		Kind:          dc.kind,
 		DriverVersion: dc.driverVersion,

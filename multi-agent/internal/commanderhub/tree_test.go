@@ -50,7 +50,7 @@ func TestSortSessionRowsNewestFirst(t *testing.T) {
 
 func TestSessionRowFromBackendMergesTurnState(t *testing.T) {
 	updatedAt := time.Now()
-	row := sessionRowFromBackend("d1", agentbackend.Session{
+	row := sessionRowFromBackend("d1", "", agentbackend.Session{
 		ID:           "s1",
 		Kind:         agentbackend.KindCodex,
 		WorkingDir:   "/repo",
@@ -86,13 +86,13 @@ func TestSessionRowFromBackendMergesTurnState(t *testing.T) {
 }
 
 func TestSessionRowFromBackendDefaultsIdleTurnState(t *testing.T) {
-	row := sessionRowFromBackend("d1", agentbackend.Session{ID: "s1"}, turnSnapshot{})
+	row := sessionRowFromBackend("d1", "", agentbackend.Session{ID: "s1"}, turnSnapshot{})
 
 	require.Equal(t, "idle", row.TurnState)
 }
 
 func TestSessionRowFromBackendUsesDaemonActiveWorkerMarker(t *testing.T) {
-	row := sessionRowFromBackend("d1", agentbackend.Session{ID: "s1", ActiveWorker: true}, turnSnapshot{})
+	row := sessionRowFromBackend("d1", "", agentbackend.Session{ID: "s1", ActiveWorker: true}, turnSnapshot{})
 
 	require.Equal(t, "idle", row.TurnState)
 	require.True(t, row.ActiveWorker)
@@ -258,6 +258,15 @@ func TestCommanderTreeRefreshesDaemonsConcurrently(t *testing.T) {
 	require.Equal(t, "fast-session", byName["fast"].Sessions[0].SessionID)
 	require.NotEqual(t, "ok", byName["slow"].Status)
 	require.NotEmpty(t, byName["slow"].Error)
+}
+
+func TestSessionRowCarriesParentAndOwner(t *testing.T) {
+	sess := agentbackend.Session{ID: "s1", Origin: agentbackend.SessionOriginAgentTask,
+		ParentAgentID: "drv-1", ParentDisplayName: "prod-driver"}
+	row := sessionRowFromBackend("d1", "slave-2", sess, turnSnapshot{})
+	if row.OwnerAgentID != "slave-2" || row.ParentAgentID != "drv-1" || row.ParentDisplayName != "prod-driver" {
+		t.Fatalf("row = %+v", row)
+	}
 }
 
 func sessionCacheHasEntry(hub *Hub, o owner, daemonID string) bool {
