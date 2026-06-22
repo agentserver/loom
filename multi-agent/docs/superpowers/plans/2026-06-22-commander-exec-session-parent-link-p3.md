@@ -66,10 +66,10 @@ git commit -m "feat(commander): add owner/parent agent fields to frontend types 
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `DaemonSessionTree.test.tsx` (cases: cross-daemon child nests under parent + is omitted from home root; parent-offline child renders as root with note; local subagent still nests):
+Append to `DaemonSessionTree.test.tsx`. Key behaviors: children are **default-collapsed** (assert hidden, then expand, then badge visible); a remote child is **omitted from its home daemon's root list** (real DOM-scope assertion, not a comment); local subagents with only `parent_id` (no `parent_agent_id`) still nest; clicking a remote child selects the **child's** daemon.
 
 ```ts
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { DaemonSessionTree } from './DaemonSessionTree';
 import type { DaemonTree, SessionRow } from '../api/types';
 
@@ -78,19 +78,27 @@ const row = (over: Partial<SessionRow>): SessionRow => ({
   turn_state: 'idle', active_worker: false, awaiting_approval: false, ...over,
 });
 
-it('nests a remote agent_task child under a parent in another daemon', () => {
+it('nests a remote agent_task child under a parent in another daemon (default-collapsed)', () => {
   const daemons: DaemonTree[] = [
     { daemon_id: 'drv', display_name: 'prod-driver', kind: 'codex', status: 'ok', short_id: 'drv-1',
-      sessions: [row({ daemon_id: 'drv', session_id: 'parent-s', owner_agent_id: 'drv-1', origin: 'user' })] },
+      sessions: [row({ daemon_id: 'drv', session_id: 'parent-s', owner_agent_id: 'drv-1', origin: 'user', title: 'parent-s' })] },
     { daemon_id: 'slv', display_name: 'slave-02', kind: 'codex', status: 'ok', short_id: 'slv-2',
-      sessions: [row({ daemon_id: 'slv', session_id: 'child-s', owner_agent_id: 'slv-2',
+      sessions: [row({ daemon_id: 'slv', session_id: 'child-s', owner_agent_id: 'slv-2', title: 'child-s',
         origin: 'agent_task', parent_id: 'parent-s', parent_agent_id: 'drv-1', parent_display_name: 'prod-driver' })] },
   ];
   render(<DaemonSessionTree daemons={daemons} selected={null} onSelect={() => {}} />);
-  // child renders under the parent (parent's session node), with a remote badge
+
+  // Default-collapsed: child is NOT visible until the parent is expanded.
+  expect(screen.queryByText(/remote · on slave-02/)).toBeNull();
+  // The child must NOT appear as a root in its home (slave) daemon group.
+  // Assert via the slave group's scope: the only session-title in the slave
+  // group is none (child-s is nested under the driver parent, not a slave root).
+  const slaveGroup = screen.getByText('slave-02').closest('section')!;
+  expect(slaveGroup.querySelector('[data-testid="root-session"]')?.textContent ?? '').not.toContain('child-s');
+
+  // Expand the parent; now the remote child + badge appear.
+  fireEvent.click(screen.getByLabelText(/展开 subagent sessions: parent-s/));
   expect(screen.getByText(/remote · on slave-02/)).toBeInTheDocument();
-  // child is NOT a root in its home daemon group
-  // (assert absence of a second top-level session-title "child-s" outside the parent)
 });
 
 it('renders parent-offline note when parent is not in any daemon', () => {
@@ -100,82 +108,113 @@ it('renders parent-offline note when parent is not in any daemon', () => {
         origin: 'agent_task', parent_id: 'gone-s', parent_agent_id: 'drv-gone', parent_display_name: 'old-driver' })] },
   ];
   render(<DaemonSessionTree daemons={daemons} selected={null} onSelect={() => {}} />);
+  // orphan renders as a root (visible without expansion) with the note.
   expect(screen.getByText(/parent offline/i)).toBeInTheDocument();
   expect(screen.getByText(/old-driver/)).toBeInTheDocument();
 });
 
-it('still nests local subagents within their daemon', () => {
+it('still nests local subagents that have only parent_id (no parent_agent_id)', () => {
   const daemons: DaemonTree[] = [
     { daemon_id: 'drv', display_name: 'prod-driver', kind: 'codex', status: 'ok', short_id: 'drv-1',
       sessions: [
-        row({ daemon_id: 'drv', session_id: 'u-s', owner_agent_id: 'drv-1', origin: 'user' }),
-        row({ daemon_id: 'drv', session_id: 'sub-s', owner_agent_id: 'drv-1', origin: 'subagent', parent_id: 'u-s' }),
+        row({ daemon_id: 'drv', session_id: 'u-s', owner_agent_id: 'drv-1', origin: 'user', title: 'u-s' }),
+        row({ daemon_id: 'drv', session_id: 'sub-s', owner_agent_id: 'drv-1', origin: 'subagent', parent_id: 'u-s', title: 'sub-s' }),
       ] },
   ];
   render(<DaemonSessionTree daemons={daemons} selected={null} onSelect={() => {}} />);
+  // sub-s must NOT be a root (it nests under u-s); expand u-s and find the subagent label.
+  const drvGroup = screen.getByText('prod-driver').closest('section')!;
+  expect(drvGroup.textContent).not.toMatch(/sub-s.*sub-s/); // not duplicated as a root
+  fireEvent.click(screen.getByLabelText(/展开 subagent sessions: u-s/));
   expect(screen.getByText(/subagent ·/)).toBeInTheDocument();
 });
+
+it('clicking a remote child selects the child home daemon, not the parent daemon', () => {
+  const onSelect = vi.fn();
+  const daemons: DaemonTree[] = [
+    { daemon_id: 'drv', display_name: 'prod-driver', kind: 'codex', status: 'ok', short_id: 'drv-1',
+      sessions: [row({ daemon_id: 'drv', session_id: 'parent-s', owner_agent_id: 'drv-1', origin: 'user', title: 'parent-s' })] },
+    { daemon_id: 'slv', display_name: 'slave-02', kind: 'codex', status: 'ok', short_id: 'slv-2',
+      sessions: [row({ daemon_id: 'slv', session_id: 'child-s', owner_agent_id: 'slv-2', title: 'child-s',
+        origin: 'agent_task', parent_id: 'parent-s', parent_agent_id: 'drv-1', parent_display_name: 'prod-driver' })] },
+  ];
+  render(<DaemonSessionTree daemons={daemons} selected={null} onSelect={onSelect} />);
+  fireEvent.click(screen.getByLabelText(/展开 subagent sessions: parent-s/));
+  fireEvent.click(screen.getByText('child-s'));
+  expect(onSelect).toHaveBeenCalledWith('slv', 'child-s'); // child's daemon, not 'drv'
+});
 ```
+
+(Tests use `data-testid="root-session"` on root session rows and `aria-label` on the toggle — add these attributes in Step 3.)
 
 - [ ] **Step 2: Run to verify they fail**
 
 Run: `cd internal/commanderhub/webapp && npm test -- DaemonSessionTree`
 Expected: FAIL — current builder is per-daemon and nests only `subagent + parent_id` within one daemon.
 
-- [ ] **Step 3: Rewrite the builder to be cross-daemon**
+- [ ] **Step 3: Rewrite the builder to be cross-daemon (owner-aware keys)**
 
-Replace `buildSessionNodes` and the render mapping in `DaemonSessionTree.tsx`. Core logic:
+Replace `buildSessionNodes` and the render mapping in `DaemonSessionTree.tsx`. **All node/child/home keys are owner-aware** `(owner_agent_id, session_id)` — never `session_id` alone — so two daemons/backends sharing a session id can't collide (#4). **Local subagents** with only `parent_id` (no `parent_agent_id`) resolve their parent under the child's own `owner_agent_id` (#3) — so they keep nesting.
 
 ```ts
 type SessionNode = { session: SessionRow; children: SessionNode[]; remote: boolean };
 
 function ownerKey(ownerAgentID: string, sessionID: string) {
-  return `${ownerAgentID}\0${sessionID}`;
+  return `${ownerAgentID ?? ''}\0${sessionID}`;
 }
 
-// Build a global tree across all daemons. Returns:
-//   rootsByDaemon: per daemon_id, the root nodes (sessions not nested elsewhere
-//                  under a resolved parent) — remote children are omitted here.
-//   A child with an unresolved parent is a root in its home daemon (parent-offline).
+// parentOwnerFor returns the owner that owns a child's parent. For remote
+// agent_task children, parent_agent_id is set explicitly. For local subagents
+// (P1 leaves ParentAgentID empty) the parent lives in the SAME owner, so fall
+// back to the child's own owner_agent_id.
+function parentOwnerFor(s: SessionRow): string {
+  return s.parent_agent_id ?? s.owner_agent_id ?? '';
+}
+
 function buildCrossDaemonTree(daemons: DaemonTree[]) {
   const all = daemons.flatMap(d => d.sessions ?? []);
+  // Every map keyed by ownerKey (owner_agent_id, session_id) — never session_id alone.
   const byOwnerKey = new Map<string, SessionNode>();
-  const nodeBySession = new Map<string, SessionNode>();
   for (const s of all) {
-    const node: SessionNode = { session: s, children: [], remote: false };
-    byOwnerKey.set(ownerKey(s.owner_agent_id ?? '', s.session_id), node);
-    nodeBySession.set(s.session_id, node);
+    byOwnerKey.set(ownerKey(s.owner_agent_id, s.session_id), { session: s, children: [], remote: false });
   }
-  const isChild = new Set<string>();
+  const isChildKey = new Set<string>(); // ownerKey of resolved children
   for (const s of all) {
     if (s.origin !== 'subagent' && s.origin !== 'agent_task') continue;
-    if (!s.parent_id || !s.parent_agent_id) continue;
-    const parent = byOwnerKey.get(ownerKey(s.parent_agent_id, s.parent_id));
-    if (!parent) continue; // parent offline → stays a root
-    parent.children.push(nodeBySession.get(s.session_id)!);
-    isChild.add(s.session_id);
+    if (!s.parent_id) continue;
+    const parentKey = ownerKey(parentOwnerFor(s), s.parent_id);
+    const parent = byOwnerKey.get(parentKey);
+    if (!parent) continue; // parent offline → child stays a root (with a note)
+    const childKey = ownerKey(s.owner_agent_id, s.session_id);
+    parent.children.push(byOwnerKey.get(childKey)!);
+    isChildKey.add(childKey);
   }
-  // Roots per daemon = that daemon's sessions that are not a resolved child.
+  // Roots per daemon = that daemon's sessions whose ownerKey is NOT a resolved child.
   const rootsByDaemon = new Map<string, SessionNode[]>();
   for (const d of daemons) {
     rootsByDaemon.set(d.daemon_id, (d.sessions ?? [])
-      .filter(s => !isChild.has(s.session_id))
-      .map(s => nodeBySession.get(s.session_id)!));
+      .filter(s => !isChildKey.has(ownerKey(s.owner_agent_id, s.session_id)))
+      .map(s => byOwnerKey.get(ownerKey(s.owner_agent_id, s.session_id))!));
   }
-  // Mark remote children (child whose home daemon != parent's home daemon).
-  const homeDaemon = new Map<string, string>(); // session_id -> daemon_id
-  for (const s of all) homeDaemon.set(s.session_id, s.daemon_id);
-  for (const node of byOwnerKey.values()) {
-    for (const child of node.children) {
-      const parentDaemon = homeDaemon.get(node.session.session_id);
-      child.remote = parentDaemon !== homeDaemon.get(child.session.session_id);
+  // Mark remote: child's home daemon != parent's home daemon (by ownerKey lookup).
+  const daemonOfOwnerKey = new Map<string, string>();
+  for (const s of all) daemonOfOwnerKey.set(ownerKey(s.owner_agent_id, s.session_id), s.daemon_id);
+  for (const parent of byOwnerKey.values()) {
+    const parentDaemon = daemonOfOwnerKey.get(ownerKey(parent.session.owner_agent_id, parent.session.session_id));
+    for (const child of parent.children) {
+      child.remote = daemonOfOwnerKey.get(ownerKey(child.session.owner_agent_id, child.session.session_id)) !== parentDaemon;
     }
   }
-  return { rootsByDaemon };
+  return { rootsByDaemon, byOwnerKey };
 }
 ```
 
-Render: for each daemon group, render `rootsByDaemon.get(daemon_id)`; under each root, recursively render `node.children` (default-collapsed, as today). A `remote` child shows a `remote · on <home daemon display_name>` meta; a root that has `parent_agent_id` but wasn't resolved (parent offline) shows a `parent offline · <parent_display_name>` meta. Look up home-daemon display_name via a `short_id → display_name` map built from `daemons` (and the child's own `daemon_id`).
+**Render rules (fix #5):**
+- For each daemon group, render its `rootsByDaemon`; mark each root row with `data-testid="root-session"` (for the dedup test).
+- Under each root, recursively render `node.children`, default-collapsed (existing `expanded` state, keyed by parent's `(daemon_id, session_id)`). The toggle keeps its existing `aria-label` (`展开/收起 subagent sessions: <title>`).
+- **A child button calls `onSelect(child.session.daemon_id, child.session.session_id)`** — the child's home daemon, NOT the parent group's daemon. (This is the #5 fix; a remote child lives visually under the driver parent but selecting it must open the slave daemon's session.)
+- A `remote` child's meta: `remote task · on <home display_name>` (home display_name from a `daemon_id → display_name` map built from `daemons`).
+- A root with `parent_id` that wasn't resolved (parent offline) — i.e. its ownerKey is not in `byOwnerKey` as someone's... actually it IS a root and has `parent_id` set but no resolved parent — render meta `parent offline · <parent_display_name>`.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -271,3 +310,8 @@ git commit -m "test(commander): playwright visual for cross-daemon nesting (#24 
 - Observer Go changes (P2 landed the needed `SessionRow` fields).
 - Per-session `current` marker concurrency (P2 accepted caveat).
 - web humanloop approval UI (still out of scope per the UI-redesign spec).
+
+## Implementation notes
+
+- **Branch:** implement P3 on its own branch (e.g. `commander-parent-link-p3`) off `origin/master` (after P2 lands). The `commander-parent-link-p2p3` branch holds plan docs only.
+- **Windows:** P3 is frontend-only (no Go path changes), so Windows verification is not required here; but the embedded `assets/dist` must rebuild cleanly on the CI Node version.

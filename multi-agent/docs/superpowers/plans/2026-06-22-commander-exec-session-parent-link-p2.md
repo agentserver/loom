@@ -20,14 +20,15 @@
 
 - `pkg/agentbackend/loomorigin.go` — **NEW**: `BuildLoomOrigin`/`ParseLoomOrigin` (shared by driver stamp + slave parse; both import agentbackend).
 - `pkg/agentbackend/loomorigin_test.go` — **NEW**.
-- `pkg/agentbackend/codex/loommeta.go` — add `writeCurrentSession`/`readCurrentSession` (the `current` marker; not a sidecar).
+- `pkg/agentbackend/codex/loommeta.go` — add `writeCurrentSession`/`ReadCurrentSession` (the `current` marker; not a sidecar).
 - `pkg/agentbackend/codex/loommeta_test.go` — marker tests.
 - `pkg/agentbackend/codex/executor.go` — write `current` marker on `thread.started` (Run **and** RunResume).
 - `internal/commander/protocol.go` — `RegisterPayload` += `ShortID`.
-- `internal/commanderhub/registry.go` + `hub.go` + `tree.go` — carry `ShortID`; `SessionRow` += `OwnerAgentID`/`ParentAgentID`/`ParentDisplayName`; `agent_id → daemonConn` map; `sessionRowFromBackend` copies parent fields.
+- `internal/commanderhub/registry.go` + `hub.go` + `tree.go` — carry `ShortID`; `SessionRow` += `OwnerAgentID`/`ParentAgentID`/`ParentDisplayName`; `sessionRowFromBackend` copies parent fields. (No observer `agent_id → daemonConn` map is built — P3 resolves cross-daemon parents in the frontend from the `SessionRow` fields; offline parents use the denormalized `parent_display_name`.)
 - `cmd/driver-agent/main.go` — populate `ShortID` in register; resolve `codex_home` from persisted ShortID; pass `cfg.Agent.CodexHome`.
 - `cmd/slave-agent/main.go` — **new `serve-daemon` subcommand** (mirror driver); move `agentbackend.New` past `EnsureRegistered`; resolve `codex_home`; populate `ShortID`.
-- `internal/driver/tools.go` ( + `contract_tools.go`/`slave_tools.go`/`register_mcp_tool.go`/`slave_file_tools.go`) — stamp `<loom_origin>` on delegation; reverse link into `driver-tasks.jsonl`.
+- `internal/driver/tools.go` + `contract_tools.go` — stamp `<loom_origin>` on chat-capable delegations only (`submit_task`, `submit_contract_task`, `resume_task`); terminal child-link record into `driver-tasks.jsonl`. Shell/file/mcp handlers untouched.
+- `internal/driver/task_journal.go` — `TaskRecord` += child fields + `Terminal`; `Recent` dedups by task_id preferring terminal.
 - `internal/poller/poller.go` — parse `<loom_origin>` → `Task.Parent*`, strip from `SystemContext`.
 - `internal/config/config.go`, `internal/driver/config.go` — (fields added in P1; P2 wires them).
 - `deploy/{linux,windows}/{driver,slave}/config.yaml.template` + `dev/configs/*.example.yaml` — set `codex_home`/`loom_home`.
@@ -105,109 +106,117 @@ Expected: FAIL — `BuildLoomOrigin`/`ParseLoomOrigin` undefined.
 
 - [ ] **Step 3: Implement `loomorigin.go`**
 
-Create `pkg/agentbackend/loomorigin.go`:
+Use a **single-line JSON marker** (robust against any value — `/>`, quotes, `<` — via `encoding/json` escaping; no hand-rolled XML parsing). One line, prefixed so it's cheap to find and strip:
 
 ```go
 package agentbackend
 
 import (
-	"encoding/xml"
+	"encoding/json"
 	"strings"
 )
 
-// ParentLink is the origin tuple carried by the <loom_origin> marker.
+// ParentLink is the origin tuple carried by the loom_origin marker.
 type ParentLink struct {
 	SessionID   string
 	AgentID     string
 	DisplayName string
 }
 
-// BuildLoomOrigin renders a <loom_origin .../> marker line that carries the
-// parent link through DelegateTaskRequest.SystemContext. Values are XML-escaped
-// so a display name containing "</loom_origin>" cannot break the boundary.
-// The marker is a single self-closing tag on its own line.
-func BuildLoomOrigin(agentID, displayName, sessionID string) string {
-	type tag struct {
-		XMLName xml.Name `xml:"loom_origin"`
-		Agent   string   `xml:"agent,attr"`
-		Name    string   `xml:"name,attr"`
-		Session string   `xml:"session,attr"`
-	}
-	var b strings.Builder
-	b.WriteString("<loom_origin")
-	writeAttr(&b, "agent", agentID)
-	writeAttr(&b, "name", displayName)
-	writeAttr(&b, "session", sessionID)
-	b.WriteString(" />\n")
-	_ = tag{} // keep xml import referenced for future structured form
-	return b.String()
+type loomOriginMarker struct {
+	LoomOrigin ParentLink `json:"loom_origin"`
 }
 
-func writeAttr(b *strings.Builder, k, v string) {
-	b.WriteByte(' ')
-	b.WriteString(k)
-	b.WriteString(`="`)
-	xml.EscapeText(b, []byte(v))
-	b.WriteByte('"')
+const loomOriginPrefix = `{"loom_origin":`
+
+// BuildLoomOrigin renders a single-line JSON marker carrying the parent link
+// through DelegateTaskRequest.SystemContext. Values are JSON-escaped, so any
+// display name (incl. ones containing "/>", quotes, or "<") is safe. The
+// marker is one line ending with "\n".
+func BuildLoomOrigin(agentID, displayName, sessionID string) string {
+	b, _ := json.Marshal(loomOriginMarker{LoomOrigin: ParentLink{
+		AgentID: agentID, DisplayName: displayName, SessionID: sessionID,
+	}})
+	return string(b) + "\n"
 }
 
 // ParseLoomOrigin extracts the parent link from a SystemContext string and
 // returns the context with the marker line removed. ok is false when no
-// well-formed marker is present.
+// well-formed marker is present. Robust: uses encoding/json, so values
+// containing "/>", quotes, or "<" parse correctly.
 func ParseLoomOrigin(systemContext string) (ParentLink, string, bool) {
-	start := strings.Index(systemContext, "<loom_origin")
-	if start < 0 {
+	var found ParentLink
+	markerLine := ""
+	rest := make([]string, 0, 4)
+	for _, line := range strings.Split(systemContext, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if markerLine == "" && strings.HasPrefix(trimmed, loomOriginPrefix) {
+			var m loomOriginMarker
+			if err := json.Unmarshal([]byte(trimmed), &m); err == nil {
+				found = m.LoomOrigin
+				markerLine = line
+				continue // drop this line from cleaned output
+			}
+		}
+		rest = append(rest, line)
+	}
+	if markerLine == "" {
 		return ParentLink{}, systemContext, false
 	}
-	end := strings.Index(systemContext[start:], "/>")
-	if end < 0 {
+	if found.SessionID == "" && found.AgentID == "" {
 		return ParentLink{}, systemContext, false
 	}
-	end += start + len("/>")
-	marker := systemContext[start:end]
-	var p ParentLink
-	p.AgentID = attrVal(marker, "agent")
-	p.DisplayName = attrVal(marker, "name")
-	p.SessionID = attrVal(marker, "session")
-	if p.SessionID == "" && p.AgentID == "" {
-		return ParentLink{}, systemContext, false
-	}
-	// Remove the marker line (and its trailing newline) from the context.
-	cleaned := systemContext[:start] + systemContext[end:]
+	cleaned := strings.Join(rest, "\n")
+	// Trim a leading blank line left where the marker was, if it was first.
 	cleaned = strings.TrimPrefix(cleaned, "\n")
-	// Collapse the gap left where the line was.
-	cleaned = strings.ReplaceAll(cleaned, "\n\n\n", "\n\n")
-	return p, cleaned, true
-}
-
-func attrVal(marker, key string) string {
-	needle := key + `="`
-	i := strings.Index(marker, needle)
-	if i < 0 {
-		return ""
-	}
-	i += len(needle)
-	j := strings.IndexByte(marker[i:], '"')
-	if j < 0 {
-		return ""
-	}
-	// Unescape XML entities produced by xml.EscapeText.
-	raw := marker[i : i+j]
-	raw = strings.ReplaceAll(raw, "&lt;", "<")
-	raw = strings.ReplaceAll(raw, "&gt;", ">")
-	raw = strings.ReplaceAll(raw, "&quot;", `"`)
-	raw = strings.ReplaceAll(raw, "&#39;", "'")
-	raw = strings.ReplaceAll(raw, "&amp;", "&")
-	return raw
+	return found, cleaned, true
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 4: Add adversarial parser tests**
+
+Append to `loomorigin_test.go` (cover the cases the prior hand-rolled parser broke on):
+
+```go
+func TestParseLoomOriginHandlesAdversarialValues(t *testing.T) {
+	for _, name := range []string{`evil"/>`, `has "quotes" and <tags>`, `back\slash`, `multi\nline`} {
+		sc := BuildLoomOrigin("drv", name, "t")
+		got, cleaned, ok := ParseLoomOrigin(sc)
+		if !ok {
+			t.Fatalf("name %q: parse failed for %q", name, sc)
+		}
+		if got.DisplayName != name {
+			t.Fatalf("name %q: round-trip got %q", name, got.DisplayName)
+		}
+		if strings.Contains(cleaned, "loom_origin") {
+			t.Fatalf("name %q: marker not stripped: %q", name, cleaned)
+		}
+	}
+}
+
+func TestParseLoomOriginMultipleMarkersUsesFirst(t *testing.T) {
+	sc := BuildLoomOrigin("drv", "d1", "t1") + BuildLoomOrigin("drv", "d2", "t2")
+	got, _, ok := ParseLoomOrigin(sc)
+	if !ok || got.SessionID != "t1" {
+		t.Fatalf("want first marker t1, got %+v ok=%v", got, ok)
+	}
+}
+
+func TestParseLoomOriginMalformedMarkerSkipped(t *testing.T) {
+	sc := `{"loom_origin": not-json}` // malformed
+	_, _, ok := ParseLoomOrigin(sc)
+	if ok {
+		t.Fatal("malformed marker should return ok=false")
+	}
+}
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
 
 Run: `go test ./pkg/agentbackend/ -run LoomOrigin -v -race`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add pkg/agentbackend/loomorigin.go pkg/agentbackend/loomorigin_test.go
@@ -233,13 +242,13 @@ func TestWriteReadCurrentSession(t *testing.T) {
 	if err := writeCurrentSession(base, "thread-now"); err != nil {
 		t.Fatalf("writeCurrentSession: %v", err)
 	}
-	if got := readCurrentSession(base); got != "thread-now" {
+	if got := ReadCurrentSession(base); got != "thread-now" {
 		t.Fatalf("readCurrentSession = %q, want thread-now", got)
 	}
 }
 
 func TestReadCurrentSessionMissing(t *testing.T) {
-	if got := readCurrentSession(t.TempDir()); got != "" {
+	if got := ReadCurrentSession(t.TempDir()); got != "" {
 		t.Fatalf("want empty, got %q", got)
 	}
 }
@@ -258,7 +267,7 @@ func TestCodexExecutorWritesCurrentSessionMarkerOnRun(t *testing.T) {
 	if _, err := ex.Run(context.Background(), agentbackend.Task{Prompt: "hi"}, &captureSink{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if got := readCurrentSession(home); got != "thr-cur" {
+	if got := ReadCurrentSession(home); got != "thr-cur" {
 		t.Fatalf("current marker = %q, want thr-cur", got)
 	}
 }
@@ -277,7 +286,7 @@ func TestCodexExecutorWritesCurrentSessionMarkerOnResume(t *testing.T) {
 	if _, ok := readLoomMeta(home, "thr-res"); ok {
 		t.Fatal("RunResume must not write a sidecar")
 	}
-	if got := readCurrentSession(home); got != "thr-res" {
+	if got := ReadCurrentSession(home); got != "thr-res" {
 		t.Fatalf("current marker = %q, want thr-res (RunResume updates marker)", got)
 	}
 }
@@ -286,9 +295,11 @@ func TestCodexExecutorWritesCurrentSessionMarkerOnResume(t *testing.T) {
 - [ ] **Step 2: Run to verify they fail**
 
 Run: `go test ./pkg/agentbackend/codex/ -run 'CurrentSession|WritesCurrentSession' -v`
-Expected: FAIL — `writeCurrentSession`/`readCurrentSession` undefined; marker not written.
+Expected: FAIL — `writeCurrentSession`/`ReadCurrentSession` undefined; marker not written.
 
 - [ ] **Step 3: Add marker helpers to `loommeta.go`**
+
+`ReadCurrentSession` is **exported** (internal/driver reads it — it cannot call unexported codex funcs). `writeCurrentSession` stays unexported (only the codex executor writes).
 
 ```go
 // writeCurrentSession writes a transient pointer to the currently-active
@@ -306,9 +317,10 @@ func writeCurrentSession(base, threadID string) error {
 	return os.WriteFile(filepath.Join(loomMetaDir(base), "current"), []byte(threadID), 0o600)
 }
 
-// readCurrentSession returns the thread id last written by writeCurrentSession,
-// or "" if absent/unreadable.
-func readCurrentSession(base string) string {
+// ReadCurrentSession returns the thread id last written by writeCurrentSession,
+// or "" if absent/unreadable. Exported so internal/driver (serve-mcp) can read
+// the parent session marker; it cannot call codex's unexported helpers.
+func ReadCurrentSession(base string) string {
 	if base == "" {
 		return ""
 	}
@@ -319,6 +331,8 @@ func readCurrentSession(base string) string {
 	return strings.TrimSpace(string(b))
 }
 ```
+
+Also **export `EffectiveCodexHome`** in `codexenv.go` (rename `effectiveCodexHome` → `EffectiveCodexHome`; update internal callers `b.effectiveCodexHome()` → `b.EffectiveCodexHome()` and the executor). internal/driver needs it to resolve the marker base from `cfg.Agent.CodexHome` (with the `$HOME/.codex` fallback when unset). The launcher (Task 9) resolves `cfg.Agent.CodexHome` from short_id; serve-mcp then calls `codex.EffectiveCodexHome(agentbackend.Config{CodexHome: cfg.Agent.CodexHome}, nil)` → `codex.ReadCurrentSession(base)`.
 
 - [ ] **Step 4: Write the marker in the executor's thread.started block**
 
@@ -511,31 +525,49 @@ git commit -m "feat(slave-agent): add serve-daemon subcommand (#24 P2)"
 
 ---
 
-## Task 6: Driver stamps `<loom_origin>` on delegation
+## Task 6: Driver stamps `<loom_origin>` on chat-capable delegations
+
+**Scope (which handlers stamp):** only delegations that can create a codex exec session on the slave — i.e. `chat`/`""`/`chat_resume` skills. The slave's codex backend runs only for those skills; shell/file/mcp skills use other executors and never write a loom-meta sidecar, so stamping them is pointless (and file/mcp tools don't pass `SystemContext`).
+
+- **STAMP** (these build a `DelegateTaskRequest` with `SystemContext` for a chat/contract task):
+  - `submit_task` — `internal/driver/tools.go:511`
+  - `submit_contract_task` — `internal/driver/contract_tools.go:100`
+  - `resume_task` — `internal/driver/tools.go:1140`
+- **DO NOT STAMP** (non-codex skills; leave untouched):
+  - `run_slave_bash` / `run_slave_powershell` / `run_slave_shell` — `internal/driver/slave_tools.go:150/279`
+  - `read_slave_file` / `write_slave_file` / `stat_slave_file` — `internal/driver/slave_file_tools.go:128/349/431` (file skills, no `SystemContext`)
+  - `register_slave_mcp` / `unregister_slave_mcp` — `internal/driver/register_mcp_tool.go:59`, `unregister_mcp_tool.go:54` (mcp skills, no codex session)
 
 **Files:**
-- Modify: `internal/driver/tools.go` (`submit_task`, ~line 511) + `contract_tools.go:100`, `slave_tools.go:150`, `register_mcp_tool.go:59`, `slave_file_tools.go:128/349/431`
+- Modify: `internal/driver/tools.go` (`submit_task` ~511, `resume_task` ~1140), `internal/driver/contract_tools.go` (`submit_contract_task` ~100)
 - Test: `internal/driver/tools_test.go`
 
 - [ ] **Step 1: Add a stamping helper on `Tools`**
 
-In `internal/driver/tools.go`, add a helper that reads the current-session marker and the driver's own identity, returning the `<loom_origin>` marker to prepend to `SystemContext`:
+In `internal/driver/tools.go`, add a helper that resolves the effective codex home (via the **exported** `codex.EffectiveCodexHome` from Task 2) and reads the current-session marker (via **exported** `codex.ReadCurrentSession`):
 
 ```go
-// loomOriginMarker returns the <loom_origin> marker for the current driver
-// session, read from the current-session marker file written by the codex
-// executor. Empty session when the marker is absent (no active turn).
+import (
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
+	"github.com/yourorg/multi-agent/pkg/agentbackend/codex"
+)
+
+// loomOriginMarker returns the loom_origin marker for the current driver
+// session. parent_session_id comes from the current-session marker written by
+// the codex executor (shared CODEX_HOME); agent_id/display_name from cfg.
+// Best-effort: absent marker → empty session (marker still carries agent+name).
 func (t *Tools) loomOriginMarker() string {
-	sess := readCurrentSessionForCfg(t.cfg) // resolves CODEX_HOME via the same effectiveCodexHome logic
+	base := codex.EffectiveCodexHome(agentbackend.Config{CodexHome: t.cfg.Agent.CodexHome}, nil)
+	sess := codex.ReadCurrentSession(base)
 	return agentbackend.BuildLoomOrigin(t.cfg.Credentials.ShortID, t.cfg.Discovery.DisplayName, sess)
 }
 ```
 
-`readCurrentSessionForCfg` resolves the effective codex home from `cfg.Agent` (codex_home → loom_home/short_id → $HOME/.codex) and calls `readCurrentSession`. Implement in a small helper in `internal/driver` (or call into a shared resolver). Keep it best-effort: absent marker → empty session → marker still carries agent+name (parent_session_id empty; slave sidecar gets empty parent session).
+(This requires `cfg.Agent.CodexHome` to be resolved at launcher startup — Task 9 sets it from short_id for both serve-mcp and serve-daemon.)
 
-- [ ] **Step 2: Stamp `SystemContext` in `submit_task`**
+- [ ] **Step 2: Stamp `SystemContext` in the three chat-capable handlers**
 
-In `submit_task` (tools.go ~line 511), where `DelegateTaskRequest` is built, prepend the marker to `SystemContext`:
+In `submit_task` (tools.go ~511), where `DelegateTaskRequest` is built, prepend the marker to `SystemContext`:
 
 ```go
 	systemContext := args.SystemContext
@@ -543,30 +575,30 @@ In `submit_task` (tools.go ~line 511), where `DelegateTaskRequest` is built, pre
 		systemContext = m + systemContext
 	}
 	resp, err := s.t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
-		TargetID:      targetID,
-		Skill:         skill,
-		Prompt:        finalPrompt,
-		SystemContext: systemContext,
+		TargetID:       targetID,
+		Skill:          skill,
+		Prompt:         finalPrompt,
+		SystemContext:  systemContext,
 		TimeoutSeconds: timeout,
 	})
 ```
 
-Repeat the `SystemContext` stamp in the other delegation handlers (`contract_tools.go:100`, `slave_tools.go:150/279`, `register_mcp_tool.go:59`, `unregister_mcp_tool.go:54`, `slave_file_tools.go:128/349/431`). For tools that don't accept `SystemContext` (file tools), skip — they don't create codex exec sessions.
+Apply the identical stamp in `submit_contract_task` (`contract_tools.go:100`) and `resume_task` (`tools.go:1140`). Do **not** touch shell/file/mcp handlers.
 
 - [ ] **Step 3: Test**
 
-`internal/driver/tools_test.go` — with a fake SDK + a temp CODEX_HOME + a written `current` marker, assert `submit_task`'s `DelegateTaskRequest.SystemContext` starts with `<loom_origin agent="<shortID>" name="<displayName>" session="<marker>" />`.
+`internal/driver/tools_test.go` — with a fake SDK + a temp `CODEX_HOME` (set `cfg.Agent.CodexHome`) + a written `current` marker, assert `submit_task`'s `DelegateTaskRequest.SystemContext` starts with `{"loom_origin":{"agent":"<shortID>","name":"<displayName>","session":"<marker>"}}`. Also assert a shell handler (`run_slave_bash`) does **not** stamp (SystemContext unchanged / absent).
 
 - [ ] **Step 4: Build + test + race**
 
-Run: `go build ./... && go test ./internal/driver/ -run SubmitTask -race -count=1`
+Run: `go build ./... && go test ./internal/driver/ -run 'SubmitTask|SlaveBash' -race -count=1`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add internal/driver/tools.go internal/driver/contract_tools.go internal/driver/slave_tools.go internal/driver/register_mcp_tool.go internal/driver/tools_test.go
-git commit -m "feat(driver): stamp <loom_origin> on task delegation (#24 P2)"
+git add internal/driver/tools.go internal/driver/contract_tools.go internal/driver/tools_test.go
+git commit -m "feat(driver): stamp <loom_origin> on chat-capable delegations (#24 P2)"
 ```
 
 ---
@@ -620,30 +652,60 @@ git commit -m "feat(poller): parse <loom_origin> into Task parent fields (#24 P2
 
 ---
 
-## Task 8: Reverse link — `driver-tasks.jsonl` records child session + agent
+## Task 8: Reverse link — append a terminal journal record at result time
+
+**Timing problem (review #2):** `recordDelegatedTask` (`tools.go:72`) calls `taskJournal.Append` immediately after `DelegateTask` returns (`tools.go:528`) — **before** the slave has run, so the child session id is unknown. The journal is **append-only** (`task_journal.go` has only `Append`/`Recent`/`RecentWithWarnings`, no `Update`). The child session id only becomes known when the result marker arrives, in `get_task` (`tools.go:619`, `sessionIDFromMarker`) / `wait_task` (`tools.go:748`).
+
+**Fix:** keep the initial `recordDelegatedTask` append as-is (delegation-time, no child fields), and **append a second, terminal record** when the result marker arrives. The journal stays append-only; `Recent`/`RecentWithWarnings` already return newest-first and the reader correlates by `task_id` (keep the terminal record; or dedup by task_id keeping the one with `child_session_id`).
 
 **Files:**
-- Modify: `internal/driver/tools.go` (`delegatedTaskRecord`, `sessionIDFromMarker` callers ~line 619-636)
-- Test: `internal/driver/tools_test.go`
+- Modify: `internal/driver/task_journal.go` (`TaskRecord` += `ChildSessionID`/`ChildAgentID` + `Terminal bool`; `Recent` dedups by task_id keeping terminal when present)
+- Modify: `internal/driver/tools.go` (in `get_task` ~619 and `wait_task` ~748, where `sessionIDFromMarker` resolves the child session, append a terminal record)
+- Test: `internal/driver/task_journal_test.go`, `internal/driver/tools_test.go`
 
-- [ ] **Step 1: Extend the journal record**
+- [ ] **Step 1: Extend `TaskRecord` + add a terminal append**
 
-`delegatedTaskRecord` (tools.go ~line 79) += `ChildSessionID string` + `ChildAgentID string`. The driver already extracts the child session via `sessionIDFromMarker` (tools.go:821) from the task result, and knows the child agent via `resolveTarget`'s `shortID` (tools.go:165-211). Populate both when the result marker arrives.
+`task_journal.go`:
 
-- [ ] **Step 2: Test**
+```go
+type TaskRecord struct {
+	// ... existing fields ...
+	ChildSessionID string `json:"child_session_id,omitempty"`
+	ChildAgentID   string `json:"child_agent_id,omitempty"`
+	Terminal       bool   `json:"terminal,omitempty"` // result-time record carrying child link
+}
+```
 
-Assert a delegated task whose result carries `{"session_id":"child-sess"}` and target shortID `slave-2` produces a journal record with `child_session_id=child-sess`, `child_agent_id=slave-2`.
+`Recent`/`RecentWithWarnings`: when both a non-terminal and a terminal record exist for the same `task_id`, return only the terminal one (it carries the child link; the delegation-time fields are repeated on the terminal record). Simplest: walk newest-first, keep first per task_id; if a terminal exists for a task_id, prefer it.
 
-- [ ] **Step 3: Build + test**
+- [ ] **Step 2: Append terminal record at result time**
 
-Run: `go build ./... && go test ./internal/driver/ -run TaskJournal -race -count=1`
+In `get_task` (`tools.go:619`) and `wait_task` (`tools.go:748`), where `sessionIDFromMarker` already extracts the child session, append a terminal record:
+
+```go
+	if childSess := sessionIDFromMarker(progress.FinalOutput, info.Output, string(info.Result)); childSess != "" {
+		_ = t.recordTerminalChild(info.TaskID, childSess, /* child agent shortID from the delegation's resolveTarget */)
+	}
+```
+
+`recordTerminalChild` appends a `TaskRecord{TaskID: ..., ChildSessionID: childSess, ChildAgentID: childAgent, Terminal: true, ...}` (repeat `Tool`/`TargetID`/`Skill` from the delegation record so the terminal row is self-describing; look them up from the in-memory `reg`/task tracking or accept best-effort empties). Best-effort: append failure is logged, not fatal (matches existing journal discipline).
+
+Note: the child agent shortID is known at delegation time (`resolveTarget` returns it, `tools.go:165-211`). Carry it on the delegation-time record too (a `ChildAgentID` field populated at delegation, since the target is known then); only `ChildSessionID` is filled at result time. That avoids needing to re-resolve the target at result time.
+
+- [ ] **Step 3: Test**
+
+`task_journal_test.go`: append a delegation record then a terminal record for the same task_id; `Recent` returns one row (the terminal) with `child_session_id` set. `tools_test.go`: a `get_task` whose result carries `{"session_id":"child-sess"}` produces a terminal journal record with `child_session_id=child-sess`, `child_agent_id=slave-2` (the latter from the delegation-time target).
+
+- [ ] **Step 4: Build + test + race**
+
+Run: `go build ./... && go test ./internal/driver/ -run 'TaskJournal|GetTask' -race -count=1`
 Expected: PASS.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add internal/driver/tools.go internal/driver/tools_test.go
-git commit -m "feat(driver): record child session+agent in task journal (#24 P2)"
+git add internal/driver/task_journal.go internal/driver/task_journal_test.go internal/driver/tools.go internal/driver/tools_test.go
+git commit -m "feat(driver): append terminal child-link record to task journal (#24 P2)"
 ```
 
 ---
@@ -713,3 +775,8 @@ Run: `gofmt -w . && git diff --exit-code` (commit formatting-only if any).
 
 - **P3 — Commander nesting:** observer global `(owner_agent_id, session_id)` parent index; frontend cross-daemon `buildSessionNodes`; `remote`/`parent offline` badges. Separate plan.
 - Concurrency-perfect parent attribution (single `current` marker; last-writer-wins) — accepted caveat.
+
+## Implementation notes
+
+- **Branch:** these plan docs live on `commander-parent-link-p2p3` (planning only). **Implement P2 on its own branch** (e.g. `commander-parent-link-p2`) off `origin/master`; P3 separately. Don't bundle P2+P3 into one PR.
+- **Windows:** P2 changes launcher/config/templates and `codex_home` resolution. `go test ./... -race` on Linux does **not** cover real Windows `os.UserHomeDir`/path behavior. Add a Windows CI job (or a `GOOS=windows go build` + a path-resolution unit test with a fake home) before merging P2.
