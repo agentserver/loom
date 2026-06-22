@@ -19,6 +19,13 @@ type Result struct {
 	CapabilityChange string // empty = no change
 	SessionID        string // backend session/thread id (chat / chat_resume only)
 	AwaitingUser     *AskUserPayload
+	// WrappedOutput, when non-empty, is the structured kind-marker envelope
+	// (`{"kind":"final"|"awaiting_user", "session_id":..., ...}`) that the
+	// dispatcher builds for chat-skill results. The poller forwards it to
+	// agentserver as the task `result` so the driver can read the session id
+	// + kind from `info.Result` even when the observer relay is unavailable.
+	// Empty for non-chat skills; the poller falls back to Summary then.
+	WrappedOutput string
 }
 
 // AskUserPayload mirrors humanloop.Payload but lives here so chat-skill

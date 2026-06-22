@@ -152,6 +152,12 @@ func (d *Dispatcher) Run(ctx context.Context, t executor.Task) (executor.Result,
 		}
 		if b, jerr := json.Marshal(wrapper); jerr == nil {
 			stored = string(b)
+			// Surface the wrapped marker on the result so the poller can
+			// forward it as the agentserver `result` field. Without this
+			// the wrapper would live only in the local slave store +
+			// observer relay, and `recordTerminalChild` (#24 P2) would
+			// silently no-op when observer is unavailable.
+			res.WrappedOutput = stored
 		}
 	}
 	if err := d.store.Complete(t.ID, stored); err != nil {

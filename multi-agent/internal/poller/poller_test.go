@@ -207,3 +207,84 @@ func TestPoller_LoomOriginParsedIntoTaskParentAndStrippedFromSystemContext(t *te
 	require.NotContains(t, got.SystemContext, "loom_origin", "marker stripped from SystemContext")
 	require.Contains(t, got.SystemContext, "trailing preamble", "non-marker preamble preserved")
 }
+
+// chatWrappingExec produces an executor.Result the dispatcher will wrap into
+// a kind:final envelope (chat-skill semantics). Used to assert the poller
+// forwards the wrapped marker as the agentserver `result` field, not the
+// raw summary string.
+type chatWrappingExec struct {
+	summary, sessionID string
+}
+
+func (e chatWrappingExec) Run(ctx context.Context, t executor.Task, sink executor.Sink) (executor.Result, error) {
+	sink.Close()
+	return executor.Result{Summary: e.summary, SessionID: e.sessionID}, nil
+}
+
+func TestPoller_ForwardsWrappedMarkerAsAgentserverResult(t *testing.T) {
+	// Without this forwarding, the driver's recordTerminalChild (#24 P2)
+	// silently no-ops whenever the observer relay is unavailable — because
+	// the kind-marker envelope only existed in the observer event payload
+	// and the local slave store, never in agentserver's task.result.
+	var taskHandedOut atomic.Bool
+	var mu sync.Mutex
+	var completedResult json.RawMessage
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/agent/tasks/poll" {
+			if !taskHandedOut.CompareAndSwap(false, true) {
+				w.WriteHeader(204)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`[{"task_id":"t-wrap","skill":"chat","prompt":"hi","timeout_seconds":30}]`))
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var msg struct {
+			Status string          `json:"status"`
+			Result json.RawMessage `json:"result"`
+		}
+		_ = json.Unmarshal(body, &msg)
+		if msg.Status == "completed" {
+			mu.Lock()
+			completedResult = msg.Result
+			mu.Unlock()
+		}
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	s, _ := store.Open(filepath.Join(t.TempDir(), "x.db"))
+	defer s.Close()
+	exec := chatWrappingExec{summary: "ok", sessionID: "slave-thr-xyz"}
+	d := dispatch.New(map[string]executor.Executor{"": exec, "chat": exec}, stubJ{}, s, nil)
+
+	p := New(Config{ServerURL: srv.URL, ProxyToken: "ptoken", IdlePoll: 50 * time.Millisecond, ActivePoll: 10 * time.Millisecond}, d, s)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	go p.Run(ctx)
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(completedResult) > 0
+	}, 15*time.Second, 20*time.Millisecond)
+
+	mu.Lock()
+	got := completedResult
+	mu.Unlock()
+
+	// Result must be the structured kind-marker envelope, not a JSON-encoded
+	// summary string. sessionIDFromMarker reads exactly this shape.
+	var wrapper struct {
+		Kind      string `json:"kind"`
+		SessionID string `json:"session_id"`
+		Summary   string `json:"summary"`
+	}
+	require.NoError(t, json.Unmarshal(got, &wrapper), "result must be JSON object: %s", string(got))
+	require.Equal(t, "final", wrapper.Kind, "result must carry kind=final, got %s", string(got))
+	require.Equal(t, "slave-thr-xyz", wrapper.SessionID, "result must carry the slave session id (drives reverse parent link)")
+	require.Equal(t, "ok", wrapper.Summary)
+}
