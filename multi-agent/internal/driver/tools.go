@@ -1224,8 +1224,10 @@ func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	// journal was rotated (acceptable degraded mode: terminal record still has
 	// ChildSessionID for session-only linking).
 	var resumeChildAgentID string
-	if prev, ok := r.t.taskJournal.LatestByTaskID(args.LastTaskID); ok {
-		resumeChildAgentID = prev.ChildAgentID
+	if r.t.taskJournal != nil {
+		if prev, ok := r.t.taskJournal.LatestByTaskID(args.LastTaskID); ok {
+			resumeChildAgentID = prev.ChildAgentID
+		}
 	}
 
 	// DelegateTask succeeded — degrade journal append failure to a log entry
