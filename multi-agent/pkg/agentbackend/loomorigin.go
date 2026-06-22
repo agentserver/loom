@@ -31,6 +31,25 @@ func BuildLoomOrigin(agentID, displayName, sessionID string) string {
 	return string(b) + "\n"
 }
 
+// MergeSystemContext returns outer+inner with a single separating newline when
+// both are non-empty. Outer comes first so its loom_origin marker wins the
+// first-match rule in ParseLoomOrigin. BuildLoomOrigin always ends with "\n" —
+// trim trailing newlines on outer before joining so we don't synthesize a blank
+// line every hop.
+func MergeSystemContext(outer, inner string) string {
+	outer = strings.TrimRight(outer, "\n")
+	switch {
+	case outer == "" && inner == "":
+		return ""
+	case outer == "":
+		return inner
+	case inner == "":
+		return outer + "\n"
+	default:
+		return outer + "\n" + inner
+	}
+}
+
 // ParseLoomOrigin extracts the parent link from a SystemContext string and
 // returns the context with the marker line removed. ok is false when no
 // well-formed marker is present. Robust: uses encoding/json, so values

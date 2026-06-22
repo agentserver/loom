@@ -76,7 +76,7 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 		if s.t.contractRunner == nil {
 			return nil, &MCPToolError{Message: "driver_fanout route is recommended but no driver contract runner is configured"}
 		}
-		result, err := s.t.contractRunner.Run(ctx, finalPrompt)
+		result, err := s.t.contractRunner.Run(ctx, finalPrompt, s.t.loomOriginMarker())
 		if err != nil {
 			return nil, &MCPToolError{Message: "driver fanout: " + err.Error()}
 		}

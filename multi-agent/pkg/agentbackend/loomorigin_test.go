@@ -81,3 +81,26 @@ func TestParseLoomOriginMalformedMarkerSkipped(t *testing.T) {
 		t.Fatal("malformed marker should return ok=false")
 	}
 }
+
+func TestMergeSystemContextNoBlankLineFromMarker(t *testing.T) {
+	marker := BuildLoomOrigin("drv", "d", "t") // ends with "\n"
+	merged := MergeSystemContext(marker, "child preamble")
+	if strings.Contains(merged, "\n\n") {
+		t.Fatalf("merge produced double newline: %q", merged)
+	}
+	if _, cleaned, ok := ParseLoomOrigin(merged); !ok || !strings.Contains(cleaned, "child preamble") {
+		t.Fatalf("merged context lost child preamble or marker: %q (ok=%v cleaned=%q)", merged, ok, cleaned)
+	}
+}
+
+func TestMergeSystemContextEmptyArgs(t *testing.T) {
+	if got := MergeSystemContext("", ""); got != "" {
+		t.Fatalf("empty,empty = %q", got)
+	}
+	if got := MergeSystemContext("", "x"); got != "x" {
+		t.Fatalf("empty,x = %q", got)
+	}
+	if got := MergeSystemContext("x\n", ""); got != "x\n" {
+		t.Fatalf("x\\n,empty = %q", got)
+	}
+}

@@ -1038,3 +1038,29 @@ func TestFanout_GoroutinePanicTurnsIntoFailedNode(t *testing.T) {
 	}
 	require.True(t, sawPanic, "expected node 'a' done event with panic-recovered error message")
 }
+
+func TestFanout_PropagatesOuterSystemContextToChildren(t *testing.T) {
+	outerMarker := agentbackend.BuildLoomOrigin("drv-1", "prod-driver", "thr-1")
+	sdk := &fakeSDKQueue{
+		agents: []agentsdk.AgentCard{
+			{AgentID: "agent-a", Status: "available"},
+			{AgentID: "agent-b", Status: "available"},
+		},
+		queue: []agentsdk.TaskInfo{
+			{Status: "completed", Output: "ok"},
+			{Status: "completed", Output: "ok"},
+		},
+	}
+	o := newOrch(t, sdk, "plan_chain")
+	task := executor.Task{ID: "p", Skill: "fanout", Prompt: "do", SystemContext: outerMarker}
+	_, err := o.Run(context.Background(), task)
+	require.NoError(t, err)
+	require.Len(t, sdk.dispatched, 2)
+	for i, req := range sdk.dispatched {
+		got, _, ok := agentbackend.ParseLoomOrigin(req.SystemContext)
+		require.True(t, ok, "node 0: loom_origin not in child SystemContext: ", i, req.SystemContext)
+		require.Equal(t, "drv-1", got.AgentID)
+		require.Equal(t, "thr-1", got.SessionID)
+		require.NotContains(t, req.SystemContext, "\n\n", "node 0: double newline in SystemContext", i)
+	}
+}
