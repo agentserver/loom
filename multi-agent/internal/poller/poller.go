@@ -189,10 +189,20 @@ func (p *Poller) execute(ctx context.Context, t pollTask) {
 	}
 	// agentserver's handleUpdateTaskStatus only persists `result` (json.RawMessage),
 	// not `output` — same field-name mismatch the SDK works around in Complete().
-	// JSON-encode the summary string and send it as `result` so it round-trips.
-	enc, _ := json.Marshal(res.Summary)
+	// For chat-skill results the dispatcher already populated WrappedOutput
+	// with the structured kind-marker envelope; forward it verbatim so the
+	// driver can read session_id from info.Result without depending on the
+	// observer relay (see executor.Result.WrappedOutput).
+	// For non-chat skills WrappedOutput is empty; JSON-encode the summary
+	// string and send it as `result` so it round-trips.
+	var resultBytes []byte
+	if res.WrappedOutput != "" && json.Valid([]byte(res.WrappedOutput)) {
+		resultBytes = []byte(res.WrappedOutput)
+	} else {
+		resultBytes, _ = json.Marshal(res.Summary)
+	}
 	if !p.putStatusRetry(ctx, t.TaskID, map[string]interface{}{
-		"status": "completed", "result": json.RawMessage(enc),
+		"status": "completed", "result": json.RawMessage(resultBytes),
 	}) {
 		_ = p.s.EnqueuePendingAck(t.TaskID, "completed")
 	}
