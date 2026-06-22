@@ -700,9 +700,13 @@ func (g *getTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMe
 			TargetID      string          `json:"target_id"`
 			Question      json.RawMessage `json:"question"`
 		}{
-			Status:        "awaiting_user",
-			IsFinal:       false,
-			SessionID:     firstNonEmpty(info.SessionID, markerSessionID),
+			Status:  "awaiting_user",
+			IsFinal: false,
+			// markerSessionID comes from the slave's chat backend (codex thread id);
+			// info.SessionID is agentserver's task-bridge `cse_<uuid>` and would
+			// not resume the right session. Prefer the marker; fall back only when
+			// the marker is missing (e.g. observer disabled, no wrapper recorded).
+			SessionID:     firstNonEmpty(markerSessionID, info.SessionID),
 			CurrentTaskID: taskID,
 			TargetID:      info.TargetID,
 			Question:      question,
@@ -815,9 +819,13 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 					TargetID      string          `json:"target_id"`
 					Question      json.RawMessage `json:"question"`
 				}{
-					Status:        "awaiting_user",
-					IsFinal:       false,
-					SessionID:     firstNonEmpty(info.SessionID, sessionIDFromMarker(info.Output, string(info.Result), progress.FinalOutput)),
+					Status:  "awaiting_user",
+					IsFinal: false,
+					// Marker session id (slave codex thread) wins over agentserver's
+					// `cse_<uuid>` task-bridge session — see SessionID comment in
+					// get_task above. Fall back to info.SessionID only when the
+					// marker chain is empty.
+					SessionID:     firstNonEmpty(sessionIDFromMarker(info.Output, string(info.Result), progress.FinalOutput), info.SessionID),
 					CurrentTaskID: taskID,
 					TargetID:      info.TargetID,
 					Question:      question,
@@ -1191,7 +1199,12 @@ func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		return nil, &MCPToolError{Message: fmt.Sprintf(
 			"not awaiting_user; status=%s, kind=%s", info.Status, kw.Kind)}
 	}
-	sessionID := firstNonEmpty(info.SessionID, kw.SessionID)
+	// kw.SessionID is the slave codex thread id (what chat_resume must target);
+	// info.SessionID is agentserver's task-bridge `cse_<uuid>` and would resume
+	// the wrong session. Prefer the marker; info.SessionID is only a defensive
+	// fallback for environments where the wrapper was missing (e.g. observer
+	// disabled AND the slave's TaskInfo.Output also lost it).
+	sessionID := firstNonEmpty(kw.SessionID, info.SessionID)
 	if sessionID == "" {
 		return nil, &MCPToolError{Message: "missing session_id; cannot resume"}
 	}

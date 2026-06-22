@@ -2409,25 +2409,29 @@ func TestResumeTaskStampsLoomOrigin(t *testing.T) {
 	home := writeLoomOriginCurrentFile(t, "thr-resume")
 
 	var captured agentsdk.DelegateTaskRequest
+	// Two distinct ids: agentserver bridges every task to a `cse_<uuid>`
+	// session, while the slave's chat backend reports its own thread id in
+	// the kind marker. Resume MUST send the marker id (slave thread), not
+	// the bridge id, or the slave can't find the session.
 	sdk := &fakeSDK{
 		getTaskFunc: func(id string, includeOutput bool) (*agentsdk.TaskInfo, error) {
 			switch id {
 			case "T-resume-1":
 				return &agentsdk.TaskInfo{
-					TaskID: "T-resume-1", Status: "completed", SessionID: "S-xyz", TargetID: "ag-R",
-					Result: json.RawMessage(`{"kind":"awaiting_user","session_id":"S-xyz","question":{"kind":"ask_user","question":"continue?"}}`),
+					TaskID: "T-resume-1", Status: "completed", SessionID: "cse_bridge-1", TargetID: "ag-R",
+					Result: json.RawMessage(`{"kind":"awaiting_user","session_id":"slave-thr-1","question":{"kind":"ask_user","question":"continue?"}}`),
 				}, nil
 			case "T-resume-2":
 				return &agentsdk.TaskInfo{
-					TaskID: "T-resume-2", Status: "completed", SessionID: "S-xyz",
-					Result: json.RawMessage(`{"kind":"final","summary":"done","session_id":"S-xyz"}`),
+					TaskID: "T-resume-2", Status: "completed", SessionID: "cse_bridge-2",
+					Result: json.RawMessage(`{"kind":"final","summary":"done","session_id":"slave-thr-1"}`),
 				}, nil
 			}
 			return nil, fmt.Errorf("unknown task: %s", id)
 		},
 		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
 			captured = req
-			return &agentsdk.DelegateTaskResponse{TaskID: "T-resume-2", SessionID: "S-xyz"}, nil
+			return &agentsdk.DelegateTaskResponse{TaskID: "T-resume-2", SessionID: "cse_bridge-2"}, nil
 		},
 	}
 	tools := newLoomTestTools(t, sdk, home, "drv-5", "driver-5")
@@ -2445,6 +2449,19 @@ func TestResumeTaskStampsLoomOrigin(t *testing.T) {
 	}
 	if p.AgentID != "drv-5" || p.DisplayName != "driver-5" || p.SessionID != "thr-resume" {
 		t.Errorf("unexpected ParentLink: %+v", p)
+	}
+	// The resume body must target the slave's codex thread id (from the
+	// kind marker), NOT agentserver's task-bridge `cse_<uuid>`. The slave
+	// looks up its own session by that id; sending the bridge id would
+	// fail-to-find or resume the wrong session.
+	var body struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal([]byte(captured.Prompt), &body); err != nil {
+		t.Fatalf("resume body not JSON: %v (prompt=%q)", err, captured.Prompt)
+	}
+	if body.SessionID != "slave-thr-1" {
+		t.Errorf("resume body session_id = %q, want slave-thr-1 (marker), not bridge id", body.SessionID)
 	}
 }
 
