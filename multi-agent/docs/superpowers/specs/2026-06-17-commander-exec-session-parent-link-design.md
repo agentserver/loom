@@ -135,7 +135,7 @@ func effectiveCodexHome(cfg, env) string {
 
 - `commander.RegisterPayload`（`internal/commander/protocol.go:35`）→ 加 `ShortID string`。`DisplayName` 已在。
 - `commanderhub.daemonConn` + `DaemonInfo`（`internal/commanderhub/registry.go:23,38`）→ 加 `ShortID`；从 `RegisterPayload` 填（`hub.go:111-113`）。
-- observer 维护 `agent_id(ShortID) → 当前 daemonConn` 映射：重连后 daemon_id 变、ShortID 不变，映射按 ShortID 重建；供按 `agent_id` 解析 parent、live 回查 display_name。
+- observer **不**维护 `agent_id → daemonConn` 映射（§8 P3 frontend-only 决议）。`ShortID` 仅作为 `DaemonInfo`/`SessionRow.OwnerAgentID` 透传给前端；跨 daemon parent 解析全部在前端基于 `(owner_agent_id, session_id)` 完成。display_name 离线兜底由 `SessionRow.ParentDisplayName`（来自 sidecar denormalized）承担，不需要 live observer 回查。
 - `SessionRow`（`internal/commanderhub/tree.go:26`）→ 加 `OwnerAgentID`（daemon 上报时填自身 ShortID）、`ParentAgentID`、`ParentDisplayName`（后两者来自 Session）、`OwnerDisplayName?`（observer live 回查 owner daemon）。**`ParentDisplayName` 必须在 row 上**（parent 离线兜底）。
 - 前端 `SessionRow`（`internal/commanderhub/webapp/src/api/types.ts:10`）→ 加对应字段。
 
@@ -155,7 +155,7 @@ func effectiveCodexHome(cfg, env) string {
 **架构现实（P2 修订）**：driver 的 MCP 工具由 `driver-agent serve-mcp` 提供，它是 **codex 的 stdio 子进程**（`codex-mcp.toml.template` 里 codex spawn `driver-agent serve-mcp`；`mcp_server.go` `Tool.Call(ctx, args)` 只拿到 codex 传的 JSON args，**没有 session 上下文**）。所以 submit_task handler 跑在与 codex **不同的进程**，无法直接拿到 codex 的 thread id。故采用 **current-session marker 文件**：
 
 - **marker 写入（executor）**：codex backend executor 在 `thread.started`（`Run` 与 `RunResume` 都写——resume 期间 codex 也可能派发任务）把当前 thread_id 写进 `<effectiveCodexHome>/loom-meta/current`（瞬态指针文件，**不是** sidecar，不违反 P1"RunResume 不写 sidecar"）。best-effort，失败不阻塞 turn。
-- **marker 读取（serve-mcp）**：`submit_task`/shell/contract 派发 handler（`internal/driver/tools.go:511`、`contract_tools.go:100`、`slave_tools.go:150` 等）读 `<effectiveCodexHome>/loom-meta/current` 得 `parent_session_id`；用 `cfg.Credentials.ShortID` 作 `parent_agent_id`、`cfg.Discovery.DisplayName` 作 `parent_display_name`。三者 stamp 进 `DelegateTaskRequest.SystemContext`：`<loom_origin agent="<ShortID>" name="<display_name>" session="<thread_id>" />`（boundary 标签 + escape，沿用 `codex/sessions.go:446` 纪律）。
+- **marker 读取（serve-mcp）**：`submit_task`/contract/resume 派发 handler（`internal/driver/tools.go:511`、`contract_tools.go:100`、`tools.go:1140`）读 `<effectiveCodexHome>/loom-meta/current` 得 `parent_session_id`；用 `cfg.Credentials.ShortID` 作 `parent_agent_id`、`cfg.Discovery.DisplayName` 作 `parent_display_name`。三者 stamp 进 `DelegateTaskRequest.SystemContext`：**single-line JSON marker** `{"loom_origin":{"agent":"<ShortID>","name":"<display_name>","session":"<thread_id>"}}\n`，用 `encoding/json` 编解码（任意 value 含 `/>`、quote、`<` 都安全；不再用 XML-ish boundary 标签 + 手写 escape）。slave 一侧用 `agentbackend.ParseLoomOrigin` 解析并按 first-match 剥离。Shell/file/MCP handlers 不 stamp（terminal 非 codex skill）。
 - **并发注意**：单 marker 文件，多个 driver codex session 同时活跃时 last-writer-wins（serve-mcp 服务的那个 codex 不一定是最后写者）。driver 典型一次一个活跃 session，可接受；若需严格，后续可按 serve-mcp 父进程 PID 或 per-session marker 细化。
 - `executor.Task`（`internal/executor/executor.go:5`，P1 已加）：`ParentSessionID`/`ParentAgentID`/`ParentDisplayName`。
 - **slave 解析（poller）**：`internal/poller/poller.go:157` 从 agentsdk task 建 `executor.Task` 处，解析 `<loom_origin>` 填进 `Task.Parent*`，并**从 `SystemContext` 剥离标记**（维持 `tools.go:506-510` JSON-prompt 保护），再交给 `Dispatcher` → `backendExecutor` → codex executor（P1 已据 `Task.Parent*` 写 sidecar）。
@@ -198,8 +198,9 @@ codex executor 在 `Run`（新建 session 路径）捕获新 `sessionID`（`exec
 
 ### 7. 反向链路：slave 结果 → driver journal
 
-- slave chat 输出带 `session_id` kind marker，driver 经 `sessionIDFromMarker`（`internal/driver/tools.go:619-636,821-833,1101-1140`）解析。扩展 marker 带 `agent_id`（slave ShortID；driver 通常已从 `AgentCard` 知道，`tools.go:165-211`）。
-- 扩展 `driver-tasks.jsonl` 记录（`tools.go:79` `delegatedTaskRecord`）加 `child_session_id` + `child_agent_id`，task 结果 marker 到达时写。反向链路：driver session 的 children 索引，持久在 driver 本地。
+- slave chat 输出带 `session_id` kind marker，driver 经 `sessionIDFromMarker`（`internal/driver/tools.go:619-636,821-833,1101-1140`）解析，得到 `child_session_id`。**不**扩展 marker 带 `agent_id`（避免 slave 协议改动 + envelope 版本 bump）。
+- `child_agent_id` 在 driver 本地恢复：`submit_task` 走 `resolveTarget` 已返回 shortID；`submit_contract_task` 扩 `selectTarget` 返回 `targetShortID`；`resume_task` 通过 `TaskJournal.LatestByTaskID(last_task_id)` 读上一条 record 的 `ChildAgentID`。
+- 扩展 `driver-tasks.jsonl` 记录（`tools.go:79` `delegatedTaskRecord`）加 `child_session_id` + `child_agent_id`：delegation 时写 `child_agent_id`，task 结果 marker 到达时追加 `Terminal=true` 记录补 `child_session_id`（幂等：同 `(task_id, child_session_id, status)` 不重复写）。反向链路：driver session 的 children 索引，持久在 driver 本地。
 
 ### 8. Observer + 前端：全量跨 daemon 嵌套（无需去重）
 
@@ -221,8 +222,8 @@ Observer（`internal/commanderhub/tree.go`，P2 已落地）：
 ### 分阶段（3 PR）
 
 1. **P1 — 后端记录 + scanner + 隔离（无 UI、无传播；测试手填 sidecar）。** `Session.ParentAgentID`/`ParentDisplayName`；`agentbackend.Config.CodexHome`（**不**含 `LoomHome`/`ShortID`）；**`internal/{config,driver}.AgentConfig` 只加 `codex_home`/`loom_home` struct 字段（定义，不接线）**；codex executor **仅 `Run`（非 `RunResume`）**写 sidecar（含校验/created_at fallback）+ resolve-then-strip + 全量去重（env slice + `os.Environ`，大小写不敏感）注入 `CODEX_HOME` + `b.env` 贯通 exec/llm/app-server；codex scanner 用 `b.effectiveCodexHome()`（实例状态）合并 sidecar（含校验）+ cache key（`Get`/`seen` 一致）+ reaper（30d）；`Task` parent 字段。
-2. **P2 — 传播 + launcher wiring（driver/slave 分开）。** executor 写 `loom-meta/current` marker（`Run`+`RunResume`）；serve-mcp 读 marker 作 `parent_session_id` + 自身 `ShortID`/`display_name` stamp `<loom_origin>` 进 `DelegateTaskRequest.SystemContext`；slave `poller.go:157` 解析进 `Task.Parent*` 并剥离标记；反向 marker（child session+agent）+ `driver-tasks.jsonl` child 字段；register→DaemonInfo→SessionRow 带 `ShortID`/`DisplayName`/`ParentAgentID`/`ParentDisplayName`；**slave**：`EnsureRegistered` 后用 short_id 解析 `codex_home` 并把 `agentbackend.New` 移到注册之后；**driver**：启动时从已持久化 config 读 `ShortID` 解析（无 `EnsureRegistered` 可重排，`ShortID` 空则报"先 register"或 fallback）；YAML schema + `deploy/` 模板 + `dev/configs` 填 `codex_home`/`loom_home` 并传入 `agentbackend.Config.CodexHome`（executor 子进程 env 与 serve-mcp cfg 共用，marker 两端可见）。
-3. **P3 — Commander 嵌套。** observer 全局 parent 索引；前端跨 daemon `buildSessionNodes` 重写、`remote`/`parent offline` badge（display_name）、默认折叠；Playwright。
+2. **P2 — 传播 + launcher wiring（driver/slave 分开）。** executor 写 `loom-meta/current` marker（`Run`+`RunResume`）；serve-mcp 读 marker 作 `parent_session_id` + 自身 `ShortID`/`display_name`，stamp single-line JSON `{"loom_origin":...}\n` marker 进 `DelegateTaskRequest.SystemContext`（chat 及 fanout/route 类 skill；shell/file/mcp 不 stamp）；fanout 编排器（`internal/orchestrator/fanout.go` + `internal/orchestration/driver_runner.go`）把外层 `t.SystemContext` 合进每个 child；`ContractRunner.Run` 接受 systemContext 参数让 `driver_fanout` route 也透传；slave `poller.go:157` 用 `agentbackend.ParseLoomOrigin` 解析进 `Task.Parent*` 并剥离标记；反向链路 = driver 本地 journal（`sessionIDFromMarker` 取 child session，`child_agent_id` 来自 `resolveTarget`/`selectTarget`/`LatestByTaskID` 恢复——**不**扩展 slave marker 带 agent_id）；register→DaemonInfo→SessionRow 带 `ShortID`/`DisplayName`/`ParentAgentID`/`ParentDisplayName`；**slave**：`EnsureRegistered` 后用 short_id 解析 `codex_home` 并把 `agentbackend.New` 移到注册之后；**driver**：启动时从已持久化 config 读 `ShortID` 解析（无 `EnsureRegistered` 可重排，`ShortID` 空则报"先 register"或 fallback）；YAML schema + `deploy/` 模板 + `dev/configs` 填 `codex_home`/`loom_home` 并传入 `agentbackend.Config.CodexHome`（executor 子进程 env 与 serve-mcp cfg 共用，marker 两端可见）。
+3. **P3 — Commander 嵌套（frontend-only）。** observer 不建 parent 索引（§8 已敲定，frontend-only）；前端跨 daemon `buildSessionNodes` 重写（owner-aware `(owner_agent_id, session_id)` key）、`remote`/`parent offline` badge（display_name）、默认折叠；Playwright。Observer Go 代码无新增改动。
 
 ### 关键文件
 
@@ -236,7 +237,7 @@ Observer（`internal/commanderhub/tree.go`，P2 已落地）：
 - `internal/executor/executor.go` — `Task` 加 `ParentSessionID`/`ParentAgentID`/`ParentDisplayName`。
 - `internal/config/config.go` + `internal/driver/config.go` — `AgentConfig` 加 `codex_home`/`loom_home`（P1 定义字段，P2 贯通）。
 - `internal/commander/protocol.go` — `RegisterPayload` 加 `ShortID`。
-- `internal/commanderhub/registry.go` + `hub.go` + `tree.go` — 贯通 `ShortID`/`ParentAgentID`/`ParentDisplayName`；`agent_id → daemonConn` 映射；全局 parent 索引；`SessionRow.OwnerAgentID` 上报填自身。
+- `internal/commanderhub/registry.go` + `hub.go` + `tree.go` — 贯通 `ShortID`/`ParentAgentID`/`ParentDisplayName`；`SessionRow.OwnerAgentID` 上报填自身（P2）。**不**建 `agent_id → daemonConn` 映射、**不**建全局 parent 索引（§8 已敲定 P3 frontend-only；observer 按 daemon 分组透传，跨 daemon 解析由前端 owner-aware key 完成）。
 - `internal/commanderhub/webapp/src/api/types.ts` + `components/DaemonSessionTree.tsx` — 跨 daemon 嵌套 + badge（display_name）。
 - `internal/driver/tools.go`（含 `contract_tools.go`/`slave_tools.go`/`register_mcp_tool.go`/`slave_file_tools.go`）— current-session 接线 + `<loom_origin>` 打标；反向 marker 解析；扩 `delegatedTaskRecord`。
 - `cmd/slave-agent/main.go`（P2）— `agentbackend.New` 移到 `EnsureRegistered` 之后，用已知 short_id 解析 `codex_home` 传入 `Config.CodexHome`。
@@ -254,9 +255,9 @@ Observer（`internal/commanderhub/tree.go`，P2 已落地）：
 - **Executor**：`thread.started` 后写正确字段 sidecar（parent 字段取自 `Task`；owner 由扫该 `CODEX_HOME` 的 daemon 隐式决定）；`created_at` 在事件无 ts 时 fallback `time.Now()`；best-effort 写失败不破 run；marker 解析进 `Task` 且从 prompt 剥离。
 - **RunResume 不写 sidecar（major）**：`RunResume` 后 `loom-meta/<id>.json` 不生成、不被修改（钉死 sidecar 写入只在 `Run` 新建路径，不落共享 `runWithArgv` 的 thread-capture 分支）。
 - **传播**：driver 打 `SystemContext`；slave 解析 + 剥离；JSON-prompt skill 仍解析（`tools.go:506` 保护保持绿）。
-- **反向链路**：`sessionIDFromMarker` 取 child session + agent_id；`driver-tasks.jsonl` 多出 child 字段。
+- **反向链路**：`sessionIDFromMarker` 取 child session（slave marker 不带 agent_id）；`child_agent_id` 在 driver 本地通过 `resolveTarget`/`selectTarget` 拿到 shortID，`resume_task` 通过 `TaskJournal.LatestByTaskID` 恢复；`driver-tasks.jsonl` 写 delegation 与 terminal 两次记录（`Terminal=true` 幂等：同 `(task_id, child_session_id, status)` 不重复 append；status 保留 `completed`/`failed`/`cancelled`）。
 - **ParentDisplayName 传输（review #1）**：sidecar `parent_display_name` → `Session.ParentDisplayName` → `SessionRow` → 前端；parent daemon 离线时 badge 仍显示该名。
-- **Commander**：observer 解析跨 daemon parent；远程 child 带 badge 嵌在 parent 下、从 home 根列表省略；离线 parent 渲染 `parent offline`（带 display_name）；本地 subagent 嵌套不变。Playwright：`driver → remote task · on slave-02`。
+- **Commander**：**前端**用 owner-aware `(owner_agent_id, session_id)` key 解析跨 daemon parent（observer 不参与）；远程 child 带 badge 嵌在 parent 下、从 home 根列表省略；离线 parent 渲染 `parent offline`（带 display_name）；本地 subagent 嵌套不变。Playwright：`driver → remote task · on slave-02`。
 - **回归**：`go test ./... -race -count=1`；`npm test`/`npm run build`（`assets/dist` build 后无 diff）。
 
 ### 验收标准（按阶段，review #5）
