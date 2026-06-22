@@ -2448,6 +2448,244 @@ func TestResumeTaskStampsLoomOrigin(t *testing.T) {
 	}
 }
 
+// =========================================================================
+// Terminal child-link tests (Task 8)
+// =========================================================================
+
+// submitTaskForTerminalTest delegates a task to slave-2 (short_id "sl2") and
+// returns the tools and the task_id for further get_task/wait_task calls.
+func submitTaskForTerminalTest(t *testing.T, taskID string) (*Tools, string) {
+	t.Helper()
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "slave-2", DisplayName: "slave-2", Status: "available",
+					Card: json.RawMessage(`{"skills":["chat"],"short_id":"sl2"}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			return &agentsdk.DelegateTaskResponse{TaskID: taskID, SessionID: "S1", Status: "submitted"}, nil
+		},
+		getTaskFunc: func(id string, _ bool) (*agentsdk.TaskInfo, error) {
+			return &agentsdk.TaskInfo{TaskID: id, Status: "completed",
+				Output: `{"session_id":"child-sess"}`}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	_, err := toolByName(t, tools, "submit_task").Call(context.Background(),
+		json.RawMessage(`{"prompt":"do work","skill":"chat","target_display_name":"slave-2"}`))
+	require.NoError(t, err)
+	return tools, taskID
+}
+
+// TestGetTaskWritesTerminalChildRecord verifies that get_task whose result
+// carries a session_id marker appends a terminal record with child_session_id,
+// child_agent_id, and status=completed.
+func TestGetTaskWritesTerminalChildRecord(t *testing.T) {
+	tools, taskID := submitTaskForTerminalTest(t, "T-gt-1")
+
+	_, err := toolByName(t, tools, "get_task").Call(context.Background(),
+		json.RawMessage(`{"task_id":"`+taskID+`"}`))
+	require.NoError(t, err)
+
+	rec, ok := tools.taskJournal.LatestByTaskID(taskID)
+	require.True(t, ok)
+	require.True(t, rec.Terminal)
+	require.Equal(t, "child-sess", rec.ChildSessionID)
+	require.Equal(t, "sl2", rec.ChildAgentID)
+	require.Equal(t, "completed", rec.Status)
+}
+
+// TestWaitTaskWithFailedStatusWritesTerminalRecord verifies that wait_task that
+// observes status=failed appends a terminal row with status=failed.
+func TestWaitTaskWithFailedStatusWritesTerminalRecord(t *testing.T) {
+	taskID := "T-wt-fail"
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "slave-2", DisplayName: "slave-2", Status: "available",
+					Card: json.RawMessage(`{"skills":["chat"],"short_id":"sl2"}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			return &agentsdk.DelegateTaskResponse{TaskID: taskID, SessionID: "S2", Status: "submitted"}, nil
+		},
+		getTaskFunc: func(id string, _ bool) (*agentsdk.TaskInfo, error) {
+			return &agentsdk.TaskInfo{TaskID: id, Status: "failed",
+				Output: `{"session_id":"fail-sess"}`}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	_, err := toolByName(t, tools, "submit_task").Call(context.Background(),
+		json.RawMessage(`{"prompt":"do work","skill":"chat","target_display_name":"slave-2"}`))
+	require.NoError(t, err)
+
+	_, err = toolByName(t, tools, "wait_task").Call(context.Background(),
+		json.RawMessage(`{"task_id":"`+taskID+`","poll_interval_sec":1,"timeout_sec":5}`))
+	// wait_task returns error for failed tasks in some codepaths; we only care about the journal
+	_ = err
+
+	rec, ok := tools.taskJournal.LatestByTaskID(taskID)
+	require.True(t, ok)
+	require.True(t, rec.Terminal)
+	require.Equal(t, "fail-sess", rec.ChildSessionID)
+	require.Equal(t, "sl2", rec.ChildAgentID)
+	require.Equal(t, "failed", rec.Status)
+}
+
+// TestGetTaskTerminalRecordIsIdempotent verifies that calling get_task three
+// times on the same completed task results in exactly one terminal row in the
+// journal (raw line count, not just Recent).
+func TestGetTaskTerminalRecordIsIdempotent(t *testing.T) {
+	tools, taskID := submitTaskForTerminalTest(t, "T-idem-1")
+
+	for i := 0; i < 3; i++ {
+		_, err := toolByName(t, tools, "get_task").Call(context.Background(),
+			json.RawMessage(`{"task_id":"`+taskID+`"}`))
+		require.NoError(t, err)
+	}
+
+	// The journal should have exactly 2 lines: 1 delegation + 1 terminal.
+	// Use raw line count to catch any spurious duplicate appends.
+	lineCount := countJournalLines(t, tools.taskJournal.Path())
+	require.Equal(t, 2, lineCount, "expected 1 delegation + 1 terminal line, got %d", lineCount)
+}
+
+// TestGetTaskStatusChangeAppendsSecondTerminalRow documents the defensive behavior:
+// if status genuinely changes between polls (hypothetically failed → cancelled),
+// a second terminal row is appended and Recent returns the newest.
+func TestGetTaskStatusChangeAppendsSecondTerminalRow(t *testing.T) {
+	taskID := "T-status-change"
+	var callCount int
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "slave-2", DisplayName: "slave-2", Status: "available",
+					Card: json.RawMessage(`{"skills":["chat"],"short_id":"sl2"}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			return &agentsdk.DelegateTaskResponse{TaskID: taskID, SessionID: "S3", Status: "submitted"}, nil
+		},
+		getTaskFunc: func(id string, _ bool) (*agentsdk.TaskInfo, error) {
+			callCount++
+			status := "failed"
+			if callCount > 1 {
+				status = "cancelled"
+			}
+			return &agentsdk.TaskInfo{TaskID: id, Status: status,
+				Output: `{"session_id":"change-sess"}`}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	_, err := toolByName(t, tools, "submit_task").Call(context.Background(),
+		json.RawMessage(`{"prompt":"do work","skill":"chat","target_display_name":"slave-2"}`))
+	require.NoError(t, err)
+
+	// First poll: status=failed
+	toolByName(t, tools, "get_task").Call(context.Background(), //nolint:errcheck
+		json.RawMessage(`{"task_id":"`+taskID+`"}`))
+	// Second poll: status=cancelled (genuinely different)
+	toolByName(t, tools, "get_task").Call(context.Background(), //nolint:errcheck
+		json.RawMessage(`{"task_id":"`+taskID+`"}`))
+
+	// Raw line count: 1 delegation + 2 terminal rows
+	lineCount := countJournalLines(t, tools.taskJournal.Path())
+	require.Equal(t, 3, lineCount, "expected 1 delegation + 2 terminal lines")
+
+	// Recent should return the newest terminal row (cancelled)
+	recs, err := tools.taskJournal.Recent(10, taskID)
+	require.NoError(t, err)
+	require.Equal(t, "cancelled", recs[0].Status)
+}
+
+// TestSubmitContractTaskDirectMatchPersistsChildAgentID verifies that
+// submit_contract_task (direct-match branch) sets ChildAgentID from the
+// target's short_id.
+func TestSubmitContractTaskDirectMatchPersistsChildAgentID(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "sbx-driver", DisplayName: "driver", Status: "available", Card: json.RawMessage(`{"skills":[]}`)},
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["chat"],"short_id":"sa"}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			return &agentsdk.DelegateTaskResponse{TaskID: "T-ct-1"}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	tc := testTaskContract()
+	tc.ExecutionPolicy.Routing = contract.RoutingDirectFirst
+	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
+	require.NoError(t, err)
+
+	_, err = submitContractToolForTest(t, tools).Call(context.Background(), raw)
+	require.NoError(t, err)
+
+	rec, ok := tools.taskJournal.LatestByTaskID("T-ct-1")
+	require.True(t, ok)
+	require.Equal(t, "sa", rec.ChildAgentID, "submit_contract_task direct-match must persist target short_id into ChildAgentID")
+}
+
+// TestResumeTaskRecoversPriorChildAgentID verifies that resume_task reads the
+// prior submit_task journal record and copies its ChildAgentID into the new
+// delegation record.
+func TestResumeTaskRecoversPriorChildAgentID(t *testing.T) {
+	originalTaskID := "T-orig-1"
+	resumeTaskID := "T-resume-R"
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "slave-2", DisplayName: "slave-2", Status: "available",
+					Card: json.RawMessage(`{"skills":["chat"],"short_id":"sl2"}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			return &agentsdk.DelegateTaskResponse{TaskID: resumeTaskID, SessionID: "S-res"}, nil
+		},
+		getTaskFunc: func(id string, _ bool) (*agentsdk.TaskInfo, error) {
+			switch id {
+			case originalTaskID:
+				return &agentsdk.TaskInfo{
+					TaskID: originalTaskID, Status: "completed", SessionID: "S-res", TargetID: "slave-2",
+					Result: json.RawMessage(`{"kind":"awaiting_user","session_id":"S-res","question":{"kind":"ask_user","question":"continue?"}}`),
+				}, nil
+			case resumeTaskID:
+				return &agentsdk.TaskInfo{
+					TaskID: resumeTaskID, Status: "completed",
+					Result: json.RawMessage(`{"kind":"final","summary":"done","session_id":"S-res"}`),
+				}, nil
+			}
+			return nil, fmt.Errorf("unknown: %s", id)
+		},
+	}
+	tools := newTestTools(t, sdk)
+
+	// First: submit_task so the journal has a record with ChildAgentID="sl2"
+	_, err := toolByName(t, tools, "submit_task").Call(context.Background(),
+		json.RawMessage(`{"prompt":"start","skill":"chat","target_display_name":"slave-2"}`))
+	require.NoError(t, err)
+
+	// Manually fix the task_id so LatestByTaskID(originalTaskID) finds it.
+	recs, err := tools.taskJournal.Recent(1, "")
+	require.NoError(t, err)
+	require.Len(t, recs, 1)
+	fixedRec := recs[0]
+	fixedRec.TaskID = originalTaskID
+	require.NoError(t, tools.taskJournal.Append(fixedRec))
+
+	// Now resume_task — it should recover ChildAgentID from the journal
+	_, err = toolByName(t, tools, "resume_task").Call(context.Background(),
+		json.RawMessage(`{"last_task_id":"`+originalTaskID+`","answer":"yes","timeout_sec":5}`))
+	require.NoError(t, err)
+
+	// The resume_task journal record must carry the recovered ChildAgentID
+	rec, ok := tools.taskJournal.LatestByTaskID(resumeTaskID)
+	require.True(t, ok)
+	require.Equal(t, "sl2", rec.ChildAgentID, "resume_task must recover ChildAgentID from prior delegation record")
+}
+
 func TestSubmitContractTaskDriverFanoutCarriesLoomOrigin(t *testing.T) {
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {

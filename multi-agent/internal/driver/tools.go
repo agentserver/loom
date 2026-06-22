@@ -88,6 +88,7 @@ type delegatedTaskRecord struct {
 	Response          *agentsdk.DelegateTaskResponse
 	TargetID          string
 	TargetDisplayName string
+	ChildAgentID      string
 	Skill             string
 	Wait              bool
 	TimeoutSec        int
@@ -103,6 +104,7 @@ func (t *Tools) recordDelegatedTask(rec delegatedTaskRecord) error {
 		SessionID:         rec.Response.SessionID,
 		TargetID:          rec.TargetID,
 		TargetDisplayName: rec.TargetDisplayName,
+		ChildAgentID:      rec.ChildAgentID,
 		Skill:             rec.Skill,
 		Status:            rec.Response.Status,
 		Wait:              rec.Wait,
@@ -111,6 +113,38 @@ func (t *Tools) recordDelegatedTask(rec delegatedTaskRecord) error {
 		return &MCPToolError{Message: fmt.Sprintf("task %s was created but driver failed to record it in driver-tasks.jsonl: %v", rec.Response.TaskID, err)}
 	}
 	return nil
+}
+
+// recordTerminalChild appends a terminal journal record for a finished
+// delegation (status ∈ {completed, failed, cancelled}), carrying the child
+// session link.
+//   - Idempotent: if the most recent journal record for taskID is already a
+//     Terminal=true row with the same (child_session_id, status), return
+//     without appending. Without this, repeated get_task/wait_task polls
+//     would append a new row each call.
+//   - Requires a prior delegation-time record (carrying ChildAgentID). If
+//     LatestByTaskID returns nothing the journal was rotated and we skip.
+//   - Best-effort: append failure is logged, not fatal.
+func (t *Tools) recordTerminalChild(taskID, childSessionID, status string) {
+	if t.taskJournal == nil || taskID == "" || childSessionID == "" {
+		return
+	}
+	rec, ok := t.taskJournal.LatestByTaskID(taskID)
+	if !ok {
+		return
+	}
+	if rec.Terminal && rec.ChildSessionID == childSessionID && rec.Status == status {
+		return // already recorded this terminal state; idempotent no-op
+	}
+	rec.ChildSessionID = childSessionID
+	rec.Terminal = true
+	rec.TS = "" // let Append stamp a fresh timestamp
+	if status != "" {
+		rec.Status = status
+	}
+	if err := t.taskJournal.Append(rec); err != nil {
+		t.logHelperErr("driver_journal", "record_terminal_child", err)
+	}
 }
 
 func (t *Tools) emit(ev observer.Event) {
@@ -511,7 +545,7 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		})
 	}
 
-	targetID, targetName, _, targetRole, err := s.t.resolveTarget(ctx, args.TargetDisplayName)
+	targetID, targetName, targetShortID, targetRole, err := s.t.resolveTarget(ctx, args.TargetDisplayName)
 	if err != nil {
 		return nil, err
 	}
@@ -561,6 +595,7 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		Response:          resp,
 		TargetID:          targetID,
 		TargetDisplayName: targetName,
+		ChildAgentID:      targetShortID,
 		Skill:             skill,
 		Wait:              false,
 		TimeoutSec:        timeout,
@@ -648,6 +683,9 @@ func (g *getTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMe
 		isAwaiting, unwrappedOutput, question = unwrapResultMarker(info)
 	}
 	markerSessionID := sessionIDFromMarker(progress.FinalOutput, info.Output, string(info.Result))
+	if markerSessionID != "" && isTerminalStatus(info.Status) {
+		g.t.recordTerminalChild(taskID, markerSessionID, info.Status)
+	}
 	if isAwaiting {
 		g.t.emit(observer.Event{
 			Type:   observer.EventDriverTaskStatus,
@@ -759,6 +797,9 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 				isAwaiting, unwrappedOutput, question = a, s, q
 			} else {
 				isAwaiting, unwrappedOutput, question = unwrapResultMarker(info)
+			}
+			if markerSess := sessionIDFromMarker(progress.FinalOutput, info.Output, string(info.Result)); markerSess != "" {
+				w.t.recordTerminalChild(taskID, markerSess, info.Status)
 			}
 			if isAwaiting && info.Status == "completed" {
 				w.t.emit(observer.Event{
@@ -1178,15 +1219,25 @@ func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	if err != nil {
 		return nil, &MCPToolError{Message: "delegate chat_resume: " + err.Error()}
 	}
+	// Recover ChildAgentID from the prior delegation journal record so the
+	// resume record carries the same agent shortID. Falls through to "" if the
+	// journal was rotated (acceptable degraded mode: terminal record still has
+	// ChildSessionID for session-only linking).
+	var resumeChildAgentID string
+	if prev, ok := r.t.taskJournal.LatestByTaskID(args.LastTaskID); ok {
+		resumeChildAgentID = prev.ChildAgentID
+	}
+
 	// DelegateTask succeeded — degrade journal append failure to a log entry
 	// so we still wait on the resume. See §1.1 #1 of the 2026-06-13 review.
 	if err := r.t.recordDelegatedTask(delegatedTaskRecord{
-		Tool:       r.Name(),
-		Response:   resp,
-		TargetID:   info.TargetID,
-		Skill:      "chat_resume",
-		Wait:       true,
-		TimeoutSec: timeout,
+		Tool:         r.Name(),
+		Response:     resp,
+		TargetID:     info.TargetID,
+		ChildAgentID: resumeChildAgentID,
+		Skill:        "chat_resume",
+		Wait:         true,
+		TimeoutSec:   timeout,
 	}); err != nil {
 		r.t.logHelperErr("driver_journal", "record_delegated_task", err)
 	}
