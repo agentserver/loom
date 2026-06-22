@@ -20,6 +20,8 @@
 
 - `pkg/agentbackend/loomorigin.go` — **NEW**: `BuildLoomOrigin`/`ParseLoomOrigin` (shared by driver stamp + slave parse; both import agentbackend).
 - `pkg/agentbackend/loomorigin_test.go` — **NEW**.
+- `pkg/agentbackend/codexhome.go` — **NEW**: `ResolveCodexHome(codexHome, loomHome, shortID)` (Task 9). Lives in the low-level `pkg/agentbackend` package so both driver and slave can call it without coupling.
+- `pkg/agentbackend/codexhome_test.go` — **NEW**.
 - `pkg/agentbackend/codex/loommeta.go` — add `writeCurrentSession`/`ReadCurrentSession` (the `current` marker; not a sidecar).
 - `pkg/agentbackend/codex/loommeta_test.go` — marker tests.
 - `pkg/agentbackend/codex/executor.go` — write `current` marker on `thread.started` (Run **and** RunResume).
@@ -27,7 +29,8 @@
 - `internal/commanderhub/registry.go` + `hub.go` + `tree.go` — carry `ShortID`; `SessionRow` += `OwnerAgentID`/`ParentAgentID`/`ParentDisplayName`; `sessionRowFromBackend` copies parent fields. (No observer `agent_id → daemonConn` map is built — P3 resolves cross-daemon parents in the frontend from the `SessionRow` fields; offline parents use the denormalized `parent_display_name`.)
 - `cmd/driver-agent/main.go` — populate `ShortID` in register; resolve `codex_home` from persisted ShortID; pass `cfg.Agent.CodexHome`.
 - `cmd/slave-agent/main.go` — **new `serve-daemon` subcommand** (mirror driver); move `agentbackend.New` past `EnsureRegistered`; resolve `codex_home`; populate `ShortID`.
-- `internal/driver/tools.go` + `contract_tools.go` — stamp `<loom_origin>` on chat-capable delegations only (`submit_task`, `submit_contract_task`, `resume_task`); terminal child-link record into `driver-tasks.jsonl`. Shell/file/mcp handlers untouched.
+- `internal/driver/tools.go` + `contract_tools.go` — stamp `<loom_origin>` on parent-link delegations (`submit_task` default + chat skills, `submit_contract_task`, `resume_task`); `submit_contract_task.selectTarget` returns `targetShortID` so the journal carries `ChildAgentID` on the direct-match branch; `resume_task` recovers `ChildAgentID` via `TaskJournal.LatestByTaskID`; terminal child-link record into `driver-tasks.jsonl`. Shell/file/mcp handlers untouched.
+- `internal/orchestrator/fanout.go` + `internal/orchestration/driver_runner.go` — propagate outer `executor.Task.SystemContext` (carries loom_origin marker) into each child `DelegateTaskRequest` so fanout-routed chat children inherit the parent link (Task 6b).
 - `internal/driver/task_journal.go` — `TaskRecord` += child fields + `Terminal`; `Recent` dedups by task_id preferring terminal.
 - `internal/poller/poller.go` — parse `<loom_origin>` → `Task.Parent*`, strip from `SystemContext`.
 - `internal/config/config.go`, `internal/driver/config.go` — (fields added in P1; P2 wires them).
@@ -509,7 +512,7 @@ In `cmd/slave-agent/main.go` switch (near the top, alongside `humanloop-mcp`):
 		runServeDaemon(os.Args[2:])
 ```
 
-Add a `runServeDaemon` (mirror driver's): load config; require `proxy_token` + `observer.url`; resolve `codex_home` (see Task 8) and pass into `agentbackend.New`; build `commander.Handler{Backend: backend, WorkerMax: cfg.Daemon.WorkerMax}`; `commander.NewDaemon` with `RegisterPayload` including `ShortID: cfg.Credentials.ShortID`, `Kind: cfg.Agent.Kind`, `DisplayName: cfg.Discovery.DisplayName`; run until signal.
+Add a `runServeDaemon` (mirror driver's): load config; require `proxy_token` + `observer.url`; resolve `codex_home` via `agentbackend.ResolveCodexHome` (see Task 9) and pass into `agentbackend.New`; build `commander.Handler{Backend: backend, WorkerMax: cfg.Daemon.WorkerMax}`; `commander.NewDaemon` with `RegisterPayload` including `ShortID: cfg.Credentials.ShortID`, `Kind: cfg.Agent.Kind`, `DisplayName: cfg.Discovery.DisplayName`; run until signal.
 
 - [ ] **Step 2: Resolve codex_home before backend creation**
 
@@ -533,15 +536,15 @@ git commit -m "feat(slave-agent): add serve-daemon subcommand (#24 P2)"
 
 ---
 
-## Task 6: Driver stamps `<loom_origin>` on chat-capable delegations
+## Task 6: Driver stamps `<loom_origin>` on chat-capable AND fanout delegations
 
-**Scope (which handlers stamp):** only delegations that can create a codex exec session on the slave — i.e. `chat`/`""`/`chat_resume` skills. The slave's codex backend runs only for those skills; shell/file/mcp skills use other executors and never write a loom-meta sidecar, so stamping them is pointless (and file/mcp tools don't pass `SystemContext`).
+**Scope (which handlers stamp):** every delegation that can transitively produce a codex exec session on a slave — that means chat-capable skills *and* `fanout`/`route`/`fanout_strict`/`""` (which the master orchestrator fans out into one-or-more chat children — see `dispatch.go:138`, `tools.go:235`, and the orchestrator propagation added in Task 6b below). Shell/file/mcp skills still don't stamp.
 
-- **STAMP** (these build a `DelegateTaskRequest` with `SystemContext` for a chat/contract task):
-  - `submit_task` — `internal/driver/tools.go:511`
+- **STAMP** (these build a `DelegateTaskRequest` whose `SystemContext` will reach a codex exec session — either directly, or after fanout propagation):
+  - `submit_task` — `internal/driver/tools.go:511` (default skill is `fanout` per `tools.go:398`)
   - `submit_contract_task` — `internal/driver/contract_tools.go:100`
   - `resume_task` — `internal/driver/tools.go:1140`
-- **DO NOT STAMP** (non-codex skills; leave untouched):
+- **DO NOT STAMP** (terminal non-codex skills; leave untouched):
   - `run_slave_bash` / `run_slave_powershell` / `run_slave_shell` — `internal/driver/slave_tools.go:150/279`
   - `read_slave_file` / `write_slave_file` / `stat_slave_file` — `internal/driver/slave_file_tools.go:128/349/431` (file skills, no `SystemContext`)
   - `register_slave_mcp` / `unregister_slave_mcp` — `internal/driver/register_mcp_tool.go:59`, `unregister_mcp_tool.go:54` (mcp skills, no codex session)
@@ -573,26 +576,31 @@ func (t *Tools) loomOriginMarker() string {
 
 (This requires `cfg.Agent.CodexHome` to be resolved at launcher startup — Task 9 sets it from short_id for both serve-mcp and serve-daemon.)
 
-- [ ] **Step 2: Stamp `SystemContext` in the three chat-capable handlers (predicate-gated)**
+- [ ] **Step 2: Stamp `SystemContext` in the three delegation handlers (predicate-gated)**
 
-`submit_task` accepts any skill (default `"fanout"` at `tools.go:396`); only `""`/`"chat"`/`"chat_resume"` route to the codex backend on the slave (`dispatch.go:138`, slave `routes[""]`/`routes["chat_resume"]`). Gate the stamp on that predicate so non-codex delegations (fanout/bash/…) don't get the marker:
+The predicate must include **fanout-routed skills** because the *default* `submit_task` skill is `"fanout"` (`tools.go:398`), and a fanout master then re-delegates to chat-capable slaves (Task 6b propagates the marker through that fanout). Without `fanout` in the predicate the most common code path — bare `submit_task` — gets no parent link at all.
 
 ```go
-// isChatDelegation reports whether the delegated skill runs the codex backend
-// on the slave (and thus creates a codex exec session needing a parent link).
-// Matches dispatch.go:138.
-func isChatDelegation(skill string) bool {
-	return skill == "" || skill == "chat" || skill == "chat_resume"
+// isParentLinkDelegation reports whether the delegated skill can transitively
+// produce a codex exec session on a slave (directly via chat, or after master
+// fanout). Stamps the loom_origin marker so the child's session inherits the
+// originating driver session. Matches dispatch.go:138 + tools.go:235.
+func isParentLinkDelegation(skill string) bool {
+	switch skill {
+	case "", "chat", "chat_resume", "fanout", "fanout_strict", "route":
+		return true
+	}
+	return false
 }
 ```
 
-In `submit_task` (tools.go ~511), where `DelegateTaskRequest` is built, prepend the marker **only when `isChatDelegation(skill)`**:
+In `submit_task` (tools.go ~511), where `DelegateTaskRequest` is built, prepend the marker **only when `isParentLinkDelegation(skill)`**. `submit_task` does not currently pass `SystemContext` to `DelegateTask` (see `tools.go:511`); add the field at the same time:
 
 ```go
-	systemContext := args.SystemContext
-	if isChatDelegation(skill) {
+	systemContext := ""
+	if isParentLinkDelegation(skill) {
 		if m := s.t.loomOriginMarker(); m != "" {
-			systemContext = m + systemContext
+			systemContext = m
 		}
 	}
 	resp, err := s.t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
@@ -604,28 +612,37 @@ In `submit_task` (tools.go ~511), where `DelegateTaskRequest` is built, prepend 
 	})
 ```
 
-Apply the identical predicate-gated stamp in `submit_contract_task` (`contract_tools.go:100`) and `resume_task` (`tools.go:1140`). Do **not** touch shell/file/mcp handlers. (Note: `submit_task` with empty skill defaults to `"fanout"` before delegation — that path goes to the driver orchestrator, not a slave codex session, so it correctly does not stamp. If the orchestrator's fanned-out sub-tasks need the parent link, that's a follow-up — flag in preflight.)
+Apply the identical predicate-gated stamp in `submit_contract_task` (`contract_tools.go:100`) and `resume_task` (`tools.go:1140`). Do **not** touch shell/file/mcp handlers. The fanout-propagation half (so slave chat children inherit the marker) is Task 6b below.
 
-- [ ] **Step 3: Test (unmarshal-based; assert non-chat does not stamp)**
+- [ ] **Step 3: Test (unmarshal-based; cover default + chat + non-chat)**
 
 `internal/driver/tools_test.go` — with a fake SDK + a temp `CODEX_HOME` (set `cfg.Agent.CodexHome`) + a written `current` marker:
 
 ```go
-// submit_task with skill="chat" stamps the marker; parse it back via
-// agentbackend.ParseLoomOrigin (do NOT assert an exact JSON prefix — field
-// order is not part of the contract).
-req := fakeSDK.lastDelegateRequest // captured by the fake SDK
-p, cleaned, ok := agentbackend.ParseLoomOrigin(req.SystemContext)
+// submit_task with default skill (empty → "fanout") stamps the marker.
+// This is the most common path; if it stops stamping, P2 fails its goal.
+reqDefault := fakeSDK.lastDelegateRequest
+p, cleaned, ok := agentbackend.ParseLoomOrigin(reqDefault.SystemContext)
 if !ok || p.AgentID != shortID || p.DisplayName != displayName || p.SessionID != markerSession {
-	t.Fatalf("chat delegation not stamped correctly: %+v", p)
+	t.Fatalf("default (fanout) delegation not stamped correctly: %+v", p)
+}
+if reqDefault.Skill != "fanout" {
+	t.Fatalf("default skill expected fanout, got %q", reqDefault.Skill)
 }
 if strings.Contains(cleaned, "loom_origin") {
 	t.Fatalf("marker not stripped-cleanable: %q", cleaned)
 }
-// submit_task with skill="bash" (non-chat) does NOT stamp.
+
+// submit_task with skill="chat" also stamps.
+reqChat := fakeSDK.lastDelegateRequestForChat
+if _, _, ok := agentbackend.ParseLoomOrigin(reqChat.SystemContext); !ok {
+	t.Fatal("chat delegation must be stamped")
+}
+
+// submit_task with skill="bash" (terminal non-codex) does NOT stamp.
 reqBash := fakeSDK.lastDelegateRequestForBash
 if _, _, ok := agentbackend.ParseLoomOrigin(reqBash.SystemContext); ok {
-	t.Fatal("non-chat delegation must not be stamped")
+	t.Fatal("bash delegation must not be stamped")
 }
 ```
 
@@ -638,7 +655,123 @@ Expected: PASS.
 
 ```bash
 git add internal/driver/tools.go internal/driver/contract_tools.go internal/driver/tools_test.go
-git commit -m "feat(driver): stamp <loom_origin> on chat-capable delegations (#24 P2)"
+git commit -m "feat(driver): stamp <loom_origin> on parent-link delegations (#24 P2)"
+```
+
+---
+
+## Task 6b: Fanout/contract pipelines propagate `SystemContext` to chat children
+
+**Problem:** Task 6 stamps the marker on the driver's `submit_task`, but four hops drop it before any slave chat child sees it:
+
+1. **`internal/orchestrator/fanout.go:474`** (master `runFanout`) — uses only `n.SystemContext`; `planner.Node.SystemContext` is `json:"-"` (`internal/planner/planner.go:50`) and never receives the outer task's value.
+2. **`internal/orchestrator/fanout.go:1091`** (`runFanoutResume` re-dispatcher) — same shape.
+3. **`internal/orchestration/driver_runner.go:160-166`** (`DriverRunner.runNode`) — receives only `(ctx, n, outputs, agents)`; outer `SystemContext` is not threaded in. `DriverRunner.Run` currently has signature `Run(ctx, prompt string)` (`driver_runner.go:46`) — no `SystemContext` parameter at all.
+4. **`internal/driver/contract_tools.go:79`** — `s.t.contractRunner.Run(ctx, finalPrompt)` calls the `ContractRunner` interface (`internal/driver/tools.go:33-35`), which today is `Run(ctx context.Context, prompt string) (orchestration.RunnerResult, error)` — also no `SystemContext` slot. The `driver_fanout` route (the contract-tool equivalent of fanout) silently strips the marker because the interface has nowhere to put it.
+
+**Fix:** widen the `Run` signatures end-to-end, and route the loom_origin marker through them. Plain `string` second arg keeps the change minimal and avoids exposing a new opts struct just for this one field.
+
+- Modify: `internal/orchestration/driver_runner.go` — change `Run(ctx, prompt)` → `Run(ctx, prompt, systemContext string)`; thread `systemContext` into `runPreparedPlan` → `runNode` and merge with `n.SystemContext` before the `DelegateTask` call (`:160-166`).
+- Modify: `internal/driver/tools.go` — change `ContractRunner.Run` to `Run(ctx, prompt, systemContext string)` so the interface matches.
+- Modify: `internal/driver/contract_tools.go:79` — pass the loom_origin marker (built via `t.loomOriginMarker()`, Task 6) as the `systemContext` arg on the `driver_fanout` route (the route delegates to a driver-local fanout runner, so the same predicate from Task 6 applies — only stamp when `isParentLinkDelegation(skill)` would have stamped a delegated request).
+- Modify: `internal/orchestrator/fanout.go` (`runFanout`, `runFanoutResume`) — merge `t.SystemContext` (the outer `executor.Task.SystemContext` already in scope) with `n.SystemContext` at each `DelegateTask` call.
+- Modify: callers of `DriverRunner.Run` and `ContractRunner.Run` — pass `""` (or a recovered marker) where appropriate; tests added below cover the parent-link cases.
+
+**Helper placement (avoid the cross-package pitfall):** put the merge helper in **`pkg/agentbackend`** (alongside `BuildLoomOrigin`/`ParseLoomOrigin`) and **export** it:
+
+```go
+// MergeSystemContext returns outer+inner with a single separating newline when
+// both are non-empty. Outer comes first so its loom_origin marker wins the
+// first-match rule in ParseLoomOrigin (one effective marker per context).
+// BuildLoomOrigin always ends with "\n" — trim trailing newlines on outer
+// before joining so we don't synthesize a blank line every hop.
+func MergeSystemContext(outer, inner string) string {
+	outer = strings.TrimRight(outer, "\n")
+	switch {
+	case outer == "" && inner == "":
+		return ""
+	case outer == "":
+		return inner
+	case inner == "":
+		return outer + "\n"
+	default:
+		return outer + "\n" + inner
+	}
+}
+```
+
+Both `internal/orchestrator` and `internal/orchestration` already import `pkg/agentbackend` for `BuildLoomOrigin`/`ParseLoomOrigin`, so this adds no new dependency edges. (A package-local helper in `internal/orchestrator/fanout.go` would be invisible from `internal/orchestration/driver_runner.go` — that's the package-boundary bug being fixed.)
+
+**Files:**
+- Modify: `pkg/agentbackend/loomorigin.go` (new exported `MergeSystemContext` + tests in `loomorigin_test.go`)
+- Modify: `internal/orchestrator/fanout.go`, `internal/orchestration/driver_runner.go`, `internal/driver/tools.go`, `internal/driver/contract_tools.go`
+- Test: `internal/orchestrator/fanout_test.go` (new), `internal/orchestration/driver_runner_test.go` (new), `internal/driver/contract_tools_test.go` (new case for `driver_fanout` route)
+
+- [ ] **Step 1: Write the failing tests**
+
+`pkg/agentbackend/loomorigin_test.go`:
+
+```go
+func TestMergeSystemContextNoBlankLineFromMarker(t *testing.T) {
+	marker := BuildLoomOrigin("drv", "d", "t") // ends with "\n"
+	merged := MergeSystemContext(marker, "child preamble")
+	if strings.Contains(merged, "\n\n") {
+		t.Fatalf("merge produced double newline: %q", merged)
+	}
+	if _, cleaned, ok := ParseLoomOrigin(merged); !ok || !strings.Contains(cleaned, "child preamble") {
+		t.Fatalf("merged context lost child preamble or marker: %q (ok=%v cleaned=%q)", merged, ok, cleaned)
+	}
+}
+
+func TestMergeSystemContextEmptyArgs(t *testing.T) {
+	if got := MergeSystemContext("", ""); got != "" {
+		t.Fatalf("empty,empty = %q", got)
+	}
+	if got := MergeSystemContext("", "x"); got != "x" {
+		t.Fatalf("empty,x = %q", got)
+	}
+	if got := MergeSystemContext("x\n", ""); got != "x\n" {
+		t.Fatalf("x\\n,empty = %q", got)
+	}
+}
+```
+
+`internal/orchestrator/fanout_test.go`: outer `executor.Task{SystemContext: agentbackend.BuildLoomOrigin("drv-1","prod-driver","thr-1")}` + planner emitting one chat node with empty `SystemContext`. Capture the fake SDK's `DelegateTaskRequest`; assert `ParseLoomOrigin(req.SystemContext)` returns `(drv-1, prod-driver, thr-1)` and that the request body has no double newline. Second case: child node has its own preamble — assert preamble survives merge and the outer marker wins first-match.
+
+`internal/orchestration/driver_runner_test.go`: analogous test, calling `r.Run(ctx, prompt, agentbackend.BuildLoomOrigin(...))`.
+
+`internal/driver/contract_tools_test.go`: a `submit_contract_task` whose contract routes to `driver_fanout` — assert the test `ContractRunner` (fake) sees the loom_origin marker in its second arg.
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `go test ./pkg/agentbackend/ ./internal/orchestrator/ ./internal/orchestration/ ./internal/driver/ -run 'MergeSystemContext|Fanout.*SystemContext|DriverRunner.*SystemContext|DriverFanout.*Marker' -v`
+Expected: FAIL — outer `SystemContext` isn't forwarded.
+
+- [ ] **Step 3: Widen signatures and merge in every dispatcher**
+
+1. **`pkg/agentbackend/loomorigin.go`** — add `MergeSystemContext` above.
+2. **`internal/orchestrator/fanout.go:474`** and **`:1091`** — replace `SystemContext: n.SystemContext` with `SystemContext: agentbackend.MergeSystemContext(t.SystemContext, n.SystemContext)` (`t` is the outer `executor.Task` already in scope in both `runFanout` and `runFanoutResume`).
+3. **`internal/orchestration/driver_runner.go`** — change `func (r *DriverRunner) Run(ctx, prompt string)` → `func (r *DriverRunner) Run(ctx, prompt, systemContext string)`. Thread `systemContext` through `runPreparedPlan(ctx, prompt, systemContext, nodes, agents)` → `runNode(ctx, n, outerCtx, outputs, agents)`. In `runNode` set `SystemContext: agentbackend.MergeSystemContext(outerCtx, n.SystemContext)` on the `DelegateTaskRequest` (`:160-166`).
+4. **`internal/driver/tools.go:33-35`** — widen the `ContractRunner` interface to `Run(ctx context.Context, prompt, systemContext string) (orchestration.RunnerResult, error)`.
+5. **`internal/driver/contract_tools.go:79`** — the `driver_fanout` route is, by definition, a fanout (the driver itself plays master and re-delegates to slaves), so it's always parent-link. No predicate needed. Replace the existing call:
+
+    ```go
+    result, err := s.t.contractRunner.Run(ctx, finalPrompt, s.t.loomOriginMarker())
+    ```
+
+    `loomOriginMarker()` returns `""` if the marker isn't available; `MergeSystemContext` inside the runner then no-ops the prepend and the existing code path is unaffected.
+6. **All other callers** of `DriverRunner.Run` and `ContractRunner.Run` (find via `grep -rn "ContractRunner\|\.Run(ctx" cmd/ internal/`) — pass `""` as the new third arg (only the `driver_fanout` and reserve paths need a non-empty marker).
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `go test ./pkg/agentbackend/ ./internal/orchestrator/ ./internal/orchestration/ ./internal/driver/ -race -count=1`
+Expected: PASS — chat child carries the outer marker; pre-existing tests still pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add pkg/agentbackend/loomorigin.go pkg/agentbackend/loomorigin_test.go internal/orchestrator/fanout.go internal/orchestrator/fanout_test.go internal/orchestration/driver_runner.go internal/orchestration/driver_runner_test.go internal/driver/tools.go internal/driver/contract_tools.go internal/driver/contract_tools_test.go
+git commit -m "feat(orchestrator): propagate parent SystemContext through fanout/contract runners (#24 P2)"
 ```
 
 ---
@@ -711,7 +844,7 @@ git commit -m "feat(poller): parse <loom_origin> into Task parent fields (#24 P2
 type TaskRecord struct {
 	// ... existing fields ...
 	ChildSessionID string `json:"child_session_id,omitempty"`
-	ChildAgentID   string `json:"child_agent_id,omitempty"` // populated at delegation (target shortID)
+	ChildAgentID   string `json:"child_agent_id,omitempty"` // populated at delegation (target shortID) — for resume_task, recovered from LatestByTaskID(original_task_id)
 	Terminal       bool   `json:"terminal,omitempty"`       // result-time record carrying child link
 }
 
@@ -727,36 +860,63 @@ func (j *TaskJournal) LatestByTaskID(taskID string) (TaskRecord, bool) {
 }
 ```
 
-`Recent`/`RecentWithWarnings`: when both a non-terminal and a terminal record exist for the same `task_id`, return only the terminal one. Simplest: walk newest-first, keep first per task_id; if a terminal exists for a task_id, prefer it over the non-terminal.
+`Recent`/`RecentWithWarnings` semantics (**carefully scoped — do not break existing multi-non-terminal behavior**): only when a record with `Terminal=true` exists for a given `task_id`, hide the **delegation-time, non-terminal** record(s) for that same `task_id` from the result. Records that are not part of the delegation→terminal pair (e.g. multiple non-terminal `resume_task` rows, or any record on a task that has no terminal counterpart) MUST still appear. Concretely: build `terminalTaskIDs := {task_id : exists rec where rec.Terminal && rec.TaskID == task_id}`; on the final pass, drop a record iff `!rec.Terminal && terminalTaskIDs[rec.TaskID]`. Add a regression test that two non-terminal `resume_task` rows for the same `task_id` (no terminal record) are still both returned newest-first — preserving the current contract exercised by `TestListDriverTasksFiltersTaskID` and friends in `internal/driver/task_journal_test.go`.
 
-`recordDelegatedTask` (`tools.go:72`): add `ChildAgentID` to `delegatedTaskRecord` and set it from the target's shortID (`resolveTarget` already returns `shortID`, `tools.go:165-211`) at the call site (`tools.go:528`). So the delegation-time record carries `ChildAgentID` (target known then); only `ChildSessionID` is unknown until result time.
+`recordDelegatedTask` (`tools.go:72`): add `ChildAgentID` to `delegatedTaskRecord`. **Three delegation paths must set it consistently** — `resolveTarget` already returns `shortID` (used by `submit_task`), but `submit_contract_task`'s `selectTarget` direct-match branch (`contract_tools.go:147-153`) returns only `agentID/displayName/skill/route` and `resume_task` (`tools.go:1140-1145`) reuses `info.TargetID` from `GetTask`. Fix:
 
-- [ ] **Step 2: Append terminal record at result time (concrete, no placeholder)**
+- `internal/driver/contract_tools.go:144` — change `selectTarget`'s return to `(targetID, targetName, targetShortID, skill, route string, err error)`. The direct-match branch reads `matches[0]` via `cardShortID(matches[0])` (helper already exists, `tools.go:250`); the fallback branch calls `s.t.resolveTarget(...)` and forwards its existing `shortID` return (currently discarded with `_`).
+- `internal/driver/tools.go:1140` `resume_task` — `info.TargetID` is an agent_id only. **Recover the child shortID** by reading the journal: `prev, ok := r.t.taskJournal.LatestByTaskID(args.LastTaskID); childAgent := prev.ChildAgentID` (the original `submit_task`/`submit_contract_task` already persisted it at delegation time). If `prev` is missing (e.g. journal rotated), fall through with `ChildAgentID == ""` — the terminal record still carries `ChildSessionID`, and the parent index degrades to session-only for that one task; document this acceptable degraded mode.
 
-In `get_task` (`tools.go:619`) and `wait_task` (`tools.go:748`), where `sessionIDFromMarker` already extracts the child session, append a terminal record using `LatestByTaskID` to recover the delegation-time fields:
+(Reverse-marker expansion — i.e. teaching the slave to embed `agent_id` in the `session_id` kind marker, so the driver could parse it from `sessionIDFromMarker` — was considered but rejected: it requires slave-side codex backend changes and an envelope version bump, while the journal-recovery approach is local to the driver and uses already-persisted state.)
+
+- [ ] **Step 2: Append terminal record at result time — idempotent, status-faithful**
+
+In `get_task` (`tools.go:619`) and `wait_task` (`tools.go:715-758` — the `switch info.Status { case "completed", "failed", "cancelled":` branch), where `sessionIDFromMarker` already extracts the child session, append a terminal record. Both tools can be called many times for the same completed task (deliberately — clients re-poll after timeouts); without an idempotency guard you would append a new terminal row on every call.
+
+Pass the actual terminal status through (`wait_task` already knows it from `info.Status`; `get_task` reads `info.Status` at `tools.go:619`):
 
 ```go
 	if childSess := sessionIDFromMarker(progress.FinalOutput, info.Output, string(info.Result)); childSess != "" {
-		t.recordTerminalChild(info.TaskID, childSess)
+		t.recordTerminalChild(info.TaskID, childSess, info.Status)
 	}
 ```
 
 ```go
-// recordTerminalChild appends a terminal journal record for a completed
-// delegation, carrying the child session link. ChildAgentID/Tool/TargetID/
-// Skill are recovered from the delegation-time record via LatestByTaskID.
-// Best-effort: append failure is logged, not fatal.
-func (t *Tools) recordTerminalChild(taskID, childSessionID string) {
+// recordTerminalChild appends a terminal journal record for a finished
+// delegation (status ∈ {completed, failed, cancelled}), carrying the child
+// session link.
+//   - status is forwarded verbatim from agentsdk.TaskInfo.Status; the Recent
+//     dedup rule only acts on Terminal=true presence, so failure/cancellation
+//     reasons survive into the journal for downstream readers.
+//   - Idempotent: if the most recent journal record for taskID is already a
+//     Terminal=true row with the same (child_session_id, status), return
+//     without appending. Without this, repeated get_task/wait_task polls —
+//     the normal client pattern — would append a new row each call, and
+//     Recent's dedup (which hides only the NON-terminal delegation row) would
+//     leave every duplicate terminal row visible.
+//   - Requires a prior delegation-time record (carrying ChildAgentID, Tool,
+//     TargetID, Skill). If LatestByTaskID returns nothing — e.g. the journal
+//     was rotated between delegation and result — we have nothing to enrich
+//     and return without writing. The parent-link reverse path degrades for
+//     that one task to "no journal evidence" (the slave's sidecar still
+//     carries the link in the forward direction).
+//   - Best-effort: append failure is logged, not fatal.
+func (t *Tools) recordTerminalChild(taskID, childSessionID, status string) {
 	if t.taskJournal == nil || taskID == "" || childSessionID == "" {
 		return
 	}
 	rec, ok := t.taskJournal.LatestByTaskID(taskID)
 	if !ok {
-		return // no delegation record to enrich (journal rotated/missing)
+		return
+	}
+	if rec.Terminal && rec.ChildSessionID == childSessionID && rec.Status == status {
+		return // already recorded this terminal state; idempotent no-op
 	}
 	rec.ChildSessionID = childSessionID
 	rec.Terminal = true
-	rec.Status = "completed"
+	if status != "" {
+		rec.Status = status
+	}
 	if err := t.taskJournal.Append(rec); err != nil {
 		t.logHelperErr("driver_journal", "record_terminal_child", err)
 	}
@@ -765,9 +925,25 @@ func (t *Tools) recordTerminalChild(taskID, childSessionID string) {
 
 (`logHelperErr` already exists on `Tools` for degraded journal errors — `tools.go:538`.)
 
+**Status transitions:** if `wait_task` first sees `failed` then a later `get_task` re-runs and `info.Status` is still `failed`, the idempotency check matches and no second row is written. If status genuinely changes between calls (shouldn't happen for terminal states in agentserver, but defensive), a new row is appended — preserving the audit trail. The dedup rule in `Recent` (Task 8 step 1) still picks the newest terminal row.
+
 - [ ] **Step 3: Test**
 
-`task_journal_test.go`: append a delegation record (with `ChildAgentID="slave-2"`) then a terminal record for the same task_id (with `ChildSessionID="child-sess"`); `Recent` returns one row (the terminal) with both `child_session_id=child-sess` and `child_agent_id=slave-2`. `LatestByTaskID` returns the terminal (newest). `tools_test.go`: a `get_task` whose result carries `{"session_id":"child-sess"}` calls `recordTerminalChild`, producing a terminal record with `child_session_id=child-sess`, `child_agent_id=slave-2`.
+`task_journal_test.go` — four cases:
+1. Append a delegation record (with `ChildAgentID="slave-2"`) then a terminal record for the same task_id (with `ChildSessionID="child-sess"`, `Status="completed"`); `Recent` returns **one** row (the terminal) with both `child_session_id=child-sess` and `child_agent_id=slave-2`. `LatestByTaskID` returns the terminal (newest).
+2. **Regression for existing semantics**: two non-terminal `resume_task` rows for the same task_id (no terminal record) — `Recent` returns **both**, newest-first. This pins down the "dedup only when terminal exists" rule and prevents the change from breaking `TestListDriverTasksFiltersTaskID`.
+3. A mix: terminal task_id `A` (one delegation + one terminal) plus task_id `B` (two non-terminal `resume_task` records) — `Recent` returns three rows (1 for A, 2 for B), newest-first.
+4. **Status fidelity**: terminal record with `Status="failed"` is preserved; `Recent` returns it with `failed` (not silently rewritten to `completed`).
+
+`tools_test.go` — four cases:
+- A `get_task` whose result carries `{"session_id":"child-sess"}` and `info.Status="completed"` calls `recordTerminalChild`, producing a terminal record with `child_session_id=child-sess`, `child_agent_id=slave-2`, `status=completed`.
+- A `wait_task` that observes `info.Status="failed"` with a child session marker writes a terminal row with `status=failed` (not `completed`).
+- **Idempotency**: calling `get_task` three times on the same completed task with the same marker results in **exactly one** terminal row in the journal (verify via raw line count, not just `Recent`).
+- **Status change between polls** (defensive): if a hypothetical second poll reports `info.Status="cancelled"` after a `failed` row exists, a second terminal row is appended, and `Recent` returns the newest (`cancelled`). This documents the chosen behavior.
+
+`contract_tools_test.go` (or `tools_test.go` if shared fixtures are easier): assert `submit_contract_task` direct-match branch persists the chosen target's shortID into `delegatedTaskRecord.ChildAgentID` (and the eventual terminal record).
+
+`tools_test.go`: assert `resume_task` reads the prior `submit_task` journal record via `LatestByTaskID`, copies its `ChildAgentID` into the new delegation record, and the terminal record for the resumed task ends up with both `child_agent_id` (recovered from prior record) and `child_session_id` (from result marker).
 
 - [ ] **Step 4: Build + test + race**
 
@@ -777,7 +953,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add internal/driver/task_journal.go internal/driver/task_journal_test.go internal/driver/tools.go internal/driver/tools_test.go
+git add internal/driver/task_journal.go internal/driver/task_journal_test.go internal/driver/tools.go internal/driver/tools_test.go internal/driver/contract_tools.go internal/driver/contract_tools_test.go
 git commit -m "feat(driver): append terminal child-link record to task journal (#24 P2)"
 ```
 
@@ -792,7 +968,7 @@ git commit -m "feat(driver): append terminal child-link record to task journal (
 
 - [ ] **Step 1: Shared resolver (primitive args, no config-type coupling)**
 
-Add to `pkg/agentbackend` (low-level; both driver and slave already import it, so neither slave→driver nor duplicate impl):
+Create **`pkg/agentbackend/codexhome.go`** (low-level; both driver and slave already import `pkg/agentbackend`, so neither slave→driver nor duplicate impl) and `pkg/agentbackend/codexhome_test.go` covering: explicit `codexHome` wins; `shortID==""` returns `""`; `loomHome` arg overrides `LOOM_HOME` env which overrides `$HOME/.cache/multi-agent`; final path is `<base>/<shortID>/.codex`; unresolvable home returns `""`.
 
 ```go
 // ResolveCodexHome resolves the per-agent codex data dir from deploy inputs.
@@ -843,39 +1019,69 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add cmd/slave-agent/main.go cmd/driver-agent/main.go internal/driver/*.go internal/config/*.go deploy/ dev/configs/
+git add pkg/agentbackend/codexhome.go pkg/agentbackend/codexhome_test.go cmd/slave-agent/main.go cmd/driver-agent/main.go internal/driver/*.go internal/config/*.go deploy/ dev/configs/
 git commit -m "feat(launcher): wire codex_home + order New past registration (#24 P2)"
 ```
 
 ---
 
-## Task 10: Whole-repo regression + gofmt
+## Task 10: Whole-repo regression + gofmt + Windows verification
 
-- [ ] **Step 1**
+- [ ] **Step 1: Linux race + vet**
 
 Run: `go build ./... && go test ./... -race -count=1 && go vet ./...`
 Expected: PASS, vet clean.
 
-- [ ] **Step 2**
+- [ ] **Step 2: gofmt**
 
 Run: `gofmt -w . && git diff --exit-code` (commit formatting-only if any).
+
+- [ ] **Step 3: Windows cross-compile (mandatory; not optional)**
+
+The launcher / `codex_home` resolution touched in Task 9 calls `os.UserHomeDir` and `filepath.Join`, both of which behave differently on Windows (`%USERPROFILE%` vs `$HOME`, backslash separators). Linux `go test` does NOT exercise these — past PRs have broken Windows here. Verify before requesting review:
+
+```bash
+GOOS=windows GOARCH=amd64 go build ./...
+GOOS=windows GOARCH=amd64 go vet ./...
+```
+
+Expected: both pass with no output.
+
+- [ ] **Step 4: Windows runtime smoke (mandatory if SSH access available)**
+
+The cross-compile catches type/import bugs but not runtime path bugs. Run the touched unit tests on a real Windows box:
+
+```bash
+ssh Administrator@9.0.16.110 'cd C:\path\to\multi-agent && go test ./pkg/agentbackend/... ./internal/driver/... ./internal/poller/... ./internal/orchestrator/... ./internal/orchestration/... -count=1'
+```
+
+(If the Windows host is unavailable, document that here and request the human reviewer run the smoke before merge — but do NOT silently skip.)
+
+Expected: PASS. Failure modes to watch for: `os.UserHomeDir` returning empty (no `$HOME` fallback hit), backslash-vs-forward-slash mismatches in `codex_home` keys, sidecar paths with mixed separators.
+
+- [ ] **Step 5: Capture Windows result**
+
+Add the Windows command output (or the documented unavailability + reviewer hand-off) to the PR description. Without it, P2 is not review-ready.
 
 ---
 
 ## Acceptance for P2
 
 - Codex executor writes `<CODEX_HOME>/loom-meta/current` on `thread.started` (Run + RunResume); RunResume still writes no sidecar.
-- Driver `submit_task` (and other delegation handlers) stamp `<loom_origin agent name session/>` into `DelegateTaskRequest.SystemContext`, reading the marker + `ShortID`/`DisplayName`.
+- Driver `submit_task` (default skill `fanout` AND `chat`/`chat_resume`), `submit_contract_task`, `resume_task` stamp `<loom_origin agent name session/>` into `DelegateTaskRequest.SystemContext`, reading the marker + `ShortID`/`DisplayName`.
+- The master orchestrator (`internal/orchestrator/fanout.go`, `internal/orchestration/driver_runner.go`) merges the outer task's `SystemContext` into each fanout child's `DelegateTaskRequest.SystemContext`, so slave chat children dispatched from default `submit_task` inherit the parent link end-to-end.
 - Slave `poller` parses the marker into `Task.Parent*` and strips it; the resulting codex exec session's loom-meta sidecar (P1) carries the parent link.
 - Slave `serve-daemon` registers with the observer (`ShortID` populated); slave codex sessions are listable by Commander.
 - `RegisterPayload`/`DaemonInfo`/`SessionRow` carry `ShortID`/`OwnerAgentID`/`ParentAgentID`/`ParentDisplayName`.
-- Driver `driver-tasks.jsonl` records `child_session_id` + `child_agent_id`.
-- Launcher resolves per-agent `codex_home` (slave `New` moved past `EnsureRegistered`; driver reads persisted ShortID); deploy templates document `codex_home`/`loom_home`.
+- Driver `driver-tasks.jsonl` records `child_session_id` + `child_agent_id` on **all three** delegation paths (`submit_task` via `resolveTarget`, `submit_contract_task` via the widened `selectTarget` return, `resume_task` via `LatestByTaskID` recovery).
+- `TaskJournal.Recent` dedup is **scoped**: only the delegation-time record is hidden when a terminal record exists for the same `task_id`; multiple non-terminal records for the same `task_id` (e.g. several `resume_task` rows) are preserved (regression coverage required).
+- Launcher resolves per-agent `codex_home` via the new shared `pkg/agentbackend.ResolveCodexHome` helper (slave `New` moved past `EnsureRegistered`; driver reads persisted ShortID); deploy templates document `codex_home`/`loom_home`.
+- End-to-end test (fake SDK + planner emitting one chat child) confirms default-skill `submit_task` → fanout → slave chat carries a non-empty loom_origin all the way to the slave's `Task.Parent*` fields.
 - `go test ./... -race` green.
 
 ## Out of scope
 
-- **P3 — Commander nesting:** observer global `(owner_agent_id, session_id)` parent index; frontend cross-daemon `buildSessionNodes`; `remote`/`parent offline` badges. Separate plan.
+- **P3 — Commander nesting (frontend-only):** frontend cross-daemon `buildSessionNodes` keyed on `(owner_agent_id, session_id)`; `remote`/`parent offline` badges; Playwright. **No observer-side parent index** (spec §8 decision); P2 ships the `SessionRow` fields and observer transparently passes them through. Separate plan.
 - Concurrency-perfect parent attribution (single `current` marker; last-writer-wins) — accepted caveat.
 
 ## Implementation notes
