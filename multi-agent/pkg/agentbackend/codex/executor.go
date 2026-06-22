@@ -202,12 +202,15 @@ func (e *executor) runWithArgv(ctx context.Context, argvHead []string, prompt st
 		}
 		if ev.Type == "thread.started" && sessionID == "" && ev.ThreadID != "" {
 			sessionID = ev.ThreadID
+			// current-session marker: written on BOTH Run and RunResume so
+			// serve-mcp can learn the parent session during any turn. Best-effort.
+			_ = writeCurrentSession(EffectiveCodexHome(e.cfg, e.env), sessionID)
 			if newSession {
 				createdAt := ev.Timestamp
 				if createdAt == "" {
 					createdAt = timeNow().UTC().Format(time.RFC3339Nano)
 				}
-				_ = writeLoomMeta(effectiveCodexHome(e.cfg, e.env), loomMeta{
+				_ = writeLoomMeta(EffectiveCodexHome(e.cfg, e.env), loomMeta{
 					Schema:            loomMetaSchema,
 					SessionID:         sessionID,
 					ParentSessionID:   parent.sessionID,

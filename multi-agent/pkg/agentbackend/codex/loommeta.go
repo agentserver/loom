@@ -107,3 +107,32 @@ func threadIDFromLoomMetaName(name string) (string, bool) {
 	}
 	return id, true
 }
+
+// writeCurrentSession writes a transient pointer to the currently-active
+// codex thread id, read by serve-mcp to learn the parent session when codex
+// calls submit_task (codex and serve-mcp are separate processes sharing
+// CODEX_HOME). Written on every thread.started (Run + RunResume). NOT a
+// sidecar; does not participate in parent-link merge or reaping. best-effort.
+func writeCurrentSession(base, threadID string) error {
+	if base == "" || threadID == "" {
+		return nil
+	}
+	if err := os.MkdirAll(loomMetaDir(base), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(loomMetaDir(base), "current"), []byte(threadID), 0o600)
+}
+
+// ReadCurrentSession returns the thread id last written by writeCurrentSession,
+// or "" if absent/unreadable. Exported so internal/driver (serve-mcp) can read
+// the parent session marker; it cannot call codex's unexported helpers.
+func ReadCurrentSession(base string) string {
+	if base == "" {
+		return ""
+	}
+	b, err := os.ReadFile(filepath.Join(loomMetaDir(base), "current"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}

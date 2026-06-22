@@ -25,7 +25,7 @@ func resolveCodexHome(cfg agentbackend.Config, env []string) string {
 	return envValue(env, "CODEX_HOME")
 }
 
-func effectiveCodexHome(cfg agentbackend.Config, env []string) string {
+func EffectiveCodexHome(cfg agentbackend.Config, env []string) string {
 	if home := resolveCodexHome(cfg, env); home != "" {
 		return home
 	}

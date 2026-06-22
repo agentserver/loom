@@ -577,6 +577,40 @@ func buildFakeCodex(t *testing.T, source string) string {
 	return exe
 }
 
+func TestCodexExecutorWritesCurrentSessionMarkerOnRun(t *testing.T) {
+	home := t.TempDir()
+	bin := writeFakeCodex(t, []string{
+		`{"type":"thread.started","thread_id":"thr-cur","timestamp":"2026-06-22T10:00:00Z"}`,
+		`{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}`,
+	})
+	ex := newExecutor(agentbackend.Config{Bin: bin, WorkDir: t.TempDir(), CodexHome: home}, []string{"CODEX_HOME=" + home})
+	if _, err := ex.Run(context.Background(), agentbackend.Task{Prompt: "hi"}, &captureSink{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := ReadCurrentSession(home); got != "thr-cur" {
+		t.Fatalf("current marker = %q, want thr-cur", got)
+	}
+}
+
+func TestCodexExecutorWritesCurrentSessionMarkerOnResume(t *testing.T) {
+	home := t.TempDir()
+	bin := writeFakeCodex(t, []string{
+		`{"type":"thread.started","thread_id":"thr-res","timestamp":"2026-06-22T10:00:00Z"}`,
+		`{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}`,
+	})
+	ex := newExecutor(agentbackend.Config{Bin: bin, WorkDir: t.TempDir(), CodexHome: home}, []string{"CODEX_HOME=" + home})
+	if _, err := ex.RunResume(context.Background(), "thr-res", "continue", &captureSink{}); err != nil {
+		t.Fatalf("RunResume: %v", err)
+	}
+	// RunResume must NOT write a sidecar (P1) but MUST write the current marker.
+	if _, ok := readLoomMeta(home, "thr-res"); ok {
+		t.Fatal("RunResume must not write a sidecar")
+	}
+	if got := ReadCurrentSession(home); got != "thr-res" {
+		t.Fatalf("current marker = %q, want thr-res (RunResume updates marker)", got)
+	}
+}
+
 func TestHumanloopMCPArgsAreTOMLSafe(t *testing.T) {
 	binSelf := `C:\Program Files\Loom "Agent"\slave-agent.exe`
 	ep := humanloop.Endpoint{Network: "unix", Address: `C:\Users\Loom "Agent"\hl.sock`}

@@ -51,7 +51,7 @@ func TestEffectiveCodexHomeFallbackHome(t *testing.T) {
 	t.Setenv("CODEX_HOME", "/proc-stale")
 	home := t.TempDir()
 	setTestHome(t, home)
-	if got := effectiveCodexHome(agentbackend.Config{}, nil); got != filepath.Join(home, ".codex") {
+	if got := EffectiveCodexHome(agentbackend.Config{}, nil); got != filepath.Join(home, ".codex") {
 		t.Fatalf("got %q, want %s", got, filepath.Join(home, ".codex"))
 	}
 }
