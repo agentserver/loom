@@ -27,7 +27,16 @@ type Config struct {
 // DaemonConfig configures optional long-lived `slave-agent serve-daemon` mode.
 // Fields and yaml tags mirror internal/driver/config.go DaemonConfig.
 type DaemonConfig struct {
-	// Listen is the HTTP bind for the daemon's debug API.
+	// AutoStart, when explicitly set to a non-nil pointer, opts the slave's
+	// long-running run() loop into starting a Commander daemon alongside the
+	// poller (using the same backend instance, no extra process). When nil
+	// (the default), run() auto-starts the daemon iff both
+	// credentials.proxy_token and observer.url are configured — the same
+	// preconditions serve-daemon enforces. Set to false to opt out (e.g. a
+	// machine where you want only the worker poller, no Commander reporting).
+	AutoStart *bool `yaml:"auto_start,omitempty"`
+	// Listen is the HTTP bind for the daemon's debug API. Defaults to
+	// 127.0.0.1:0 (loopback, random port) when AutoStart selects on.
 	Listen string `yaml:"listen,omitempty"`
 	// WSPath is appended to Observer.URL when dialing the observer hub.
 	WSPath string `yaml:"ws_path,omitempty"`
