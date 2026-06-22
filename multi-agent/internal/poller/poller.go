@@ -14,6 +14,7 @@ import (
 	"github.com/yourorg/multi-agent/internal/dispatch"
 	"github.com/yourorg/multi-agent/internal/executor"
 	"github.com/yourorg/multi-agent/internal/store"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
 // Dispatcher is the contract poller uses to hand a task off for execution.
@@ -154,9 +155,23 @@ func (p *Poller) fetchSkill(ctx context.Context, id string) (string, error) {
 
 func (p *Poller) execute(ctx context.Context, t pollTask) {
 	p.putStatus(ctx, t.TaskID, map[string]interface{}{"status": "running"})
+	// Strip the driver-stamped <loom_origin> marker from SystemContext before
+	// the slave's chat backend sees it (JSON-prompt skills choke on prefixes),
+	// and surface the parsed parent tuple on the Task so the codex executor
+	// can persist it into the loom-meta sidecar (P1 already consumes these).
+	systemContext := t.SystemContext
+	var parentLink agentbackend.ParentLink
+	if pl, cleaned, ok := agentbackend.ParseLoomOrigin(systemContext); ok {
+		parentLink = pl
+		systemContext = cleaned
+	}
 	res, err := p.disp.Run(ctx, executor.Task{
 		ID: t.TaskID, Skill: t.Skill, Prompt: t.Prompt,
-		SystemContext: t.SystemContext, TimeoutSec: t.TimeoutSeconds,
+		SystemContext:     systemContext,
+		TimeoutSec:        t.TimeoutSeconds,
+		ParentSessionID:   parentLink.SessionID,
+		ParentAgentID:     parentLink.AgentID,
+		ParentDisplayName: parentLink.DisplayName,
 	})
 	if err != nil {
 		if errors.Is(err, dispatch.ErrDuplicateTaskRunning) {
