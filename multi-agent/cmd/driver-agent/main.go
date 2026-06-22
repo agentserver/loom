@@ -317,6 +317,13 @@ func runServeDaemon(args []string) {
 	if cfg.Credentials.ProxyToken == "" {
 		die("serve-daemon requires credentials.proxy_token; run `driver-agent register --config " + opts.ConfigPath + "` first")
 	}
+	if cfg.Credentials.ShortID == "" {
+		// ShortID is the stable agent identity Commander uses to build the
+		// (owner_agent_id, session_id) parent index across daemons (P3). An
+		// empty ShortID would still register, but driver sessions would have
+		// no owner namespace and cross-daemon nesting could collide.
+		die("serve-daemon requires credentials.short_id; run `driver-agent register --config " + opts.ConfigPath + "` first")
+	}
 	if cfg.Observer.URL == "" {
 		die("serve-daemon requires observer.url")
 	}
