@@ -19,8 +19,8 @@ import (
 
 	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/capabilitydoc"
-	"github.com/yourorg/multi-agent/internal/commandiface"
 	"github.com/yourorg/multi-agent/internal/commander"
+	"github.com/yourorg/multi-agent/internal/commandiface"
 	"github.com/yourorg/multi-agent/internal/config"
 	"github.com/yourorg/multi-agent/internal/dispatch"
 	"github.com/yourorg/multi-agent/internal/executor"
