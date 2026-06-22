@@ -467,7 +467,7 @@ func main() {
 
 func TestCodexExecutorSubprocessEnvDefaultOverridesStale(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	t.Setenv("CODEX_HOME", "/stale-from-process")
 	t.Setenv("Codex_Home", "/stale-case-variant")
 	dir := t.TempDir()
