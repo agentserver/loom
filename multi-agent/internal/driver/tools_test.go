@@ -19,6 +19,7 @@ import (
 	"github.com/yourorg/multi-agent/internal/contract"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/orchestration"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
 // fakeSDK satisfies SDKClient for tests.
@@ -2224,4 +2225,219 @@ func TestWaitTask_DegradesSyncWritesFailureToWarning(t *testing.T) {
 	// Main response fields still present
 	require.Contains(t, s, `"status":"completed"`)
 	require.Contains(t, s, `"is_final":true`)
+}
+
+// --- loom_origin stamping tests (P2 Task 6) ---
+
+// writeLoomOriginCurrentFile sets up a CODEX_HOME temp dir with a current
+// marker file so loomOriginMarker() can read the parent session.
+func writeLoomOriginCurrentFile(t *testing.T, sessionID string) string {
+	t.Helper()
+	home := t.TempDir()
+	dir := filepath.Join(home, "loom-meta")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "current"), []byte(sessionID), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return home
+}
+
+// newLoomTestTools creates test tools with CODEX_HOME, ShortID, and DisplayName set.
+func newLoomTestTools(t *testing.T, sdk SDKClient, codexHome, shortID, displayName string) *Tools {
+	t.Helper()
+	tools := newTestTools(t, sdk)
+	tools.cfg.Agent.CodexHome = codexHome
+	tools.cfg.Credentials.ShortID = shortID
+	tools.cfg.Discovery.DisplayName = displayName
+	return tools
+}
+
+// TestSubmitTaskDefaultStampsLoomOrigin verifies that submit_task with no skill
+// (defaults to "fanout") stamps a parseable loom_origin marker in SystemContext.
+func TestSubmitTaskDefaultStampsLoomOrigin(t *testing.T) {
+	const (
+		shortID      = "drv-1"
+		displayName  = "prod-driver"
+		markerSessID = "thr-parent"
+	)
+	home := writeLoomOriginCurrentFile(t, markerSessID)
+
+	var captured agentsdk.DelegateTaskRequest
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "ag-1", DisplayName: "master", Status: "available",
+					Card: json.RawMessage(`{"skills":["fanout"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			captured = req
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-1"}, nil
+		},
+	}
+	tools := newLoomTestTools(t, sdk, home, shortID, displayName)
+
+	_, err := toolByName(t, tools, "submit_task").Call(context.Background(),
+		json.RawMessage(`{"prompt":"do work"}`))
+	require.NoError(t, err)
+
+	if captured.Skill != "fanout" {
+		t.Fatalf("default skill expected fanout, got %q", captured.Skill)
+	}
+	p, cleaned, ok := agentbackend.ParseLoomOrigin(captured.SystemContext)
+	if !ok {
+		t.Fatalf("loom_origin not stamped in SystemContext: %q", captured.SystemContext)
+	}
+	if p.AgentID != shortID {
+		t.Errorf("AgentID = %q, want %q", p.AgentID, shortID)
+	}
+	if p.DisplayName != displayName {
+		t.Errorf("DisplayName = %q, want %q", p.DisplayName, displayName)
+	}
+	if p.SessionID != markerSessID {
+		t.Errorf("SessionID = %q, want %q", p.SessionID, markerSessID)
+	}
+	if strings.Contains(cleaned, "loom_origin") {
+		t.Errorf("marker not removed from cleaned context: %q", cleaned)
+	}
+}
+
+// TestSubmitTaskChatStampsLoomOrigin verifies that submit_task with skill="chat"
+// also stamps the loom_origin marker.
+// target_display_name is required because resolveTarget auto-selects by fanout skill.
+func TestSubmitTaskChatStampsLoomOrigin(t *testing.T) {
+	home := writeLoomOriginCurrentFile(t, "thr-chat")
+
+	var captured agentsdk.DelegateTaskRequest
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "ag-2", DisplayName: "slave", Status: "available",
+					Card: json.RawMessage(`{"skills":["chat"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			captured = req
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-2"}, nil
+		},
+	}
+	tools := newLoomTestTools(t, sdk, home, "drv-2", "driver-2")
+
+	_, err := toolByName(t, tools, "submit_task").Call(context.Background(),
+		json.RawMessage(`{"prompt":"chat work","skill":"chat","target_display_name":"slave"}`))
+	require.NoError(t, err)
+
+	if _, _, ok := agentbackend.ParseLoomOrigin(captured.SystemContext); !ok {
+		t.Fatalf("chat delegation must be stamped with loom_origin, got SystemContext=%q", captured.SystemContext)
+	}
+}
+
+// TestSubmitTaskBashDoesNotStampLoomOrigin verifies that submit_task with
+// skill="bash" (a terminal non-codex skill) does NOT stamp the loom_origin marker.
+// target_display_name is required because resolveTarget only auto-selects fanout agents.
+func TestSubmitTaskBashDoesNotStampLoomOrigin(t *testing.T) {
+	home := writeLoomOriginCurrentFile(t, "thr-bash")
+
+	var captured agentsdk.DelegateTaskRequest
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "ag-3", DisplayName: "slave-bash", Status: "available",
+					Card: json.RawMessage(`{"skills":["bash"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			captured = req
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-3"}, nil
+		},
+	}
+	tools := newLoomTestTools(t, sdk, home, "drv-3", "driver-3")
+
+	_, err := toolByName(t, tools, "submit_task").Call(context.Background(),
+		json.RawMessage(`{"prompt":"run bash","skill":"bash","target_display_name":"slave-bash"}`))
+	require.NoError(t, err)
+
+	if _, _, ok := agentbackend.ParseLoomOrigin(captured.SystemContext); ok {
+		t.Fatalf("bash delegation must NOT be stamped with loom_origin, got SystemContext=%q", captured.SystemContext)
+	}
+}
+
+// TestSubmitContractTaskStampsLoomOrigin verifies that submit_contract_task stamps
+// loom_origin when routing to a chat-capable slave.
+func TestSubmitContractTaskStampsLoomOrigin(t *testing.T) {
+	home := writeLoomOriginCurrentFile(t, "thr-contract")
+
+	var captured agentsdk.DelegateTaskRequest
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "sbx-driver", DisplayName: "driver", Status: "available", Card: json.RawMessage(`{"skills":[]}`)},
+				{AgentID: "slave-c", DisplayName: "slave-c", Status: "available",
+					Card: json.RawMessage(`{"skills":["chat"],"short_id":"sc"}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			captured = req
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-c"}, nil
+		},
+	}
+	tools := newLoomTestTools(t, sdk, home, "drv-4", "driver-4")
+
+	tc := testTaskContract()
+	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
+	require.NoError(t, err)
+
+	_, err = submitContractToolForTest(t, tools).Call(context.Background(), raw)
+	require.NoError(t, err)
+
+	if _, _, ok := agentbackend.ParseLoomOrigin(captured.SystemContext); !ok {
+		t.Fatalf("submit_contract_task chat delegation must be stamped with loom_origin, got SystemContext=%q", captured.SystemContext)
+	}
+}
+
+// TestResumeTaskStampsLoomOrigin verifies that resume_task stamps loom_origin
+// on its chat_resume delegation.
+func TestResumeTaskStampsLoomOrigin(t *testing.T) {
+	home := writeLoomOriginCurrentFile(t, "thr-resume")
+
+	var captured agentsdk.DelegateTaskRequest
+	sdk := &fakeSDK{
+		getTaskFunc: func(id string, includeOutput bool) (*agentsdk.TaskInfo, error) {
+			switch id {
+			case "T-resume-1":
+				return &agentsdk.TaskInfo{
+					TaskID: "T-resume-1", Status: "completed", SessionID: "S-xyz", TargetID: "ag-R",
+					Result: json.RawMessage(`{"kind":"awaiting_user","session_id":"S-xyz","question":{"kind":"ask_user","question":"continue?"}}`),
+				}, nil
+			case "T-resume-2":
+				return &agentsdk.TaskInfo{
+					TaskID: "T-resume-2", Status: "completed", SessionID: "S-xyz",
+					Result: json.RawMessage(`{"kind":"final","summary":"done","session_id":"S-xyz"}`),
+				}, nil
+			}
+			return nil, fmt.Errorf("unknown task: %s", id)
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			captured = req
+			return &agentsdk.DelegateTaskResponse{TaskID: "T-resume-2", SessionID: "S-xyz"}, nil
+		},
+	}
+	tools := newLoomTestTools(t, sdk, home, "drv-5", "driver-5")
+
+	_, err := toolByName(t, tools, "resume_task").Call(context.Background(),
+		json.RawMessage(`{"last_task_id":"T-resume-1","answer":"yes","timeout_sec":2}`))
+	require.NoError(t, err)
+
+	if captured.Skill != "chat_resume" {
+		t.Fatalf("expected skill=chat_resume, got %q", captured.Skill)
+	}
+	p, _, ok := agentbackend.ParseLoomOrigin(captured.SystemContext)
+	if !ok {
+		t.Fatalf("resume_task must stamp loom_origin, got SystemContext=%q", captured.SystemContext)
+	}
+	if p.AgentID != "drv-5" || p.DisplayName != "driver-5" || p.SessionID != "thr-resume" {
+		t.Errorf("unexpected ParentLink: %+v", p)
+	}
 }

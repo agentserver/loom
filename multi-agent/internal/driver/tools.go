@@ -15,6 +15,8 @@ import (
 	"github.com/yourorg/multi-agent/internal/commandiface"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/orchestration"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
+	"github.com/yourorg/multi-agent/pkg/agentbackend/codex"
 )
 
 // SDKClient is the narrow agentserver SDK surface the driver tools use.
@@ -57,6 +59,28 @@ func (t *Tools) SetTaskJournal(j *TaskJournal) {
 
 func (t *Tools) SetContractRunner(r ContractRunner) {
 	t.contractRunner = r
+}
+
+// isParentLinkDelegation reports whether the delegated skill can transitively
+// produce a codex exec session on a slave (directly via chat, or after master
+// fanout). Stamps the loom_origin marker so the child's session inherits the
+// originating driver session. Matches dispatch.go:138 + tools.go:235.
+func isParentLinkDelegation(skill string) bool {
+	switch skill {
+	case "", "chat", "chat_resume", "fanout", "fanout_strict", "route":
+		return true
+	}
+	return false
+}
+
+// loomOriginMarker returns the loom_origin marker for the current driver
+// session. parent_session_id comes from the current-session marker written by
+// the codex executor (shared CODEX_HOME); agent_id/display_name from cfg.
+// Best-effort: absent marker → empty session (marker still carries agent+name).
+func (t *Tools) loomOriginMarker() string {
+	base := codex.EffectiveCodexHome(agentbackend.Config{CodexHome: t.cfg.Agent.CodexHome}, nil)
+	sess := codex.ReadCurrentSession(base)
+	return agentbackend.BuildLoomOrigin(t.cfg.Credentials.ShortID, t.cfg.Discovery.DisplayName, sess)
 }
 
 type delegatedTaskRecord struct {
@@ -508,10 +532,17 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	} else {
 		finalPrompt = manifest.Encode() + "\n\n" + args.Prompt
 	}
+	systemContext := ""
+	if isParentLinkDelegation(skill) {
+		if m := s.t.loomOriginMarker(); m != "" {
+			systemContext = m
+		}
+	}
 	resp, err := s.t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
 		TargetID:       targetID,
 		Skill:          skill,
 		Prompt:         finalPrompt,
+		SystemContext:  systemContext,
 		TimeoutSeconds: timeout,
 	})
 	if err != nil {
@@ -1141,6 +1172,7 @@ func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		TargetID:       info.TargetID,
 		Skill:          "chat_resume",
 		Prompt:         string(body),
+		SystemContext:  r.t.loomOriginMarker(),
 		TimeoutSeconds: timeout,
 	})
 	if err != nil {

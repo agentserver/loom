@@ -97,10 +97,17 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 	if timeout == 0 {
 		timeout = s.t.cfg.DriverDefaults.TaskTimeoutSec
 	}
+	systemContext := ""
+	if isParentLinkDelegation(skill) {
+		if m := s.t.loomOriginMarker(); m != "" {
+			systemContext = m
+		}
+	}
 	resp, err := s.t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
 		TargetID:       targetID,
 		Skill:          skill,
 		Prompt:         finalPrompt,
+		SystemContext:  systemContext,
 		TimeoutSeconds: timeout,
 	})
 	if err != nil {
