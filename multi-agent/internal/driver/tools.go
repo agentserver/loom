@@ -33,7 +33,7 @@ type ObserverSink interface {
 }
 
 type ContractRunner interface {
-	Run(ctx context.Context, prompt string) (orchestration.RunnerResult, error)
+	Run(ctx context.Context, prompt, systemContext string) (orchestration.RunnerResult, error)
 }
 
 // Tools holds shared state and exposes the six MCP tools as a slice.

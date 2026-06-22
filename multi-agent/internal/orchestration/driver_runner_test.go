@@ -11,6 +11,7 @@ import (
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/stretchr/testify/require"
 	"github.com/yourorg/multi-agent/internal/planner"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
 type fakeRunnerPlanner struct {
@@ -83,7 +84,7 @@ func TestDriverRunnerExecutesPlannedNodeAndReduces(t *testing.T) {
 	}
 	runner := NewDriverRunner(plannerFake, sdk, RunnerConfig{MaxConcurrency: 2, ChildTimeoutSec: 30})
 
-	got, err := runner.Run(context.Background(), "original prompt")
+	got, err := runner.Run(context.Background(), "original prompt", "")
 
 	require.NoError(t, err)
 	require.Equal(t, "final answer", got.Summary)
@@ -111,7 +112,7 @@ func TestDriverRunnerPollsUntilTaskCompletes(t *testing.T) {
 	}
 	runner := NewDriverRunner(plannerFake, sdk, RunnerConfig{ChildTimeoutSec: 30, PollInterval: time.Nanosecond})
 
-	got, err := runner.Run(context.Background(), "original prompt")
+	got, err := runner.Run(context.Background(), "original prompt", "")
 
 	require.NoError(t, err)
 	require.Equal(t, "final answer", got.Summary)
@@ -135,7 +136,7 @@ func TestDriverRunnerPlansOnlyAgainstAvailableNonSelfAgents(t *testing.T) {
 	}
 	runner := NewDriverRunner(plannerFake, sdk, RunnerConfig{SelfID: "driver-self"})
 
-	_, err := runner.Run(context.Background(), "original prompt")
+	_, err := runner.Run(context.Background(), "original prompt", "")
 
 	require.NoError(t, err)
 	require.Equal(t, []agentsdk.AgentCard{
@@ -159,7 +160,7 @@ func TestDriverRunnerRendersPromptFromPriorNodeOutput(t *testing.T) {
 		summary: "final answer",
 	}, sdk, RunnerConfig{MaxConcurrency: 1})
 
-	_, err := runner.Run(context.Background(), "original prompt")
+	_, err := runner.Run(context.Background(), "original prompt", "")
 
 	require.NoError(t, err)
 	require.Len(t, sdk.delegated, 2)
@@ -175,7 +176,7 @@ func TestDriverRunnerRequiredNodeFailureReturnsError(t *testing.T) {
 		nodes: []planner.Node{{ID: "n1", TargetID: "slave-a", Prompt: "required"}},
 	}, sdk, RunnerConfig{})
 
-	_, err := runner.Run(context.Background(), "original prompt")
+	_, err := runner.Run(context.Background(), "original prompt", "")
 
 	require.ErrorContains(t, err, "required node n1 failed: boom")
 }
@@ -191,7 +192,7 @@ func TestDriverRunnerOptionalNodeFailureStillReduces(t *testing.T) {
 	}
 	runner := NewDriverRunner(plannerFake, sdk, RunnerConfig{})
 
-	got, err := runner.Run(context.Background(), "original prompt")
+	got, err := runner.Run(context.Background(), "original prompt", "")
 
 	require.NoError(t, err)
 	require.Equal(t, "reduced anyway", got.Summary)
@@ -213,7 +214,7 @@ func TestDriverRunnerOptionalFailureSkipsRequiredDownstreamAndDoesNotReduce(t *t
 	}
 	runner := NewDriverRunner(plannerFake, sdk, RunnerConfig{})
 
-	_, err := runner.Run(context.Background(), "original prompt")
+	_, err := runner.Run(context.Background(), "original prompt", "")
 
 	require.ErrorContains(t, err, "required node required skipped: upstream optional failed/skipped")
 	require.Equal(t, 0, plannerFake.reduceCalls)
@@ -235,7 +236,7 @@ func TestDriverRunnerReducesResultsInPlanOrder(t *testing.T) {
 	plannerFake := &fakeRunnerPlanner{nodes: nodes, summary: "ordered"}
 	runner := NewDriverRunner(plannerFake, sdk, RunnerConfig{MaxConcurrency: nodeCount})
 
-	_, err := runner.Run(context.Background(), "original prompt")
+	_, err := runner.Run(context.Background(), "original prompt", "")
 
 	require.NoError(t, err)
 	require.Len(t, plannerFake.gotResults, nodeCount)
@@ -256,7 +257,7 @@ func TestDriverRunnerFallsBackWhenReduceFails(t *testing.T) {
 		reduceErr: errors.New("reducer unavailable"),
 	}, sdk, RunnerConfig{})
 
-	got, err := runner.Run(context.Background(), "original prompt")
+	got, err := runner.Run(context.Background(), "original prompt", "")
 
 	require.NoError(t, err)
 	require.True(t, strings.Contains(got.Summary, "reducer unavailable"))
@@ -301,7 +302,7 @@ func TestDriverRunnerReplansInvalidMCPArgsBeforeDispatch(t *testing.T) {
 	}
 	runner := NewDriverRunner(plannerFake, sdk, RunnerConfig{})
 
-	_, err := runner.Run(context.Background(), "multiply")
+	_, err := runner.Run(context.Background(), "multiply", "")
 
 	require.NoError(t, err)
 	require.Len(t, plannerFake.gotPrompts, 2)
@@ -336,7 +337,7 @@ func TestDriverRunnerStopsAfterFiveInvalidPlanAttempts(t *testing.T) {
 	}
 	runner := NewDriverRunner(plannerFake, sdk, RunnerConfig{})
 
-	_, err := runner.Run(context.Background(), "multiply")
+	_, err := runner.Run(context.Background(), "multiply", "")
 
 	require.ErrorContains(t, err, "invalid plan after 5 attempts")
 	require.ErrorContains(t, err, "missing required property")
@@ -384,7 +385,7 @@ func TestDriverRunnerReplansRenderedMCPArgsBeforeDispatch(t *testing.T) {
 	}
 	runner := NewDriverRunner(plannerFake, sdk, RunnerConfig{MaxConcurrency: 1})
 
-	_, err := runner.Run(context.Background(), "sum rows")
+	_, err := runner.Run(context.Background(), "sum rows", "")
 
 	require.NoError(t, err)
 	require.Len(t, plannerFake.gotPrompts, 2)
@@ -392,4 +393,55 @@ func TestDriverRunnerReplansRenderedMCPArgsBeforeDispatch(t *testing.T) {
 	require.Len(t, sdk.delegated, 2)
 	require.Equal(t, "produce rows", sdk.delegated[0].Prompt)
 	require.Equal(t, "explain rows were invalid", sdk.delegated[1].Prompt)
+}
+
+func TestDriverRunnerPropagatesSystemContextToChildren(t *testing.T) {
+	outerMarker := agentbackend.BuildLoomOrigin("drv-1", "prod-driver", "thr-1")
+
+	sdk := &fakeRunnerSDK{
+		cards: []agentsdk.AgentCard{{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["chat"]}`)}},
+		tasks: []agentsdk.TaskInfo{{Status: "completed", Output: "done"}},
+	}
+	plannerFake := &fakeRunnerPlanner{
+		nodes:   []planner.Node{{ID: "n1", TargetID: "slave-a", Skill: "chat", Prompt: "do work"}},
+		summary: "final",
+	}
+	runner := NewDriverRunner(plannerFake, sdk, RunnerConfig{MaxConcurrency: 2, ChildTimeoutSec: 30})
+
+	_, err := runner.Run(context.Background(), "prompt", outerMarker)
+
+	require.NoError(t, err)
+	require.Len(t, sdk.delegated, 1)
+	got, _, ok := agentbackend.ParseLoomOrigin(sdk.delegated[0].SystemContext)
+	require.True(t, ok, "loom_origin not found in child SystemContext: %q", sdk.delegated[0].SystemContext)
+	require.Equal(t, "drv-1", got.AgentID)
+	require.Equal(t, "prod-driver", got.DisplayName)
+	require.Equal(t, "thr-1", got.SessionID)
+	require.NotContains(t, sdk.delegated[0].SystemContext, "\n\n", "double newline in SystemContext")
+}
+
+func TestDriverRunnerMergesChildNodeSystemContextWithOuter(t *testing.T) {
+	outerMarker := agentbackend.BuildLoomOrigin("drv-1", "prod-driver", "thr-1")
+
+	sdk := &fakeRunnerSDK{
+		cards: []agentsdk.AgentCard{{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["chat"]}`)}},
+		tasks: []agentsdk.TaskInfo{{Status: "completed", Output: "done"}},
+	}
+	childPreamble := "child node preamble"
+	plannerFake := &fakeRunnerPlanner{
+		nodes:   []planner.Node{{ID: "n1", TargetID: "slave-a", Skill: "chat", Prompt: "do work", SystemContext: childPreamble}},
+		summary: "final",
+	}
+	runner := NewDriverRunner(plannerFake, sdk, RunnerConfig{MaxConcurrency: 2, ChildTimeoutSec: 30})
+
+	_, err := runner.Run(context.Background(), "prompt", outerMarker)
+
+	require.NoError(t, err)
+	require.Len(t, sdk.delegated, 1)
+	merged := sdk.delegated[0].SystemContext
+	got, cleaned, ok := agentbackend.ParseLoomOrigin(merged)
+	require.True(t, ok, "loom_origin not found in merged SystemContext: %q", merged)
+	require.Equal(t, "drv-1", got.AgentID)
+	require.Contains(t, cleaned, childPreamble, "child preamble lost from cleaned context")
+	require.NotContains(t, merged, "\n\n", "double newline in merged SystemContext")
 }

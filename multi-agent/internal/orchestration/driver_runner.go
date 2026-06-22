@@ -9,6 +9,7 @@ import (
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/yourorg/multi-agent/internal/planner"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
 type RunnerPlanner interface {
@@ -43,7 +44,7 @@ func NewDriverRunner(p RunnerPlanner, sdk RunnerSDK, cfg RunnerConfig) *DriverRu
 	return &DriverRunner{planner: p, sdk: sdk, cfg: cfg}
 }
 
-func (r *DriverRunner) Run(ctx context.Context, prompt string) (RunnerResult, error) {
+func (r *DriverRunner) Run(ctx context.Context, prompt, systemContext string) (RunnerResult, error) {
 	agents, err := r.sdk.DiscoverAgents(ctx)
 	if err != nil {
 		return RunnerResult{}, fmt.Errorf("discover agents: %w", err)
@@ -69,7 +70,7 @@ func (r *DriverRunner) Run(ctx context.Context, prompt string) (RunnerResult, er
 			planPrompt = replanPrompt(prompt, nodes, validationErr, attempt)
 			continue
 		}
-		result, err := r.runPreparedPlan(ctx, prompt, prepared, candidates)
+		result, err := r.runPreparedPlan(ctx, prompt, systemContext, prepared, candidates)
 		if err != nil {
 			var validationErr planValidationError
 			if !errors.As(err, &validationErr) {
@@ -87,7 +88,7 @@ func (r *DriverRunner) Run(ctx context.Context, prompt string) (RunnerResult, er
 	return RunnerResult{}, fmt.Errorf("invalid plan after 5 attempts: %w", lastValidationErr)
 }
 
-func (r *DriverRunner) runPreparedPlan(ctx context.Context, prompt string, nodes []planner.Node, agents []agentsdk.AgentCard) (RunnerResult, error) {
+func (r *DriverRunner) runPreparedPlan(ctx context.Context, prompt, systemContext string, nodes []planner.Node, agents []agentsdk.AgentCard) (RunnerResult, error) {
 	sched := NewScheduler(nodes, r.cfg.MaxConcurrency)
 	outputs := make(map[string]string, len(nodes))
 	renderedPrompts := make(map[string]string, len(nodes))
@@ -103,7 +104,7 @@ func (r *DriverRunner) runPreparedPlan(ctx context.Context, prompt string, nodes
 		}
 		for _, n := range ready {
 			sched.MarkDispatched(n.ID)
-			result, err := r.runNode(ctx, n, outputs, agents)
+			result, err := r.runNode(ctx, n, systemContext, outputs, agents)
 			if err != nil {
 				return RunnerResult{}, err
 			}
@@ -149,7 +150,7 @@ func plannerCandidates(agents []agentsdk.AgentCard, selfID string) []agentsdk.Ag
 	return out
 }
 
-func (r *DriverRunner) runNode(ctx context.Context, n planner.Node, outputs map[string]string, agents []agentsdk.AgentCard) (planner.SubResult, error) {
+func (r *DriverRunner) runNode(ctx context.Context, n planner.Node, outerCtx string, outputs map[string]string, agents []agentsdk.AgentCard) (planner.SubResult, error) {
 	rendered, err := Render(n.Prompt, outputs)
 	if err != nil {
 		return planner.SubResult{}, err
@@ -161,7 +162,7 @@ func (r *DriverRunner) runNode(ctx context.Context, n planner.Node, outputs map[
 		TargetID:       n.TargetID,
 		Prompt:         rendered,
 		Skill:          n.Skill,
-		SystemContext:  n.SystemContext,
+		SystemContext:  agentbackend.MergeSystemContext(outerCtx, n.SystemContext),
 		TimeoutSeconds: r.cfg.ChildTimeoutSec,
 	})
 	if err != nil {

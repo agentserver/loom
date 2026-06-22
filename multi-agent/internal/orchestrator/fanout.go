@@ -15,6 +15,7 @@ import (
 	"github.com/yourorg/multi-agent/internal/orchestration"
 	"github.com/yourorg/multi-agent/internal/planner"
 	"github.com/yourorg/multi-agent/internal/store"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
 const fanoutFailureDrainTimeout = 5 * time.Second
@@ -471,7 +472,7 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 				TargetID:       n.TargetID,
 				Skill:          n.Skill,
 				Prompt:         prompt,
-				SystemContext:  n.SystemContext,
+				SystemContext:  agentbackend.MergeSystemContext(t.SystemContext, n.SystemContext),
 				TimeoutSeconds: o.cfg.SubTaskDefaults.TimeoutSec,
 			})
 			if err != nil {
@@ -1091,6 +1092,7 @@ func (o *Orchestrator) runFanoutResume(ctx context.Context, t executor.Task, row
 			resp, derr := o.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
 				TargetID:       n.TargetID,
 				Prompt:         rendered,
+				SystemContext:  agentbackend.MergeSystemContext(t.SystemContext, n.SystemContext),
 				TimeoutSeconds: o.cfg.SubTaskDefaults.TimeoutSec,
 			})
 			if derr != nil {

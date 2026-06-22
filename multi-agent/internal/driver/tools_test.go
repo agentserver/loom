@@ -57,13 +57,19 @@ func (f *fakeObserver) Emit(ev observer.Event) {
 func (f *fakeObserver) Token() string { return "fake-token" }
 
 type fakeContractRunner struct {
-	prompt string
-	result orchestration.RunnerResult
-	err    error
+	prompt        string
+	systemContext string
+	result        orchestration.RunnerResult
+	err           error
+	onRun         func(prompt, systemContext string)
 }
 
-func (f *fakeContractRunner) Run(ctx context.Context, prompt string) (orchestration.RunnerResult, error) {
+func (f *fakeContractRunner) Run(ctx context.Context, prompt, systemContext string) (orchestration.RunnerResult, error) {
 	f.prompt = prompt
+	f.systemContext = systemContext
+	if f.onRun != nil {
+		f.onRun(prompt, systemContext)
+	}
 	return f.result, f.err
 }
 
@@ -2438,6 +2444,53 @@ func TestResumeTaskStampsLoomOrigin(t *testing.T) {
 		t.Fatalf("resume_task must stamp loom_origin, got SystemContext=%q", captured.SystemContext)
 	}
 	if p.AgentID != "drv-5" || p.DisplayName != "driver-5" || p.SessionID != "thr-resume" {
+		t.Errorf("unexpected ParentLink: %+v", p)
+	}
+}
+
+func TestSubmitContractTaskDriverFanoutCarriesLoomOrigin(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "sbx-driver", DisplayName: "driver", Status: "available"},
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["chat"],"mcp_tools":[{"server":"csv_profiler","name":"profile_orders_csv"}]}`)},
+				{AgentID: "slave-b", DisplayName: "slave-b", Status: "available", Card: json.RawMessage(`{"skills":["chat"],"mcp_tools":[{"server":"csv_profiler","name":"profile_orders_csv"}]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			t.Fatal("driver_fanout route must not call sdk.DelegateTask")
+			return nil, nil
+		},
+	}
+	tc := testTaskContract()
+	tc.ExecutionPolicy.Routing = contract.RoutingDirectFirst
+	tc.CapabilityRequirements.Skills = nil
+	tc.CapabilityRequirements.Tools = []string{"csv_profiler/profile_orders_csv"}
+	raw, err := json.Marshal(map[string]interface{}{"contract": tc, "prompt": "analyze"})
+	require.NoError(t, err)
+
+	tools := newTestTools(t, sdk)
+	// Simulate the driver knowing its own session — set ShortID and DisplayName
+	tools.cfg.Credentials.ShortID = "drv-5"
+	tools.cfg.Discovery.DisplayName = "driver-5"
+
+	var capturedSystemContext string
+	runner := &fakeContractRunner{
+		result: orchestration.RunnerResult{Summary: "ok"},
+		onRun: func(prompt, systemContext string) {
+			capturedSystemContext = systemContext
+		},
+	}
+	tools.SetContractRunner(runner)
+
+	_, err = submitContractToolForTest(t, tools).Call(context.Background(), raw)
+	require.NoError(t, err)
+
+	p, _, ok := agentbackend.ParseLoomOrigin(capturedSystemContext)
+	if !ok {
+		t.Fatalf("driver_fanout ContractRunner.Run did not receive loom_origin marker; systemContext=%q", capturedSystemContext)
+	}
+	if p.AgentID != "drv-5" || p.DisplayName != "driver-5" {
 		t.Errorf("unexpected ParentLink: %+v", p)
 	}
 }
