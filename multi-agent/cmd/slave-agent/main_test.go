@@ -12,6 +12,61 @@ import (
 	"github.com/yourorg/multi-agent/internal/platform"
 )
 
+// --------------------------------------------------------------------------
+// serve-daemon tests — mirrors cmd/driver-agent/main_test.go patterns
+// --------------------------------------------------------------------------
+
+func TestServeDaemon_ParseFlagsConfigRequired(t *testing.T) {
+	if _, err := parseServeDaemonFlags([]string{}); err == nil {
+		t.Fatal("expected error for missing --config")
+	}
+}
+
+func TestServeDaemon_ParseFlagsConfigParsed(t *testing.T) {
+	opts, err := parseServeDaemonFlags([]string{"--config", "/tmp/x.yaml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.ConfigPath != "/tmp/x.yaml" {
+		t.Errorf("ConfigPath=%q", opts.ConfigPath)
+	}
+}
+
+func TestServeDaemon_ParseFlagsListenOverride(t *testing.T) {
+	opts, err := parseServeDaemonFlags([]string{
+		"--config", "/tmp/x.yaml",
+		"--listen", "0.0.0.0:8080",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Listen != "0.0.0.0:8080" {
+		t.Errorf("Listen=%q", opts.Listen)
+	}
+}
+
+func TestSlaveDaemonWSURLConvertsHTTPToInsecureWS(t *testing.T) {
+	got, insecure := daemonWSURL("http://observer.example/", "/api/daemon-link")
+	want := "ws://observer.example/api/daemon-link"
+	if got != want {
+		t.Errorf("daemonWSURL=%q, want %q", got, want)
+	}
+	if !insecure {
+		t.Error("expected insecure=true for http://")
+	}
+}
+
+func TestSlaveDaemonWSURLConvertsHTTPSToSecureWSS(t *testing.T) {
+	got, insecure := daemonWSURL("https://observer.example/", "/api/daemon-link")
+	want := "wss://observer.example/api/daemon-link"
+	if got != want {
+		t.Errorf("daemonWSURL=%q, want %q", got, want)
+	}
+	if insecure {
+		t.Error("expected insecure=false for https://")
+	}
+}
+
 func TestHasSkill(t *testing.T) {
 	if !hasSkill([]string{"chat", "bash"}, "bash") {
 		t.Fatal("expected bash skill")

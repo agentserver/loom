@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -18,6 +20,7 @@ import (
 	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/capabilitydoc"
 	"github.com/yourorg/multi-agent/internal/commandiface"
+	"github.com/yourorg/multi-agent/internal/commander"
 	"github.com/yourorg/multi-agent/internal/config"
 	"github.com/yourorg/multi-agent/internal/dispatch"
 	"github.com/yourorg/multi-agent/internal/executor"
@@ -40,6 +43,10 @@ func main() {
 		if err := runHumanloopMCP(os.Args[2:]); err != nil {
 			log.Fatalf("slave_agent humanloop-mcp: %v", err)
 		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "serve-daemon" {
+		runServeDaemon(os.Args[2:])
 		return
 	}
 	cfgPath := "config.yaml"
@@ -413,4 +420,149 @@ func loadDynamicMCP(path string) (*dynamicMCPFile, error) {
 		}{}
 	}
 	return &df, nil
+}
+
+// --------------------------------------------------------------------------
+// serve-daemon subcommand
+// --------------------------------------------------------------------------
+
+// serveDaemonOpts holds parsed serve-daemon flags.
+type serveDaemonOpts struct {
+	ConfigPath string
+	Listen     string
+}
+
+// parseServeDaemonFlags parses the serve-daemon flag set. Mirrors driver's parseServeDaemonFlags.
+func parseServeDaemonFlags(args []string) (serveDaemonOpts, error) {
+	fs := flag.NewFlagSet("serve-daemon", flag.ContinueOnError)
+	cfgPath := fs.String("config", "", "path to slave config.yaml (required)")
+	listen := fs.String("listen", "", "HTTP bind override")
+	if err := fs.Parse(args); err != nil {
+		return serveDaemonOpts{}, err
+	}
+	if *cfgPath == "" {
+		return serveDaemonOpts{}, fmt.Errorf("--config is required")
+	}
+	return serveDaemonOpts{ConfigPath: *cfgPath, Listen: *listen}, nil
+}
+
+// runServeDaemon implements the serve-daemon subcommand for the slave agent.
+// It mirrors cmd/driver-agent/main.go runServeDaemon; slave codex sessions
+// become listable by Commander once connected.
+func runServeDaemon(args []string) {
+	opts, err := parseServeDaemonFlags(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "serve-daemon:", err)
+		os.Exit(2)
+	}
+
+	cfg, err := config.Load(opts.ConfigPath)
+	if err != nil {
+		die("load config: " + err.Error())
+	}
+	if cfg.Credentials.ProxyToken == "" {
+		die("serve-daemon requires credentials.proxy_token; run slave-agent registration first")
+	}
+	if cfg.Observer.URL == "" {
+		die("serve-daemon requires observer.url")
+	}
+
+	listen := opts.Listen
+	if listen == "" {
+		listen = cfg.Daemon.Listen
+	}
+	if strings.HasPrefix(listen, "0.0.0.0") {
+		fmt.Fprintln(os.Stderr, "WARNING: serve-daemon HTTP bound to 0.0.0.0; debug API will be reachable from the network")
+	}
+
+	// Task 9 will replace cfg.Agent.CodexHome with agentbackend.ResolveCodexHome.
+	backend, err := agentbackend.New(agentbackend.Config{
+		Kind:       agentbackend.Kind(cfg.Agent.Kind),
+		Bin:        cfg.Agent.Bin,
+		WorkDir:    cfg.Agent.WorkDir,
+		ExtraArgs:  cfg.Agent.ExtraArgs,
+		WorkerMode: cfg.Agent.WorkerMode,
+		CodexHome:  cfg.Agent.CodexHome,
+	}, nil)
+	if err != nil {
+		die("agentbackend.New: " + err.Error())
+	}
+
+	wsURL, insecureWS := daemonWSURL(cfg.Observer.URL, cfg.Daemon.WSPath)
+	if insecureWS {
+		fmt.Fprintln(os.Stderr, "WARNING: serve-daemon WS uses ws://; credentials.proxy_token will be sent without TLS. Use https:// observer.url outside loopback/debug deployments.")
+	}
+
+	handler := &commander.Handler{Backend: backend, WorkerMax: cfg.Daemon.WorkerMax}
+	if cfg.Daemon.WorkerIdleTimeoutSec > 0 {
+		handler.WorkerIdleTimeout = time.Duration(cfg.Daemon.WorkerIdleTimeoutSec) * time.Second
+	}
+
+	d := commander.NewDaemon(commander.DaemonConfig{
+		Handler:       handler,
+		ListenAddr:    listen,
+		HTTPAuthToken: cfg.Credentials.ProxyToken,
+		WS: commander.WSConfig{
+			URL:        wsURL,
+			ProxyToken: cfg.Credentials.ProxyToken,
+			Register: commander.RegisterPayload{
+				SchemaVersion: commander.SchemaVersion,
+				Kind:          cfg.Agent.Kind,
+				AgentBin:      cfg.Agent.Bin,
+				AgentWorkDir:  cfg.Agent.WorkDir,
+				DisplayName:   cfg.Discovery.DisplayName,
+				DriverVersion: "", // slave has no version constant; driver_version left empty
+				ShortID:       cfg.Credentials.ShortID,
+			},
+			HeartbeatInt:   time.Duration(cfg.Daemon.HeartbeatIntervalSec) * time.Second,
+			InitialBackoff: time.Duration(cfg.Daemon.InitialBackoffMs) * time.Millisecond,
+			MaxBackoff:     time.Duration(cfg.Daemon.MaxBackoffMs) * time.Millisecond,
+		},
+	})
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- d.Run(ctx) }()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			die("daemon: " + err.Error())
+		}
+		return
+	case <-d.Ready():
+	case <-ctx.Done():
+		if err := <-errCh; err != nil {
+			die("daemon: " + err.Error())
+		}
+		return
+	}
+	fmt.Fprintf(os.Stderr, "serve-daemon: ws=%s http=http://%s\n", wsURL, d.HTTPAddr())
+	if err := <-errCh; err != nil {
+		die("daemon: " + err.Error())
+	}
+}
+
+// daemonWSURL converts an observer HTTP(S) URL + wsPath into a WS URL.
+// Duplicated from cmd/driver-agent/main.go — TODO: move to a shared internal helper.
+func daemonWSURL(observerURL, wsPath string) (string, bool) {
+	wsURL := strings.TrimRight(observerURL, "/") + wsPath
+	switch {
+	case strings.HasPrefix(wsURL, "http://"):
+		return "ws://" + strings.TrimPrefix(wsURL, "http://"), true
+	case strings.HasPrefix(wsURL, "https://"):
+		return "wss://" + strings.TrimPrefix(wsURL, "https://"), false
+	case strings.HasPrefix(wsURL, "ws://"):
+		return wsURL, true
+	default:
+		return wsURL, false
+	}
+}
+
+// die prints a fatal error message to stderr and exits with code 1.
+func die(msg string) {
+	fmt.Fprintln(os.Stderr, "slave-agent:", msg)
+	os.Exit(1)
 }

@@ -20,7 +20,26 @@ type Config struct {
 	Fanout      Fanout               `yaml:"fanout"`
 	Resources   *Resources           `yaml:"resources,omitempty"`
 	Observer    Observer             `yaml:"observer,omitempty"`
+	Daemon      DaemonConfig         `yaml:"daemon,omitempty"`
 	Humanloop   HumanloopConfig      `yaml:"humanloop"`
+}
+
+// DaemonConfig configures optional long-lived `slave-agent serve-daemon` mode.
+// Fields and yaml tags mirror internal/driver/config.go DaemonConfig.
+type DaemonConfig struct {
+	// Listen is the HTTP bind for the daemon's debug API.
+	Listen string `yaml:"listen,omitempty"`
+	// WSPath is appended to Observer.URL when dialing the observer hub.
+	WSPath string `yaml:"ws_path,omitempty"`
+	// HeartbeatIntervalSec is the daemon-to-observer heartbeat cadence.
+	HeartbeatIntervalSec int `yaml:"heartbeat_interval_sec,omitempty"`
+	// InitialBackoffMs and MaxBackoffMs bound WS reconnect backoff.
+	InitialBackoffMs int `yaml:"initial_backoff_ms,omitempty"`
+	MaxBackoffMs     int `yaml:"max_backoff_ms,omitempty"`
+	// WorkerMax caps hot session workers kept by commander. Zero uses the handler default.
+	WorkerMax int `yaml:"worker_max,omitempty"`
+	// WorkerIdleTimeoutSec controls idle hot-worker lifetime. Zero uses the handler default.
+	WorkerIdleTimeoutSec int `yaml:"worker_idle_timeout_sec,omitempty"`
 }
 
 type HumanloopConfig struct {
@@ -181,6 +200,21 @@ func Load(path string) (*Config, error) {
 	}
 	if c.Humanloop.MaxQuestionsPerTask == 0 {
 		c.Humanloop.MaxQuestionsPerTask = 5
+	}
+	if c.Daemon.Listen == "" {
+		c.Daemon.Listen = "127.0.0.1:0"
+	}
+	if c.Daemon.WSPath == "" {
+		c.Daemon.WSPath = "/api/daemon-link"
+	}
+	if c.Daemon.HeartbeatIntervalSec == 0 {
+		c.Daemon.HeartbeatIntervalSec = 30
+	}
+	if c.Daemon.InitialBackoffMs == 0 {
+		c.Daemon.InitialBackoffMs = 1000
+	}
+	if c.Daemon.MaxBackoffMs == 0 {
+		c.Daemon.MaxBackoffMs = 30000
 	}
 	observerLegacyConfigured := c.Observer.APIKey != "" || c.Observer.TokenStatePath != ""
 	observerProxyReady := c.Credentials.ProxyToken != ""
