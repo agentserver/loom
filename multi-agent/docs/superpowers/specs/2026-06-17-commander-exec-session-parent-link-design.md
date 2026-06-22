@@ -205,17 +205,18 @@ codex executor 在 `Run`（新建 session 路径）捕获新 `sessionID`（`exec
 
 §1 per-agent `CODEX_HOME` 隔离 → 每个 session 只被唯一一个 daemon 扫到上报，**无重复**，observer 无需去重。
 
-Observer（`internal/commanderhub/tree.go`）：
+**P3 是 frontend-only**：observer 不建 parent 索引、不做跨 daemon 嵌套计算；P2 把 `owner_agent_id`/`parent_agent_id`/`parent_display_name` 放到 `SessionRow`（`sessionRowFromBackend` 从 Session 拷贝、`OwnerAgentID` 取上报 daemon 的 ShortID），observer 原样透传给前端。跨 daemon 嵌套在前端解析。
 
-- 跨 daemon 嵌套建全局 parent 索引：key `(owner_agent_id, session_id)` → node，跨所有 daemon；带 `parent_id`+`parent_agent_id` 的 child 挂到 `(parent_agent_id, parent_id)` 下（即便 parent 在另一 daemon 分组）。
-- 渲染：远程 child 嵌在 parent session 下（主位置），带 `remote` badge 标 display_name（如 `remote · on slave-02`）。child 从其归属 daemon 根列表省略（归在 parent 下）；`session_count` 仍计。
+Observer（`internal/commanderhub/tree.go`，P2 已落地）：
 
-前端（`DaemonSessionTree.tsx` + `api/types.ts`）：
+- `SessionRow` 带 `owner_agent_id`/`parent_agent_id`/`parent_display_name`（P2）；observer 不做嵌套计算，按 daemon 分组透传。
 
-- `SessionRow` 加 `owner_agent_id`/`parent_agent_id`/`owner_display_name?`/`parent_display_name?`。
-- 跨 daemon builder 替换单 daemon `buildSessionNodes`：聚合所有 session，建全局 `(owner_agent_id, session_id)` map，把 `origin==='subagent'||'agent_task'` 且带 `parent_id` 的 child 嵌到解析出的 parent node 下，默认折叠。
-- 离线/缺失 parent：无节点匹配 `(parent_agent_id, parent_id)` → child 当根行渲染并附 `parent offline`（带 `parent_display_name`，来自 sidecar denormalized）灰色注记。
-- Badge：远程 `agent_task` 行 `remote task · on <owner display_name>`；本地 subagent 保留 `subagent · <name>`。
+前端（`DaemonSessionTree.tsx` + `api/types.ts`，P3）：
+
+- `SessionRow` 加 `owner_agent_id`/`parent_agent_id`/`owner_display_name?`/`parent_display_name?`；`DaemonTree` 加 `short_id`。
+- 跨 daemon builder 替换单 daemon `buildSessionNodes`：聚合所有 session，建全局 `(owner_agent_id, session_id)` map（**owner-aware key**，非 session_id 单独），把 `origin==='subagent'||'agent_task'` 且带 `parent_id` 的 child 嵌到解析出的 parent node 下，默认折叠。本地 subagent 只有 `parent_id`（无 `parent_agent_id`）时，以 child 自身 `owner_agent_id` 作 parent owner 解析（保持原有嵌套）。
+- 离线/缺失 parent：builder 给该 child 设 `parentOffline` flag → 当根行渲染并附 `parent offline · <parent_display_name>`（来自 sidecar denormalized）灰色注记。
+- 渲染：远程 child 嵌在 parent session 下（主位置），从归属 daemon 根列表省略；**child 按钮用 `child.daemon_id` 选择**（非 parent 分组）。Badge：远程 `agent_task` 行 `remote task · on <home display_name>`（统一文案）；本地 subagent 保留 `subagent · <name>`。
 
 ### 分阶段（3 PR）
 
