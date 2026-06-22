@@ -1068,7 +1068,7 @@ Add the Windows command output (or the documented unavailability + reviewer hand
 ## Acceptance for P2
 
 - Codex executor writes `<CODEX_HOME>/loom-meta/current` on `thread.started` (Run + RunResume); RunResume still writes no sidecar.
-- Driver `submit_task` (default skill `fanout` AND `chat`/`chat_resume`), `submit_contract_task`, `resume_task` stamp `<loom_origin agent name session/>` into `DelegateTaskRequest.SystemContext`, reading the marker + `ShortID`/`DisplayName`.
+- Driver `submit_task` (default skill `fanout` AND `chat`/`chat_resume`), `submit_contract_task`, `resume_task` stamp a single-line JSON marker `{"loom_origin":{"agent":..., "name":..., "session":...}}\n` into `DelegateTaskRequest.SystemContext`, reading the parent session id from the current-session marker and `ShortID`/`DisplayName` from cfg. (Implementation uses `agentbackend.BuildLoomOrigin`; values are JSON-escaped so any character is safe.)
 - The master orchestrator (`internal/orchestrator/fanout.go`, `internal/orchestration/driver_runner.go`) merges the outer task's `SystemContext` into each fanout child's `DelegateTaskRequest.SystemContext`, so slave chat children dispatched from default `submit_task` inherit the parent link end-to-end.
 - Slave `poller` parses the marker into `Task.Parent*` and strips it; the resulting codex exec session's loom-meta sidecar (P1) carries the parent link.
 - Slave `serve-daemon` registers with the observer (`ShortID` populated); slave codex sessions are listable by Commander.
