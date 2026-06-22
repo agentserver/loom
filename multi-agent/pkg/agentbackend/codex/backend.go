@@ -57,7 +57,7 @@ func (b *Backend) Permissions() agentbackend.PermissionsStore { return b.perm }
 func (b *Backend) Detect(ctx context.Context) error           { return detect(ctx, b.cfg.Bin) }
 
 func withCodexHome(cfg agentbackend.Config, env []string) []string {
-	final := effectiveCodexHome(cfg, env)
+	final := EffectiveCodexHome(cfg, env)
 	out := make([]string, 0, len(env)+1)
 	for _, kv := range env {
 		k, _, ok := splitEnv(kv)
@@ -72,8 +72,8 @@ func withCodexHome(cfg agentbackend.Config, env []string) []string {
 	return out
 }
 
-func (b *Backend) effectiveCodexHome() string {
-	return effectiveCodexHome(b.cfg, b.env)
+func (b *Backend) EffectiveCodexHome() string {
+	return EffectiveCodexHome(b.cfg, b.env)
 }
 
 func (b *Backend) resumeWorkDir(ctx context.Context, sessionID string) (string, error) {

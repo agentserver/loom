@@ -152,3 +152,19 @@ func TestReaperKeepsLiveAndFresh(t *testing.T) {
 		t.Fatal("live fresh sidecar must survive")
 	}
 }
+
+func TestWriteReadCurrentSession(t *testing.T) {
+	base := t.TempDir()
+	if err := writeCurrentSession(base, "thread-now"); err != nil {
+		t.Fatalf("writeCurrentSession: %v", err)
+	}
+	if got := ReadCurrentSession(base); got != "thread-now" {
+		t.Fatalf("readCurrentSession = %q, want thread-now", got)
+	}
+}
+
+func TestReadCurrentSessionMissing(t *testing.T) {
+	if got := ReadCurrentSession(t.TempDir()); got != "" {
+		t.Fatalf("want empty, got %q", got)
+	}
+}

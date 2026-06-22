@@ -10,7 +10,7 @@ import (
 func TestBackendEffectiveCodexHomeFromConfig(t *testing.T) {
 	t.Setenv("CODEX_HOME", "/stale-process")
 	b := New(agentbackend.Config{CodexHome: "/cfg-home"}, nil)
-	if got := b.effectiveCodexHome(); got != "/cfg-home" {
+	if got := b.EffectiveCodexHome(); got != "/cfg-home" {
 		t.Fatalf("effectiveCodexHome = %q, want /cfg-home", got)
 	}
 }
@@ -18,7 +18,7 @@ func TestBackendEffectiveCodexHomeFromConfig(t *testing.T) {
 func TestBackendEffectiveCodexHomeFromEnvSlice(t *testing.T) {
 	t.Setenv("CODEX_HOME", "/stale-process")
 	b := New(agentbackend.Config{}, []string{"CODEX_HOME=/env-home"})
-	if got := b.effectiveCodexHome(); got != "/env-home" {
+	if got := b.EffectiveCodexHome(); got != "/env-home" {
 		t.Fatalf("effectiveCodexHome = %q, want /env-home", got)
 	}
 }

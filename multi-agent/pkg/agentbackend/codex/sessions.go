@@ -32,7 +32,7 @@ import (
 var filenameUUIDRe = regexp.MustCompile(`-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$`)
 
 func (b *Backend) sessionsRoot() string {
-	base := b.effectiveCodexHome()
+	base := b.EffectiveCodexHome()
 	if base == "" {
 		return ""
 	}
@@ -52,7 +52,7 @@ func (b *Backend) ListSessions(ctx context.Context) ([]agentbackend.Session, err
 	if root == "" {
 		return nil, nil
 	}
-	base := b.effectiveCodexHome()
+	base := b.EffectiveCodexHome()
 	if _, err := os.Stat(root); errors.Is(err, fs.ErrNotExist) {
 		reaper(base, nil)
 		b.list.Prune(nil)
@@ -108,7 +108,7 @@ func (b *Backend) GetSession(ctx context.Context, id string) (agentbackend.Sessi
 	if root == "" {
 		return agentbackend.Session{}, nil, agentbackend.ErrSessionNotFound
 	}
-	base := b.effectiveCodexHome()
+	base := b.EffectiveCodexHome()
 	if _, err := os.Stat(root); errors.Is(err, fs.ErrNotExist) {
 		return agentbackend.Session{}, nil, agentbackend.ErrSessionNotFound
 	} else if err != nil {
