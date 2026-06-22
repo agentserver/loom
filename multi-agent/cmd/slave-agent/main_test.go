@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yourorg/multi-agent/internal/config"
 	"github.com/yourorg/multi-agent/internal/platform"
 )
 
@@ -197,4 +198,60 @@ func withTempWorkDir(t *testing.T) string {
 		_ = os.Chdir(oldwd)
 	})
 	return dir
+}
+
+// --------------------------------------------------------------------------
+// shouldAutoStartDaemon — drives whether run() spawns a Commander daemon
+// alongside the poller. Default policy is observer.url + proxy_token + ShortID.
+// --------------------------------------------------------------------------
+
+func TestShouldAutoStartDaemon_AllPreconditionsMet(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Credentials.ProxyToken = "tok"
+	cfg.Credentials.ShortID = "sl-1"
+	cfg.Observer.URL = "https://observer.example/"
+	if !shouldAutoStartDaemon(cfg) {
+		t.Fatal("should auto-start when proxy_token + short_id + observer.url are all set")
+	}
+}
+
+func TestShouldAutoStartDaemon_NoObserverURL(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Credentials.ProxyToken = "tok"
+	cfg.Credentials.ShortID = "sl-1"
+	if shouldAutoStartDaemon(cfg) {
+		t.Fatal("must not auto-start when observer.url is empty (nothing to register with)")
+	}
+}
+
+func TestShouldAutoStartDaemon_NoShortID(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Credentials.ProxyToken = "tok"
+	cfg.Observer.URL = "https://observer.example/"
+	if shouldAutoStartDaemon(cfg) {
+		t.Fatal("must not auto-start before registration populates short_id (P3 owner-key would collide)")
+	}
+}
+
+func TestShouldAutoStartDaemon_ExplicitDisable(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Credentials.ProxyToken = "tok"
+	cfg.Credentials.ShortID = "sl-1"
+	cfg.Observer.URL = "https://observer.example/"
+	off := false
+	cfg.Daemon.AutoStart = &off
+	if shouldAutoStartDaemon(cfg) {
+		t.Fatal("explicit auto_start=false must override the auto policy")
+	}
+}
+
+func TestShouldAutoStartDaemon_ExplicitEnableWithoutObserver(t *testing.T) {
+	// Explicit yes overrides missing preconditions — let buildSlaveDaemon
+	// fail loudly so operators see why instead of being silently disabled.
+	cfg := &config.Config{}
+	on := true
+	cfg.Daemon.AutoStart = &on
+	if !shouldAutoStartDaemon(cfg) {
+		t.Fatal("explicit auto_start=true must take effect even when preconditions look off")
+	}
 }

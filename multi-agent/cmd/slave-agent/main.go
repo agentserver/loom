@@ -348,11 +348,108 @@ func run(cfgPath string) error {
 	g.Go(func() error { return tn.Run(gctx) })
 	g.Go(func() error { return p.Run(gctx) })
 
+	// Auto-start the Commander daemon alongside the poller when configured.
+	// Default policy: enable iff observer.url + proxy_token are both set —
+	// the same preconditions serve-daemon enforces. This is what makes the
+	// existing slave-agent.service unit report sessions to Commander without
+	// any deployment-side changes (#24 P2 review feedback). Operators can
+	// disable via `daemon.auto_start: false` for worker-only deployments.
+	if shouldAutoStartDaemon(cfg) {
+		daemon, dErr := buildSlaveDaemon(cfg, backend)
+		if dErr != nil {
+			log.Printf("commander daemon disabled: %v", dErr)
+		} else {
+			g.Go(func() error {
+				if rErr := daemon.Run(gctx); rErr != nil && rErr != context.Canceled {
+					return fmt.Errorf("commander daemon: %w", rErr)
+				}
+				return nil
+			})
+			go func() {
+				select {
+				case <-daemon.Ready():
+					fmt.Fprintf(os.Stderr, "slave-agent: commander daemon ready http=http://%s\n", daemon.HTTPAddr())
+				case <-gctx.Done():
+				}
+			}()
+		}
+	}
+
 	err = g.Wait()
 	if err != nil && err != context.Canceled {
 		return fmt.Errorf("run: %w", err)
 	}
 	return nil
+}
+
+// shouldAutoStartDaemon decides whether the slave's run() loop should bring
+// up a Commander daemon alongside the poller. Explicit `daemon.auto_start`
+// always wins; otherwise the daemon turns on iff both preconditions
+// runServeDaemon would have validated (proxy_token + observer.url) are met.
+// Empty ShortID is treated as "not yet registered" — the daemon stays off
+// until the next start cycle reads the populated config.
+func shouldAutoStartDaemon(cfg *config.Config) bool {
+	if cfg.Daemon.AutoStart != nil {
+		return *cfg.Daemon.AutoStart
+	}
+	return cfg.Credentials.ProxyToken != "" &&
+		cfg.Credentials.ShortID != "" &&
+		cfg.Observer.URL != ""
+}
+
+// buildSlaveDaemon constructs the Commander daemon used by both
+// runServeDaemon (standalone subcommand) and run() (auto-start path).
+// The caller owns the backend and the daemon lifetime.
+func buildSlaveDaemon(cfg *config.Config, backend agentbackend.Backend) (*commander.Daemon, error) {
+	if cfg.Credentials.ProxyToken == "" {
+		return nil, fmt.Errorf("credentials.proxy_token is required")
+	}
+	if cfg.Credentials.ShortID == "" {
+		return nil, fmt.Errorf("credentials.short_id is required (run registration first)")
+	}
+	if cfg.Observer.URL == "" {
+		return nil, fmt.Errorf("observer.url is required")
+	}
+
+	listen := cfg.Daemon.Listen
+	if listen == "" {
+		listen = "127.0.0.1:0"
+	}
+	if strings.HasPrefix(listen, "0.0.0.0") {
+		fmt.Fprintln(os.Stderr, "WARNING: slave commander HTTP bound to 0.0.0.0; debug API will be reachable from the network")
+	}
+
+	wsURL, insecureWS := daemonWSURL(cfg.Observer.URL, cfg.Daemon.WSPath)
+	if insecureWS {
+		fmt.Fprintln(os.Stderr, "WARNING: slave commander WS uses ws://; credentials.proxy_token will be sent without TLS. Use https:// observer.url outside loopback/debug deployments.")
+	}
+
+	handler := &commander.Handler{Backend: backend, WorkerMax: cfg.Daemon.WorkerMax}
+	if cfg.Daemon.WorkerIdleTimeoutSec > 0 {
+		handler.WorkerIdleTimeout = time.Duration(cfg.Daemon.WorkerIdleTimeoutSec) * time.Second
+	}
+
+	return commander.NewDaemon(commander.DaemonConfig{
+		Handler:       handler,
+		ListenAddr:    listen,
+		HTTPAuthToken: cfg.Credentials.ProxyToken,
+		WS: commander.WSConfig{
+			URL:        wsURL,
+			ProxyToken: cfg.Credentials.ProxyToken,
+			Register: commander.RegisterPayload{
+				SchemaVersion: commander.SchemaVersion,
+				Kind:          cfg.Agent.Kind,
+				AgentBin:      cfg.Agent.Bin,
+				AgentWorkDir:  cfg.Agent.WorkDir,
+				DisplayName:   cfg.Discovery.DisplayName,
+				DriverVersion: "", // slave has no version constant; driver_version left empty
+				ShortID:       cfg.Credentials.ShortID,
+			},
+			HeartbeatInt:   time.Duration(cfg.Daemon.HeartbeatIntervalSec) * time.Second,
+			InitialBackoff: time.Duration(cfg.Daemon.InitialBackoffMs) * time.Millisecond,
+			MaxBackoff:     time.Duration(cfg.Daemon.MaxBackoffMs) * time.Millisecond,
+		},
+	}), nil
 }
 
 // backendExecutor adapts agentbackend.Backend to executor.Executor.
@@ -464,19 +561,9 @@ func runServeDaemon(args []string) {
 	if err != nil {
 		die("load config: " + err.Error())
 	}
-	if cfg.Credentials.ProxyToken == "" {
-		die("serve-daemon requires credentials.proxy_token; run slave-agent registration first")
-	}
-	if cfg.Observer.URL == "" {
-		die("serve-daemon requires observer.url")
-	}
-
-	listen := opts.Listen
-	if listen == "" {
-		listen = cfg.Daemon.Listen
-	}
-	if strings.HasPrefix(listen, "0.0.0.0") {
-		fmt.Fprintln(os.Stderr, "WARNING: serve-daemon HTTP bound to 0.0.0.0; debug API will be reachable from the network")
+	if opts.Listen != "" {
+		// --listen override flows through cfg so buildSlaveDaemon sees it.
+		cfg.Daemon.Listen = opts.Listen
 	}
 
 	cfg.Agent.CodexHome = agentbackend.ResolveCodexHome(cfg.Agent.CodexHome, cfg.Agent.LoomHome, cfg.Credentials.ShortID)
@@ -492,37 +579,10 @@ func runServeDaemon(args []string) {
 		die("agentbackend.New: " + err.Error())
 	}
 
-	wsURL, insecureWS := daemonWSURL(cfg.Observer.URL, cfg.Daemon.WSPath)
-	if insecureWS {
-		fmt.Fprintln(os.Stderr, "WARNING: serve-daemon WS uses ws://; credentials.proxy_token will be sent without TLS. Use https:// observer.url outside loopback/debug deployments.")
+	d, err := buildSlaveDaemon(cfg, backend)
+	if err != nil {
+		die("serve-daemon: " + err.Error())
 	}
-
-	handler := &commander.Handler{Backend: backend, WorkerMax: cfg.Daemon.WorkerMax}
-	if cfg.Daemon.WorkerIdleTimeoutSec > 0 {
-		handler.WorkerIdleTimeout = time.Duration(cfg.Daemon.WorkerIdleTimeoutSec) * time.Second
-	}
-
-	d := commander.NewDaemon(commander.DaemonConfig{
-		Handler:       handler,
-		ListenAddr:    listen,
-		HTTPAuthToken: cfg.Credentials.ProxyToken,
-		WS: commander.WSConfig{
-			URL:        wsURL,
-			ProxyToken: cfg.Credentials.ProxyToken,
-			Register: commander.RegisterPayload{
-				SchemaVersion: commander.SchemaVersion,
-				Kind:          cfg.Agent.Kind,
-				AgentBin:      cfg.Agent.Bin,
-				AgentWorkDir:  cfg.Agent.WorkDir,
-				DisplayName:   cfg.Discovery.DisplayName,
-				DriverVersion: "", // slave has no version constant; driver_version left empty
-				ShortID:       cfg.Credentials.ShortID,
-			},
-			HeartbeatInt:   time.Duration(cfg.Daemon.HeartbeatIntervalSec) * time.Second,
-			InitialBackoff: time.Duration(cfg.Daemon.InitialBackoffMs) * time.Millisecond,
-			MaxBackoff:     time.Duration(cfg.Daemon.MaxBackoffMs) * time.Millisecond,
-		},
-	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -543,7 +603,8 @@ func runServeDaemon(args []string) {
 		}
 		return
 	}
-	fmt.Fprintf(os.Stderr, "serve-daemon: ws=%s http=http://%s\n", wsURL, d.HTTPAddr())
+	wsURLLog, _ := daemonWSURL(cfg.Observer.URL, cfg.Daemon.WSPath)
+	fmt.Fprintf(os.Stderr, "serve-daemon: ws=%s http=http://%s\n", wsURLLog, d.HTTPAddr())
 	if err := <-errCh; err != nil {
 		die("daemon: " + err.Error())
 	}
