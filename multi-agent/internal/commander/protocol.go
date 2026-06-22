@@ -40,6 +40,10 @@ type RegisterPayload struct {
 	DisplayName   string   `json:"display_name"`
 	DriverVersion string   `json:"driver_version"`
 	Capabilities  []string `json:"capabilities,omitempty"`
+	// ShortID is the stable agent-instance id (agentserver-assigned, persisted).
+	// Lets the observer resolve a parent across reconnects (daemon_id is
+	// ephemeral). Empty for old daemons.
+	ShortID string `json:"short_id,omitempty"`
 }
 
 // CommandPayload describes an observer-to-daemon command.
