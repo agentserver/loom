@@ -21,6 +21,8 @@ agent:
   bin: __AGENT_BIN__
   workdir: __PROJECT_DIR__
   extra_args: []
+  # codex_home: ""  # per-agent CODEX_HOME override; default derives from loom_home + short_id
+  # loom_home: ""   # state root for per-agent codex_home (defaults: $LOOM_HOME or $HOME/.cache/multi-agent)
 
 planner:
   bin: ""

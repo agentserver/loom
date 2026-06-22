@@ -192,21 +192,6 @@ func run(cfgPath string) error {
 	}
 	mcpExec := executor.NewMCPExecutor(mcpCfg)
 	defer mcpExec.Close()
-	backend, err := agentbackend.New(agentbackend.Config{
-		Kind:       agentbackend.Kind(cfg.Agent.Kind),
-		Bin:        cfg.Agent.Bin,
-		WorkDir:    cfg.Agent.WorkDir,
-		ExtraArgs:  cfg.Agent.ExtraArgs,
-		WorkerMode: cfg.Agent.WorkerMode,
-	}, nil)
-	if err != nil {
-		log.Fatalf("agentbackend: %v", err)
-	}
-
-	j, err := journal.New(journal.Config{Dir: journalDir, LLM: backend.LLM()})
-	if err != nil {
-		return err
-	}
 
 	ui := webui.NewHandler(s, journalDir, cfg)
 	webui.SetMCPBridge(ui, mcpExec)
@@ -218,6 +203,25 @@ func run(cfgPath string) error {
 	tn.SetPlatform(caps.Platform)
 	tn.SetCommandInterfaces(caps.CommandInterfaces)
 	if err := tn.EnsureRegistered(ctx); err != nil {
+		return err
+	}
+
+	// Resolve CodexHome now that cfg.Credentials.ShortID is populated by EnsureRegistered.
+	cfg.Agent.CodexHome = agentbackend.ResolveCodexHome(cfg.Agent.CodexHome, cfg.Agent.LoomHome, cfg.Credentials.ShortID)
+	backend, err := agentbackend.New(agentbackend.Config{
+		Kind:       agentbackend.Kind(cfg.Agent.Kind),
+		Bin:        cfg.Agent.Bin,
+		WorkDir:    cfg.Agent.WorkDir,
+		ExtraArgs:  cfg.Agent.ExtraArgs,
+		WorkerMode: cfg.Agent.WorkerMode,
+		CodexHome:  cfg.Agent.CodexHome,
+	}, nil)
+	if err != nil {
+		log.Fatalf("agentbackend: %v", err)
+	}
+
+	j, err := journal.New(journal.Config{Dir: journalDir, LLM: backend.LLM()})
+	if err != nil {
 		return err
 	}
 	applyRuntimeCapabilities(cfg, caps)
@@ -475,7 +479,7 @@ func runServeDaemon(args []string) {
 		fmt.Fprintln(os.Stderr, "WARNING: serve-daemon HTTP bound to 0.0.0.0; debug API will be reachable from the network")
 	}
 
-	// Task 9 will replace cfg.Agent.CodexHome with agentbackend.ResolveCodexHome.
+	cfg.Agent.CodexHome = agentbackend.ResolveCodexHome(cfg.Agent.CodexHome, cfg.Agent.LoomHome, cfg.Credentials.ShortID)
 	backend, err := agentbackend.New(agentbackend.Config{
 		Kind:       agentbackend.Kind(cfg.Agent.Kind),
 		Bin:        cfg.Agent.Bin,

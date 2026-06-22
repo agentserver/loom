@@ -13,6 +13,8 @@ agent:
   kind: claude
   bin: claude
   workdir: /tmp/slave-a-dev
+  # codex_home: ""  # per-agent CODEX_HOME override; default derives from loom_home + short_id
+  # loom_home: ""   # state root for per-agent codex_home (defaults: $LOOM_HOME or $HOME/.cache/multi-agent)
 
 discovery:
   display_name: slave-a-dev
