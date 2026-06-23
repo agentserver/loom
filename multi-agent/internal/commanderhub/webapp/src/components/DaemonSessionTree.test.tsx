@@ -216,3 +216,55 @@ test('two daemons with the same session_id and no owner_agent_id render independ
   expect(d1Group.getByText(/in d1/)).toBeInTheDocument();
   expect(d2Group.getByText(/in d2/)).toBeInTheDocument();
 });
+
+test('renders descendants of a remote agent_task (slave subagent under driver→remote→subagent chain)', () => {
+  // The P2-shipped shape: driver session → submit_task delegates to slave
+  // (creates a remote agent_task on slave) → that codex_exec spawns its
+  // own subagent on the slave. Three-level tree across two daemons. The
+  // slave subagent gets filtered from the slave's root list (it's a
+  // resolved child) AND must render under its agent_task parent, which
+  // itself is nested under the driver root. Without recursive rendering,
+  // the subagent disappears entirely from the UI. #24 P3 review.
+  const daemons: DaemonTree[] = [
+    {
+      daemon_id: 'drv', display_name: 'prod-driver', kind: 'codex', status: 'ok', short_id: 'drv-1',
+      sessions: [row({
+        daemon_id: 'drv', session_id: 'driver-s', owner_agent_id: 'drv-1',
+        origin: 'user', title: 'driver-s',
+      })],
+    },
+    {
+      daemon_id: 'slv', display_name: 'slave-02', kind: 'codex', status: 'ok', short_id: 'slv-2',
+      sessions: [
+        row({
+          daemon_id: 'slv', session_id: 'task-s', owner_agent_id: 'slv-2', title: 'task-s',
+          origin: 'agent_task', parent_id: 'driver-s', parent_agent_id: 'drv-1', parent_display_name: 'prod-driver',
+        }),
+        row({
+          daemon_id: 'slv', session_id: 'sub-s', owner_agent_id: 'slv-2',
+          origin: 'subagent', parent_id: 'task-s', agent_name: 'Lovelace', title: 'sub-s',
+        }),
+      ],
+    },
+  ];
+  render(<DaemonSessionTree daemons={daemons} selected={null} onSelect={() => {}} />);
+
+  // Neither nested session appears as a slave-group root.
+  const slaveGroup = within(screen.getByText('slave-02').closest('section')!);
+  expect(slaveGroup.queryAllByTestId('root-session')).toHaveLength(0);
+
+  // Driver root exists; nothing visible from the subtree until we expand.
+  expect(screen.queryByText(/remote task · on slave-02/)).toBeNull();
+  expect(screen.queryByText(/subagent · Lovelace/)).toBeNull();
+
+  // Expand the driver root → remote agent_task surfaces.
+  fireEvent.click(screen.getByLabelText(/展开 subagent sessions: driver-s/));
+  expect(screen.getByText(/remote task · on slave-02/)).toBeInTheDocument();
+  // Still default-collapsed at the next level — the slave subagent is not
+  // visible until its agent_task parent is expanded.
+  expect(screen.queryByText(/subagent · Lovelace/)).toBeNull();
+
+  // Expand the remote agent_task → its slave subagent finally shows.
+  fireEvent.click(screen.getByLabelText(/展开 subagent sessions: task-s/));
+  expect(screen.getByText(/subagent · Lovelace/)).toBeInTheDocument();
+});

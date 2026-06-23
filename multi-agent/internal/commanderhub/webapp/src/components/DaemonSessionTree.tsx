@@ -113,13 +113,26 @@ export function DaemonSessionTree({
   const rootsByDaemon = buildCrossDaemonTree(daemons);
   const daemonByID = new Map(daemons.map(d => [d.daemon_id, d.display_name || d.daemon_id]));
 
-  function renderChildNode(node: SessionNode) {
+  function renderNode(node: SessionNode, depth: number) {
     const { session } = node;
+    // expanded state is keyed by (home_daemon_id, session_id) so a remote
+    // child uses the SAME key whether it's surfaced as a root in its home
+    // daemon (impossible — it's always nested under its parent) or nested
+    // here under a different daemon's parent. The toggle is consistent.
+    const key = sessionTreeKey(session.daemon_id, session.session_id);
+    const isExpanded = !!expanded[key];
+    const hasChildren = node.children.length > 0;
     const isSelected = selected?.daemonID === session.daemon_id && selected.sessionID === session.session_id;
+    const isRoot = depth === 0;
     const isSubagent = session.origin === 'subagent';
 
     let metaText: string;
-    if (node.remote && session.origin === 'agent_task') {
+    let metaClass = 'session-meta';
+    if (node.parentOffline && session.origin === 'agent_task') {
+      const displayName = session.parent_display_name ?? session.parent_id ?? '';
+      metaText = `parent offline · ${displayName}`;
+      metaClass += ' session-meta-muted';
+    } else if (node.remote && session.origin === 'agent_task') {
       const homeName = daemonByID.get(session.daemon_id) ?? session.daemon_id;
       metaText = `remote task · on ${homeName}`;
     } else if (isSubagent) {
@@ -128,51 +141,25 @@ export function DaemonSessionTree({
       metaText = sessionMeta(session, false);
     }
 
-    return (
-      <button
-        key={ownerKey(effectiveOwner(session), session.session_id)}
-        className={`${isSelected ? 'session-row selected' : 'session-row'} subagent-row`}
-        onClick={() => onSelect(session.daemon_id, session.session_id)}
-        type="button"
-      >
-        <span className="session-title">{session.title}</span>
-        <span className="session-meta">{metaText}</span>
-        <span className="session-badges">
-          {session.active_worker ? (
-            <span className="active-worker-badge" title="Daemon has a hot worker cached for this session">
-              active
-            </span>
-          ) : null}
-          <StatusBadge state={session.turn_state} />
-        </span>
-      </button>
-    );
-  }
-
-  function renderRootNode(node: SessionNode, daemonID: string) {
-    const { session } = node;
-    const key = sessionTreeKey(daemonID, session.session_id);
-    const isExpanded = !!expanded[key];
-    const hasChildren = node.children.length > 0;
-    const isSelected = selected?.daemonID === session.daemon_id && selected.sessionID === session.session_id;
-
-    let metaText: string;
-    if (node.parentOffline && session.origin === 'agent_task') {
-      const displayName = session.parent_display_name ?? session.parent_id ?? '';
-      metaText = `parent offline · ${displayName}`;
-    } else {
-      const isSubagent = session.origin === 'subagent';
-      metaText = sessionMeta(session, isSubagent);
-    }
+    // Roots and nested rows share the same structure so descendants of a
+    // remote agent_task (e.g. the slave's own subagents under a remote
+    // child) recurse correctly. Without this, P2's most common shape —
+    // driver → slave agent_task → slave subagents — silently dropped
+    // the subagents (filtered from the slave's root list AND never
+    // rendered under their agent_task parent). #24 P3 review.
+    const rowClass = isRoot
+      ? (isSelected ? 'session-row selected' : 'session-row')
+      : `${isSelected ? 'session-row selected' : 'session-row'} subagent-row`;
+    const rowLineProps = isRoot ? { 'data-testid': 'root-session' } : {};
 
     return (
       <div className="session-node" key={ownerKey(effectiveOwner(session), session.session_id)}>
-        <div className="session-row-line" data-testid="root-session">
+        <div className="session-row-line" {...rowLineProps}>
           {hasChildren ? (
             <button
               aria-label={`${isExpanded ? '收起' : '展开'} subagent sessions: ${session.title}`}
               className="session-toggle"
-              onClick={() => toggle(daemonID, session.session_id)}
+              onClick={() => toggle(session.daemon_id, session.session_id)}
               type="button"
             >
               {isExpanded ? '▾' : '▸'}
@@ -181,12 +168,12 @@ export function DaemonSessionTree({
             <span className="session-toggle-spacer" />
           )}
           <button
-            className={`${isSelected ? 'session-row selected' : 'session-row'}`}
+            className={rowClass}
             onClick={() => onSelect(session.daemon_id, session.session_id)}
             type="button"
           >
             <span className="session-title">{session.title}</span>
-            <span className={`session-meta${node.parentOffline ? ' session-meta-muted' : ''}`}>{metaText}</span>
+            <span className={metaClass}>{metaText}</span>
             <span className="session-badges">
               {session.active_worker ? (
                 <span className="active-worker-badge" title="Daemon has a hot worker cached for this session">
@@ -199,7 +186,7 @@ export function DaemonSessionTree({
         </div>
         {hasChildren && isExpanded ? (
           <div className="session-children">
-            {node.children.map((child) => renderChildNode(child))}
+            {node.children.map((child) => renderNode(child, depth + 1))}
           </div>
         ) : null}
       </div>
@@ -219,7 +206,7 @@ export function DaemonSessionTree({
           {daemon.error ? <p className="daemon-error">{daemon.error}</p> : null}
           <div className="session-list">
             {(rootsByDaemon.get(daemon.daemon_id) ?? []).map((node) =>
-              renderRootNode(node, daemon.daemon_id)
+              renderNode(node, 0)
             )}
           </div>
         </section>
