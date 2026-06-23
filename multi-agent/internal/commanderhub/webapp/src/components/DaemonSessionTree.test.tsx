@@ -158,8 +158,13 @@ test('renders parent-offline note when parent is not in any daemon', () => {
   ];
   render(<DaemonSessionTree daemons={daemons} selected={null} onSelect={() => {}} />);
   // orphan renders as a root (visible without expansion) with the note.
-  expect(screen.getByText(/parent offline/i)).toBeInTheDocument();
+  const offlineText = screen.getByText(/parent offline/i);
+  expect(offlineText).toBeInTheDocument();
   expect(screen.getByText(/old-driver/)).toBeInTheDocument();
+  // The muted CSS class is the user-facing signal distinguishing a stale
+  // parent-offline root from a normal root — pin it so a future refactor
+  // can't silently drop the styling branch.
+  expect(offlineText.className).toContain('session-meta-muted');
 });
 
 test('still nests local subagents that have only parent_id (no parent_agent_id)', () => {
