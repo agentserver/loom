@@ -11,6 +11,7 @@ import (
 	"github.com/yourorg/multi-agent/internal/executor"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/store"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
 // ErrDuplicateTaskRunning is returned by Run when the same task ID is
@@ -209,11 +210,13 @@ func (d *Dispatcher) replayExistingTask(t executor.Task) (executor.Result, error
 		// For chat skills row.Output is the kind-marker JSON envelope (see
 		// the wrapping block in Run above); surface it via WrappedOutput so
 		// the poller forwards it verbatim and doesn't double-JSON-encode it
-		// through the raw-summary fallback. For non-chat skills row.Output
-		// is the raw summary string; WrappedOutput stays empty and the
-		// poller's fallback handles it correctly.
+		// through the raw-summary fallback. Match specifically the envelope
+		// SHAPE (kind ∈ {final, awaiting_user}); plain json.Valid would
+		// also match bash/file/MCP outputs that happen to be JSON, causing
+		// the poller to forward them as objects on replay but as strings
+		// on the normal path.
 		res := executor.Result{Summary: row.Output}
-		if (t.Skill == "" || t.Skill == "chat" || t.Skill == "chat_resume") && json.Valid([]byte(row.Output)) {
+		if (t.Skill == "" || t.Skill == "chat" || t.Skill == "chat_resume") && agentbackend.IsKindMarkerEnvelope(row.Output) {
 			res.WrappedOutput = row.Output
 		}
 		return res, nil
