@@ -208,19 +208,35 @@ func (d *Dispatcher) replayExistingTask(t executor.Task) (executor.Result, error
 	switch row.Status {
 	case "completed":
 		// For chat skills row.Output is the kind-marker JSON envelope (see
-		// the wrapping block in Run above); surface it via WrappedOutput so
-		// the poller forwards it verbatim and doesn't double-JSON-encode it
-		// through the raw-summary fallback. ShouldForwardEnvelopeRaw mirrors
-		// the normal-path Run gate exactly — kind=awaiting_user OR
-		// (kind=final && session_id != "") — so an empty-session_id final
-		// envelope round-trips as a plain summary string on replay too
-		// (matches what Run sends, keeps contract test green, keeps
-		// orchestrator taskOutput happy). #24 P2 review 4.
-		res := executor.Result{Summary: row.Output}
-		if (t.Skill == "" || t.Skill == "chat" || t.Skill == "chat_resume") && agentbackend.ShouldForwardEnvelopeRaw(row.Output) {
-			res.WrappedOutput = row.Output
+		// the wrapping block in Run above). Replay MUST produce the same
+		// executor.Result the normal Run path would have produced for the
+		// same stored output — otherwise the poller's wire-encoding logic
+		// produces different bytes on the duplicate-delivery path than on
+		// the original path. WireResultFromStoredOutput encodes the rule:
+		//
+		//   awaiting_user OR (final && session_id != "") → forward raw via
+		//     WrappedOutput; Summary is irrelevant for those because the
+		//     poller picks WrappedOutput first.
+		//   final with empty session_id → no WrappedOutput; Summary is the
+		//     UNWRAPPED summary string (the same value Run sent as
+		//     res.Summary), so the poller's raw-summary fallback wire-
+		//     encodes it identically.
+		//   non-envelope (non-chat skills, or anything that wasn't wrapped)
+		//     → no WrappedOutput; Summary is row.Output verbatim.
+		//
+		// Bug history: an earlier round set Summary = row.Output for chat
+		// envelopes too, which let the poller JSON-encode the envelope
+		// TEXT into a string like "{\"kind\":\"final\"...}" instead of
+		// sending "ok". #24 P2 review 5.
+		isChatSkill := t.Skill == "" || t.Skill == "chat" || t.Skill == "chat_resume"
+		if isChatSkill {
+			raw, payload := agentbackend.WireResultFromStoredOutput(row.Output)
+			if raw {
+				return executor.Result{Summary: row.Output, WrappedOutput: row.Output}, nil
+			}
+			return executor.Result{Summary: payload}, nil
 		}
-		return res, nil
+		return executor.Result{Summary: row.Output}, nil
 	case "failed":
 		if row.Error == "" {
 			return executor.Result{}, fmt.Errorf("task %s previously failed", t.ID)
