@@ -257,14 +257,14 @@ func (p *Poller) drainPendingAcks(ctx context.Context) {
 			// forwarded raw so info.Result reads as the structured object
 			// downstream code (sessionIDFromMarker, contract tests) expects.
 			// For everything else — including bash/file/MCP outputs that
-			// happen to be valid JSON text — JSON-encode it as a string so
-			// the wire shape matches the normal path. PopPendingAcks does
-			// not return the skill, so the only signal we have is the
-			// envelope SHAPE (kind ∈ {final, awaiting_user}). json.Valid
-			// would over-match and silently swap non-chat JSON outputs from
-			// "JSON string" to "JSON object" on the retry path.
+			// happen to be valid JSON text AND chat envelopes with empty
+			// session_id (the normal path sends those as plain strings) —
+			// JSON-encode the output as a string so the wire shape matches
+			// the normal path on every code route. ShouldForwardEnvelopeRaw
+			// holds the exact contract; see #24 P2 review 4 for the
+			// asymmetry it closes.
 			var result json.RawMessage
-			if agentbackend.IsKindMarkerEnvelope(a.Reason) {
+			if agentbackend.ShouldForwardEnvelopeRaw(a.Reason) {
 				result = json.RawMessage(a.Reason)
 			} else {
 				enc, _ := json.Marshal(a.Reason)

@@ -50,11 +50,19 @@ func TestUnwrapKindMarkerNotAnEnvelope(t *testing.T) {
 	}
 }
 
-func TestIsKindMarkerEnvelopeOnlyMatchesKnownKinds(t *testing.T) {
+func TestShouldForwardEnvelopeRawMatchesNormalPathContract(t *testing.T) {
+	// Mirror the normal-path WrappedOutput gate in dispatch.Run:
+	//   res.AwaitingUser != nil || res.SessionID != ""
+	// On ack/replay paths we only have the stored envelope string, so the
+	// equivalent shape predicate is:
+	//   kind == "awaiting_user"  OR  (kind == "final" && session_id != "")
 	yes := []string{
-		`{"kind":"final","summary":"x","session_id":"s"}`,
-		`{"kind":"final","summary":"","session_id":""}`, // empty-summary final still IS an envelope
+		// awaiting_user: always raw-forward (driver needs the question payload).
 		`{"kind":"awaiting_user","question":{},"session_id":"s"}`,
+		`{"kind":"awaiting_user","question":{}}`,
+		// final + session_id: reverse parent link needs the session id.
+		`{"kind":"final","summary":"x","session_id":"thr-1"}`,
+		`{"kind":"final","summary":"","session_id":"thr-1"}`,
 	}
 	no := []string{
 		"",
@@ -65,15 +73,20 @@ func TestIsKindMarkerEnvelopeOnlyMatchesKnownKinds(t *testing.T) {
 		`"just a string"`,
 		`{"kind":"something_else"}`,
 		`{"summary":"missing kind"}`,
+		// final + empty session_id: downstream gets nothing useful from the
+		// envelope shape. Normal path sends raw "ok"; ack/replay MUST match.
+		// This is the r4-#1 asymmetry guard — see review notes.
+		`{"kind":"final","summary":"ok","session_id":""}`,
+		`{"kind":"final","summary":"ok"}`, // missing session_id key = same case
 	}
 	for _, s := range yes {
-		if !IsKindMarkerEnvelope(s) {
-			t.Errorf("IsKindMarkerEnvelope(%q) = false, want true", s)
+		if !ShouldForwardEnvelopeRaw(s) {
+			t.Errorf("ShouldForwardEnvelopeRaw(%q) = false, want true", s)
 		}
 	}
 	for _, s := range no {
-		if IsKindMarkerEnvelope(s) {
-			t.Errorf("IsKindMarkerEnvelope(%q) = true, want false (would corrupt non-chat JSON outputs)", s)
+		if ShouldForwardEnvelopeRaw(s) {
+			t.Errorf("ShouldForwardEnvelopeRaw(%q) = true, want false (would create wire-shape skew vs normal path)", s)
 		}
 	}
 }
