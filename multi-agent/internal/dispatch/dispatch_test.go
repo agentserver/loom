@@ -474,3 +474,24 @@ func TestDispatcher_ReplayCompletedChatTaskWithNonEnvelopeJSONLeavesWrappedEmpty
 	require.Equal(t, rawJSON, res.Summary)
 	require.Empty(t, res.WrappedOutput, "non-envelope JSON must not be flagged as WrappedOutput on replay")
 }
+
+func TestDispatcher_ReplayCompletedChatTaskWithEmptySessionEnvelopeStringRoundTrip(t *testing.T) {
+	// Asymmetry guard (mirror of poller's empty-session_id ack test).
+	// dispatch.Run sets WrappedOutput only when SessionID != "" or
+	// AwaitingUser != nil; the replay path MUST match. An empty-session_id
+	// final envelope must replay with WrappedOutput="" so the poller's
+	// raw-summary fallback wire-encodes the envelope text as a JSON string,
+	// keeping the wire shape identical across Run and replay.
+	// #24 P2 review 4.
+	s := newStore(t)
+	emptySessionEnvelope := `{"kind":"final","summary":"ok","session_id":""}`
+	_, err := s.InsertIfAbsent(store.Task{ID: "t-replay-empty-sess", Skill: "chat", Prompt: "hi"})
+	require.NoError(t, err)
+	require.NoError(t, s.Complete("t-replay-empty-sess", emptySessionEnvelope))
+
+	d := New(map[string]executor.Executor{"": &stubExec{}}, &stubJournal{}, s, nil)
+	res, err := d.Run(context.Background(), executor.Task{ID: "t-replay-empty-sess", Skill: "chat", Prompt: "hi"})
+	require.NoError(t, err)
+	require.Equal(t, emptySessionEnvelope, res.Summary)
+	require.Empty(t, res.WrappedOutput, "empty-session_id final envelope MUST NOT raw-forward on replay; otherwise wire shape diverges from the normal path")
+}

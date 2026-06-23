@@ -432,3 +432,77 @@ func TestPoller_DrainPendingAckNonChatJSONOutputForwardedAsString(t *testing.T) 
 	}
 	require.Equal(t, rawJSONOutput, asString, "JSON-encoded string must round-trip to the raw bash output")
 }
+
+func TestPoller_DrainPendingAckEmptySessionFinalEnvelopeForwardedAsString(t *testing.T) {
+	// Asymmetry guard: a chat task that completed WITHOUT capturing a
+	// session id (e.g. a backend that returns Result{Summary:"ok"} with no
+	// SessionID) is wrapped by dispatch into
+	//   {"kind":"final","summary":"ok","session_id":""}
+	// The normal completion path sends this as a JSON-encoded STRING (per
+	// the WrappedOutput gate in dispatch.Run). Ack drain (and replay) MUST
+	// match — otherwise the same task arrives at agentserver as an object
+	// on the retry path and the contract assertion result=="ok" breaks
+	// silently. #24 P2 review 4.
+	var taskHandedOut atomic.Bool
+	var mu sync.Mutex
+	var ackedResult json.RawMessage
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/agent/tasks/poll" {
+			if !taskHandedOut.CompareAndSwap(false, true) {
+				w.WriteHeader(204)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`[]`))
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var msg struct {
+			Status string          `json:"status"`
+			Result json.RawMessage `json:"result"`
+		}
+		_ = json.Unmarshal(body, &msg)
+		if msg.Status == "completed" {
+			mu.Lock()
+			ackedResult = msg.Result
+			mu.Unlock()
+		}
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	emptySessionEnvelope := `{"kind":"final","summary":"ok","session_id":""}`
+	s, _ := store.Open(filepath.Join(t.TempDir(), "x.db"))
+	defer s.Close()
+	_, err := s.InsertIfAbsent(store.Task{ID: "t-empty-sess", Skill: "chat", Prompt: "hi"})
+	require.NoError(t, err)
+	require.NoError(t, s.Complete("t-empty-sess", emptySessionEnvelope))
+	require.NoError(t, s.EnqueuePendingAck("t-empty-sess", "completed"))
+
+	d := dispatch.New(map[string]executor.Executor{"": echoExec{}}, stubJ{}, s, nil)
+	p := New(Config{ServerURL: srv.URL, ProxyToken: "ptoken", IdlePoll: 50 * time.Millisecond, ActivePoll: 10 * time.Millisecond}, d, s)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go p.Run(ctx)
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(ackedResult) > 0
+	}, 5*time.Second, 20*time.Millisecond)
+
+	mu.Lock()
+	got := ackedResult
+	mu.Unlock()
+
+	// Must arrive as a JSON-encoded STRING containing the envelope text,
+	// NOT as the raw envelope object. (Sending it raw would yield a
+	// {"kind":"final",...} object on the wire — the asymmetry this pins.)
+	var asString string
+	if err := json.Unmarshal(got, &asString); err != nil {
+		t.Fatalf("empty-session_id final envelope must round-trip as a JSON string on ack drain (matches normal path); got raw=%s", string(got))
+	}
+	require.Equal(t, emptySessionEnvelope, asString, "the envelope text is preserved verbatim, just wire-encoded as a string")
+}

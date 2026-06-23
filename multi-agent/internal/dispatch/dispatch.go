@@ -210,13 +210,14 @@ func (d *Dispatcher) replayExistingTask(t executor.Task) (executor.Result, error
 		// For chat skills row.Output is the kind-marker JSON envelope (see
 		// the wrapping block in Run above); surface it via WrappedOutput so
 		// the poller forwards it verbatim and doesn't double-JSON-encode it
-		// through the raw-summary fallback. Match specifically the envelope
-		// SHAPE (kind ∈ {final, awaiting_user}); plain json.Valid would
-		// also match bash/file/MCP outputs that happen to be JSON, causing
-		// the poller to forward them as objects on replay but as strings
-		// on the normal path.
+		// through the raw-summary fallback. ShouldForwardEnvelopeRaw mirrors
+		// the normal-path Run gate exactly — kind=awaiting_user OR
+		// (kind=final && session_id != "") — so an empty-session_id final
+		// envelope round-trips as a plain summary string on replay too
+		// (matches what Run sends, keeps contract test green, keeps
+		// orchestrator taskOutput happy). #24 P2 review 4.
 		res := executor.Result{Summary: row.Output}
-		if (t.Skill == "" || t.Skill == "chat" || t.Skill == "chat_resume") && agentbackend.IsKindMarkerEnvelope(row.Output) {
+		if (t.Skill == "" || t.Skill == "chat" || t.Skill == "chat_resume") && agentbackend.ShouldForwardEnvelopeRaw(row.Output) {
 			res.WrappedOutput = row.Output
 		}
 		return res, nil
