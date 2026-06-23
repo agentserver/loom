@@ -252,22 +252,29 @@ func (p *Poller) drainPendingAcks(ctx context.Context) {
 		if a.Status == "failed" {
 			body["failure_reason"] = a.Reason
 		} else {
-			// a.Reason is row.Output (see store.PopPendingAcks). For chat
-			// skills it's the kind-marker JSON envelope, which must be
-			// forwarded raw so info.Result reads as the structured object
-			// downstream code (sessionIDFromMarker, contract tests) expects.
-			// For everything else — including bash/file/MCP outputs that
-			// happen to be valid JSON text AND chat envelopes with empty
-			// session_id (the normal path sends those as plain strings) —
-			// JSON-encode the output as a string so the wire shape matches
-			// the normal path on every code route. ShouldForwardEnvelopeRaw
-			// holds the exact contract; see #24 P2 review 4 for the
-			// asymmetry it closes.
+			// a.Reason is row.Output (see store.PopPendingAcks). The same
+			// stored output reached us through three different paths
+			// (Run, replay, ack drain) and MUST produce identical bytes on
+			// the wire. WireResultFromStoredOutput encodes that contract:
+			//
+			//   - awaiting_user OR final+session_id  → forward the envelope
+			//     raw (downstream reads kind/session_id from info.Result).
+			//   - final with empty session_id → UNWRAP to the inner summary
+			//     string, then JSON-encode it. Run's normal path sent
+			//     res.Summary plain ("ok"); ack drain must send "ok" too,
+			//     not "{\"kind\":\"final\",\"summary\":\"ok\"...}".
+			//   - non-envelope (bash/file/MCP, including JSON text) →
+			//     JSON-encode verbatim as a string.
+			//
+			// Bug history: an earlier round forwarded raw based purely on
+			// kind=final|awaiting_user, then later switched to "raw OR
+			// envelope text as string", both wrong for the empty-session
+			// case. #24 P2 review 5.
 			var result json.RawMessage
-			if agentbackend.ShouldForwardEnvelopeRaw(a.Reason) {
-				result = json.RawMessage(a.Reason)
+			if raw, payload := agentbackend.WireResultFromStoredOutput(a.Reason); raw {
+				result = json.RawMessage(payload)
 			} else {
-				enc, _ := json.Marshal(a.Reason)
+				enc, _ := json.Marshal(payload)
 				result = json.RawMessage(enc)
 			}
 			body["result"] = result

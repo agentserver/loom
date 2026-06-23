@@ -433,16 +433,19 @@ func TestPoller_DrainPendingAckNonChatJSONOutputForwardedAsString(t *testing.T) 
 	require.Equal(t, rawJSONOutput, asString, "JSON-encoded string must round-trip to the raw bash output")
 }
 
-func TestPoller_DrainPendingAckEmptySessionFinalEnvelopeForwardedAsString(t *testing.T) {
+func TestPoller_DrainPendingAckEmptySessionFinalEnvelopeUnwrapsToSummary(t *testing.T) {
 	// Asymmetry guard: a chat task that completed WITHOUT capturing a
 	// session id (e.g. a backend that returns Result{Summary:"ok"} with no
 	// SessionID) is wrapped by dispatch into
 	//   {"kind":"final","summary":"ok","session_id":""}
-	// The normal completion path sends this as a JSON-encoded STRING (per
-	// the WrappedOutput gate in dispatch.Run). Ack drain (and replay) MUST
-	// match — otherwise the same task arrives at agentserver as an object
-	// on the retry path and the contract assertion result=="ok" breaks
-	// silently. #24 P2 review 4.
+	// The normal completion path sends res.Summary plain ("ok") — the
+	// WrappedOutput gate skips the empty-session case. Ack drain stored
+	// row.Output as the envelope text; if it forwarded the envelope text
+	// as a JSON string, the wire would carry "{\"kind\":...}" while the
+	// normal path carried "ok" — same task, two different `result` values
+	// depending on whether the PUT succeeded first try. Fix: ack drain
+	// unwraps the envelope's inner summary so the wire shape matches
+	// regardless of retry path. #24 P2 review 5.
 	var taskHandedOut atomic.Bool
 	var mu sync.Mutex
 	var ackedResult json.RawMessage
@@ -497,12 +500,86 @@ func TestPoller_DrainPendingAckEmptySessionFinalEnvelopeForwardedAsString(t *tes
 	got := ackedResult
 	mu.Unlock()
 
-	// Must arrive as a JSON-encoded STRING containing the envelope text,
-	// NOT as the raw envelope object. (Sending it raw would yield a
-	// {"kind":"final",...} object on the wire — the asymmetry this pins.)
+	// Must arrive as a JSON-encoded STRING carrying ONLY the inner
+	// summary ("ok"), matching what dispatch.Run sends on the normal path
+	// for the same task. The envelope text MUST NOT appear on the wire.
 	var asString string
 	if err := json.Unmarshal(got, &asString); err != nil {
-		t.Fatalf("empty-session_id final envelope must round-trip as a JSON string on ack drain (matches normal path); got raw=%s", string(got))
+		t.Fatalf("empty-session_id final envelope must unwrap to a JSON-encoded summary string on ack drain (matches normal path); got raw=%s", string(got))
 	}
-	require.Equal(t, emptySessionEnvelope, asString, "the envelope text is preserved verbatim, just wire-encoded as a string")
+	require.Equal(t, "ok", asString, "ack drain must unwrap the envelope and send the inner summary, not the envelope text")
+}
+
+func TestPoller_PUTFailureThenAckRetryEmptySessionWireShapeIdentical(t *testing.T) {
+	// End-to-end: a chat task whose normal PUT fails (network error or
+	// 5xx) gets queued as a pending ack. The retry MUST send the same
+	// `result` value the normal PUT would have sent. Specifically, for a
+	// task whose backend produced Result{Summary:"ok"} with no session id,
+	// the wire `result` field MUST be the JSON-encoded string "ok" on
+	// BOTH attempts. This regression test exercises that path: it makes
+	// the first PUT fail with 500, then verifies the retry comes through
+	// with `result == "ok"` — matching what the contract test asserts.
+	// #24 P2 review 5.
+	var taskHandedOut atomic.Bool
+	var mu sync.Mutex
+	var attempts []json.RawMessage
+	var failedOnce atomic.Bool
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/agent/tasks/poll" {
+			if !taskHandedOut.CompareAndSwap(false, true) {
+				w.WriteHeader(204)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`[{"task_id":"t-pf","skill":"chat","prompt":"hi","timeout_seconds":30}]`))
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var msg struct {
+			Status string          `json:"status"`
+			Result json.RawMessage `json:"result"`
+		}
+		_ = json.Unmarshal(body, &msg)
+		if msg.Status == "completed" {
+			if failedOnce.CompareAndSwap(false, true) {
+				// Fail the first completion PUT to force the pending-ack path.
+				w.WriteHeader(500)
+				return
+			}
+			mu.Lock()
+			attempts = append(attempts, msg.Result)
+			mu.Unlock()
+		}
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	s, _ := store.Open(filepath.Join(t.TempDir(), "x.db"))
+	defer s.Close()
+	// chatWrappingExec returns Result{Summary:"ok"} with NO session id —
+	// the empty-session case the reviewer flagged.
+	exec := chatWrappingExec{summary: "ok"}
+	d := dispatch.New(map[string]executor.Executor{"": exec, "chat": exec}, stubJ{}, s, nil)
+	p := New(Config{ServerURL: srv.URL, ProxyToken: "ptoken", IdlePoll: 50 * time.Millisecond, ActivePoll: 10 * time.Millisecond}, d, s)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	go p.Run(ctx)
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(attempts) >= 1
+	}, 15*time.Second, 20*time.Millisecond)
+
+	mu.Lock()
+	got := attempts[len(attempts)-1]
+	mu.Unlock()
+
+	// Same contract as the normal path: wire result must be a JSON-encoded
+	// string equal to "ok" — NOT the envelope text, NOT a raw object.
+	var asString string
+	require.NoError(t, json.Unmarshal(got, &asString), "ack retry result must be a JSON string, got raw=%s", string(got))
+	require.Equal(t, "ok", asString, "ack retry must send the inner summary, matching what the normal-path PUT would have sent")
 }

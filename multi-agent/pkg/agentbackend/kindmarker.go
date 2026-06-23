@@ -52,10 +52,8 @@ func UnwrapKindMarker(s string) (isAwaiting bool, finalSummary string, question 
 //     parent-link reads child session_id from info.Result without
 //     depending on the observer relay (#24 P2).
 //   - kind == "final" && session_id == "": treat as a plain summary —
-//     downstream has no use for an empty session id, and the wire shape
-//     must match what the normal path produces (raw summary string) so
-//     consumers like the orchestrator's taskOutput parser and the
-//     agentserver contract test see the same thing on every code path.
+//     callers must unwrap via UnwrapKindMarker and forward the inner
+//     summary string. See WireResultFromStoredOutput for the full rule.
 //
 // This is intentionally narrower than json.Valid: bash/file/MCP outputs
 // that happen to be valid JSON would otherwise be misclassified and
@@ -79,4 +77,47 @@ func ShouldForwardEnvelopeRaw(s string) bool {
 	default:
 		return false
 	}
+}
+
+// WireResultFromStoredOutput converts a stored task output (row.Output /
+// a.Reason from store.PopPendingAcks) into the exact value the slave's
+// normal completion path would have sent as the agentserver `result`
+// field. Three cases, in order:
+//
+//  1. ShouldForwardEnvelopeRaw(stored) → forwardRaw=true; the caller must
+//     send the stored bytes as a raw JSON object (json.RawMessage).
+//  2. The envelope is a final marker with empty session_id (or the
+//     envelope has no inner summary for any reason) → forwardRaw=false;
+//     the caller must wire-encode the unwrapped summary as a JSON string.
+//     This is the case dispatch.Run handles by sending res.Summary plain;
+//     ack/replay paths must produce the same wire shape.
+//  3. stored is not an envelope (bash/file/MCP raw output, including
+//     outputs that happen to be valid JSON text) → forwardRaw=false;
+//     the caller wire-encodes stored as a JSON string.
+//
+// In every non-raw case payload is the string the caller should pass to
+// json.Marshal. This keeps the wire-shape contract in one place: every
+// consumer that turns a stored output into an HTTP `result` field uses
+// this helper, and the three execution paths (Run, replay, ack drain)
+// produce identical bytes for the same logical task.
+func WireResultFromStoredOutput(stored string) (forwardRaw bool, payload string) {
+	if ShouldForwardEnvelopeRaw(stored) {
+		return true, stored
+	}
+	// At this point stored is one of:
+	//   (a) a final envelope with empty session_id — must unwrap to the
+	//       inner summary string so the wire shape matches what Run sent
+	//       (Run only stamps WrappedOutput when session_id is non-empty);
+	//   (b) not an envelope at all — bash/file/MCP raw output, possibly
+	//       valid JSON text. Pass through verbatim.
+	// Re-parse for kind so we correctly handle the empty-summary final
+	// case (unwrap to "" rather than falling through to envelope text).
+	var kw struct {
+		Kind    string `json:"kind"`
+		Summary string `json:"summary"`
+	}
+	if err := json.Unmarshal([]byte(stored), &kw); err == nil && kw.Kind == "final" {
+		return false, kw.Summary
+	}
+	return false, stored
 }

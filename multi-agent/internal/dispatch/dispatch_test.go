@@ -475,14 +475,15 @@ func TestDispatcher_ReplayCompletedChatTaskWithNonEnvelopeJSONLeavesWrappedEmpty
 	require.Empty(t, res.WrappedOutput, "non-envelope JSON must not be flagged as WrappedOutput on replay")
 }
 
-func TestDispatcher_ReplayCompletedChatTaskWithEmptySessionEnvelopeStringRoundTrip(t *testing.T) {
+func TestDispatcher_ReplayCompletedChatTaskWithEmptySessionEnvelopeUnwrapsToSummary(t *testing.T) {
 	// Asymmetry guard (mirror of poller's empty-session_id ack test).
-	// dispatch.Run sets WrappedOutput only when SessionID != "" or
-	// AwaitingUser != nil; the replay path MUST match. An empty-session_id
-	// final envelope must replay with WrappedOutput="" so the poller's
-	// raw-summary fallback wire-encodes the envelope text as a JSON string,
-	// keeping the wire shape identical across Run and replay.
-	// #24 P2 review 4.
+	// dispatch.Run sets res.Summary plain ("ok") for the empty-session
+	// case because WrappedOutput is only stamped when session_id != "".
+	// Replay loads row.Output (the envelope text) and MUST produce the
+	// same executor.Result Run did: Summary="ok", WrappedOutput="".
+	// Without the unwrap, the poller would JSON-encode the envelope
+	// text into a string like "{\"kind\":\"final\"...}", diverging from
+	// the normal path. #24 P2 review 5.
 	s := newStore(t)
 	emptySessionEnvelope := `{"kind":"final","summary":"ok","session_id":""}`
 	_, err := s.InsertIfAbsent(store.Task{ID: "t-replay-empty-sess", Skill: "chat", Prompt: "hi"})
@@ -492,6 +493,6 @@ func TestDispatcher_ReplayCompletedChatTaskWithEmptySessionEnvelopeStringRoundTr
 	d := New(map[string]executor.Executor{"": &stubExec{}}, &stubJournal{}, s, nil)
 	res, err := d.Run(context.Background(), executor.Task{ID: "t-replay-empty-sess", Skill: "chat", Prompt: "hi"})
 	require.NoError(t, err)
-	require.Equal(t, emptySessionEnvelope, res.Summary)
-	require.Empty(t, res.WrappedOutput, "empty-session_id final envelope MUST NOT raw-forward on replay; otherwise wire shape diverges from the normal path")
+	require.Equal(t, "ok", res.Summary, "replay must unwrap the envelope and surface the inner summary, not the envelope text")
+	require.Empty(t, res.WrappedOutput, "empty-session_id final envelope must replay without WrappedOutput so the wire shape matches the normal path")
 }

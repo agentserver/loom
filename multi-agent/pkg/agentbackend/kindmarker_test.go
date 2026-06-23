@@ -50,6 +50,81 @@ func TestUnwrapKindMarkerNotAnEnvelope(t *testing.T) {
 	}
 }
 
+func TestWireResultFromStoredOutputMatchesNormalPath(t *testing.T) {
+	// Every case here pins what dispatch.Run's normal path would have
+	// sent as the agentserver `result` field for the same stored output.
+	// ack-drain and replay paths must produce the identical wire shape.
+	cases := []struct {
+		name       string
+		stored     string
+		wantRaw    bool
+		wantString string // when wantRaw is false, expected unwrapped value
+	}{
+		{
+			name:    "awaiting_user always raw",
+			stored:  `{"kind":"awaiting_user","question":{"kind":"ask_user","question":"?"},"session_id":"thr-1"}`,
+			wantRaw: true,
+		},
+		{
+			name:    "final with session_id raw",
+			stored:  `{"kind":"final","summary":"x","session_id":"thr-1"}`,
+			wantRaw: true,
+		},
+		{
+			// THIS is the case the round-5 review caught. Run would have
+			// sent res.Summary = "ok" plain; ack/replay MUST do the same.
+			name:       "final with empty session_id unwraps to summary",
+			stored:     `{"kind":"final","summary":"ok","session_id":""}`,
+			wantRaw:    false,
+			wantString: "ok",
+		},
+		{
+			name:       "final with empty session_id and empty summary unwraps to empty",
+			stored:     `{"kind":"final","summary":"","session_id":""}`,
+			wantRaw:    false,
+			wantString: "",
+		},
+		{
+			name:       "missing session_id key treated as empty",
+			stored:     `{"kind":"final","summary":"hello"}`,
+			wantRaw:    false,
+			wantString: "hello",
+		},
+		{
+			name:       "non-envelope raw string passes through",
+			stored:     "raw bash output",
+			wantRaw:    false,
+			wantString: "raw bash output",
+		},
+		{
+			name:       "non-envelope JSON passes through verbatim (string-encoded by caller)",
+			stored:     `{"ok":true}`,
+			wantRaw:    false,
+			wantString: `{"ok":true}`,
+		},
+		{
+			name:       "empty input passes through",
+			stored:     "",
+			wantRaw:    false,
+			wantString: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotRaw, gotPayload := WireResultFromStoredOutput(tc.stored)
+			if gotRaw != tc.wantRaw {
+				t.Errorf("raw=%v, want %v", gotRaw, tc.wantRaw)
+			}
+			if !tc.wantRaw && gotPayload != tc.wantString {
+				t.Errorf("payload=%q, want %q", gotPayload, tc.wantString)
+			}
+			if tc.wantRaw && gotPayload != tc.stored {
+				t.Errorf("raw payload=%q, want stored verbatim %q", gotPayload, tc.stored)
+			}
+		})
+	}
+}
+
 func TestShouldForwardEnvelopeRawMatchesNormalPathContract(t *testing.T) {
 	// Mirror the normal-path WrappedOutput gate in dispatch.Run:
 	//   res.AwaitingUser != nil || res.SessionID != ""
