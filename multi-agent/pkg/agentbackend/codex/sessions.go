@@ -353,12 +353,27 @@ func applyLoomMeta(base string, sess *agentbackend.Session) {
 	if m.Schema != loomMetaSchema || m.Kind != "codex" || m.Origin != "agent_task" || m.SessionID != sess.ID {
 		return
 	}
-	if sess.Origin != agentbackend.SessionOriginAgentTask || m.ParentSessionID == "" || sess.ParentID != "" {
+	if sess.Origin != agentbackend.SessionOriginAgentTask {
 		return
 	}
-	sess.ParentID = m.ParentSessionID
-	sess.ParentAgentID = m.ParentAgentID
-	sess.ParentDisplayName = m.ParentDisplayName
+	// Merge each parent field independently. P2's driver-side stamping
+	// (loomOriginMarker) may produce a sidecar with only ParentAgentID +
+	// ParentDisplayName when the driver's codex hasn't written its
+	// current-session marker yet (e.g. driver invoked via `codex exec`).
+	// Gating the whole merge on ParentSessionID dropped those rows in
+	// Commander even though the cross-daemon parent link only needs
+	// ParentAgentID. Each field is only filled when empty so the codex
+	// native subagent's ParentID (set by applyCodexSessionMeta) is never
+	// overwritten. #24 P3 e2e finding.
+	if m.ParentSessionID != "" && sess.ParentID == "" {
+		sess.ParentID = m.ParentSessionID
+	}
+	if m.ParentAgentID != "" && sess.ParentAgentID == "" {
+		sess.ParentAgentID = m.ParentAgentID
+	}
+	if m.ParentDisplayName != "" && sess.ParentDisplayName == "" {
+		sess.ParentDisplayName = m.ParentDisplayName
+	}
 }
 
 func scanCodexSessionWorkingDir(path string) string {

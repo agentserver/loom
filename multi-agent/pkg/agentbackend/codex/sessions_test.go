@@ -733,3 +733,52 @@ func TestTitleFromUserText_TruncatesAtValidUTF8Boundary(t *testing.T) {
 		t.Fatalf("title is not valid UTF-8: %q", title)
 	}
 }
+
+func TestListSessionsLoomMetaMergesPartialParentLink(t *testing.T) {
+	// E2e finding: P2's driver-side stamping (loomOriginMarker) writes a
+	// sidecar carrying ParentAgentID + ParentDisplayName but an EMPTY
+	// ParentSessionID whenever the driver's codex hasn't yet written its
+	// own current-session marker (typical for `codex exec` invocations).
+	// Earlier applyLoomMeta logic gated the entire merge on a non-empty
+	// ParentSessionID, dropping the cross-daemon parent link from
+	// Commander even though only ParentAgentID is actually required
+	// for the owner-aware key. Verify each parent field merges
+	// independently when the destination is empty.
+	home := t.TempDir()
+	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir(), CodexHome: home}, nil)
+	id := "deadbeef-0000-0000-0000-00000000abcd"
+	writeCodexRollout(t, home, id, `{"id":"`+id+`","cwd":"/proj","originator":"codex_exec"}`, "2026-06-23T08:00:00Z")
+	if err := writeLoomMeta(home, loomMeta{
+		Schema:            loomMetaSchema,
+		SessionID:         id,
+		ParentSessionID:   "", // P2's driver may not know its own session id at stamp time
+		ParentAgentID:     "drv-bvl2",
+		ParentDisplayName: "driver-codex-local",
+		Origin:            "agent_task",
+		Kind:              "codex",
+		CreatedAt:         "2026-06-23T08:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := b.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 session, got %d", len(got))
+	}
+	s := got[0]
+	if s.Origin != agentbackend.SessionOriginAgentTask {
+		t.Fatalf("Origin = %q, want agent_task", s.Origin)
+	}
+	if s.ParentAgentID != "drv-bvl2" {
+		t.Fatalf("ParentAgentID = %q, want drv-bvl2 (P3 nesting needs this even when ParentID is unknown)", s.ParentAgentID)
+	}
+	if s.ParentDisplayName != "driver-codex-local" {
+		t.Fatalf("ParentDisplayName = %q, want driver-codex-local", s.ParentDisplayName)
+	}
+	if s.ParentID != "" {
+		t.Fatalf("ParentID should stay empty when sidecar didn't carry one, got %q", s.ParentID)
+	}
+}
