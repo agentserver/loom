@@ -34,8 +34,8 @@ func Open(path string) (*Store, error) {
 	return &Store{db: db, subs: make(map[string][]chan Event)}, nil
 }
 
-func (s *Store) Close() error      { return s.db.Close() }
-func (s *Store) DB() *sql.DB       { return s.db } // test-only accessor
+func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) DB() *sql.DB  { return s.db } // test-only accessor
 
 type Task struct {
 	ID            string
@@ -262,6 +262,14 @@ type PendingAck struct {
 	TaskID string
 	Status string // "completed" | "failed"
 	Reason string // optional
+	// Skill carries the original task's skill so the ack-drain caller can
+	// reproduce the wire-shape contract dispatch.Run established on the
+	// normal path. Without it the drainer would have to guess from Reason
+	// alone, which falsely matches non-chat outputs that happen to look
+	// like chat kind-marker envelopes (e.g. a bash task that prints
+	// {"kind":"final","summary":"x","session_id":""}). Joined from
+	// tasks.skill in PopPendingAcks. #24 P2 review.
+	Skill string
 }
 
 func (s *Store) Recover() error {
@@ -317,7 +325,7 @@ func (s *Store) EnqueuePendingAck(id, status string) error {
 }
 
 func (s *Store) PopPendingAcks() ([]PendingAck, error) {
-	rows, err := s.db.Query(`SELECT pa.task_id, pa.status, COALESCE(t.error,''), COALESCE(t.output,'')
+	rows, err := s.db.Query(`SELECT pa.task_id, pa.status, COALESCE(t.error,''), COALESCE(t.output,''), COALESCE(t.skill,'')
                              FROM pending_acks pa JOIN tasks t ON t.id=pa.task_id
                              ORDER BY pa.enqueued_at ASC`)
 	if err != nil {
@@ -328,7 +336,7 @@ func (s *Store) PopPendingAcks() ([]PendingAck, error) {
 	for rows.Next() {
 		var p PendingAck
 		var output string
-		if err := rows.Scan(&p.TaskID, &p.Status, &p.Reason, &output); err != nil {
+		if err := rows.Scan(&p.TaskID, &p.Status, &p.Reason, &output, &p.Skill); err != nil {
 			return nil, err
 		}
 		if p.Status == "completed" {
@@ -346,9 +354,9 @@ func (s *Store) DeletePendingAck(id string) error {
 
 type SubTaskRow struct {
 	ParentID, NodeID, TargetID, ChildTaskID, Prompt string
-	DependsOn  []string
-	Status, Output, Error string
-	CreatedAt, StartedAt, FinishedAt string
+	DependsOn                                       []string
+	Status, Output, Error                           string
+	CreatedAt, StartedAt, FinishedAt                string
 }
 
 func (s *Store) InsertSubTasks(parentID string, rows []SubTaskRow) error {

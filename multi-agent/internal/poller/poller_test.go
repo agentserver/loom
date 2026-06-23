@@ -583,3 +583,84 @@ func TestPoller_PUTFailureThenAckRetryEmptySessionWireShapeIdentical(t *testing.
 	require.NoError(t, json.Unmarshal(got, &asString), "ack retry result must be a JSON string, got raw=%s", string(got))
 	require.Equal(t, "ok", asString, "ack retry must send the inner summary, matching what the normal-path PUT would have sent")
 }
+
+func TestPoller_DrainPendingAckNonChatOutputLookingLikeEnvelopeNotUnwrapped(t *testing.T) {
+	// The critical bug round-6 caught: a non-chat (e.g. bash) task whose
+	// output happens to be a JSON kind-marker envelope MUST round-trip as
+	// a JSON-encoded STRING through ack drain, matching dispatch.Run's
+	// normal path (Run doesn't wrap non-chat outputs). Treating the
+	// stored text as a chat envelope and unwrapping its summary would
+	// silently corrupt the wire `result` field.
+	//
+	// Setup: bash task whose row.Output is `{"kind":"final","summary":
+	// "build done","session_id":""}` — a fully-valid envelope shape that
+	// the bash script just happened to print. Without the Skill-aware
+	// gate added in #24 P2 review 6, the drainer would unwrap and send
+	// "build done" instead of the raw text. The chat-skill counterpart
+	// (TestPoller_DrainPendingAckEmptySessionFinalEnvelopeUnwrapsToSummary)
+	// proves the unwrap is correct WHEN skill is chat.
+	var taskHandedOut atomic.Bool
+	var mu sync.Mutex
+	var ackedResult json.RawMessage
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/agent/tasks/poll" {
+			if !taskHandedOut.CompareAndSwap(false, true) {
+				w.WriteHeader(204)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`[]`)) // no new tasks; let the drainer run
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var msg struct {
+			Status string          `json:"status"`
+			Result json.RawMessage `json:"result"`
+		}
+		_ = json.Unmarshal(body, &msg)
+		if msg.Status == "completed" {
+			mu.Lock()
+			ackedResult = msg.Result
+			mu.Unlock()
+		}
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	// Envelope-shaped bash output — every bit a valid chat envelope, but
+	// from a non-chat skill. Run's normal path stores it verbatim and
+	// JSON-encodes as string; ack drain MUST do exactly the same.
+	bashOutputThatLooksLikeEnvelope := `{"kind":"final","summary":"build done","session_id":""}`
+	s, _ := store.Open(filepath.Join(t.TempDir(), "x.db"))
+	defer s.Close()
+	require.NoError(t, s.Insert(store.Task{ID: "t-bash-envelope", Skill: "bash", Prompt: "echo"}))
+	require.NoError(t, s.Complete("t-bash-envelope", bashOutputThatLooksLikeEnvelope))
+	require.NoError(t, s.EnqueuePendingAck("t-bash-envelope", "completed"))
+
+	d := dispatch.New(map[string]executor.Executor{"": echoExec{}}, stubJ{}, s, nil)
+	p := New(Config{ServerURL: srv.URL, ProxyToken: "ptoken", IdlePoll: 50 * time.Millisecond, ActivePoll: 10 * time.Millisecond}, d, s)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go p.Run(ctx)
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(ackedResult) > 0
+	}, 5*time.Second, 20*time.Millisecond)
+
+	mu.Lock()
+	got := ackedResult
+	mu.Unlock()
+
+	// Wire shape: a JSON-encoded STRING whose value is the bash output
+	// VERBATIM. Not the unwrapped summary "build done". Not the raw
+	// envelope object.
+	var asString string
+	require.NoError(t, json.Unmarshal(got, &asString),
+		"non-chat envelope-shaped output must wire as a JSON string, got raw=%s", string(got))
+	require.Equal(t, bashOutputThatLooksLikeEnvelope, asString,
+		"non-chat output must NOT be unwrapped; would silently corrupt the wire result")
+}

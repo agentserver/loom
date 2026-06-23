@@ -218,3 +218,30 @@ func TestStore_InsertIfAbsent_DuplicateReturnsFalse(t *testing.T) {
 		t.Fatalf("prompt overwritten on duplicate: %q", row.Prompt)
 	}
 }
+
+func TestPopPendingAcksReturnsSkill(t *testing.T) {
+	// PendingAck must carry the original task's skill so the poller's
+	// drain path can decide whether to apply chat-envelope unwrap logic
+	// or leave non-chat outputs (which may coincidentally look like an
+	// envelope) untouched. #24 P2 review 6.
+	s, _ := Open(filepath.Join(t.TempDir(), "x.db"))
+	defer s.Close()
+
+	require.NoError(t, s.Insert(Task{ID: "t-chat", Skill: "chat", Prompt: "hi"}))
+	require.NoError(t, s.Complete("t-chat", `{"kind":"final","summary":"ok","session_id":""}`))
+	require.NoError(t, s.EnqueuePendingAck("t-chat", "completed"))
+
+	require.NoError(t, s.Insert(Task{ID: "t-bash", Skill: "bash", Prompt: "echo"}))
+	require.NoError(t, s.Complete("t-bash", `{"kind":"final","summary":"x","session_id":""}`))
+	require.NoError(t, s.EnqueuePendingAck("t-bash", "completed"))
+
+	pa, err := s.PopPendingAcks()
+	require.NoError(t, err)
+	require.Len(t, pa, 2)
+	bySkill := map[string]PendingAck{}
+	for _, p := range pa {
+		bySkill[p.TaskID] = p
+	}
+	require.Equal(t, "chat", bySkill["t-chat"].Skill)
+	require.Equal(t, "bash", bySkill["t-bash"].Skill)
+}
