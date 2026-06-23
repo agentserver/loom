@@ -255,26 +255,35 @@ func (p *Poller) drainPendingAcks(ctx context.Context) {
 			// a.Reason is row.Output (see store.PopPendingAcks). The same
 			// stored output reached us through three different paths
 			// (Run, replay, ack drain) and MUST produce identical bytes on
-			// the wire. WireResultFromStoredOutput encodes that contract:
+			// the wire — but the rule depends on whether the original task
+			// was a chat skill or not:
 			//
-			//   - awaiting_user OR final+session_id  → forward the envelope
-			//     raw (downstream reads kind/session_id from info.Result).
-			//   - final with empty session_id → UNWRAP to the inner summary
-			//     string, then JSON-encode it. Run's normal path sent
-			//     res.Summary plain ("ok"); ack drain must send "ok" too,
-			//     not "{\"kind\":\"final\",\"summary\":\"ok\"...}".
-			//   - non-envelope (bash/file/MCP, including JSON text) →
-			//     JSON-encode verbatim as a string.
+			//   chat-shaped skill ("" | "chat" | "chat_resume"):
+			//     dispatch.Run wrapped the output into a kind-marker
+			//     envelope and stored that envelope text. Route via
+			//     WireResultFromStoredOutput which mirrors Run's
+			//     WrappedOutput gate (awaiting_user OR final+session_id →
+			//     forward raw; final with empty session_id → unwrap to
+			//     inner summary; non-envelope → pass through).
 			//
-			// Bug history: an earlier round forwarded raw based purely on
-			// kind=final|awaiting_user, then later switched to "raw OR
-			// envelope text as string", both wrong for the empty-session
-			// case. #24 P2 review 5.
+			//   non-chat skill (bash/file/MCP/register_mcp/...):
+			//     dispatch.Run stored res.Summary verbatim — even when it
+			//     happens to be valid JSON or a kind-marker-looking string
+			//     (e.g. `echo '{"kind":"final","summary":"x"}'`). The
+			//     normal poller path JSON-encodes res.Summary as a string;
+			//     ack drain must do exactly the same. Treating it as a
+			//     chat envelope would silently unwrap a legitimate output
+			//     and corrupt the wire result. #24 P2 review 6.
 			var result json.RawMessage
-			if raw, payload := agentbackend.WireResultFromStoredOutput(a.Reason); raw {
-				result = json.RawMessage(payload)
+			if isChatSkillForAck(a.Skill) {
+				if raw, payload := agentbackend.WireResultFromStoredOutput(a.Reason); raw {
+					result = json.RawMessage(payload)
+				} else {
+					enc, _ := json.Marshal(payload)
+					result = json.RawMessage(enc)
+				}
 			} else {
-				enc, _ := json.Marshal(payload)
+				enc, _ := json.Marshal(a.Reason)
 				result = json.RawMessage(enc)
 			}
 			body["result"] = result
@@ -283,4 +292,18 @@ func (p *Poller) drainPendingAcks(ctx context.Context) {
 			_ = p.s.DeletePendingAck(a.TaskID)
 		}
 	}
+}
+
+// isChatSkillForAck mirrors dispatch.Run's wrap predicate so the ack
+// drainer can decide whether the stored output is a kind-marker envelope
+// to be parsed via WireResultFromStoredOutput, or a raw summary string
+// from a non-chat skill that must round-trip as JSON-encoded text.
+// Single source of truth: dispatch.Run uses `skill == "" || skill ==
+// "chat" || skill == "chat_resume"`; this mirrors that exactly.
+func isChatSkillForAck(skill string) bool {
+	switch skill {
+	case "", "chat", "chat_resume":
+		return true
+	}
+	return false
 }
