@@ -239,6 +239,14 @@ textarea {
   font-size: 12px;
 }
 
+/* Muted variant for parent-offline orphan rows (#24 P3). The base
+   color is already a subtle grey; the muted variant pushes it further
+   to communicate the link is stale. */
+.session-meta-muted {
+  color: #97a0ad;
+  font-style: italic;
+}
+
 .session-badges {
   display: flex;
   flex-wrap: wrap;
