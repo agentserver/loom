@@ -11,6 +11,7 @@ import (
 	"github.com/yourorg/multi-agent/internal/executor"
 	"github.com/yourorg/multi-agent/internal/planner"
 	"github.com/yourorg/multi-agent/internal/store"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
 func (o *Orchestrator) runRoute(ctx context.Context, t executor.Task) (executor.Result, error) {
@@ -141,11 +142,23 @@ func taskOutput(info *agentsdk.TaskInfo) string {
 	if info == nil {
 		return ""
 	}
+	// Peel chat-skill kind:final envelopes before any other parsing: the
+	// slave dispatcher wraps completed chat results as
+	// {"kind":"final","summary":..., "session_id":...} (internal/dispatch.Run)
+	// and the slave poller forwards that envelope verbatim as agentserver
+	// `result` when the session id is present (internal/poller.execute,
+	// #24 P2). Without this unwrap, fanout/route children reduce to "".
 	if info.Output != "" {
+		if _, summary, _ := agentbackend.UnwrapKindMarker(info.Output); summary != "" {
+			return summary
+		}
 		return info.Output
 	}
 	if len(info.Result) == 0 {
 		return ""
+	}
+	if _, summary, _ := agentbackend.UnwrapKindMarker(string(info.Result)); summary != "" {
+		return summary
 	}
 	var obj struct {
 		Output string `json:"output"`

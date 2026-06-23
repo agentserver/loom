@@ -250,3 +250,41 @@ func TestRun_EmitsMasterTaskFailedWithErrorPayload(t *testing.T) {
 	require.NoError(t, json.Unmarshal(last.Payload, &payload))
 	require.Contains(t, payload["error"], "boom")
 }
+
+func TestTaskOutputUnwrapsChatKindFinalEnvelope(t *testing.T) {
+	// The slave poller now forwards chat-skill results as the wrapped
+	// kind:final envelope (#24 P2). Without unwrap, every chat child in a
+	// fanout/route plan reduces to "" because none of the existing JSON
+	// shapes ({"output":...}, JSON string) match.
+	info := &agentsdk.TaskInfo{
+		Status: "completed",
+		Result: json.RawMessage(`{"kind":"final","summary":"the child output","session_id":"thr-7"}`),
+	}
+	if got := taskOutput(info); got != "the child output" {
+		t.Fatalf("taskOutput should unwrap kind:final.summary, got %q", got)
+	}
+}
+
+func TestTaskOutputAwaitingUserDoesNotMasqueradeAsSummary(t *testing.T) {
+	// awaiting_user has no inner summary; we must fall through to the
+	// other parsers (or "") rather than synthesise a fake string.
+	info := &agentsdk.TaskInfo{
+		Status: "completed",
+		Result: json.RawMessage(`{"kind":"awaiting_user","question":{"kind":"ask_user"},"session_id":"thr-7"}`),
+	}
+	if got := taskOutput(info); got != "" {
+		t.Fatalf("awaiting_user envelope must not become a non-empty summary, got %q", got)
+	}
+}
+
+func TestTaskOutputFallbackOutputFieldStillWorks(t *testing.T) {
+	// Existing {"output":...} contract (non-chat skills, e.g. bash) MUST
+	// still parse — the chat unwrap is an addition, not a replacement.
+	info := &agentsdk.TaskInfo{
+		Status: "completed",
+		Result: json.RawMessage(`{"output":"bash stdout"}`),
+	}
+	if got := taskOutput(info); got != "bash stdout" {
+		t.Fatalf("non-chat {output:...} path regressed, got %q", got)
+	}
+}

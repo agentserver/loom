@@ -360,3 +360,75 @@ func TestPoller_DrainPendingAckPreservesJSONEnvelope(t *testing.T) {
 	require.Equal(t, "final", wrapper.Kind)
 	require.Equal(t, "thr-pending", wrapper.SessionID, "session id must survive ack-drain round trip")
 }
+
+func TestPoller_DrainPendingAckNonChatJSONOutputForwardedAsString(t *testing.T) {
+	// Bash/file/MCP outputs that happen to be valid JSON (e.g. {"ok":true})
+	// must round-trip through ack drain the same way they round-trip through
+	// the normal path: as a JSON-encoded STRING. Earlier `json.Valid` short
+	// circuit swapped the wire type to "object", breaking consumers that
+	// json.Unmarshal'd info.Result into a `var raw string`.
+	var taskHandedOut atomic.Bool
+	var mu sync.Mutex
+	var ackedResult json.RawMessage
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/agent/tasks/poll" {
+			if !taskHandedOut.CompareAndSwap(false, true) {
+				w.WriteHeader(204)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`[]`))
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var msg struct {
+			Status string          `json:"status"`
+			Result json.RawMessage `json:"result"`
+		}
+		_ = json.Unmarshal(body, &msg)
+		if msg.Status == "completed" {
+			mu.Lock()
+			ackedResult = msg.Result
+			mu.Unlock()
+		}
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	// A bash task whose stdout happens to be valid JSON text. Stored as raw
+	// text in row.Output (no chat envelope wrapping for non-chat skills).
+	rawJSONOutput := `{"ok":true,"items":[1,2,3]}`
+	s, _ := store.Open(filepath.Join(t.TempDir(), "x.db"))
+	defer s.Close()
+	_, err := s.InsertIfAbsent(store.Task{ID: "t-bash-json", Skill: "bash", Prompt: "echo"})
+	require.NoError(t, err)
+	require.NoError(t, s.Complete("t-bash-json", rawJSONOutput))
+	require.NoError(t, s.EnqueuePendingAck("t-bash-json", "completed"))
+
+	d := dispatch.New(map[string]executor.Executor{"": echoExec{}}, stubJ{}, s, nil)
+	p := New(Config{ServerURL: srv.URL, ProxyToken: "ptoken", IdlePoll: 50 * time.Millisecond, ActivePoll: 10 * time.Millisecond}, d, s)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go p.Run(ctx)
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(ackedResult) > 0
+	}, 5*time.Second, 20*time.Millisecond)
+
+	mu.Lock()
+	got := ackedResult
+	mu.Unlock()
+
+	// Must arrive as a JSON-encoded string, not as the raw object. The
+	// normal-path poller (above, TestPoller_PollsAndCompletes) encodes
+	// summary as a string via json.Marshal; ack drain must match.
+	var asString string
+	if err := json.Unmarshal(got, &asString); err != nil {
+		t.Fatalf("non-chat JSON output must be wire-encoded as a JSON string, got raw=%s", string(got))
+	}
+	require.Equal(t, rawJSONOutput, asString, "JSON-encoded string must round-trip to the raw bash output")
+}

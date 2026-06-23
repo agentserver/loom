@@ -455,3 +455,22 @@ func TestDispatcher_ReplayCompletedNonChatTaskLeavesWrappedOutputEmpty(t *testin
 	require.Equal(t, "raw-bash-output", res.Summary)
 	require.Empty(t, res.WrappedOutput, "non-chat replay must not pretend to have a JSON envelope")
 }
+
+func TestDispatcher_ReplayCompletedChatTaskWithNonEnvelopeJSONLeavesWrappedEmpty(t *testing.T) {
+	// Defensive: if a chat task's row.Output happens to be valid JSON but
+	// not the envelope shape (e.g. a backend that bypassed the wrapping
+	// path, or test seed using a raw JSON string), WrappedOutput MUST stay
+	// empty so the poller's raw-summary fallback kicks in. Otherwise we'd
+	// silently switch the wire type from string to object.
+	s := newStore(t)
+	rawJSON := `{"raw":"output that happens to be json"}`
+	_, err := s.InsertIfAbsent(store.Task{ID: "t-chat-raw-json", Skill: "chat", Prompt: "hi"})
+	require.NoError(t, err)
+	require.NoError(t, s.Complete("t-chat-raw-json", rawJSON))
+
+	d := New(map[string]executor.Executor{"": &stubExec{}}, &stubJournal{}, s, nil)
+	res, err := d.Run(context.Background(), executor.Task{ID: "t-chat-raw-json", Skill: "chat", Prompt: "hi"})
+	require.NoError(t, err)
+	require.Equal(t, rawJSON, res.Summary)
+	require.Empty(t, res.WrappedOutput, "non-envelope JSON must not be flagged as WrappedOutput on replay")
+}

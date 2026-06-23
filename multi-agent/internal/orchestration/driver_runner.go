@@ -291,11 +291,23 @@ func runnerTaskOutput(info *agentsdk.TaskInfo) string {
 	if info == nil {
 		return ""
 	}
+	// Peel chat-skill kind:final envelopes before any other parsing — same
+	// rationale as orchestrator/route.taskOutput. The driver runner is the
+	// driver_fanout path's child-result reducer, and slave chat children
+	// arrive with the wrapped envelope in info.Result whenever they captured
+	// a session id (#24 P2). Without this unwrap, every chat child sub-task
+	// reduces to "" and the reducer hands the planner an empty summary.
 	if info.Output != "" {
+		if _, summary, _ := agentbackend.UnwrapKindMarker(info.Output); summary != "" {
+			return summary
+		}
 		return info.Output
 	}
 	if len(info.Result) == 0 {
 		return ""
+	}
+	if _, summary, _ := agentbackend.UnwrapKindMarker(string(info.Result)); summary != "" {
+		return summary
 	}
 	var obj struct {
 		Output string `json:"output"`

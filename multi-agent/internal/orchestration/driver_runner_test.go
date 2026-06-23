@@ -445,3 +445,35 @@ func TestDriverRunnerMergesChildNodeSystemContextWithOuter(t *testing.T) {
 	require.Contains(t, cleaned, childPreamble, "child preamble lost from cleaned context")
 	require.NotContains(t, merged, "\n\n", "double newline in merged SystemContext")
 }
+
+func TestRunnerTaskOutputUnwrapsChatKindFinalEnvelope(t *testing.T) {
+	// Mirror orchestrator/route TestTaskOutputUnwrapsChatKindFinalEnvelope.
+	// driver_runner is the driver_fanout child reducer.
+	info := &agentsdk.TaskInfo{
+		Status: "completed",
+		Result: json.RawMessage(`{"kind":"final","summary":"reduced output","session_id":"thr-99"}`),
+	}
+	if got := runnerTaskOutput(info); got != "reduced output" {
+		t.Fatalf("runnerTaskOutput should unwrap kind:final.summary, got %q", got)
+	}
+}
+
+func TestRunnerTaskOutputAwaitingUserDoesNotMasqueradeAsSummary(t *testing.T) {
+	info := &agentsdk.TaskInfo{
+		Status: "completed",
+		Result: json.RawMessage(`{"kind":"awaiting_user","question":{"kind":"ask_user"},"session_id":"thr-99"}`),
+	}
+	if got := runnerTaskOutput(info); got != "" {
+		t.Fatalf("awaiting_user envelope must not become a non-empty summary, got %q", got)
+	}
+}
+
+func TestRunnerTaskOutputFallbackOutputFieldStillWorks(t *testing.T) {
+	info := &agentsdk.TaskInfo{
+		Status: "completed",
+		Result: json.RawMessage(`{"output":"bash stdout"}`),
+	}
+	if got := runnerTaskOutput(info); got != "bash stdout" {
+		t.Fatalf("non-chat {output:...} path regressed, got %q", got)
+	}
+}

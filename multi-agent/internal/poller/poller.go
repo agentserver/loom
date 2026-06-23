@@ -253,13 +253,18 @@ func (p *Poller) drainPendingAcks(ctx context.Context) {
 			body["failure_reason"] = a.Reason
 		} else {
 			// a.Reason is row.Output (see store.PopPendingAcks). For chat
-			// skills that is the kind-marker JSON envelope, which must be
+			// skills it's the kind-marker JSON envelope, which must be
 			// forwarded raw so info.Result reads as the structured object
 			// downstream code (sessionIDFromMarker, contract tests) expects.
-			// For raw-string outputs, JSON-encode so it round-trips as a
-			// JSON string. Treat valid-JSON outputs as already-encoded.
+			// For everything else — including bash/file/MCP outputs that
+			// happen to be valid JSON text — JSON-encode it as a string so
+			// the wire shape matches the normal path. PopPendingAcks does
+			// not return the skill, so the only signal we have is the
+			// envelope SHAPE (kind ∈ {final, awaiting_user}). json.Valid
+			// would over-match and silently swap non-chat JSON outputs from
+			// "JSON string" to "JSON object" on the retry path.
 			var result json.RawMessage
-			if json.Valid([]byte(a.Reason)) {
+			if agentbackend.IsKindMarkerEnvelope(a.Reason) {
 				result = json.RawMessage(a.Reason)
 			} else {
 				enc, _ := json.Marshal(a.Reason)
