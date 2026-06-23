@@ -78,7 +78,7 @@ function buildCrossDaemonTree(daemons: DaemonTree[]) {
       child.remote = daemonOfOwnerKey.get(ownerKey(effectiveOwner(child.session), child.session.session_id)) !== parentDaemon;
     }
   }
-  return { rootsByDaemon, byOwnerKey };
+  return rootsByDaemon;
 }
 
 function subagentMeta(session: SessionRow) {
@@ -110,7 +110,7 @@ export function DaemonSessionTree({
     setExpanded((current) => ({ ...current, [key]: !current[key] }));
   }
 
-  const { rootsByDaemon } = buildCrossDaemonTree(daemons);
+  const rootsByDaemon = buildCrossDaemonTree(daemons);
   const daemonByID = new Map(daemons.map(d => [d.daemon_id, d.display_name || d.daemon_id]));
 
   function renderChildNode(node: SessionNode) {
