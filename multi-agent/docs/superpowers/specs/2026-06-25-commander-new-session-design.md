@@ -30,8 +30,9 @@ them straight into the chat composer.
   and is out of scope.
 - No "create empty session server-side" RPC. Empty sessions live only in
   client state until the first turn lands.
-- No active "abandon" / "delete" UX for a pending session beyond reloading
-  the page.
+- No server-side delete for already-submitted sessions. The `×` discard
+  button on the virtual row releases a client-side `'draft'` only; once
+  a turn has been sent, the row is permanent on the backend.
 - No subagent-row `+` button. The `+` is per-daemon only; subagents are
   spawned by the parent session, not created from the UI.
 
@@ -182,9 +183,13 @@ release the draft lock without submitting or reloading.
   (`setPendingSession(prev => prev ? { ...prev, phase: 'submitting' } : null)`)
   and trigger `void loadTree()`. Use a ref mirror `pendingSessionRef`
   (same pattern as `selectedRef`) so the closure inside `sendPrompt`
-  sees the latest value. Once in `'submitting'`, other `+` buttons
-  unlock, detail fetch becomes live, but the virtual row stays in the
-  tree until the real row appears.
+  sees the latest value. Once in `'submitting'`, detail fetch becomes
+  live (the effect re-runs on the phase change and issues a real
+  `apiGet(sessionPath(...))`). Other-daemon `+` buttons STAY disabled
+  (Visibility rule covers both phases — single-slot pending can't hold
+  a second placeholder); they re-enable only after `loadTree` confirms
+  the real row and clears `pendingSession`. The virtual row stays in
+  the tree throughout.
 - On `loadTree` resolution: if `pendingSession` is set AND the resolved
   tree contains a session with that UUID under the same daemon, clear
   `pendingSession` then. This is the **only** path that fully clears
@@ -293,7 +298,7 @@ existing ellipsis + selected state work as-is.)
 | File | Change |
 |---|---|
 | `src/CommanderApp.tsx` | `pendingSession` state (incl. `phase`) + `createPendingSession` + `discardPendingSession` helpers + `pendingDaemonOffline` derive + `composerLocked`/`composerNote` plumbing + `sendPrompt` post-done phase flip + `loadTree`-clears-pending effect |
-| `src/components/DaemonSessionTree.tsx` | `pendingSession`/`onCreateSession`/`onDiscardSession` props; `+` button (disabled when another `'draft'` exists); virtual pending row with phase-aware title + discard `×` (draft only) |
+| `src/components/DaemonSessionTree.tsx` | `pendingSession`/`onCreateSession`/`onDiscardSession` props; `+` button (disabled on other daemons when ANY pending exists, phase-aware title); virtual pending row with phase-aware title + discard `×` (draft only) |
 | `src/components/ChatWorkspace.tsx` | `composerLocked?` + `composerNote?` optional props; disabled predicate updated; `.composer-note` element |
 | `src/components/MobileShell.tsx` | thread `pendingSession`/`onCreateSession`/`onDiscardSession`/`composerLocked`/`composerNote` through; `handleCreate` wrapper that closes Sessions drawer |
 | `src/styles.css` | `.daemon-new-session-btn` (desktop 32px + mobile 44px); `.session-discard-btn` (desktop ~28px + mobile 44px); `.composer-note` (single line, muted) |
