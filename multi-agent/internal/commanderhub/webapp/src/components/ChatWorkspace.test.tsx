@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, expect, test, vi } from 'vitest';
 import { ChatWorkspace } from './ChatWorkspace';
 
@@ -78,4 +78,54 @@ test('keeps prompt when send fails', async () => {
 
   await waitFor(() => expect(onSend).toHaveBeenCalledWith('please retry'));
   expect(textarea.value).toBe('please retry');
+});
+
+test('renders mobileLeading and mobileTrailing slots inside chat-header', () => {
+  render(
+    <ChatWorkspace
+      daemonID="d1"
+      sessionID="s1"
+      session={null}
+      turnState="idle"
+      onSend={vi.fn()}
+      mobileLeading={<button type="button">L</button>}
+      mobileTrailing={<button type="button">R</button>}
+    />,
+  );
+  const header = screen.getByTestId('chat-workspace').querySelector('.chat-header') as HTMLElement | null;
+  expect(header).not.toBeNull();
+  expect(within(header as HTMLElement).getByRole('button', { name: 'L' })).toBeInTheDocument();
+  expect(within(header as HTMLElement).getByRole('button', { name: 'R' })).toBeInTheDocument();
+});
+
+test('empty=true forces composer disabled and shows the no-sessions hint', () => {
+  render(
+    <ChatWorkspace
+      daemonID=""
+      sessionID=""
+      session={null}
+      turnState="idle"
+      onSend={vi.fn()}
+      empty
+    />,
+  );
+  expect(screen.getByLabelText('输入提示词')).toBeDisabled();
+  expect(screen.getByRole('button', { name: '发送' })).toBeDisabled();
+  expect(
+    screen.getByText('No sessions yet — open Sessions to pick one once a daemon appears'),
+  ).toBeInTheDocument();
+});
+
+test('empty=false (default) keeps composer enabled at turnState idle', () => {
+  render(
+    <ChatWorkspace
+      daemonID="d1"
+      sessionID="s1"
+      session={null}
+      turnState="idle"
+      onSend={vi.fn()}
+    />,
+  );
+  expect(screen.getByLabelText('输入提示词')).toBeEnabled();
+  expect(screen.getByRole('button', { name: '发送' })).toBeEnabled();
 });

@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef } from 'react';
+import type { ReactNode } from 'react';
 import { MessageRenderer } from './MessageRenderer';
 import type { SessionDetail, TurnState } from '../api/types';
 
@@ -31,16 +32,24 @@ export function ChatWorkspace({
   session,
   turnState,
   onSend,
+  mobileLeading,
+  mobileTrailing,
+  empty,
 }: {
   daemonID: string;
   sessionID: string;
   session: SessionDetail | null;
   turnState: TurnState | string;
   onSend: (prompt: string) => Promise<void>;
+  mobileLeading?: ReactNode;
+  mobileTrailing?: ReactNode;
+  empty?: boolean;
 }) {
   const title = sessionString(session?.session, 'Title', 'title') || 'Session';
   const cwd = sessionString(session?.session, 'WorkingDir', 'working_dir');
-  const disabled = ['queued', 'answering', 'awaiting_approval'].includes(turnState);
+  const disabled =
+    empty === true ||
+    ['queued', 'answering', 'awaiting_approval'].includes(turnState);
   const messages = session?.messages || [];
   const messageListRef = useRef<HTMLDivElement>(null);
 
@@ -53,24 +62,32 @@ export function ChatWorkspace({
   return (
     <main className="chat-workspace" data-testid="chat-workspace">
       <header className="chat-header">
-        <div>
+        {mobileLeading ? <div className="chat-header-slot">{mobileLeading}</div> : null}
+        <div className="chat-header-title">
           <h1>{title}</h1>
           <p>{cwd}</p>
         </div>
         <span data-testid="turn-status" className="turn-status" role="status" aria-live="polite">
           {displayTurnState(turnState)}
         </span>
+        {mobileTrailing ? <div className="chat-header-slot">{mobileTrailing}</div> : null}
       </header>
       <div data-testid="message-list" className="message-list" ref={messageListRef}>
-        {messages.map((msg, index) => {
-          const role = msg.role || 'assistant';
-          const text = msg.text || '';
-          return (
-            <article key={index} className={`message message-${role}`}>
-              <MessageRenderer text={text} />
-            </article>
-          );
-        })}
+        {empty ? (
+          <p className="message-list-empty">
+            No sessions yet — open Sessions to pick one once a daemon appears
+          </p>
+        ) : (
+          messages.map((msg, index) => {
+            const role = msg.role || 'assistant';
+            const text = msg.text || '';
+            return (
+              <article key={index} className={`message message-${role}`}>
+                <MessageRenderer text={text} />
+              </article>
+            );
+          })
+        )}
       </div>
       <form
         className="composer"
