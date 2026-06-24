@@ -901,7 +901,7 @@ Open `internal/commanderhub/webapp/src/CommanderApp.tsx`. Apply the edits in thi
       })
 ```
 
-3f) Update the desktop render branch (around lines 420-435) to pass the new props to `DaemonSessionTree` and `ChatWorkspace`. Compute `pendingDaemonOffline` and `composerLockProps` first:
+3f) Compute derived state used by BOTH the mobile and desktop branches. Place these `const` declarations between the `if (!tree) return ...` line and the `if (isNonDesktop) {` block:
 
 ```tsx
   const selectedIsPendingDraft = pendingSession != null
@@ -913,11 +913,16 @@ Open `internal/commanderhub/webapp/src/CommanderApp.tsx`. Apply the edits in thi
   const composerNote = composerLocked
     ? 'daemon 离线 — 无法提交,等待 daemon 上线或选择其它会话'
     : undefined;
+  // Suppress FileExplorerPanel fetches when selected is a draft pending
+  // session — the backend has no row for it yet, so /files?path=. would
+  // 404 and surface a misleading error. Passing an empty sessionID
+  // short-circuits the panel's effect (see FileExplorerPanel.tsx — the
+  // useEffect bails when !daemonID || !sessionID).
+  const fileSessionID = selectedIsPendingDraft ? '' : (selected?.sessionID || '');
+  const fileDaemonID = selectedIsPendingDraft ? '' : (selected?.daemonID || '');
 ```
 
-(Place these `const` declarations between the `if (!tree) return ...` line and the `if (isNonDesktop) {` block. They are used by both the mobile and desktop branches.)
-
-3g) Update the mobile branch's `<MobileShell>` call to forward the new props:
+3g) Update the mobile branch's `<MobileShell>` call to forward the new props. Note `disableFiles={selectedIsPendingDraft}`: when true, MobileShell will pass empty daemonID/sessionID into its inner FileExplorerPanel to suppress the 404 fetch (Task 5 wires this).
 
 ```tsx
   if (isNonDesktop) {
@@ -941,6 +946,7 @@ Open `internal/commanderhub/webapp/src/CommanderApp.tsx`. Apply the edits in thi
         onDiscardSession={discardPendingSession}
         composerLocked={composerLocked}
         composerNote={composerNote}
+        disableFiles={selectedIsPendingDraft}
       />
     );
   }
@@ -968,7 +974,7 @@ Open `internal/commanderhub/webapp/src/CommanderApp.tsx`. Apply the edits in thi
         composerLocked={composerLocked}
         composerNote={composerNote}
       />
-      <FileExplorerPanel daemonID={selected?.daemonID || ''} sessionID={selected?.sessionID || ''} />
+      <FileExplorerPanel daemonID={fileDaemonID} sessionID={fileSessionID} />
     </div>
   );
 ```
@@ -995,15 +1001,16 @@ Do **NOT** commit yet. Proceed straight to Task 5 — the commit at the end of T
 
 **Interfaces:**
 - Consumes: Task 4's helpers + state (passed in as props). Task 2's `DaemonSessionTree` props.
-- Produces: `MobileShell` extended with 5 new optional-but-actively-used props:
+- Produces: `MobileShell` extended with 6 new optional-but-actively-used props:
   ```ts
   pendingSession?: { daemonID: string; sessionID: string; phase: 'draft' | 'submitting' } | null;
   onCreateSession?: (daemonID: string) => void;
   onDiscardSession?: (sessionID: string) => void;
   composerLocked?: boolean;
   composerNote?: string;
+  disableFiles?: boolean;  // when true, pass empty IDs into FileExplorerPanel to suppress fetches
   ```
-  The first three flow into `<DaemonSessionTree>` (with `onCreateSession` wrapped to also close the Sessions drawer). The last two flow into `<ChatWorkspace>`.
+  The first three flow into `<DaemonSessionTree>` (with `onCreateSession` wrapped to also close the Sessions drawer). `composerLocked` + `composerNote` flow into `<ChatWorkspace>`. `disableFiles` short-circuits the wrapped `<FileExplorerPanel>` by passing empty IDs into it (the panel's effect bails when `!daemonID || !sessionID`).
 
 - [ ] **Step 1: Edit `MobileShell.tsx`**
 
@@ -1031,6 +1038,7 @@ export function MobileShell({
   onDiscardSession,
   composerLocked,
   composerNote,
+  disableFiles,
 }: {
   daemons: DaemonTree[];
   selected: { daemonID: string; sessionID: string } | null;
@@ -1050,10 +1058,11 @@ export function MobileShell({
   onDiscardSession?: (sessionID: string) => void;
   composerLocked?: boolean;
   composerNote?: string;
+  disableFiles?: boolean;
 }) {
 ```
 
-(The existing types for `selected`, `setSessionsOpen`, `setFilesOpen`, `setPreviewPayload` might differ slightly in your local file — leave them as they currently are; only add the five new lines.)
+(The existing types for `selected`, `setSessionsOpen`, `setFilesOpen`, `setPreviewPayload` might differ slightly in your local file — leave them as they currently are; only add the six new lines.)
 
 1b) Add a wrapper that closes the Sessions drawer after invoking `onCreateSession`. Add this near the existing `handleSelectSession` helper inside the component body:
 
@@ -1096,6 +1105,19 @@ export function MobileShell({
 ```
 
 (Leave the other props — `mobileLeading`, `mobileTrailing`, `empty` — as they are; just add the two new lines.)
+
+1e) Find the `<FileExplorerPanel>` invocation in the Files drawer. Apply the `disableFiles` suppression by passing empty IDs when set, to short-circuit the panel's eager `/files?path=.` fetch:
+
+```tsx
+        <FileExplorerPanel
+          daemonID={disableFiles ? '' : (selected?.daemonID || '')}
+          sessionID={disableFiles ? '' : (selected?.sessionID || '')}
+          renderMode="sheet"
+          onPreview={(payload) => { setPreviewPayload(payload); overlay.open('preview'); }}
+        />
+```
+
+(Leave any other props on `<FileExplorerPanel>` as they are; only the `daemonID` and `sessionID` lines change to use the `disableFiles` ternary.)
 
 - [ ] **Step 2: Run mobile tests to verify pass**
 
