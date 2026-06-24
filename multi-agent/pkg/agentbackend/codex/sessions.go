@@ -256,6 +256,7 @@ func scanCodexSession(path, fallbackID string, withMessages bool, base string) c
 	}
 	defer f.Close()
 
+	var rolloutIsExec bool // OR-accumulated across all session_meta records
 	var lastAssistantText string
 	rd := bufio.NewReader(f)
 	for {
@@ -278,6 +279,9 @@ func scanCodexSession(path, fallbackID string, withMessages bool, base string) c
 				if p.Cwd != "" {
 					res.session.WorkingDir = p.Cwd
 				}
+				// OR-accumulate; a later record without exec fields must not
+				// be able to demote an earlier true.
+				rolloutIsExec = rolloutIsExec || p.Originator == "codex_exec" || p.Source.Kind == "exec"
 				applyCodexSessionMeta(&res.session, p)
 				if res.session.StartedAt.IsZero() && !ts.IsZero() {
 					res.session.StartedAt = ts
@@ -319,7 +323,7 @@ func scanCodexSession(path, fallbackID string, withMessages bool, base string) c
 	if lastAssistantText != "" {
 		res.session.Preview = truncatePreview(lastAssistantText)
 	}
-	applyLoomMeta(base, &res.session)
+	applyLoomMeta(base, &res.session, rolloutIsExec)
 	return res
 }
 
@@ -341,7 +345,17 @@ func applyCodexSessionMeta(sess *agentbackend.Session, p codexMetaPayload) {
 	}
 }
 
-func applyLoomMeta(base string, sess *agentbackend.Session) {
+// applyLoomMeta upgrades sess.Origin to AgentTask iff:
+//   - a valid loom-meta sidecar exists for sess.ID,
+//   - sess is not already classified as Subagent (Gate 1 — codex-native
+//     subagent priority, enshrined by TestListSessionsSidecarDoesNotRelabelUserSession),
+//   - the rollout is exec-mode (Gate 2 — prevents stray sidecars from
+//     upgrading interactive sessions).
+//
+// Parent-link fields (ParentID, ParentAgentID, ParentDisplayName) merge
+// independently — each is only filled when empty so codex-native subagent
+// ParentID set by applyCodexSessionMeta is never overwritten.
+func applyLoomMeta(base string, sess *agentbackend.Session, rolloutIsExec bool) {
 	if base == "" || sess == nil {
 		return
 	}
@@ -352,9 +366,16 @@ func applyLoomMeta(base string, sess *agentbackend.Session) {
 	if m.Schema != loomMetaSchema || m.Kind != "codex" || m.Origin != "agent_task" || m.SessionID != sess.ID {
 		return
 	}
-	if sess.Origin != agentbackend.SessionOriginAgentTask {
+	// Gate 1: codex-native subagent classification is authoritative.
+	if sess.Origin == agentbackend.SessionOriginSubagent {
 		return
 	}
+	// Gate 2: only exec-mode rollouts are eligible for sidecar upgrade.
+	if !rolloutIsExec {
+		return
+	}
+
+	sess.Origin = agentbackend.SessionOriginAgentTask
 	// Merge each parent field independently. P2's driver-side stamping
 	// (loomOriginMarker) may produce a sidecar with only ParentAgentID +
 	// ParentDisplayName when the driver's codex hasn't written its
