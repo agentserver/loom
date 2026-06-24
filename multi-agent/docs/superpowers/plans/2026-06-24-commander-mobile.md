@@ -1826,7 +1826,7 @@ function mockTreeFetch(tree: CommanderTree) {
   // wrong title.
   const titleByOwner = new Map<string, string>();
   const detailKey = (daemonID: string, sessionID: string) =>
-    `${daemonID} ${sessionID}`;
+    `${daemonID}\0${sessionID}`;
   for (const daemon of tree.daemons) {
     for (const s of daemon.sessions || []) {
       titleByOwner.set(detailKey(daemon.daemon_id, s.session_id), s.title);
@@ -2585,24 +2585,58 @@ test('non-desktop: no horizontal overflow at 360/390/430 and 834', async ({ page
 
 test('non-desktop: drawer interactive controls meet 44px hit area', async ({ page }, testInfo) => {
   if (testInfo.project.name === 'chromium-desktop') test.skip();
-  await mockIdleTree(page);
+  // Override the tree so Sessions drawer renders a parent + a subagent
+  // child; this exposes a real `.session-toggle` to assert against. The
+  // mockIdleTree helper covers the single-session default; for this test
+  // we install a richer fixture.
+  await page.route('**/api/commander/tree', (route) => route.fulfill({ json: {
+    daemons: [
+      {
+        ...idleTreePayload.daemons[0],
+        sessions: [
+          { ...idleTreePayload.daemons[0].sessions[0] },
+          {
+            ...idleTreePayload.daemons[0].sessions[0],
+            session_id: 'child-1',
+            title: 'Child subagent session',
+            origin: 'subagent',
+            parent_id: 's1',
+          },
+        ],
+      },
+    ],
+  }}));
   await page.route('**/api/commander/daemons/d1/sessions/s1/files?path=.', (route) => route.fulfill({ json: fileMocks.rootListing }));
   await page.route('**/api/commander/daemons/d1/sessions/s1/files/content?path=go.mod', (route) => route.fulfill({ json: fileMocks.goMod }));
   await page.goto('/commander/');
 
   await page.getByRole('button', { name: 'Sessions' }).click();
   const left = page.getByTestId('drawer-left');
-  for (const row of await left.locator('.session-row').all()) await assertHitArea(row, '.session-row');
-  for (const toggle of await left.locator('.session-toggle').all()) await assertHitArea(toggle, '.session-toggle');
+  // Wait for the session list to actually render so .all() does not silently
+  // return an empty array and turn the assertHitArea loop into a no-op.
+  await expect(left.locator('.session-row').first()).toBeVisible();
+  await expect(left.locator('.session-toggle').first()).toBeVisible();
+  const sessionRows = await left.locator('.session-row').all();
+  expect(sessionRows.length).toBeGreaterThan(0);
+  for (const row of sessionRows) await assertHitArea(row, '.session-row');
+  const sessionToggles = await left.locator('.session-toggle').all();
+  expect(sessionToggles.length).toBeGreaterThan(0);
+  for (const toggle of sessionToggles) await assertHitArea(toggle, '.session-toggle');
   await assertHitArea(left.locator('.mobile-drawer-close'), 'drawer-left close');
   await page.goBack();
 
   await page.getByRole('button', { name: 'Files' }).click();
   const right = page.getByTestId('drawer-right');
-  for (const row of await right.locator('.file-row').all()) await assertHitArea(row, '.file-row');
-  for (const cp of await right.locator('.file-copy-button').all()) await assertHitArea(cp, '.file-copy-button');
+  await expect(right.getByText('go.mod')).toBeVisible();
+  const fileRows = await right.locator('.file-row').all();
+  expect(fileRows.length).toBeGreaterThan(0);
+  for (const row of fileRows) await assertHitArea(row, '.file-row');
+  const copyButtons = await right.locator('.file-copy-button').all();
+  expect(copyButtons.length).toBeGreaterThan(0);
+  for (const cp of copyButtons) await assertHitArea(cp, '.file-copy-button');
   await right.getByRole('button', { name: /打开文件 go.mod/ }).click();
   const sheet = page.getByTestId('file-preview-sheet');
+  await expect(sheet).toBeVisible();
   await assertHitArea(sheet.locator('.file-preview-sheet-close'), 'sheet close');
   await assertHitArea(sheet.locator('.file-preview-sheet-copy'), 'sheet copy');
 });
