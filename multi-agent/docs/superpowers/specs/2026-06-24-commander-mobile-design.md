@@ -78,19 +78,27 @@ Concrete changes:
 
 - **Mobile / tablet portrait only.** Desktop keeps its current "no session
   selected by default" behavior.
-- On the first `loadTree` resolution after mount, if and only if
-  `isNonDesktop && selected == null`, `CommanderApp` auto-selects the
-  first visible session it finds by scanning `tree.daemons` in order and,
-  for each daemon, scanning `daemon.sessions` in order. A session is
-  considered selectable when `DaemonSessionTree` would render it as a
-  top-level (non-subagent) row — i.e. `session.origin !== 'subagent'` or
-  the session has no resolvable `parent_id` inside this tree. If every
-  daemon's top-level sessions are exhausted, the scan falls back to the
-  first subagent session it sees so the user still lands on chat content.
-  Only if no session of any kind exists does the empty state render.
+- Auto-select runs when **either** of two triggers fires and the guard
+  `isNonDesktop && selected == null && !hasAutoSelectedRef.current && a
+  selectable session exists in tree`:
+  1. The first `loadTree` resolution after mount.
+  2. The `isNonDesktop` flag transitions from false → true (e.g. tablet
+     rotated from landscape to portrait, or window narrowed across the
+     1024px breakpoint). Without this trigger a user who opened
+     `/commander/` on desktop without selecting a session would land in
+     the empty state after rotating, even though sessions exist.
+- The scan walks `tree.daemons` in order and, for each daemon, walks
+  `daemon.sessions` in order. A session is considered selectable when
+  `DaemonSessionTree` would render it as a top-level (non-subagent) row
+  — i.e. `session.origin !== 'subagent'` or the session has no resolvable
+  `parent_id` inside this tree. If every daemon's top-level sessions are
+  exhausted, the scan falls back to the first subagent session it sees
+  so the user still lands on chat content. Only if no session of any
+  kind exists does the empty state render.
 - Subsequent `loadTree` refreshes do not auto-select again: an explicit
-  user selection (or an explicit user clear) is never overridden. A
-  `hasAutoSelectedRef` flag in `CommanderApp` guards this.
+  user selection (or an explicit user clear) is never overridden. The
+  `hasAutoSelectedRef` flag in `CommanderApp` guards this and only
+  resets on full logout (`authRequired` false → true).
 - If `isNonDesktop` and no daemon or no session is available, the mobile
   shell renders an empty state inside the chat area: a single line
   ("No sessions yet — open Sessions to pick one once a daemon appears")
@@ -274,11 +282,18 @@ same `{ commanderOverlay: id }` shape.
      history entries. Full-unmount paths call `controller.reset()`
      instead, which leaves history untouched.
    - Auto-select rule (mobile-only, one-shot): keep a
-     `hasAutoSelectedRef = useRef(false)`. After `loadTree` resolves, if
+     `hasAutoSelectedRef = useRef(false)` and a helper
+     `tryAutoSelect(tree)` that, when
      `!hasAutoSelectedRef.current && isNonDesktop && selected == null`,
-     scan `tree.daemons` per the First-screen behavior section to find the
-     first selectable session (top-level first, subagent as fallback). If
-     one is found, call `selectSession(...)` and set the ref to true.
+     scans `tree.daemons` per the First-screen behavior section, calls
+     `selectSession(...)` on the first selectable session (top-level
+     first, subagent as fallback), and sets the ref to true. The helper
+     is invoked from two effects:
+     (a) the `loadTree` `.then(setTree)` branch after each fetch
+         resolves; and
+     (b) an effect keyed on `[isNonDesktop, tree]` that runs whenever
+         the breakpoint transitions to non-desktop or the tree changes
+         while the user is already on non-desktop.
      Resetting the ref happens only on full logout (`authRequired`
      transition from false → true), so a deliberate clear is respected.
    - When `useMediaQuery` is true: render `<MobileShell>`; otherwise render
@@ -459,12 +474,12 @@ Add new tests, each guarded so they run on `chromium-mobile` and
      respond `pending` (no real OAuth round-trip; we never resolve).
    - Assert `documentElement.scrollWidth <= clientWidth` at the project
      viewport.
-   - Assert login button has `boundingBox().height >= 44` (anchor not
-     yet rendered — `login.verifyURL` is undefined until the button
-     click).
+   - Apply `assertHitArea` (the same helper used in test 7, requiring
+     both `height >= 44` and `width >= 44`) to the login button
+     (anchor not yet rendered — `login.verifyURL` is undefined until
+     the button click).
    - Click login button → wait for the verify-URL anchor to become
-     visible; then assert its `boundingBox().height >= 44` and
-     `width >= 44`.
+     visible; apply `assertHitArea` to the anchor.
 
 9. **`desktop: no auto-select preserves current behavior`** (chromium-desktop only)
    - Tree mock returns one daemon with one session. Spy on
@@ -528,8 +543,11 @@ Add new tests, each guarded so they run on `chromium-mobile` and
   at 1023px and desktop grid renders at 1024px; auto-select scans across
   daemons (case A: first daemon has no sessions, second daemon has one →
   second daemon's session is selected; case B: only subagent sessions exist
-  → fallback selects the first subagent; case C: nothing → empty state);
-  empty-tree state disables composer.
+  → fallback selects the first subagent; case C: nothing → empty state;
+  case D: matchMedia transitions from desktop to mobile with `selected ==
+  null` and a session in tree → auto-select fires on the breakpoint
+  change, not only on initial loadTree); empty-tree state disables
+  composer.
 - `MobileDrawer.test.tsx` (new): controlled open/close, ESC closes,
   overlay-click closes, `aria-modal="true"` present; `history.pushState`
   is called on open and `popstate` triggers close.
