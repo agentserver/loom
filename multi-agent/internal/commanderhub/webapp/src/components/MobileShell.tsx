@@ -22,6 +22,12 @@ export function MobileShell({
   setFilesOpen,
   previewPayload,
   setPreviewPayload,
+  pendingSession,
+  onCreateSession,
+  onDiscardSession,
+  composerLocked,
+  composerNote,
+  disableFiles,
 }: {
   daemons: DaemonTree[];
   selected: { daemonID: string; sessionID: string } | null;
@@ -36,6 +42,12 @@ export function MobileShell({
   setFilesOpen: (next: boolean) => void;
   previewPayload: FilePreviewPayload | null;
   setPreviewPayload: (next: FilePreviewPayload | null) => void;
+  pendingSession?: { daemonID: string; sessionID: string; phase: 'draft' | 'submitting' } | null;
+  onCreateSession?: (daemonID: string) => void;
+  onDiscardSession?: (sessionID: string) => void;
+  composerLocked?: boolean;
+  composerNote?: string;
+  disableFiles?: boolean;
 }) {
   useEffect(() => {
     const unsubscribe = overlay.onPop((id) => {
@@ -86,6 +98,12 @@ export function MobileShell({
     closeOverlay('sessions', setSessionsOpen);
   }
 
+  function handleCreate(daemonID: string) {
+    if (!onCreateSession) return;
+    onCreateSession(daemonID);
+    closeOverlay('sessions', setSessionsOpen);
+  }
+
   function handlePreviewRequest() {
     overlay.open('preview');
   }
@@ -126,6 +144,8 @@ export function MobileShell({
         mobileLeading={sessionsBtn}
         mobileTrailing={filesBtn}
         empty={selected == null}
+        composerLocked={composerLocked}
+        composerNote={composerNote}
       />
       <MobileDrawer
         open={sessionsOpen}
@@ -136,7 +156,14 @@ export function MobileShell({
         side="left"
         title="Sessions"
       >
-        <DaemonSessionTree daemons={daemons} selected={selected} onSelect={handleSelectSession} />
+        <DaemonSessionTree
+          daemons={daemons}
+          selected={selected}
+          onSelect={handleSelectSession}
+          pendingSession={pendingSession}
+          onCreateSession={onCreateSession ? handleCreate : undefined}
+          onDiscardSession={onDiscardSession}
+        />
       </MobileDrawer>
       <MobileDrawer
         open={filesOpen}
@@ -148,8 +175,8 @@ export function MobileShell({
         title="Files"
       >
         <FileExplorerPanel
-          daemonID={selected?.daemonID || ''}
-          sessionID={selected?.sessionID || ''}
+          daemonID={disableFiles ? '' : (selected?.daemonID || '')}
+          sessionID={disableFiles ? '' : (selected?.sessionID || '')}
           renderMode="sheet"
           onPreviewRequest={handlePreviewRequest}
           onPreview={handlePreview}

@@ -128,6 +128,13 @@ export function CommanderApp() {
   const [filesOpen, setFilesOpen] = useState(false);
   const [previewPayload, setPreviewPayload] = useState<FilePreviewPayload | null>(null);
 
+  type PendingSession = { daemonID: string; sessionID: string; phase: 'draft' | 'submitting' };
+  const [pendingSession, setPendingSession] = useState<PendingSession | null>(null);
+  const pendingSessionRef = useRef<PendingSession | null>(null);
+  useLayoutEffect(() => {
+    pendingSessionRef.current = pendingSession;
+  });
+
   // Overlay history controller — one instance per CommanderApp lifetime
   const overlay = useOverlayHistory();
 
@@ -201,6 +208,18 @@ export function CommanderApp() {
         // before React flushes the state update. Path (b) useEffect above
         // also covers this case for rotation while tree is loaded.
         tryAutoSelectRef.current(nextTree);
+        // If a pending session's real row has arrived, clear pending so
+        // the virtual row is replaced by the real one.
+        const p = pendingSessionRef.current;
+        if (p != null) {
+          const realRow = nextTree.daemons
+            .find((d) => d.daemon_id === p.daemonID)
+            ?.sessions?.find((s) => s.session_id === p.sessionID);
+          if (realRow) {
+            pendingSessionRef.current = null;
+            setPendingSession(null);
+          }
+        }
       })
       .catch((err: Error) => {
         if (err.message === 'unauthorized') {
@@ -288,6 +307,19 @@ export function CommanderApp() {
       ?.sessions?.find((session) => session.session_id === selected.sessionID);
     setTurnState(row?.turn_state || 'idle');
 
+    // Draft pending — backend has no row yet; render an empty placeholder.
+    if (
+      pendingSession != null
+      && pendingSession.sessionID === selected.sessionID
+      && pendingSession.phase === 'draft'
+    ) {
+      setSessionDetail({
+        session: { ID: selected.sessionID, Title: '新建会话' },
+        messages: [],
+      });
+      return;
+    }
+
     apiGet<SessionDetail>(sessionPath(selected.daemonID, selected.sessionID))
       .then((detail) => {
         if (!cancelled) setSessionDetail(detail);
@@ -299,7 +331,7 @@ export function CommanderApp() {
     return () => {
       cancelled = true;
     };
-  }, [selected, tree]);
+  }, [selected, tree, pendingSession]);
 
   async function sendPrompt(prompt: string) {
     const text = prompt.trim();
@@ -344,6 +376,25 @@ export function CommanderApp() {
         }
       });
       if (turnError) throw turnError;
+      // pending phase flip + loadTree MUST run independent of isCurrentTurn():
+      // the server-side session was created regardless of whether the user has
+      // since navigated to a different session. If we gated this on
+      // isCurrentTurn(), a quick navigation away would leave the virtual row
+      // visible forever and lock other daemons' + buttons.
+      const pendingNow = pendingSessionRef.current;
+      if (
+        pendingNow != null
+        && pendingNow.sessionID === submitted.sessionID
+        && pendingNow.phase === 'draft'
+      ) {
+        const flipped: PendingSession = { ...pendingNow, phase: 'submitting' };
+        pendingSessionRef.current = flipped;
+        setPendingSession(flipped);
+        void loadTree();
+        // Detail fetch is handled by the [selected, tree, pendingSession]
+        // effect when it re-runs on the phase change. We don't issue one here.
+        return;
+      }
       if (!isCurrentTurn()) return;
       const detail = await apiGet<SessionDetail>(sessionPath(submitted.daemonID, submitted.sessionID));
       if (isCurrentTurn()) setSessionDetail(detail);
@@ -375,6 +426,31 @@ export function CommanderApp() {
     setSelected(next);
   }
 
+  function createPendingSession(daemonID: string) {
+    const current = pendingSessionRef.current;
+    if (current != null && current.daemonID !== daemonID) return;
+    if (current != null && current.daemonID === daemonID) {
+      // Re-select existing; no fresh UUID.
+      selectSession(current.daemonID, current.sessionID);
+      return;
+    }
+    const sid = crypto.randomUUID();
+    const next: PendingSession = { daemonID, sessionID: sid, phase: 'draft' };
+    pendingSessionRef.current = next;
+    setPendingSession(next);
+    selectSession(daemonID, sid);
+  }
+
+  function discardPendingSession() {
+    const prev = pendingSessionRef.current;
+    pendingSessionRef.current = null;
+    setPendingSession(null);
+    if (prev != null && selectedRef.current?.sessionID === prev.sessionID) {
+      selectedRef.current = null;
+      setSelected(null);
+    }
+  }
+
   if (authRequired) {
     return (
       <div className="login-shell">
@@ -397,6 +473,23 @@ export function CommanderApp() {
   if (error) return <div className="login-shell">加载失败: {error}</div>;
   if (!tree) return <div className="login-shell">加载中</div>;
 
+  const selectedIsPendingDraft = pendingSession != null
+    && selected?.sessionID === pendingSession.sessionID
+    && pendingSession.phase === 'draft';
+  const pendingDaemonOffline = pendingSession?.phase === 'draft'
+    && (tree?.daemons.find((d) => d.daemon_id === pendingSession.daemonID)?.status ?? 'offline') !== 'ok';
+  const composerLocked = selectedIsPendingDraft && pendingDaemonOffline;
+  const composerNote = composerLocked
+    ? 'daemon 离线 — 无法提交,等待 daemon 上线或选择其它会话'
+    : undefined;
+  // Suppress FileExplorerPanel fetches when selected is a draft pending
+  // session — the backend has no row for it yet, so /files?path=. would
+  // 404 and surface a misleading error. Passing an empty sessionID
+  // short-circuits the panel's effect (see FileExplorerPanel.tsx — the
+  // useEffect bails when !daemonID || !sessionID).
+  const fileSessionID = selectedIsPendingDraft ? '' : (selected?.sessionID || '');
+  const fileDaemonID = selectedIsPendingDraft ? '' : (selected?.daemonID || '');
+
   if (isNonDesktop) {
     return (
       <MobileShell
@@ -413,6 +506,12 @@ export function CommanderApp() {
         setFilesOpen={setFilesOpen}
         previewPayload={previewPayload}
         setPreviewPayload={setPreviewPayload}
+        pendingSession={pendingSession}
+        onCreateSession={createPendingSession}
+        onDiscardSession={discardPendingSession}
+        composerLocked={composerLocked}
+        composerNote={composerNote}
+        disableFiles={selectedIsPendingDraft}
       />
     );
   }
@@ -423,6 +522,9 @@ export function CommanderApp() {
         daemons={tree.daemons}
         selected={selected}
         onSelect={selectSession}
+        pendingSession={pendingSession}
+        onCreateSession={createPendingSession}
+        onDiscardSession={discardPendingSession}
       />
       <ChatWorkspace
         daemonID={selected?.daemonID || ''}
@@ -430,8 +532,10 @@ export function CommanderApp() {
         session={sessionDetail}
         turnState={turnState}
         onSend={sendPrompt}
+        composerLocked={composerLocked}
+        composerNote={composerNote}
       />
-      <FileExplorerPanel daemonID={selected?.daemonID || ''} sessionID={selected?.sessionID || ''} />
+      <FileExplorerPanel daemonID={fileDaemonID} sessionID={fileSessionID} />
     </div>
   );
 }
