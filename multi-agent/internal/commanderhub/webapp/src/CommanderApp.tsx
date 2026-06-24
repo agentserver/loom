@@ -1,9 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { apiGet, isTurnInFlightError, postTurn, sessionPath } from './api/client';
-import type { CommanderTree, SessionDetail, TurnState } from './api/types';
+import type { CommanderTree, SessionDetail, SessionRow, TurnState } from './api/types';
 import { ChatWorkspace } from './components/ChatWorkspace';
 import { DaemonSessionTree } from './components/DaemonSessionTree';
 import { FileExplorerPanel } from './components/FileExplorerPanel';
+import { MobileShell } from './components/MobileShell';
+import type { FilePreviewPayload } from './components/FilePreviewSheet';
+import { useMediaQuery } from './hooks/useMediaQuery';
+import { useOverlayHistory } from './hooks/useOverlayHistory';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -68,6 +72,63 @@ type LoginPollResponse = {
   error?: string;
 };
 
+// effectiveOwner returns a stable owner namespace for a session. For P2+
+// daemons it's the ShortID (owner_agent_id). For pre-P2 daemons that don't
+// carry owner_agent_id yet, fall back to `daemon:<daemon_id>` so two old
+// daemons exporting the same session_id can't collide in the global map.
+function effectiveOwner(s: SessionRow): string {
+  return s.owner_agent_id ?? `daemon:${s.daemon_id}`;
+}
+
+// ownerKey is the global node identity.
+function ownerKey(owner: string, sessionID: string): string {
+  return `${owner}\0${sessionID}`;
+}
+
+// parentOwnerFor returns the namespace under which a child's parent should be
+// resolved.
+function parentOwnerFor(s: SessionRow): string {
+  return s.parent_agent_id ?? effectiveOwner(s);
+}
+
+// pickAutoSession mirrors DaemonSessionTree.buildCrossDaemonTree to find the
+// first "root" session (not a resolved child) from all daemons.
+// Returns { daemonID, sessionID } of the first root, or null if none.
+function pickAutoSession(
+  tree: CommanderTree,
+): { daemonID: string; sessionID: string } | null {
+  const daemons = tree.daemons;
+  const all = daemons.flatMap((d) => d.sessions ?? []);
+  if (all.length === 0) return null;
+
+  // Build owner-keyed set so we can find resolved children (same logic as
+  // DaemonSessionTree.buildCrossDaemonTree — never use a flat Set<session_id>
+  // because cross-daemon session_id collisions would falsely link sessions).
+  const isChildKey = new Set<string>();
+  for (const s of all) {
+    if (s.origin !== 'subagent' && s.origin !== 'agent_task') continue;
+    if (!s.parent_id) continue;
+    const parentKey = ownerKey(parentOwnerFor(s), s.parent_id);
+    // Only mark as child if the parent exists in our set
+    const parentExists = all.some(
+      (p) => ownerKey(effectiveOwner(p), p.session_id) === parentKey,
+    );
+    if (parentExists) {
+      isChildKey.add(ownerKey(effectiveOwner(s), s.session_id));
+    }
+  }
+
+  // Return first root session from any daemon
+  for (const d of daemons) {
+    for (const s of d.sessions ?? []) {
+      if (!isChildKey.has(ownerKey(effectiveOwner(s), s.session_id))) {
+        return { daemonID: s.daemon_id, sessionID: s.session_id };
+      }
+    }
+  }
+  return null;
+}
+
 export function CommanderApp() {
   const [tree, setTree] = useState<CommanderTree | null>(null);
   const [error, setError] = useState<string>('');
@@ -79,12 +140,84 @@ export function CommanderApp() {
   const selectedRef = useRef<typeof selected>(null);
   const turnRequestsRef = useRef(new Map<string, number>());
 
+  // Mobile overlay state — hoisted here so CommanderApp owns it
+  const [sessionsOpen, setSessionsOpen] = useState(false);
+  const [filesOpen, setFilesOpen] = useState(false);
+  const [previewPayload, setPreviewPayload] = useState<FilePreviewPayload | null>(null);
+
+  // Overlay history controller — one instance per CommanderApp lifetime
+  const overlay = useOverlayHistory();
+
+  // One-shot auto-select guard: set to true after the first auto-select,
+  // reset only on full logout (authRequired false → true).
+  const hasAutoSelectedRef = useRef(false);
+  const prevAuthRequiredRef = useRef(authRequired);
+
+  // Reset the auto-select ref on full logout (authRequired false → true).
+  useEffect(() => {
+    if (!prevAuthRequiredRef.current && authRequired) {
+      hasAutoSelectedRef.current = false;
+    }
+    prevAuthRequiredRef.current = authRequired;
+  }, [authRequired]);
+
+  // matchMedia onChange fires BEFORE setMatches — use it to drain overlay
+  // history synchronously when transitioning desktop (matches becomes false).
+  const isNonDesktop = useMediaQuery('(max-width: 1023px)', {
+    onChange(matches) {
+      if (!matches) {
+        // Transitioning to desktop: drain pushed history entries, then flush
+        // overlay UI flags — order matters per spec.
+        overlay.drainForBreakpoint();
+        setSessionsOpen(false);
+        setFilesOpen(false);
+        setPreviewPayload(null);
+      }
+    },
+  });
+
+  // Full unmount cleanup — detaches the popstate listener only.
+  useEffect(() => () => overlay.reset(), [overlay]);
+
+  // tryAutoSelect: one-shot auto-select for mobile. Reads latest state via
+  // refs so it can be called from both the loadTree .then callback and the
+  // useEffect below without stale-closure issues.
+  function tryAutoSelect(nextTree: CommanderTree) {
+    if (hasAutoSelectedRef.current) return;
+    if (!isNonDesktop) return;
+    if (selectedRef.current != null) return;
+    const pick = pickAutoSession(nextTree);
+    if (pick) {
+      hasAutoSelectedRef.current = true;
+      selectedRef.current = pick;
+      setSelected(pick);
+    }
+  }
+
+  // Keep a ref to tryAutoSelect so loadTree's useCallback([]) can call the
+  // latest version without capturing stale closures.
+  const tryAutoSelectRef = useRef(tryAutoSelect);
+  useLayoutEffect(() => {
+    tryAutoSelectRef.current = tryAutoSelect;
+  });
+
+  // Auto-select effect: fires when isNonDesktop or tree changes.
+  // Path (b): covers desktop→mobile rotation while tree is already loaded.
+  useEffect(() => {
+    if (!tree) return;
+    tryAutoSelectRef.current(tree);
+  }, [isNonDesktop, tree]);
+
   const loadTree = useCallback(() => {
     setError('');
     return apiGet<CommanderTree>('/api/commander/tree')
       .then((nextTree) => {
         setTree(nextTree);
         setAuthRequired(false);
+        // Path (a): one-shot auto-select right after the tree arrives,
+        // before React flushes the state update. Path (b) useEffect above
+        // also covers this case for rotation while tree is loaded.
+        tryAutoSelectRef.current(nextTree);
       })
       .catch((err: Error) => {
         if (err.message === 'unauthorized') {
@@ -280,6 +413,27 @@ export function CommanderApp() {
   }
   if (error) return <div className="login-shell">加载失败: {error}</div>;
   if (!tree) return <div className="login-shell">加载中</div>;
+
+  if (isNonDesktop) {
+    return (
+      <MobileShell
+        daemons={tree.daemons}
+        selected={selected}
+        onSelect={selectSession}
+        sessionDetail={sessionDetail}
+        turnState={turnState}
+        onSend={sendPrompt}
+        overlay={overlay}
+        sessionsOpen={sessionsOpen}
+        setSessionsOpen={setSessionsOpen}
+        filesOpen={filesOpen}
+        setFilesOpen={setFilesOpen}
+        previewPayload={previewPayload}
+        setPreviewPayload={setPreviewPayload}
+      />
+    );
+  }
+
   return (
     <div className="commander-shell" data-testid="commander-shell">
       <DaemonSessionTree
