@@ -28,7 +28,8 @@ The full commander workflow is therefore not usable on mobile or tablet.
 - Make `/commander` usable end-to-end on common phone widths (360, 390, 430)
   and tablet portrait widths (768, 834), including the login flow.
 - Preserve the existing three-pane desktop experience on tablet landscape
-  (1024–1180) and larger.
+  (1024–1180) and larger, including the current "no session selected by
+  default" behavior on desktop.
 - Replace `display: none` for critical navigation with touch-accessible
   controls (drawers + sheet) so every desktop action remains reachable, with
   ≥44×44px hit areas for every interactive control on mobile/tablet portrait.
@@ -75,27 +76,61 @@ Concrete changes:
 
 ### First-screen behavior (no empty-chat dead end)
 
-- On mount, after `loadTree` resolves and on every tree refresh while
-  `selected` is null, `CommanderApp` auto-selects the first available session
-  it can find (first daemon's first non-subagent session).
-- If no daemon or no session is available, mobile shell renders an empty
-  state inside the chat area: a single line ("No sessions yet — open Sessions
-  to pick one once a daemon appears") plus the Sessions drawer trigger; the
-  composer renders disabled.
+- **Mobile / tablet portrait only.** Desktop keeps its current "no session
+  selected by default" behavior.
+- On the first `loadTree` resolution after mount, if and only if
+  `isNonDesktop && selected == null && a session exists`, `CommanderApp`
+  auto-selects the first daemon's first non-subagent session.
+- Subsequent `loadTree` refreshes do not auto-select again: an explicit
+  user selection (or an explicit user clear) is never overridden. A
+  `hasAutoSelectedRef` flag in `CommanderApp` guards this.
+- If `isNonDesktop` and no daemon or no session is available, the mobile
+  shell renders an empty state inside the chat area: a single line
+  ("No sessions yet — open Sessions to pick one once a daemon appears")
+  plus the Sessions drawer trigger; the composer renders disabled.
 - `ChatWorkspace` gains an `empty?: boolean` prop. When `empty` is true the
   composer textarea and send button are forced `disabled` regardless of
-  `turnState`. Desktop benefits from the same guard.
+  `turnState`. Mobile shell sets this when `selected == null`; desktop
+  callers leave the prop unset, preserving today's behavior (composer is a
+  visible textarea but submits are no-ops without a session — unchanged).
 
 ### Browser back as drawer/sheet close
 
-- When a drawer or the file preview sheet opens, `MobileShell` calls
-  `history.pushState({ commanderOverlay: <id> }, '')` and listens for
-  `popstate`. A `popstate` whose old state was a commander overlay closes the
-  matching overlay; explicit close (close button, overlay click, ESC) calls
-  `history.back()` to keep the stack consistent.
-- Only one overlay-back entry is pushed per overlay open. The file preview
-  sheet sitting on top of the Files drawer pushes a second entry, so back
-  pops the sheet first, then the drawer.
+`MobileShell` maintains a `overlayStackRef = useRef<OverlayID[]>([])` (where
+`OverlayID` is `'sessions' | 'files' | 'preview'`). The stack mirrors the
+visible overlay order top-to-bottom.
+
+**Opening an overlay**
+1. Push the id onto `overlayStackRef.current`.
+2. Call `history.pushState({ commanderOverlay: id }, '')`. Each open pushes
+   exactly one history entry (preview stacked on Files therefore pushes a
+   second entry).
+3. Flip the corresponding React state (`sessionsOpen` / `filesOpen` /
+   `previewPayload`) to render the overlay.
+
+**Closing via UI (close button, overlay click, ESC, session selection)**
+- If `overlayStackRef.current[length-1]` matches the overlay being closed,
+  call `history.back()` and let the `popstate` handler do the React state
+  update. This keeps the back stack in sync.
+- If the ref is empty (defensive: e.g. SSR-style remount), close the React
+  state directly without touching history.
+
+**Closing via browser Back**
+- The single `popstate` listener pops the top of `overlayStackRef.current`
+  and flips the matching React state to closed. It does **not** inspect
+  the new history state — the local stack is the source of truth for which
+  overlay is on top. It does inspect `event.state`: if the new top is one
+  of our `{ commanderOverlay }` entries and the local stack is empty, the
+  user navigated forward into commander again — ignore.
+- If the local stack is empty when `popstate` fires, the event is a
+  non-overlay navigation; do nothing (the browser leaves commander).
+
+**Edge cases**
+- Page reload: history entries our shell pushed remain in browser history
+  but the ref is empty on mount; the `popstate` handler ignores them per
+  the rule above.
+- Programmatic navigation away (e.g. logout link): no special handling
+  needed — overlays unmount with the route.
 
 ## Component Structure
 
@@ -121,24 +156,32 @@ Concrete changes:
    - Provides ESC, overlay-click, focus trap, and `aria-modal` via Radix.
 
 3. **`FilePreviewSheet.tsx`** — full-viewport Radix Dialog for previewing one
-   file on mobile.
-   - Top bar: back affordance, file path (single-line truncation), "Copy path"
-     button.
+   file on mobile, stacked over the Files drawer.
+   - Props: `open`, `onOpenChange`, `payload: { preview: FileReadResult,
+     fullPath: string, displayPath: string } | null`.
+   - Top bar: back/close affordance (44×44), `displayPath` shown
+     single-line-truncated, "Copy path" button (44×44) that writes
+     `payload.fullPath` to the clipboard.
    - Body: reuses the existing `FilePreview` function from
      `FileExplorerPanel.tsx`, with `max-height: calc(100dvh - 56px)`.
-   - Closing returns to chat. Users reopen via `[Files]`.
+   - Closing (button, ESC, overlay click, browser back) returns to the
+     **Files drawer**, which remains mounted underneath with its expanded
+     directories and scroll position preserved.
 
 ### Modified components
 
 4. **`FileExplorerPanel.tsx`** — add a `renderMode: 'inline' | 'sheet'` prop
    (default `'inline'` so desktop behavior is preserved) plus an
-   `onPreview?: (preview: FileReadResult) => void` callback.
+   `onPreview?: (payload: { preview: FileReadResult, fullPath: string,
+   displayPath: string }) => void` callback.
    - `inline` mode: current behavior. Selecting a file calls the internal
      state-based preview.
    - `sheet` mode: file tree only (no inline preview). Selecting a file
-     invokes `onPreview(result)` while leaving the tree's `directories` /
-     scroll state untouched (state lives in the same component instance, so
-     it persists across overlay open/close).
+     invokes `onPreview({ preview, fullPath, displayPath })`, computing
+     `fullPath` via the existing `fullPath(root, entry.path)` helper and
+     using `entry.path` for `displayPath`. The tree's `directories` /
+     scroll state is left untouched (state lives in the same component
+     instance, so it persists across overlay open/close).
    - The `FilePreview` function stays exported and is consumed by both
      `FileExplorerPanel` (inline) and `FilePreviewSheet` (sheet).
 
@@ -152,17 +195,19 @@ Concrete changes:
      the composer textarea + send button are forced `disabled`.
 
 6. **`CommanderApp.tsx`** — branch on the media query, hoist drawer state,
-   and auto-select.
+   and auto-select on mobile only.
    - Uses `useMediaQuery('(max-width: 1023px)')` (a ~10-line inline hook).
-   - After each `loadTree` resolution, if `selected` is null and any session
-     exists, calls `selectSession` with the first daemon's first non-subagent
-     session. Honors a user-cleared selection (`null` after they manually
-     navigate) only on initial load; subsequent refreshes leave the explicit
-     selection alone.
+   - Auto-select rule (mobile-only, one-shot): keep a
+     `hasAutoSelectedRef = useRef(false)`. After `loadTree` resolves, if
+     `!hasAutoSelectedRef.current && isNonDesktop && selected == null` and
+     a session exists, call `selectSession(...)` and set the ref to true.
+     Resetting the ref happens only on full logout (`authRequired`
+     transition from false → true), so a deliberate clear is respected.
    - When `useMediaQuery` is true: render `<MobileShell>`; otherwise render
      the existing three-pane `<div class="commander-shell">` JSX unchanged.
    - Owns drawer open/close state for Sessions and Files, plus the current
-     `FilePreviewSheet` payload.
+     `FilePreviewSheet` payload (the `{ preview, fullPath, displayPath }`
+     object).
 
 ### Unchanged components
 
@@ -290,9 +335,13 @@ Add new tests, each guarded so they run on `chromium-mobile` and
      called.
 
 4. **`non-desktop: open files drawer, preview file, then preview a second`**
+   - Tree/file mocks return `root: '/root/project'` and `go.mod`,
+     `README.md` entries.
    - Click `[Files]` → file panel renders inside drawer; `go.mod` visible.
    - Click `go.mod` → preview sheet opens stacked over drawer.
-   - Click "Copy path" inside the sheet → clipboard contains the full path.
+   - Click "Copy path" inside the sheet → assert clipboard value equals
+     `/root/project/go.mod` exactly (proves fullPath, not bare filename, is
+     copied).
    - Close sheet → Files drawer is still open, still showing the file list.
    - Click a second file (`README.md`) → preview sheet opens with that
      file's content, no extra drawer reopen needed.
@@ -325,6 +374,12 @@ Add new tests, each guarded so they run on `chromium-mobile` and
    - Mock `POST /api/commander/login` to return a fake `login_id` +
      `verification_uri_complete`; click button; assert the verify-URL link
      becomes visible. (No real OAuth round-trip.)
+
+9. **`desktop: no auto-select preserves current behavior`** (chromium-desktop only)
+   - Tree mock returns one daemon with one session.
+   - Assert chat workspace renders with empty header (no auto-selected
+     session) — matches today's desktop default.
+   - Click the session in the daemon tree → chat now shows the title.
 
 ### Screenshots (snapshot tests)
 - `commander-desktop.png` — kept (existing).
