@@ -45,28 +45,55 @@ creates the session. `list_sessions` surfaces it on the next tree refresh.
 
 ### Pending session state
 
-Because the backend has no record of a fresh session until the first turn
-lands, the frontend models a `pendingSession` placeholder:
+A fresh session passes through **two distinct phases** before it becomes
+a regular tree row:
 
 ```ts
-type PendingSession = { daemonID: string; sessionID: string };
+type PendingSession = {
+  daemonID: string;
+  sessionID: string;
+  phase: 'draft' | 'submitting';
+};
 ```
 
+- `'draft'` — no turn has been submitted yet. The backend has no record
+  of this session. Detail fetch must be skipped (would 404). Composer is
+  the user's entry point. Other-daemon `+` buttons are disabled to
+  prevent the unsubmitted draft from being silently discarded.
+- `'submitting'` — the first turn POST completed with `done`. The
+  backend now has the session. Detail fetch is **enabled** (the row
+  exists server-side; subsequent turn replies should refresh the
+  transcript). Other-daemon `+` buttons are **re-enabled** (the user
+  has committed; no draft to lose). The virtual row stays visible until
+  `loadTree` returns a real row with the same UUID.
+
 This lives in `CommanderApp` state alongside `selected`, `tree`,
-`sessionDetail`. At most one pending session exists at a time across the
-whole app (creating a second `+` while a first pending is unsubmitted
-replaces the first — covered in §Edge cases).
+`sessionDetail`. At most one pending session exists at a time across
+the whole app, but the `'submitting'` phase is non-blocking, so the
+single-slot limit only constrains drafts.
 
 ### Visibility rule
 
 - Daemon `+` button visible only when `daemon.status === 'ok'`. Offline /
   error daemons show their existing status text instead.
-- When a `pendingSession` is set on **any** daemon, every other daemon's
-  `+` button is rendered with `disabled` + `title="先发送或离开当前新会话"`
-  (only the daemon that owns the current pending session can still take
-  a click, and clicking it on that daemon is a no-op since selection
-  already points there). This guarantees an unsubmitted draft can never
-  be silently overwritten by a second `+` tap.
+- When a `pendingSession` is set in `'draft'` phase on **any** daemon,
+  every other daemon's `+` button is rendered with `disabled` +
+  `title="先发送或丢弃当前草稿"` (only the daemon that owns the current
+  draft can still take a click, and clicking it on that daemon is a
+  no-op since selection already points there). This guarantees an
+  unsubmitted draft can never be silently overwritten by a second `+`
+  tap.
+- When the pending session is in `'submitting'` phase, **no `+` buttons
+  are disabled** — the user has already committed; nothing to protect.
+
+### Discard draft
+
+The pending session's virtual tree row carries a small `×` button
+(`.session-discard-btn`, 44×44 on mobile) on its right edge. Clicking
+it clears `pendingSession` and, if `selected.sessionID === pendingSession.sessionID`,
+also clears `selected`. The composer draft text is lost — this is the
+explicit "I want to abandon this" path; the button is the only way to
+release the draft lock without submitting or reloading.
 
 ## Component Changes
 
@@ -75,14 +102,15 @@ replaces the first — covered in §Edge cases).
 
 ### `DaemonSessionTree.tsx`
 
-- New prop `pendingSession?: { daemonID: string; sessionID: string } | null`.
+- New prop `pendingSession?: { daemonID: string; sessionID: string; phase: 'draft' | 'submitting' } | null`.
 - New prop `onCreateSession?: (daemonID: string) => void`.
+- New prop `onDiscardSession?: (sessionID: string) => void`.
 - For each daemon row: when `daemon.status === 'ok'` AND `onCreateSession`
   is provided, render a `<button class="daemon-new-session-btn">` with a
   lucide `Plus` icon at the position currently occupied by the
   `.daemon-status` text. Aria-label: `` `新建 session: ${daemon.display_name || daemon.daemon_id}` ``.
-- The button is rendered `disabled` when `pendingSession != null && pendingSession.daemonID !== daemon.daemon_id`.
-  When disabled it sets `title="先发送或离开当前新会话"` and a CSS `cursor: not-allowed`. Clicking is a no-op.
+- The button is rendered `disabled` when `pendingSession?.phase === 'draft' && pendingSession.daemonID !== daemon.daemon_id`.
+  When disabled it sets `title="先发送或丢弃当前草稿"` and a CSS `cursor: not-allowed`. Clicking is a no-op. `'submitting'` phase does NOT disable other daemons' `+`.
 - The owning-daemon's button (where `pendingSession.daemonID === daemon.daemon_id`)
   remains enabled but clicking it is a no-op (selection already points at
   the existing pending session — re-invoking `onCreateSession` would mint
@@ -92,26 +120,49 @@ replaces the first — covered in §Edge cases).
   unchanged (no `+` button — independent of `pendingSession`).
 - Tree-building: if `pendingSession?.daemonID === daemon.daemon_id` and no
   session with `pendingSession.sessionID` exists in `daemon.sessions`,
-  prepend a virtual row to that daemon's session list. The virtual row uses
-  `title: "新建会话(待提交)"`, `origin: 'user'`, `turn_state: 'idle'`,
-  empty preview, no status badge. Selection / click behavior is the same as
-  any other row (forwards to `onSelect`).
+  prepend a virtual row to that daemon's session list. Title text depends
+  on `phase`:
+  - `'draft'` → `"新建会话(待提交)"`
+  - `'submitting'` → `"新建会话(同步中…)"`
+  The row uses `origin: 'user'`, `turn_state: 'idle'`, empty preview,
+  no status badge. Selection / click behavior is the same as any other
+  row (forwards to `onSelect`).
+- When `phase === 'draft'`, the virtual row also renders a `×` discard
+  button (`.session-discard-btn`, aria-label `丢弃草稿`, 44×44 on mobile,
+  smaller on desktop) at its right edge that calls
+  `onDiscardSession(pendingSession.sessionID)`. The button uses
+  `event.stopPropagation()` so clicking it does not also trigger the
+  row's `onSelect`. No discard button in `'submitting'` phase (the
+  session is real on the server now).
 
 ### `CommanderApp.tsx`
 
 - New state: `const [pendingSession, setPendingSession] = useState<PendingSession | null>(null)`.
 - New helper `createPendingSession(daemonID: string)`:
-  1. If `pendingSessionRef.current != null && pendingSessionRef.current.daemonID !== daemonID`, return early — guard mirrors the disabled-button rule defensively in case the call sneaks past the UI.
-  2. If `pendingSessionRef.current != null && pendingSessionRef.current.daemonID === daemonID`, just re-select the existing pending session and return (no fresh UUID, no draft loss).
-  3. Otherwise: `const sid = crypto.randomUUID()`; `setPendingSession({ daemonID, sessionID: sid })`; `selectSession(daemonID, sid)`.
-- Pass `pendingSession` and `createPendingSession` to both desktop
-  `<DaemonSessionTree>` and `<MobileShell>` (which forwards to its embedded
-  `<DaemonSessionTree>`).
-- Compute `pendingDaemonOffline = pendingSession != null && (tree?.daemons.find(d => d.daemon_id === pendingSession.daemonID)?.status ?? 'offline') !== 'ok'`.
-  When the currently-`selected` session matches `pendingSession`, pass
+  1. If `pendingSessionRef.current?.phase === 'draft' && pendingSessionRef.current.daemonID !== daemonID`, return early — guard mirrors the disabled-button rule defensively in case the call sneaks past the UI.
+  2. If `pendingSessionRef.current?.phase === 'draft' && pendingSessionRef.current.daemonID === daemonID`, just re-select the existing pending session and return (no fresh UUID, no draft loss).
+  3. Otherwise (no pending, or pending is in `'submitting'` phase):
+     `const sid = crypto.randomUUID()`;
+     `setPendingSession({ daemonID, sessionID: sid, phase: 'draft' })`;
+     `selectSession(daemonID, sid)`. Creating a new draft while a
+     `'submitting'` pending exists is allowed — the prior session keeps
+     its virtual row until tree confirms it.
+- New helper `discardPendingSession()`: `setPendingSession(null)`; if
+  `selectedRef.current?.sessionID === <discarded sid>` then
+  `setSelected(null)` + `selectedRef.current = null`.
+- Pass `pendingSession`, `createPendingSession`, and `discardPendingSession`
+  to both desktop `<DaemonSessionTree>` and `<MobileShell>` (which
+  forwards to its embedded `<DaemonSessionTree>`).
+- Detail-fetch short-circuit: skip `apiGet(sessionPath(...))` and set
+  `sessionDetail = { session: { ID: sid, Title: '新建会话' }, messages: [] }`
+  **only when `pendingSession?.phase === 'draft'`**. During `'submitting'`,
+  detail fetch is allowed (backend has the session).
+- Compute `pendingDaemonOffline = pendingSession?.phase === 'draft' && pendingSession != null && (tree?.daemons.find(d => d.daemon_id === pendingSession.daemonID)?.status ?? 'offline') !== 'ok'`.
+  When the currently-`selected` session matches a `'draft'` pending, pass
   `composerLocked={pendingDaemonOffline}` and
   `composerNote={pendingDaemonOffline ? 'daemon 离线 — 无法提交,等待 daemon 上线或选择其它会话' : undefined}`
-  to `ChatWorkspace`.
+  to `ChatWorkspace`. `'submitting'` and non-pending paths leave both
+  props unset.
 - `useEffect` that loads `sessionDetail` for `selected`: skip the
   `apiGet(sessionPath(...))` call when `selected.sessionID === pendingSession?.sessionID`.
   Set `sessionDetail = { session: { ID: sid, Title: '新建会话' }, messages: [] }`
@@ -119,17 +170,23 @@ replaces the first — covered in §Edge cases).
   composer.
 - `sendPrompt`: after a turn completes successfully (`done` state — the
   branch that calls `apiGet(sessionPath(...))` to refresh detail), check
-  whether `submitted.sessionID === pendingSessionRef.current?.sessionID`.
-  If so: trigger `void loadTree()` but **do not** clear `pendingSession`
-  yet. Use a ref mirror `pendingSessionRef` (same pattern as
-  `selectedRef`) so the closure inside `sendPrompt` sees the latest value.
+  whether `submitted.sessionID === pendingSessionRef.current?.sessionID
+  && pendingSessionRef.current.phase === 'draft'`. If so: transition
+  pending to `'submitting'` phase
+  (`setPendingSession(prev => prev ? { ...prev, phase: 'submitting' } : null)`)
+  and trigger `void loadTree()`. Use a ref mirror `pendingSessionRef`
+  (same pattern as `selectedRef`) so the closure inside `sendPrompt`
+  sees the latest value. Once in `'submitting'`, other `+` buttons
+  unlock, detail fetch becomes live, but the virtual row stays in the
+  tree until the real row appears.
 - On `loadTree` resolution: if `pendingSession` is set AND the resolved
   tree contains a session with that UUID under the same daemon, clear
-  `pendingSession` then. This is the **only** path that clears pending
-  on success. If `loadTree` fails or returns without the row, the
-  placeholder stays visible — the user can see their session is still
-  on screen even when the refresh races. (Backend wins races where it
-  already has the row before our turn — same code path.)
+  `pendingSession` then. This is the **only** path that fully clears
+  pending on the success route. If `loadTree` fails or returns without
+  the row, the placeholder stays visible — the user can see their
+  session is still on screen even when the refresh races. (Backend
+  wins races where it already has the row before our turn — same code
+  path.)
 
 ### `ChatWorkspace.tsx`
 
@@ -188,14 +245,16 @@ existing ellipsis + selected state work as-is.)
 
 ## Edge Cases
 
-1. **User taps `+` twice on the same daemon**: the `+` button is rendered
-   `disabled` while any pending session exists (see Visibility rule), so
-   the second tap is a no-op. The first pending UUID and the user's
-   composer draft are preserved.
-2. **User taps `+` on daemon A, then `+` on daemon B**: daemon B's `+`
-   is `disabled` (per Visibility rule). User must submit or navigate
-   away from the pending session first. Daemon A's virtual row stays
-   intact; the existing draft in the composer is preserved.
+1. **User taps `+` twice on the same daemon (draft phase)**: the `+`
+   button on the owning daemon is rendered enabled, but
+   `createPendingSession` no-ops when a same-daemon draft already exists
+   (re-selects instead). Draft and composer text are preserved. The
+   second click does NOT mint a new UUID.
+2. **User taps `+` on daemon A, then `+` on daemon B (draft phase)**:
+   daemon B's `+` is `disabled` (per Visibility rule). User must submit
+   the draft or click `×` on the virtual row to discard it. Daemon A's
+   virtual row stays intact; the existing draft in the composer is
+   preserved.
 3. **User taps `+`, types a prompt, the turn fails (network / 5xx)**:
    `pendingSession` stays set, the row stays visible, the composer retains
    the draft (existing `ChatWorkspace` already does this). User can retry.
@@ -227,11 +286,11 @@ existing ellipsis + selected state work as-is.)
 
 | File | Change |
 |---|---|
-| `src/CommanderApp.tsx` | `pendingSession` state + `createPendingSession` helper + `pendingDaemonOffline` derive + `composerLocked`/`composerNote` plumbing + `sendPrompt` post-done refresh + `loadTree`-clears-pending effect |
-| `src/components/DaemonSessionTree.tsx` | `pendingSession` + `onCreateSession` props; `+` button (with disabled-when-other-pending rule); virtual pending row at top of owning daemon's list |
+| `src/CommanderApp.tsx` | `pendingSession` state (incl. `phase`) + `createPendingSession` + `discardPendingSession` helpers + `pendingDaemonOffline` derive + `composerLocked`/`composerNote` plumbing + `sendPrompt` post-done phase flip + `loadTree`-clears-pending effect |
+| `src/components/DaemonSessionTree.tsx` | `pendingSession`/`onCreateSession`/`onDiscardSession` props; `+` button (disabled when another `'draft'` exists); virtual pending row with phase-aware title + discard `×` (draft only) |
 | `src/components/ChatWorkspace.tsx` | `composerLocked?` + `composerNote?` optional props; disabled predicate updated; `.composer-note` element |
-| `src/components/MobileShell.tsx` | thread `pendingSession`/`onCreateSession`/`composerLocked`/`composerNote` through; `handleCreate` wrapper that closes Sessions drawer |
-| `src/styles.css` | `.daemon-new-session-btn` (desktop 32px + mobile 44px); `.composer-note` (single line, muted) |
+| `src/components/MobileShell.tsx` | thread `pendingSession`/`onCreateSession`/`onDiscardSession`/`composerLocked`/`composerNote` through; `handleCreate` wrapper that closes Sessions drawer |
+| `src/styles.css` | `.daemon-new-session-btn` (desktop 32px + mobile 44px); `.session-discard-btn` (desktop ~28px + mobile 44px); `.composer-note` (single line, muted) |
 | `src/e2e/commander.spec.ts` | 2 new tests (desktop + non-desktop); extend test 7 to include `.daemon-new-session-btn` |
 | `src/components/DaemonSessionTree.test.tsx` | new cases per Test Strategy |
 | `src/components/ChatWorkspace.test.tsx` | new cases per Test Strategy |
@@ -244,13 +303,19 @@ existing ellipsis + selected state work as-is.)
 - `DaemonSessionTree.test.tsx` — add cases:
   - `+` button renders on `ok` daemon when `onCreateSession` provided.
   - `+` button hidden on non-`ok` daemon (status text shown instead).
-  - `+` button on **other** daemons is `disabled` when `pendingSession`
-    is set elsewhere; clicking the disabled button does not call
-    `onCreateSession`.
+  - `+` button on **other** daemons is `disabled` when a `'draft'`-phase
+    `pendingSession` is set elsewhere; clicking the disabled button does
+    not call `onCreateSession`.
+  - `+` button on other daemons is **enabled** when the only pending
+    session is `'submitting'` phase.
   - `pendingSession` matching a daemon inserts a virtual row at top of
-    that daemon's session list.
-  - clicking the virtual row calls `onSelect(daemonID, pendingSession.sessionID)`.
-  - clicking the `+` calls `onCreateSession(daemonID)`.
+    that daemon's session list. `'draft'` row shows the `×` discard
+    button; `'submitting'` row does not.
+  - Title text differs between `'draft'` and `'submitting'` phases.
+  - Clicking the virtual row calls `onSelect(daemonID, pendingSession.sessionID)`.
+  - Clicking the `+` calls `onCreateSession(daemonID)`.
+  - Clicking the `×` discard button calls `onDiscardSession(sessionID)`
+    and does NOT call `onSelect` (event.stopPropagation works).
 
 - `ChatWorkspace.test.tsx` — add cases:
   - `composerLocked=true` forces textarea + send button `disabled`
@@ -260,12 +325,21 @@ existing ellipsis + selected state work as-is.)
 
 - `CommanderApp.mobile.test.tsx` — add cases:
   - mobile shell + open Sessions drawer + click `+` → `selected` updates
-    to a new UUID, `pendingSession` set, drawer closes, `ChatWorkspace`
-    renders empty messages + active composer (no detail fetch issued).
-  - re-clicking the same daemon's `+` while pending exists does NOT mint
-    a fresh UUID (selectedRef stays equal).
-  - daemon-status change to non-`ok` while pending → composer becomes
-    `disabled` and `.composer-note` appears with the offline text.
+    to a new UUID, `pendingSession` set with `phase: 'draft'`, drawer
+    closes, `ChatWorkspace` renders empty messages + active composer
+    (no detail fetch issued).
+  - re-clicking the same daemon's `+` while a draft pending exists does
+    NOT mint a fresh UUID (selectedRef stays equal).
+  - daemon-status change to non-`ok` while in `'draft'` phase → composer
+    becomes `disabled` and `.composer-note` appears with the offline
+    text.
+  - first turn submitted successfully → `pendingSession.phase` flips to
+    `'submitting'`, the next `apiGet(sessionPath(...))` IS issued
+    (detail fetch live), other-daemon `+` buttons re-enable.
+  - subsequent `loadTree` returning the real row → `pendingSession`
+    cleared, virtual row gone, real row visible.
+  - clicking `×` on a `'draft'` virtual row clears `pendingSession`
+    and `selected`.
 
 ### Playwright e2e (`commander.spec.ts`)
 
@@ -302,7 +376,9 @@ inside the Sessions drawer.
 | Click `+` creates pending session + selects it + opens composer | `CommanderApp.createPendingSession` | unit + e2e |
 | Empty `ChatWorkspace` rendered for pending session, no 404 fetch | `CommanderApp` detail-load short-circuit | unit + e2e |
 | First turn POST creates real session server-side, tree refresh swaps placeholder (placeholder NOT cleared before tree confirms the row) | `sendPrompt` post-done branch + `loadTree` resolution clear | e2e flow test |
-| Second `+` while pending exists is blocked (no draft loss) | DaemonSessionTree `disabled` rule + CommanderApp.createPendingSession guard | unit |
+| Second `+` while a `'draft'` pending exists is blocked (no draft loss); `'submitting'` does NOT block | DaemonSessionTree `disabled` rule + CommanderApp.createPendingSession guard | unit |
+| `×` discard button releases the draft lock without submitting | DaemonSessionTree row + CommanderApp.discardPendingSession | unit |
+| First-turn success flips pending to `'submitting'`: detail fetch goes live, other `+` unlocks, virtual row stays until tree confirms | sendPrompt phase flip + loadTree resolution | unit + e2e |
 | Pending-daemon-goes-offline locks composer + shows note | CommanderApp computes `pendingDaemonOffline`, passes `composerLocked` + `composerNote` to ChatWorkspace | unit |
 | Mobile: tap `+` in drawer closes drawer, reveals chat | `MobileShell.handleCreate` wrapper | mobile e2e |
 | All interactive controls on `< 1024px` retain ≥44×44 hit areas | CSS + extended test 7 | hit-area e2e |
@@ -324,5 +400,5 @@ inside the Sessions drawer.
 - Per-session working_dir picker (requires protocol change to add
   `WorkingDir` to `SessionTurnArgs` and slave handler honoring it).
 - Per-session title rename (requires backend `rename_session` command).
-- Pending-session "X" / cancel button.
-- Multi-pending support (one per daemon vs one global).
+- Persisting drafts across page reloads (e.g. localStorage).
+- Multi-draft support (one per daemon vs one global).
