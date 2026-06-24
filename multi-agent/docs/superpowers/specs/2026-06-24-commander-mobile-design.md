@@ -131,6 +131,16 @@ visible overlay order top-to-bottom.
   the rule above.
 - Programmatic navigation away (e.g. logout link): no special handling
   needed — overlays unmount with the route.
+- Breakpoint crossing (e.g. tablet rotated to landscape, `< 1024px →
+  ≥ 1024px`) or any `MobileShell` unmount: a single
+  `useEffect(..., [])` cleanup pops every commander-pushed history entry
+  by calling `history.back()` once per id remaining in
+  `overlayStackRef.current` before the shell unmounts. Concretely the
+  effect captures the stack length at cleanup time and calls
+  `window.history.go(-len)` once — equivalent to N back steps but does
+  not require waiting on intermediate `popstate` events. After the cleanup
+  fires, the ref is cleared and the React state for each overlay is reset
+  to closed. The user never has to press Back to consume phantom entries.
 
 ## Component Structure
 
@@ -242,9 +252,11 @@ visible overlay order top-to-bottom.
 - Header: title "Files" + close (×) button (44×44).
 - Body: `<FileExplorerPanel renderMode="sheet" onPreview={…}>`. Only the file
   tree and any error message render here; selecting a directory expands in
-  place. Selecting a file calls `onPreview(readResult)` which opens
-  `<FilePreviewSheet>` **stacked on top of the Files drawer**; the drawer
-  stays mounted so its expanded directories and scroll position survive.
+  place. Selecting a file calls
+  `onPreview({ preview, fullPath, displayPath })` (signature defined in the
+  Component Structure section) which opens `<FilePreviewSheet>` **stacked on
+  top of the Files drawer**; the drawer stays mounted so its expanded
+  directories and scroll position survive.
 - Closing the preview sheet returns the user to the Files drawer in its
   prior state, ready to pick another file.
 - Copy-path button works as today and continues to use the existing
@@ -376,10 +388,28 @@ Add new tests, each guarded so they run on `chromium-mobile` and
      becomes visible. (No real OAuth round-trip.)
 
 9. **`desktop: no auto-select preserves current behavior`** (chromium-desktop only)
-   - Tree mock returns one daemon with one session.
-   - Assert chat workspace renders with empty header (no auto-selected
-     session) — matches today's desktop default.
-   - Click the session in the daemon tree → chat now shows the title.
+   - Tree mock returns one daemon with one session. Spy on
+     `GET /api/commander/daemons/d1/sessions/s1`.
+   - Assert chat header renders with its current no-selection fallback
+     (title text `Session`, working-dir line empty) — matches today's
+     desktop default.
+   - Assert the session detail endpoint has **not** been requested.
+   - Click the session in the daemon tree → chat header now shows the
+     mock session title and the detail endpoint has been requested.
+
+10. **`non-desktop: resizing to desktop while overlay is open does not
+    leave phantom history`** (chromium-mobile only; uses
+    `page.setViewportSize`)
+    - Auto-selected first session is visible.
+    - Click `[Sessions]` → drawer open.
+    - Resize viewport to `1280×900` → `MobileShell` unmounts, desktop
+      three-pane shell renders.
+    - Record `window.history.length` after resize.
+    - Trigger one `page.goBack()` → assert the page navigates away from
+      `/commander/` (or pops out of the test fixture), not just closes
+      something invisible. Equivalent assertion: after `goBack`,
+      `window.location.pathname` differs from the pre-back value, proving
+      no phantom overlay entry remained.
 
 ### Screenshots (snapshot tests)
 - `commander-desktop.png` — kept (existing).
