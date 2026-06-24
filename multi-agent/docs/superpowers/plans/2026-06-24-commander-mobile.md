@@ -469,8 +469,7 @@ test('renders mobileLeading and mobileTrailing slots inside chat-header', () => 
       mobileTrailing={<button type="button">R</button>}
     />,
   );
-  const header = screen.getByRole('banner', { hidden: true })
-    ?? screen.getByTestId('chat-workspace').querySelector('.chat-header');
+  const header = screen.getByTestId('chat-workspace').querySelector('.chat-header') as HTMLElement | null;
   expect(header).not.toBeNull();
   expect(within(header as HTMLElement).getByRole('button', { name: 'L' })).toBeInTheDocument();
   expect(within(header as HTMLElement).getByRole('button', { name: 'R' })).toBeInTheDocument();
@@ -667,7 +666,7 @@ test('renderMode="sheet" calls onPreview with { preview, fullPath, displayPath }
         entries: [{ name: 'go.mod', path: 'go.mod', kind: 'file', size: 12 }],
       }), { status: 200 });
     }
-    if (url.includes('/file?path=go.mod')) {
+    if (url.includes('/files/content?path=go.mod')) {
       return new Response(JSON.stringify({ path: 'go.mod', size: 12, content: 'module x' }), { status: 200 });
     }
     return new Response('not found', { status: 404 });
@@ -739,16 +738,59 @@ test('renderMode="sheet" preserves directory expansion across external rerender 
 Run from `internal/commanderhub/webapp/`: `npm test -- src/components/FileExplorerPanel.test.tsx`
 Expected: FAIL — `renderMode` / `onPreview` not accepted; `expect(screen.queryByText('No file selected'))` triggers because today the inline preview always renders.
 
-- [ ] **Step 3: Update `FileExplorerPanel.tsx`**
+- [ ] **Step 3: Rewrite `FileExplorerPanel.tsx`**
 
-Edit `internal/commanderhub/webapp/src/components/FileExplorerPanel.tsx`:
+Replace the entire contents of `internal/commanderhub/webapp/src/components/FileExplorerPanel.tsx` with:
 
 ```tsx
-// Export FilePreview, fullPath helpers so FilePreviewSheet can reuse them.
-export function FilePreview({ preview }: { preview: FileReadResult | null }) { /* unchanged body */ }
+import { useEffect, useRef, useState } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
+import { ChevronDown, ChevronRight, Copy } from 'lucide-react';
+import { apiGet, fileContentPath, filesPath } from '../api/client';
+import type { FileEntry, FileListResult, FileReadResult } from '../api/types';
 
-export function isAbsolutePath(path: string) { /* unchanged */ }
-export function fullPath(root: string, path: string) { /* unchanged */ }
+export function FilePreview({ preview }: { preview: FileReadResult | null }) {
+  if (!preview) return <div className="file-preview-empty">No file selected</div>;
+  if (preview.too_large) {
+    return (
+      <div className="file-preview">
+        <strong>{preview.path}</strong>
+        <p>文件超过 2MB, 不预览。</p>
+      </div>
+    );
+  }
+  if (preview.binary) {
+    return (
+      <div className="file-preview">
+        <strong>{preview.path}</strong>
+        <p>二进制文件 · {preview.size} bytes</p>
+      </div>
+    );
+  }
+  return (
+    <pre className="file-preview">
+      <code>{preview.content || ''}</code>
+    </pre>
+  );
+}
+
+type DirectoryNode = {
+  expanded: boolean;
+  entries?: FileEntry[];
+  loading?: boolean;
+};
+
+export function isAbsolutePath(path: string) {
+  return path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path) || path.startsWith('\\\\');
+}
+
+export function fullPath(root: string, path: string) {
+  if (!root || path === '.' || isAbsolutePath(path)) return path;
+  const separator = root.includes('\\') ? '\\' : '/';
+  const cleanRoot = root.replace(/[\\/]+$/, '');
+  const cleanPath = path.replace(/^[\\/]+/, '').replace(/[\\/]+/g, separator);
+  return `${cleanRoot}${separator}${cleanPath}`;
+}
 
 export function FileExplorerPanel({
   daemonID,
@@ -765,8 +807,42 @@ export function FileExplorerPanel({
     displayPath: string;
   }) => void;
 }) {
-  // existing state hooks unchanged
-  // ...
+  const [root, setRoot] = useState('');
+  const [entries, setEntries] = useState<FileEntry[]>([]);
+  const [directories, setDirectories] = useState<Record<string, DirectoryNode>>({});
+  const [preview, setPreview] = useState<FileReadResult | null>(null);
+  const [error, setError] = useState('');
+  const previewRequestRef = useRef(0);
+  const listingRequestRef = useRef(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    previewRequestRef.current += 1;
+    listingRequestRef.current += 1;
+    const requestID = listingRequestRef.current;
+    setRoot('');
+    setEntries([]);
+    setDirectories({});
+    setPreview(null);
+    setError('');
+
+    if (!daemonID || !sessionID) return;
+
+    apiGet<FileListResult>(filesPath(daemonID, sessionID, '.'))
+      .then((result) => {
+        if (!cancelled && listingRequestRef.current === requestID) {
+          setRoot(result.root || '');
+          setEntries(result.entries || []);
+        }
+      })
+      .catch((err: Error) => {
+        if (!cancelled && listingRequestRef.current === requestID) setError(err.message);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [daemonID, sessionID]);
 
   async function openFile(entry: FileEntry) {
     if (entry.kind !== 'file' || !daemonID || !sessionID) return;
@@ -793,7 +869,89 @@ export function FileExplorerPanel({
     }
   }
 
-  // toggleDirectory / copyPath / renderEntries unchanged
+  async function toggleDirectory(entry: FileEntry) {
+    if (entry.kind !== 'dir' || !daemonID || !sessionID) return;
+
+    const current = directories[entry.path];
+    if (current?.expanded) {
+      setDirectories((prev) => ({
+        ...prev,
+        [entry.path]: { ...prev[entry.path], expanded: false },
+      }));
+      return;
+    }
+
+    setDirectories((prev) => ({
+      ...prev,
+      [entry.path]: { ...(prev[entry.path] || {}), expanded: true, loading: !prev[entry.path]?.entries },
+    }));
+    if (current?.entries) return;
+
+    const requestID = listingRequestRef.current;
+    try {
+      const result = await apiGet<FileListResult>(filesPath(daemonID, sessionID, entry.path));
+      if (listingRequestRef.current !== requestID) return;
+      setRoot((current) => current || result.root || '');
+      setDirectories((prev) => ({
+        ...prev,
+        [entry.path]: { expanded: true, entries: result.entries || [], loading: false },
+      }));
+    } catch (err) {
+      if (listingRequestRef.current !== requestID) return;
+      setDirectories((prev) => ({
+        ...prev,
+        [entry.path]: { ...(prev[entry.path] || {}), expanded: false, loading: false },
+      }));
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function copyPath(path: string) {
+    try {
+      await navigator.clipboard.writeText(path);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  function renderEntries(items: FileEntry[], depth = 0): ReactNode {
+    return items.map((entry) => {
+      const isDir = entry.kind === 'dir';
+      const dir = directories[entry.path];
+      const isExpanded = !!dir?.expanded;
+      return (
+        <div className="file-node" key={entry.path}>
+          <div className="file-row-line" style={{ '--depth': depth } as CSSProperties}>
+            <button
+              aria-label={isDir ? `${isExpanded ? '收起' : '展开'}目录 ${entry.name}` : `打开文件 ${entry.name}`}
+              className="file-row"
+              onClick={() => (isDir ? void toggleDirectory(entry) : void openFile(entry))}
+              type="button"
+            >
+              <span className="file-kind">
+                {isDir ? (isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />) : 'FILE'}
+              </span>
+              <span className="file-name">{entry.name}</span>
+            </button>
+            <button
+              aria-label={`复制路径 ${entry.path}`}
+              className="file-copy-button"
+              onClick={() => void copyPath(fullPath(root, entry.path))}
+              title="复制路径"
+              type="button"
+            >
+              <Copy size={14} />
+            </button>
+          </div>
+          {isDir && isExpanded ? (
+            <div className="file-children">
+              {dir?.loading ? <div className="file-loading">Loading</div> : renderEntries(dir?.entries || [], depth + 1)}
+            </div>
+          ) : null}
+        </div>
+      );
+    });
+  }
 
   return (
     <aside className="file-panel" data-testid="file-panel">
@@ -804,6 +962,12 @@ export function FileExplorerPanel({
   );
 }
 ```
+
+The only behavioral change vs today is:
+1. `renderMode` / `onPreview` are added to the props (default `'inline'` preserves desktop behavior).
+2. `openFile` branches: when `renderMode === 'sheet'` it invokes `onPreview({ preview, fullPath, displayPath })` and skips the local `setPreview` call.
+3. The trailing `<FilePreview>` is only rendered in `inline` mode.
+4. `isAbsolutePath` and `fullPath` are now exported so `FilePreviewSheet` can reuse `fullPath` if needed — current implementation does the `fullPath` computation inside `FileExplorerPanel` before invoking `onPreview`, so re-exporting is forward compatibility only.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -1155,7 +1319,7 @@ Refs: #30"
 - Create: `internal/commanderhub/webapp/src/components/MobileShell.test.tsx`
 
 **Interfaces:**
-- Consumes: `ChatWorkspace`, `DaemonSessionTree`, `FileExplorerPanel`, `MobileDrawer`, `FilePreviewSheet`, and the `OverlayController` instance owned by `CommanderApp`.
+- Consumes: `ChatWorkspace`, `DaemonSessionTree`, `FileExplorerPanel`, `MobileDrawer`, `FilePreviewSheet`. The overlay state itself lives in `CommanderApp` (per spec §Component Structure #6, "Owns drawer open/close state for Sessions and Files, plus the current FilePreviewSheet payload"). `MobileShell` is a pure rendering layer that receives the open flags and setters as props so the matchMedia breakpoint-cross handler in `CommanderApp` can reset them without prop-drilling refs back upward.
 - Produces:
   ```ts
   export function MobileShell(props: {
@@ -1166,10 +1330,16 @@ Refs: #30"
     turnState: TurnState;
     onSend: (prompt: string) => Promise<void>;
     overlay: OverlayController;
+    sessionsOpen: boolean;
+    setSessionsOpen: (next: boolean) => void;
+    filesOpen: boolean;
+    setFilesOpen: (next: boolean) => void;
+    previewPayload: FilePreviewPayload | null;
+    setPreviewPayload: (next: FilePreviewPayload | null) => void;
   }): JSX.Element;
   ```
   - Renders `<ChatWorkspace mobileLeading={<SessionsButton/>} mobileTrailing={<FilesButton/>} empty={selected == null} ... />`.
-  - Owns `sessionsOpen` / `filesOpen` / `previewPayload` React state. Subscribes to `overlay.onPop` to flip those flags in sync with browser Back.
+  - On mount, subscribes to `overlay.onPop` to flip the appropriate setter in response to browser Back. Unsubscribes on unmount.
   - `[Sessions]` click → `overlay.open('sessions'); setSessionsOpen(true)`.
   - `[Files]` click → `overlay.open('files'); setFilesOpen(true)`.
   - Sessions drawer's `<DaemonSessionTree onSelect>` wraps the prop callback so it also calls `overlay.closeTop('sessions')` (which triggers popstate → `setSessionsOpen(false)`).
@@ -1211,9 +1381,18 @@ const daemons: DaemonTree[] = [
   },
 ];
 
+type RenderShellState = {
+  sessionsOpen: boolean;
+  filesOpen: boolean;
+  previewPayload: null;
+};
+
 function renderShell(overrides: Partial<Parameters<typeof MobileShell>[0]> = {}) {
   const overlay = createOverlayController();
   const onSelect = vi.fn();
+  const setSessionsOpen = vi.fn();
+  const setFilesOpen = vi.fn();
+  const setPreviewPayload = vi.fn();
   const props = {
     daemons,
     selected: { daemonID: 'd1', sessionID: 's1' },
@@ -1222,10 +1401,16 @@ function renderShell(overrides: Partial<Parameters<typeof MobileShell>[0]> = {})
     turnState: 'idle' as const,
     onSend: vi.fn(),
     overlay,
+    sessionsOpen: false,
+    setSessionsOpen,
+    filesOpen: false,
+    setFilesOpen,
+    previewPayload: null,
+    setPreviewPayload,
     ...overrides,
   };
-  render(<MobileShell {...props} />);
-  return { overlay, onSelect };
+  const utils = render(<MobileShell {...props} />);
+  return { overlay, onSelect, setSessionsOpen, setFilesOpen, setPreviewPayload, ...utils };
 }
 
 test('renders chat workspace with Sessions and Files trigger buttons in chat-header', () => {
@@ -1235,20 +1420,73 @@ test('renders chat workspace with Sessions and Files trigger buttons in chat-hea
   expect(within(header).getByRole('button', { name: /Files/ })).toBeInTheDocument();
 });
 
-test('clicking Sessions opens the left drawer with DaemonSessionTree inside', () => {
-  renderShell();
+test('clicking Sessions calls overlay.open + setSessionsOpen(true); drawer renders when prop is true', () => {
+  const { setSessionsOpen, overlay, rerender } = renderShell();
+  const openSpy = vi.spyOn(overlay, 'open');
   fireEvent.click(screen.getByRole('button', { name: /Sessions/ }));
+  expect(openSpy).toHaveBeenCalledWith('sessions');
+  expect(setSessionsOpen).toHaveBeenCalledWith(true);
+
+  // Re-render with sessionsOpen=true (simulating CommanderApp setState).
+  rerender(
+    <MobileShell
+      daemons={daemons}
+      selected={{ daemonID: 'd1', sessionID: 's1' }}
+      onSelect={vi.fn()}
+      sessionDetail={null}
+      turnState="idle"
+      onSend={vi.fn()}
+      overlay={overlay}
+      sessionsOpen
+      setSessionsOpen={setSessionsOpen}
+      filesOpen={false}
+      setFilesOpen={vi.fn()}
+      previewPayload={null}
+      setPreviewPayload={vi.fn()}
+    />,
+  );
   const drawer = screen.getByTestId('drawer-left');
   expect(within(drawer).getByTestId('daemon-tree')).toBeInTheDocument();
 });
 
-test('selecting a session in the drawer closes the drawer and forwards onSelect', () => {
-  const { onSelect } = renderShell();
-  fireEvent.click(screen.getByRole('button', { name: /Sessions/ }));
+test('selecting a session in the drawer forwards onSelect and asks overlay.closeTop("sessions")', () => {
+  const { overlay, setSessionsOpen, onSelect, rerender } = renderShell();
+  const closeSpy = vi.spyOn(overlay, 'closeTop');
+  // Open drawer via re-render (CommanderApp would do this after click).
+  rerender(
+    <MobileShell
+      daemons={daemons}
+      selected={{ daemonID: 'd1', sessionID: 's1' }}
+      onSelect={onSelect}
+      sessionDetail={null}
+      turnState="idle"
+      onSend={vi.fn()}
+      overlay={overlay}
+      sessionsOpen
+      setSessionsOpen={setSessionsOpen}
+      filesOpen={false}
+      setFilesOpen={vi.fn()}
+      previewPayload={null}
+      setPreviewPayload={vi.fn()}
+    />,
+  );
   const drawer = screen.getByTestId('drawer-left');
+  // To exercise selection without depending on real history mutations, stub open()/closeTop().
+  vi.spyOn(overlay, 'open').mockImplementation(() => {});
+  closeSpy.mockImplementation(() => {});
   fireEvent.click(within(drawer).getByRole('button', { name: /Session one/ }));
   expect(onSelect).toHaveBeenCalledWith('d1', 's1');
-  expect(screen.queryByTestId('drawer-left')).not.toBeInTheDocument();
+  expect(closeSpy).toHaveBeenCalledWith('sessions');
+});
+
+test('overlay.onPop("sessions") triggers setSessionsOpen(false)', () => {
+  const { overlay, setSessionsOpen } = renderShell({ sessionsOpen: true });
+  // simulate browser back popping the top of the controller's stack
+  // The hook attaches the popstate listener internally; just dispatch the event
+  // after pushing the same id into the controller so the stack is non-empty.
+  overlay.open('sessions');
+  window.dispatchEvent(new PopStateEvent('popstate', { state: null }));
+  expect(setSessionsOpen).toHaveBeenCalledWith(false);
 });
 
 test('empty=true when selected == null (composer disabled via ChatWorkspace)', () => {
@@ -1265,7 +1503,7 @@ Expected: FAIL — module not found.
 - [ ] **Step 3: Implement `MobileShell.tsx`**
 
 ```tsx
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { Menu, FolderOpen } from 'lucide-react';
 import type { DaemonTree, SessionDetail, TurnState } from '../api/types';
 import type { OverlayController } from '../hooks/useOverlayHistory';
@@ -1283,6 +1521,12 @@ export function MobileShell({
   turnState,
   onSend,
   overlay,
+  sessionsOpen,
+  setSessionsOpen,
+  filesOpen,
+  setFilesOpen,
+  previewPayload,
+  setPreviewPayload,
 }: {
   daemons: DaemonTree[];
   selected: { daemonID: string; sessionID: string } | null;
@@ -1291,11 +1535,13 @@ export function MobileShell({
   turnState: TurnState;
   onSend: (prompt: string) => Promise<void>;
   overlay: OverlayController;
+  sessionsOpen: boolean;
+  setSessionsOpen: (next: boolean) => void;
+  filesOpen: boolean;
+  setFilesOpen: (next: boolean) => void;
+  previewPayload: FilePreviewPayload | null;
+  setPreviewPayload: (next: FilePreviewPayload | null) => void;
 }) {
-  const [sessionsOpen, setSessionsOpen] = useState(false);
-  const [filesOpen, setFilesOpen] = useState(false);
-  const [previewPayload, setPreviewPayload] = useState<FilePreviewPayload | null>(null);
-
   useEffect(() => {
     const unsubscribe = overlay.onPop((id) => {
       if (id === 'sessions') setSessionsOpen(false);
@@ -1303,7 +1549,7 @@ export function MobileShell({
       else if (id === 'preview') setPreviewPayload(null);
     });
     return unsubscribe;
-  }, [overlay]);
+  }, [overlay, setSessionsOpen, setFilesOpen, setPreviewPayload]);
 
   function openSessions() {
     overlay.open('sessions');
@@ -1410,9 +1656,11 @@ git commit -m "feat(commander): add MobileShell composing chat + drawers + previ
 
 Single-column chat with Sessions/Files triggers in the chat-header,
 left/right drawers via MobileDrawer, and a stacked preview sheet via
-FilePreviewSheet (issue #30). MobileShell owns sessionsOpen/filesOpen/
-previewPayload local state and subscribes to overlay.onPop so browser
-Back closes the topmost overlay deterministically.
+FilePreviewSheet (issue #30). MobileShell is a pure rendering layer:
+sessionsOpen / filesOpen / previewPayload are received as props from
+CommanderApp so the matchMedia breakpoint-cross handler can reset
+them in place. The component still subscribes to overlay.onPop so
+browser Back closes the topmost overlay deterministically.
 
 Refs: #30"
 ```
@@ -1428,16 +1676,20 @@ Refs: #30"
 (Existing `CommanderApp.test.tsx` is unchanged.)
 
 **Interfaces:**
-- Consumes: `useMediaQuery`, `useOverlayHistory` (tasks 1 & 2), `MobileShell` (task 7).
-- Produces: `CommanderApp` that, when `useMediaQuery('(max-width: 1023px)')` is true, renders `<MobileShell>` and runs the mobile-only auto-select logic per spec. When false, renders the existing three-pane JSX unchanged. The component owns one `OverlayController` instance for its lifetime.
+- Consumes: `useMediaQuery`, `useOverlayHistory` (tasks 1 & 2), `MobileShell` (task 7), `FilePreviewPayload` type from `FilePreviewSheet` (task 6).
+- Produces: `CommanderApp` that, when `useMediaQuery('(max-width: 1023px)')` is true, renders `<MobileShell>` (passing the hoisted overlay state down) and runs the mobile-only auto-select logic per spec. When false, renders the existing three-pane JSX unchanged. The component owns one `OverlayController` instance for its lifetime **and** the Sessions / Files / preview overlay React state (per spec §Component Structure #6).
+
+Overlay state hoisting (spec §Component Structure #6):
+- `CommanderApp` holds `[sessionsOpen, setSessionsOpen]`, `[filesOpen, setFilesOpen]`, and `[previewPayload, setPreviewPayload]` as `useState`. They are passed into `<MobileShell>` as props.
+- The matchMedia mobile→desktop transition handler (below) calls all three setters with their closed/null values **before** flipping the local `isNonDesktop` view state, so the desktop shell never inherits stale overlay flags and a rotation back to mobile starts from a clean state.
 
 The auto-select rule (spec §First-screen behavior):
 - Helper `pickAutoSession(tree)`: scans `tree.daemons` in order; for each daemon scans `daemon.sessions` in order, returning the first whose `origin !== 'subagent'` AND whose `parent_id` is empty (or its parent is not present in the same daemon). If none found, fall back to the first session of any kind. Returns `null` if no session anywhere.
 - A `hasAutoSelectedRef` guards one-shot behavior; it resets only when `authRequired` flips false → true.
 - `tryAutoSelect(tree)`: when `!hasAutoSelectedRef.current && isNonDesktop && selected == null`, call `pickAutoSession(tree)`; if non-null, call `selectSession(...)` and set the ref.
 - Invoke `tryAutoSelect` (a) inside `loadTree().then` after `setTree(nextTree)` and (b) from a `useEffect` keyed on `[isNonDesktop, tree]`.
-- A separate `useEffect` watches `isNonDesktop` transitions from true → false: it calls `overlay.drainForBreakpoint()` then sets local overlay-mirror state if any (none here — MobileShell owns it). Because MobileShell unmounts on the transition, the closures inside `onPop` are detached automatically when `MobileShell` cleanup unsubscribes; the drain ensures Back is not blocked by phantom entries afterward.
-- A `useEffect(() => () => overlay.reset(), [overlay])` runs on full unmount (route change, logout) and only detaches the listener.
+- A separate `useEffect` watches `isNonDesktop` transitions from true → false: it calls `overlay.drainForBreakpoint()`, then resets every overlay UI flag (`setSessionsOpen(false)`, `setFilesOpen(false)`, `setPreviewPayload(null)`), then the breakpoint flag flips (React re-renders, `MobileShell` unmounts).
+- A `useEffect(() => () => overlay.reset(), [overlay])` runs on full unmount (route change, logout) and only detaches the listener (no history mutation).
 
 - [ ] **Step 1: Add failing mobile-branch tests**
 
@@ -1568,12 +1820,19 @@ Expected: FAIL — `MobileShell` not rendered, auto-select not implemented.
 
 - [ ] **Step 3: Edit `CommanderApp.tsx`**
 
-At the top of the file, add imports:
+At the top of the file, replace the existing api/types import and add the new hook/component imports:
 
 ```tsx
+// Replace the existing line
+//   import type { CommanderTree, SessionDetail, TurnState } from './api/types';
+// with the line below (adds SessionRow + FilePreviewPayload-relevant types):
+import type { CommanderTree, SessionDetail, SessionRow, TurnState } from './api/types';
+
+// New imports below the existing api/client + components imports:
 import { useMediaQuery } from './hooks/useMediaQuery';
 import { useOverlayHistory } from './hooks/useOverlayHistory';
 import { MobileShell } from './components/MobileShell';
+import type { FilePreviewPayload } from './components/FilePreviewSheet';
 ```
 
 Add the helper near other top-level functions (above `CommanderApp`):
@@ -1599,7 +1858,7 @@ function pickAutoSession(tree: CommanderTree | null) {
 }
 ```
 
-Inside `CommanderApp` add:
+Inside `CommanderApp` add (place after the existing `useState` hooks for `tree`/`error`/`authRequired`/`login`/`selected`/`sessionDetail`/`turnState`):
 
 ```tsx
 const isNonDesktop = useMediaQuery('(max-width: 1023px)');
@@ -1607,14 +1866,26 @@ const overlay = useOverlayHistory();
 const hasAutoSelectedRef = useRef(false);
 const wasNonDesktopRef = useRef(isNonDesktop);
 
+// Hoisted overlay UI state (spec §Component Structure #6).
+const [sessionsOpen, setSessionsOpen] = useState(false);
+const [filesOpen, setFilesOpen] = useState(false);
+const [previewPayload, setPreviewPayload] = useState<FilePreviewPayload | null>(null);
+
 useEffect(() => {
   // Reset the auto-select guard on full logout (false -> true).
   if (authRequired) hasAutoSelectedRef.current = false;
 }, [authRequired]);
 
 useEffect(() => {
-  // mobile -> desktop transition: drain pushed history so Back is not blocked.
-  if (wasNonDesktopRef.current && !isNonDesktop) overlay.drainForBreakpoint();
+  // mobile -> desktop transition: drain pushed history AND reset overlay UI
+  // state so a rotation back to mobile does not auto-reopen an overlay whose
+  // backing history entries were already consumed.
+  if (wasNonDesktopRef.current && !isNonDesktop) {
+    overlay.drainForBreakpoint();
+    setSessionsOpen(false);
+    setFilesOpen(false);
+    setPreviewPayload(null);
+  }
   wasNonDesktopRef.current = isNonDesktop;
 }, [isNonDesktop, overlay]);
 
@@ -1636,7 +1907,7 @@ useEffect(() => {
 }, [isNonDesktop, tree]);
 ```
 
-Update the existing `loadTree` `.then` block so it also invokes `tryAutoSelect`:
+Update the existing `loadTree` `.then` block so it also invokes `tryAutoSelect`. The existing `.catch` handler is unchanged; the only line you add is `tryAutoSelect(nextTree);` after `setAuthRequired(false);`:
 
 ```tsx
 return apiGet<CommanderTree>('/api/commander/tree')
@@ -1645,7 +1916,14 @@ return apiGet<CommanderTree>('/api/commander/tree')
     setAuthRequired(false);
     tryAutoSelect(nextTree);
   })
-  // ...
+  .catch((err: Error) => {
+    if (err.message === 'unauthorized') {
+      setAuthRequired(true);
+      setTree(null);
+      return;
+    }
+    setError(err.message);
+  });
 ```
 
 Replace the final return block (after `authRequired` / `error` / `!tree` early returns) so it branches on `isNonDesktop`:
@@ -1661,6 +1939,12 @@ if (isNonDesktop) {
       turnState={turnState}
       onSend={sendPrompt}
       overlay={overlay}
+      sessionsOpen={sessionsOpen}
+      setSessionsOpen={setSessionsOpen}
+      filesOpen={filesOpen}
+      setFilesOpen={setFilesOpen}
+      previewPayload={previewPayload}
+      setPreviewPayload={setPreviewPayload}
     />
   );
 }
@@ -1698,11 +1982,13 @@ git commit -m "feat(commander): branch CommanderApp on media query + auto-select
 
 useMediaQuery('(max-width: 1023px)') swaps in MobileShell while
 keeping desktop's three-pane JSX intact. CommanderApp owns the
-useOverlayHistory controller for the component lifetime so the
-matchMedia mobile->desktop handler can drainForBreakpoint() before
-MobileShell unmounts. Auto-select runs one-shot on the first loadTree
-or when the breakpoint flips to non-desktop with no selection;
-desktop never auto-selects.
+useOverlayHistory controller AND the Sessions/Files/preview overlay
+React state (per spec). The matchMedia mobile->desktop handler runs
+drainForBreakpoint() then closes every overlay flag before flipping
+isNonDesktop, so a rotation back to mobile starts from a clean
+state. Auto-select runs one-shot on the first loadTree or when the
+breakpoint flips to non-desktop with no selection; desktop never
+auto-selects.
 
 Refs: #30"
 ```
@@ -2019,8 +2305,8 @@ test('non-desktop: open sessions drawer, select session, send prompt', async ({ 
 test('non-desktop: open files drawer, preview file, then preview a second', async ({ page }, testInfo) => {
   if (testInfo.project.name === 'chromium-desktop') test.skip();
   await page.route('**/api/commander/daemons/d1/sessions/s1/files?path=.', (route) => route.fulfill({ json: fileMocks.rootListing }));
-  await page.route('**/api/commander/daemons/d1/sessions/s1/file?path=go.mod', (route) => route.fulfill({ json: fileMocks.goMod }));
-  await page.route('**/api/commander/daemons/d1/sessions/s1/file?path=README.md', (route) => route.fulfill({ json: fileMocks.readme }));
+  await page.route('**/api/commander/daemons/d1/sessions/s1/files/content?path=go.mod', (route) => route.fulfill({ json: fileMocks.goMod }));
+  await page.route('**/api/commander/daemons/d1/sessions/s1/files/content?path=README.md', (route) => route.fulfill({ json: fileMocks.readme }));
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
   await page.goto('/commander/');
   await page.getByRole('button', { name: 'Files' }).click();
@@ -2040,7 +2326,7 @@ test('non-desktop: open files drawer, preview file, then preview a second', asyn
 test('non-desktop: browser back closes overlays in stack order', async ({ page }, testInfo) => {
   if (testInfo.project.name === 'chromium-desktop') test.skip();
   await page.route('**/api/commander/daemons/d1/sessions/s1/files?path=.', (route) => route.fulfill({ json: fileMocks.rootListing }));
-  await page.route('**/api/commander/daemons/d1/sessions/s1/file?path=go.mod', (route) => route.fulfill({ json: fileMocks.goMod }));
+  await page.route('**/api/commander/daemons/d1/sessions/s1/files/content?path=go.mod', (route) => route.fulfill({ json: fileMocks.goMod }));
   await page.goto('about:blank');
   await page.goto('/commander/');
   await page.getByRole('button', { name: 'Sessions' }).click();
@@ -2073,7 +2359,7 @@ test('non-desktop: no horizontal overflow at 360/390/430 and 834', async ({ page
 test('non-desktop: drawer interactive controls meet 44px hit area', async ({ page }, testInfo) => {
   if (testInfo.project.name === 'chromium-desktop') test.skip();
   await page.route('**/api/commander/daemons/d1/sessions/s1/files?path=.', (route) => route.fulfill({ json: fileMocks.rootListing }));
-  await page.route('**/api/commander/daemons/d1/sessions/s1/file?path=go.mod', (route) => route.fulfill({ json: fileMocks.goMod }));
+  await page.route('**/api/commander/daemons/d1/sessions/s1/files/content?path=go.mod', (route) => route.fulfill({ json: fileMocks.goMod }));
   await page.goto('/commander/');
 
   await page.getByRole('button', { name: 'Sessions' }).click();
@@ -2127,7 +2413,7 @@ test('desktop: no auto-select preserves current behavior', async ({ page }, test
 test('non-desktop: resizing to desktop while two overlays are stacked leaves no phantom history', async ({ page }, testInfo) => {
   if (testInfo.project.name !== 'chromium-mobile') test.skip();
   await page.route('**/api/commander/daemons/d1/sessions/s1/files?path=.', (route) => route.fulfill({ json: fileMocks.rootListing }));
-  await page.route('**/api/commander/daemons/d1/sessions/s1/file?path=go.mod', (route) => route.fulfill({ json: fileMocks.goMod }));
+  await page.route('**/api/commander/daemons/d1/sessions/s1/files/content?path=go.mod', (route) => route.fulfill({ json: fileMocks.goMod }));
   await page.goto('about:blank');
   await page.goto('/commander/');
   await page.getByRole('button', { name: 'Files' }).click();
@@ -2165,7 +2451,7 @@ test('non-desktop: chat default state baseline screenshot', async ({ page }, tes
 test('non-desktop: mobile sessions drawer + file preview screenshots', async ({ page }, testInfo) => {
   if (testInfo.project.name !== 'chromium-mobile') test.skip();
   await page.route('**/api/commander/daemons/d1/sessions/s1/files?path=.', (route) => route.fulfill({ json: fileMocks.rootListing }));
-  await page.route('**/api/commander/daemons/d1/sessions/s1/file?path=go.mod', (route) => route.fulfill({ json: fileMocks.goMod }));
+  await page.route('**/api/commander/daemons/d1/sessions/s1/files/content?path=go.mod', (route) => route.fulfill({ json: fileMocks.goMod }));
   await page.goto('/commander/');
   await page.getByRole('button', { name: 'Sessions' }).click();
   await expect(page.getByTestId('drawer-left')).toBeVisible();
