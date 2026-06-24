@@ -146,3 +146,26 @@ func TestBindThreadTool_Call_ValidatorRejection(t *testing.T) {
 	require.ErrorAs(t, err, &mcpErr)
 	require.Contains(t, mcpErr.Message, "invalid thread_id format")
 }
+
+// TestRequireBoundThread_UnboundReturnsActionableError covers the path the
+// model will see when the skill skipped Step 1 of Initialization.
+func TestRequireBoundThread_UnboundReturnsActionableError(t *testing.T) {
+	tools := newLoomTestTools(t, &fakeSDK{}, "", "drv-1", "d1")
+	id, err := tools.requireBoundThread()
+	require.Error(t, err)
+	require.Empty(t, id)
+	// The message MUST mention bind_thread AND the script — the model
+	// uses both keywords to recover.
+	require.Contains(t, err.Error(), "bind_thread")
+	require.Contains(t, err.Error(), "discover-thread.sh")
+}
+
+// TestRequireBoundThread_ReturnsCapturedValue is the success path.
+func TestRequireBoundThread_ReturnsCapturedValue(t *testing.T) {
+	tools := newLoomTestTools(t, &fakeSDK{}, "", "drv-1", "d1")
+	_, err := tools.BindThread(context.Background(), "thr-1")
+	require.NoError(t, err)
+	id, err := tools.requireBoundThread()
+	require.NoError(t, err)
+	require.Equal(t, "thr-1", id)
+}

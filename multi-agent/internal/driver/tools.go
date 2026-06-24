@@ -18,7 +18,6 @@ import (
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/orchestration"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
-	"github.com/yourorg/multi-agent/pkg/agentbackend/codex"
 )
 
 // SDKClient is the narrow agentserver SDK surface the driver tools use.
@@ -113,14 +112,29 @@ func (t *Tools) BindThread(_ context.Context, threadID string) (BindResult, erro
 	}, nil
 }
 
-// loomOriginMarker returns the loom_origin marker for the current driver
-// session. parent_session_id comes from the current-session marker written by
-// the codex executor (shared CODEX_HOME); agent_id/display_name from cfg.
-// Best-effort: absent marker → empty session (marker still carries agent+name).
-func (t *Tools) loomOriginMarker() string {
-	base := codex.EffectiveCodexHome(agentbackend.Config{CodexHome: t.cfg.Agent.CodexHome}, nil)
-	sess := codex.ReadCurrentSession(base)
-	return agentbackend.BuildLoomOrigin(t.cfg.Credentials.ShortID, t.cfg.Discovery.DisplayName, sess)
+// requireBoundThread returns the parent codex thread id captured by a prior
+// bind_thread MCP call. Caller MUST invoke this exactly once at the top of
+// a tool call, BEFORE any side effects, then thread the returned id through
+// to BuildLoomOrigin as a local variable.
+//
+// A second Load mid-call would race with a concurrent bind_thread (MCP
+// server handles requests concurrently — internal/driver/mcp_server.go:79,237).
+// The capture-and-pass pattern guarantees a single tool invocation sees one
+// consistent thread id even if the model rebinds mid-flight.
+//
+// The error message is intentionally long: when the model sees it, it should
+// know both the failure mode AND the recovery (run discover-thread.sh and
+// call bind_thread). Keep both keywords ("bind_thread", "discover-thread.sh")
+// in the message — the multiagent SKILL.md tells the model to look for them.
+func (t *Tools) requireBoundThread() (string, error) {
+	p := t.parentThread.Load()
+	if p == nil {
+		return "", fmt.Errorf(
+			"driver not bound to a codex thread; call `bind_thread` first " +
+				"(the multiagent skill runs scripts/discover-thread.sh as " +
+				"its first init step)")
+	}
+	return *p, nil
 }
 
 type delegatedTaskRecord struct {
@@ -607,10 +621,24 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	} else {
 		finalPrompt = manifest.Encode() + "\n\n" + args.Prompt
 	}
+	// Before:
+	//   systemContext := ""
+	//   if isParentLinkDelegation(skill) {
+	//       if m := s.t.loomOriginMarker(); m != "" {
+	//           systemContext = m
+	//       }
+	//   }
+	// After (temporary — Task 4 will move the requireBoundThread call to the
+	// top of Call() and fail-fast there; this preserves the LEGACY best-effort
+	// semantics just long enough to keep the tree compiling):
 	systemContext := ""
 	if isParentLinkDelegation(skill) {
-		if m := s.t.loomOriginMarker(); m != "" {
-			systemContext = m
+		if pid, err := s.t.requireBoundThread(); err == nil {
+			systemContext = agentbackend.BuildLoomOrigin(
+				s.t.cfg.Credentials.ShortID,
+				s.t.cfg.Discovery.DisplayName,
+				pid,
+			)
 		}
 	}
 	resp, err := s.t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
@@ -1263,11 +1291,22 @@ func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		timeout = 600
 	}
 
+	// Before:
+	//   SystemContext: r.t.loomOriginMarker(),
+	// After (temporary):
+	sysCtx := ""
+	if pid, err := r.t.requireBoundThread(); err == nil {
+		sysCtx = agentbackend.BuildLoomOrigin(
+			r.t.cfg.Credentials.ShortID,
+			r.t.cfg.Discovery.DisplayName,
+			pid,
+		)
+	}
 	resp, err := r.t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
 		TargetID:       info.TargetID,
 		Skill:          "chat_resume",
 		Prompt:         string(body),
-		SystemContext:  r.t.loomOriginMarker(),
+		SystemContext:  sysCtx,
 		TimeoutSeconds: timeout,
 	})
 	if err != nil {

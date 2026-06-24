@@ -2284,8 +2284,10 @@ func TestSubmitTaskDefaultStampsLoomOrigin(t *testing.T) {
 		},
 	}
 	tools := newLoomTestTools(t, sdk, home, shortID, displayName)
+	_, err := tools.BindThread(context.Background(), markerSessID)
+	require.NoError(t, err)
 
-	_, err := toolByName(t, tools, "submit_task").Call(context.Background(),
+	_, err = toolByName(t, tools, "submit_task").Call(context.Background(),
 		json.RawMessage(`{"prompt":"do work"}`))
 	require.NoError(t, err)
 
@@ -2330,8 +2332,10 @@ func TestSubmitTaskChatStampsLoomOrigin(t *testing.T) {
 		},
 	}
 	tools := newLoomTestTools(t, sdk, home, "drv-2", "driver-2")
+	_, err := tools.BindThread(context.Background(), "thr-chat")
+	require.NoError(t, err)
 
-	_, err := toolByName(t, tools, "submit_task").Call(context.Background(),
+	_, err = toolByName(t, tools, "submit_task").Call(context.Background(),
 		json.RawMessage(`{"prompt":"chat work","skill":"chat","target_display_name":"slave"}`))
 	require.NoError(t, err)
 
@@ -2360,8 +2364,10 @@ func TestSubmitTaskBashDoesNotStampLoomOrigin(t *testing.T) {
 		},
 	}
 	tools := newLoomTestTools(t, sdk, home, "drv-3", "driver-3")
+	_, err := tools.BindThread(context.Background(), "thr-bash")
+	require.NoError(t, err)
 
-	_, err := toolByName(t, tools, "submit_task").Call(context.Background(),
+	_, err = toolByName(t, tools, "submit_task").Call(context.Background(),
 		json.RawMessage(`{"prompt":"run bash","skill":"bash","target_display_name":"slave-bash"}`))
 	require.NoError(t, err)
 
@@ -2390,6 +2396,8 @@ func TestSubmitContractTaskStampsLoomOrigin(t *testing.T) {
 		},
 	}
 	tools := newLoomTestTools(t, sdk, home, "drv-4", "driver-4")
+	_, err := tools.BindThread(context.Background(), "thr-contract")
+	require.NoError(t, err)
 
 	tc := testTaskContract()
 	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
@@ -2435,8 +2443,10 @@ func TestResumeTaskStampsLoomOrigin(t *testing.T) {
 		},
 	}
 	tools := newLoomTestTools(t, sdk, home, "drv-5", "driver-5")
+	_, err := tools.BindThread(context.Background(), "thr-resume")
+	require.NoError(t, err)
 
-	_, err := toolByName(t, tools, "resume_task").Call(context.Background(),
+	_, err = toolByName(t, tools, "resume_task").Call(context.Background(),
 		json.RawMessage(`{"last_task_id":"T-resume-1","answer":"yes","timeout_sec":2}`))
 	require.NoError(t, err)
 
@@ -2737,6 +2747,8 @@ func TestSubmitContractTaskDriverFanoutCarriesLoomOrigin(t *testing.T) {
 		},
 	}
 	tools.SetContractRunner(runner)
+	_, err = tools.BindThread(context.Background(), "thr-fanout")
+	require.NoError(t, err)
 
 	_, err = submitContractToolForTest(t, tools).Call(context.Background(), raw)
 	require.NoError(t, err)
