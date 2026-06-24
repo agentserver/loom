@@ -3,11 +3,13 @@ on:
   push:
     paths:
       - multi-agent/**
+      - skills/**
       - .github/workflows/multi-agent.yml
       - .github/workflows/release.yml
   pull_request:
     paths:
       - multi-agent/**
+      - skills/**
       - .github/workflows/multi-agent.yml
       - .github/workflows/release.yml
 
@@ -75,3 +77,10 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e '.[dev]'
       - run: python -m pytest tests/unit
+
+  skills:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: discover-thread.sh tests
+        run: skills/multiagent/scripts/discover-thread_test.sh
