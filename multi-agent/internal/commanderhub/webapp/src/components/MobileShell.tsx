@@ -86,9 +86,12 @@ export function MobileShell({
     closeOverlay('sessions', setSessionsOpen);
   }
 
+  function handlePreviewRequest() {
+    overlay.open('preview');
+  }
+
   function handlePreview(payload: FilePreviewPayload) {
     setPreviewPayload(payload);
-    overlay.open('preview');
   }
 
   const sessionsBtn = (
@@ -148,6 +151,7 @@ export function MobileShell({
           daemonID={selected?.daemonID || ''}
           sessionID={selected?.sessionID || ''}
           renderMode="sheet"
+          onPreviewRequest={handlePreviewRequest}
           onPreview={handlePreview}
         />
       </MobileDrawer>
