@@ -58,11 +58,11 @@ The refactor is split into two PRs, P1 and P2 (defined below). P1 alone fixes th
 
 - **Wire format additive-only, with one documented exception.** No existing JSON / YAML / file-format field is renamed, retyped, or removed by this refactor. The `session_id` / `session` / `child_session_id` field names in markers / sidecars keep their meaning unchanged.
   - **Driver journal `session_id`** has historically carried the bridge id (see "Legacy journal data" below). P1 changes its semantics: from this refactor onward `session_id` is the **backend-native** id; the bridge id moves to a new optional `bridge_session_id` sibling field. Legacy rows are read with a per-row classifier (see "Legacy journal data").
-  - **`submit_task` response** today returns `"session_id": resp.SessionID` which is the **bridge** id (backend id is not known yet at dispatch time). P1 keeps `submit_task.session_id` populated with the bridge id for backward compatibility AND adds a new sibling `bridge_session_id` field with the same value — so consumers can opt into the new explicit name on their own schedule. `submit_task.session_id` is the single documented exception to the "session_id always means backend" rule, and the `bridge_session_id` field is the migration path.
+  - **`submit_task` response** today returns `"session_id": resp.SessionID` which is the **bridge** id (backend id is not known synchronously at dispatch time). P1 keeps `submit_task.session_id` populated with the bridge id **permanently** for backward compatibility AND adds a new sibling `bridge_session_id` field with the same value. `submit_task.session_id` is the single permanent exception to "session_id always means backend"; see "submit_task contract" in "Observable behavior change" below for the full rationale and why this is not a planned migration.
   - **`wait_task` / `get_task` response** today returns `session_id` as `firstNonEmpty(markerSessionID, info.SessionID)` — meaning backend when the marker resolved, bridge when it didn't. P1 changes this to always be the backend id when known (empty otherwise), and emits `bridge_session_id` as a separate sibling.
   - New `bridge_session_id` / `child_bridge_session_id` fields are added with `omitempty` and only to driver-owned writers (TaskJournal rows; `submit_task` / `wait_task` / `get_task` response bodies).
 - **No new wire fields added to formats we don't own.** loom-meta sidecar (slave codex_home, read by slave/Commander), `loom_origin` marker (driver → slave system context), kind marker (slave executor → driver output) — **none** of these gain a `bridge_session_id` field. They only ever needed backend ids and continue to write only `session_id` / `session`.
-- **Read backward compatibility.** SessionRef.UnmarshalJSON must accept the old single-field shape (`{"session_id": "<id>"}`) and route the id into `Backend`, so loading a sidecar / journal row written by an older binary continues to work.
+- **Read backward compatibility.** Read paths that produce a `SessionRef` from on-disk JSON (only `TaskJournal.Record.UnmarshalJSON` after this refactor — `SessionRef` itself has no JSON methods) must accept the old single-field shape and use the bridge-id prefix classifier (see "Legacy journal data" below) to route legacy values to `Backend` or `Bridge`. Loom-meta sidecars, kind markers, and `loom_origin` markers always meant backend-native and continue to load directly into `Backend` without classifier logic.
 - **Bridge field never carries a backend id, and vice versa.** Construction sites enforce this: when wrapping an agentsdk response, set `Bridge` only; when reading from a kind marker / loom_origin / slave executor result, set `Backend` only. A SessionRef may have both set when the driver has paired them (e.g. journal records of a delegation it issued).
 - **`Backend` is required for any backend-facing operation.** `RunResume`, `chat_resume` delegation, sidecar writes, and cross-daemon nesting all require `Backend != ""`. If only `Bridge` is known, the caller must error rather than guess.
 - **Two-PR landing.** P1 lands without changing the `Backend` interface. P2 lands the interface change in a separate PR so each is reviewable on its own.
@@ -199,8 +199,8 @@ There is intentionally **no** `NewBoth` constructor that takes both at once — 
 
 Changes:
 
-1. **`pkg/agentbackend/sessionref.go`** — new file, the type + constructors + JSON I/O + tests.
-2. **`pkg/agentbackend/sessionref_test.go`** — new file, table-driven tests for IsZero/HasBackend/String/Marshal/Unmarshal/round-trip/legacy-read.
+1. **`pkg/agentbackend/sessionref.go`** — new file: the type, constructors (`NewBackend`, `NewBridgeOnly`, `WithBackend`), and predicates (`IsZero`, `HasBackend`, `String`). **No JSON methods on SessionRef.** JSON ownership lives on containing structs (`TaskJournal.Record`, response builders) per the rationale above.
+2. **`pkg/agentbackend/sessionref_test.go`** — new file: table-driven tests for `IsZero`, `HasBackend`, `String`, and the three constructors (including panic preconditions on `WithBackend`). **No marshal/unmarshal tests on SessionRef** — those live on `task_journal_test.go` per Record's flatten ownership.
 3. **`internal/driver/tools.go`** — every line touching `SessionID` / `session_id` / `ChildSessionID` migrates to `SessionRef`. Concretely:
    - `delegatedTaskRecord.Response` was used for `Response.SessionID` (bridge); wrap into `NewBridgeOnly(kind, agentShortID, resp.SessionID)` at the agentsdk seam, stash as `SessionRef` on the record.
    - The two response-builder paths in `wait_task` / `get_task` that today do `firstNonEmpty(sessionIDFromMarker(...), info.SessionID)`: split — extract `markerBackendID = sessionIDFromMarker(...)` and `bridgeID = info.SessionID` separately, build a `SessionRef{Backend: markerBackendID, Bridge: bridgeID, ...}`, then emit both as sibling JSON fields. **Wire change**: `session_id` becomes empty (rather than fall back to bridge) when the marker was absent; `bridge_session_id` is the new explicit sibling. The "Wire format additive-only" constraint above documents this exception and the migration path for consumers.
@@ -253,17 +253,25 @@ What does NOT change in P1:
 | `pkg/agentbackend/claude/backend.go` `executorForWorkDir(...).RunResume(...)` | wrapper | signature change |
 | `pkg/agentbackend/opencode/executor.go` `*Executor.RunResume` | impl | signature change |
 | `pkg/agentbackend/opencode/backend.go` `executorForWorkDir(...).RunResume(...)` | wrapper | signature change |
-| `internal/executor/chat_resume.go` `ResumeBackend` interface + caller | local interface alias of Backend.RunResume | **must move alongside** — interface signature changes from `(ctx, string, ...)` to `(ctx, SessionRef, ...)`; ChatResumeExecutor caller wraps `body.SessionID` (which is the slave's marker session id — backend-native) into `NewBackend(...)` before calling |
-| `internal/executor/chat_resume_test.go` `fakeResumeBackend` stub | test stub | signature change |
-| `internal/commander/handler.go` two call sites (lines 61 + 65) | commander session-turn handler fallback | wrap bare string `id` into `NewBackend(...)` before call. The commander handler's `Backend.RunResume(ctx, id, prompt, sink)` calls use an `id` value originating from the commander session id (which the surrounding code treats as a backend-native id; it's the session id of the agent's prior conversation, not a bridge id). Document this in the call site with a comment so future readers know why this is a `NewBackend` not a `NewBridgeOnly`. |
-| `cmd/slave-agent/main.go` `backendExecutor.RunResume(ctx, sid, ans, s)` | the slave-side adapter implementing `executor.ResumeBackend` | signature change to match the new `ResumeBackend` interface above. Body wraps `sid` (the slave's own backend session id) into `NewBackend(...)` before calling the underlying `agentbackend.Backend.RunResume`. |
+| `internal/executor/chat_resume.go` `ResumeBackend` interface + caller | local interface alias of Backend.RunResume | **STAYS bare `string`** — see "Why ResumeBackend stays string" below |
+| `internal/executor/chat_resume_test.go` `fakeResumeBackend` stub | test stub | **STAYS bare `string`** (same reason) |
+| `internal/commander/handler.go` two call sites (lines 61 + 65) | commander session-turn handler fallback | wrap bare string `id` into `NewBackend(kind, agentID, id)` before call. The commander handler's `Backend.RunResume(ctx, id, prompt, sink)` calls use an `id` value originating from the commander session id (which the surrounding code treats as a backend-native id — the session id of the agent's prior conversation, not a bridge id). Document this in the call site with a comment so future readers know why this is `NewBackend` not `NewBridgeOnly`. |
+| `internal/commander/handler_test.go` | test stubs / assertions | wrap test ids with `NewBackend(...)`; assertions on `RunResume(ctx, "id", ...)` become `RunResume(ctx, ref, ...)` with `ref.Backend == "id"` |
+| `internal/commanderhub/proxy_test.go` | test stub for fake Backend | signature change on the stub |
+| `cmd/slave-agent/main.go` `backendExecutor.RunResume(ctx, sid, ans, s)` | the slave-side adapter implementing `executor.ResumeBackend` (string signature) AND forwarding into `agentbackend.Backend.RunResume` (new SessionRef signature) | the adapter is **the seam**: takes a string `sid` from `executor.ResumeBackend`, wraps as `NewBackend(kind, agentID, sid)` before calling the agentbackend layer. No signature change to `backendExecutor.RunResume` itself — only its body changes. |
+| `pkg/agentbackend/codex/backend_resume_test.go` | direct `b.RunResume(ctx, id, ...)` call | wrap id as SessionRef in test |
+| `pkg/agentbackend/codex/executor_test.go` | 4 sites calling `ex.RunResume(ctx, "thr-...", ...)` | wrap each as `NewBackend(KindCodex, "", "thr-...")` |
+| `pkg/agentbackend/claude/backend_resume_test.go` | `b.RunResume(ctx, id, ...)` call | wrap as SessionRef |
+| `pkg/agentbackend/claude/executor_test.go` | `ex.RunResume(ctx, "sess-1", ...)` | wrap as SessionRef |
+| `pkg/agentbackend/opencode/backend_resume_test.go` | 2 sites calling `b.RunResume(ctx, id, ...)` | wrap as SessionRef |
+| `pkg/agentbackend/opencode/executor_test.go` | `b.RunResume(ctx, "sess-abc", ...)` | wrap as SessionRef |
 | `internal/driver/tools.go::resumeTaskTool.Call` | the driver caller | stops unwrapping `ref.Backend` to string; passes `ref` directly. |
 
-Total: **13 files** touched. The `internal/executor` + `internal/commander` + `cmd/slave-agent` inclusions are the corrections from the codex round-1 review — without them the build does not compile.
+Total: **18 files** touched in P2. The expansion from the round-1 spec catches (a) the import-cycle constraint and (b) the test-stub surface that must change in lockstep with the interface signature. Without all of these, `go test ./...` does not compile.
 
-**No import-cycle risk** — `pkg/agentbackend` is already imported by `internal/executor`, `internal/commander`, `cmd/slave-agent`, and `internal/driver`. Adding `SessionRef` to the existing imported package does not introduce a new cycle.
+**Why `executor.ResumeBackend` stays `string` (NOT SessionRef):** `pkg/agentbackend/backend.go:8` imports `internal/executor` for the `Task` / `Sink` / `Result` type aliases. The reverse import (`internal/executor` → `pkg/agentbackend`) does NOT exist today. Promoting `executor.ResumeBackend` to take a `SessionRef` would require importing `pkg/agentbackend.SessionRef` into `internal/executor` — which forms `agentbackend → executor → agentbackend`, a Go-rejected import cycle. So `executor.ResumeBackend` keeps `(ctx, sessionID string, ...)`; the `cmd/slave-agent` adapter is the seam that wraps that string into a `SessionRef` before calling the underlying `agentbackend.Backend.RunResume(ref, ...)`. Below the seam, the type is enforced; above the seam (only one direct caller, `ChatResumeExecutor`), the contract is that `sessionID` is the slave's own backend-native id — already enforced by where it's sourced from (kind marker JSON).
 
-**Why these stay bare `string` in P1 but move in P2:** they implement or call the `Backend.RunResume` interface, so once that interface signature changes, ALL implementors and callers MUST change in the same PR — Go interface implementation is by signature match, not nominal. We can't migrate them piecemeal. This is exactly the "everything in P2, all at once" property that justifies splitting from P1.
+**Why these signature changes must land together in P2:** Go interface satisfaction is structural — once `agentbackend.Backend.RunResume` changes its parameter from `string` to `SessionRef`, every implementor (codex/claude/opencode `Executor.RunResume`, `*.Backend.RunResume` wrappers, `nilBackend` test stub, `commanderhub` proxy test stub) MUST update in the same commit or the build fails. Test files calling `b.RunResume(ctx, "literal-id", ...)` also fail to compile until they wrap the literal. The `executor.ResumeBackend` interface, by contrast, is independent — it has its own concrete signature — and isolates the seam at the slave-agent adapter.
 
 What does NOT change in P2:
 - Wire format. Still none.
@@ -279,11 +287,20 @@ What does NOT change in P2:
 
 ### Observable behavior change
 
-Only one operationally observable behavior changes:
+The refactor changes four observable behaviors, all intentional:
 
-- **`resume_task` with a malformed/missing slave marker now errors** with `"resume failed: slave never reported a backend session id; …"` instead of silently delegating `chat_resume` against a bridge id (which would then fail later on the slave side with a less actionable error). This is intentional — it's the bug-fix half of the issue.
+1. **`resume_task` with a malformed/missing slave marker now errors** with `"resume failed: slave never reported a backend session id; …"` instead of silently delegating `chat_resume` against a bridge id (which would then fail later on the slave side with a less actionable error). This is the bug-fix half of the issue.
+2. **`wait_task` / `get_task` response `session_id`** is empty when the slave's marker was absent (previously fell back to the bridge id). Consumers relying on the field always being non-empty must read `bridge_session_id` instead. The driver journal carries both fields too.
+3. **`submit_task` response gains a `bridge_session_id` field** with the same value as `session_id` (both bridge — backend is not known at dispatch). `session_id` retains its bridge value indefinitely (see "submit_task contract" below); the new field is the explicit alias.
+4. **Driver journal** new rows carry both `session_id` (backend) and `bridge_session_id` (bridge) as siblings. Old rows are read through a `^cse_` prefix classifier.
 
-All other paths are equivalent in observable behavior: same wire output, same JSON shapes, same backend invocations.
+#### `submit_task` contract (permanent)
+
+`submit_task.session_id` is the **permanent** exception to the "session_id always means backend" rule. The bridge id is the only id that exists at dispatch time (the slave's codex/claude/opencode CLI has not yet started, so no backend session id has been minted). `submit_task` cannot synchronously return a backend id without blocking on slave startup; we will not introduce that block. So `session_id` here stays the bridge id forever, deprecated for new consumers in favor of `bridge_session_id`. The reverse is not in scope: there is no plan to populate `submit_task.session_id` with a backend id, because doing so synchronously is architecturally impossible.
+
+Consumers that need the backend id post-dispatch already use `wait_task` / `get_task` (which return it once the slave reports it via kind marker). Those endpoints follow the standard rule: `session_id` is backend, `bridge_session_id` is bridge.
+
+All other paths (kind marker / loom_origin marker / loom-meta sidecar / `Backend.Run*` invocations / agentsdk traffic) are equivalent in observable behavior.
 
 ### Testing
 
@@ -291,7 +308,7 @@ All other paths are equivalent in observable behavior: same wire output, same JS
 |---|---|
 | `pkg/agentbackend/sessionref_test.go` (new) | IsZero, HasBackend, String formatting, Marshal+Unmarshal round-trip, Unmarshal of legacy single-field JSON, Unmarshal of full new shape, constructors set fields correctly. |
 | `internal/driver/tools_test.go` | Existing TaskInfo-construction fixtures updated; new `TestResumeTask_RefusesBridgeOnlyFallback`; new `TestWaitTask_BridgeAndBackendBothInResponse` that asserts the new `bridge_session_id` field appears alongside the existing `session_id` field. |
-| `internal/driver/task_journal_test.go` | New `TestJournal_BackwardCompatReadLegacyRow` that writes a row with only `session_id` (no `bridge_session_id`) and verifies `SessionRef.UnmarshalJSON` puts it into Backend. New `TestJournal_RoundTripSessionRef` that writes a SessionRef with both fields and reads it back. |
+| `internal/driver/task_journal_test.go` | New `TestRecord_MarshalFlattensSessionRefIntoSiblings` (proves flat output, not nested), `TestRecord_UnmarshalLegacyBridgeSessionID` (cse_ prefix → Bridge), `TestRecord_UnmarshalLegacyBackendSessionID` (uuid shape → Backend), `TestRecord_RoundTripModernRow` (both fields populated). All flatten/unmarshal/classifier logic lives on `Record`, not on `SessionRef`. |
 | `pkg/agentbackend/backend_test.go` (P2) | `nilBackend.RunResume` signature update. |
 | `pkg/agentbackend/codex/appserver_worker_test.go` (P2) | The two `RunResume` assertion sites: `if id, answer := …, …; id != …` becomes `if ref.Backend, answer := …, …; ref.Backend != …`. |
 | E2E | No new e2e required. The prod_test stack exercises the resume path; PR runs go test ./... and exits green is sufficient. |
@@ -318,6 +335,16 @@ Four P1 (blocking) + two P3 findings from `codex exec resume 019ef428…` agains
 - **P1 (P2 RunResume call sites):** Expanded the P2 call-site inventory from 8 sites to 13. Added `internal/executor/chat_resume.go`, `internal/commander/handler.go`, `cmd/slave-agent/main.go`. Explained why these must move with the interface signature change.
 - **P3 (WithBackend preconditions):** Added explicit panic preconditions (`backendID != ""`, `r.Bridge != ""`, `r.Backend == ""`).
 - **P3 (rollout topology):** Clarified that PR merge order is **strictly P1 → P2**.
+
+### Codex round 2 (2026-06-24)
+
+Three P1 (blocking) + two P2 findings against commit `9d2f4f7`. All real and reproducible. Resolutions:
+
+- **P1 (stale "SessionRef JSON I/O" requirements):** swept the spec — removed all references to `SessionRef.MarshalJSON` / `UnmarshalJSON`. The constraint at line 65 now points to `TaskJournal.Record.UnmarshalJSON` and the journal's bridge-id classifier; the `sessionref.go` and `sessionref_test.go` plan items dropped "JSON I/O" language and now explicitly say "no JSON methods on SessionRef".
+- **P1 (import cycle `agentbackend → executor → agentbackend`):** verified by `grep -nE "internal/executor" pkg/agentbackend/*.go` showing `backend.go:8` does import `internal/executor`, while `grep -nE "pkg/agentbackend" internal/executor/*.go` is empty. Spec P2 rewrite: `executor.ResumeBackend` interface **stays bare `string`** (no signature change); the `cmd/slave-agent/main.go` adapter is the seam that wraps the string into a `SessionRef` before calling the (newly typed) `agentbackend.Backend.RunResume`. Above the seam (only one caller: `ChatResumeExecutor`), the contract that `sessionID` is a backend-native id is enforced by where it's sourced — the slave's own kind marker JSON. Added a dedicated "Why ResumeBackend stays string" paragraph.
+- **P1 (P2 call-site inventory incomplete for `go test ./...`):** expanded from 13 sites to 18. Added every test file that calls `b.RunResume(ctx, "literal-id", ...)`: `internal/commander/handler_test.go`, `internal/commanderhub/proxy_test.go`, `pkg/agentbackend/codex/backend_resume_test.go`, `pkg/agentbackend/codex/executor_test.go` (4 sites), `pkg/agentbackend/claude/backend_resume_test.go`, `pkg/agentbackend/claude/executor_test.go`, `pkg/agentbackend/opencode/backend_resume_test.go` (2 sites), `pkg/agentbackend/opencode/executor_test.go`.
+- **P2 (observable behavior section contradicted the journal/response changes):** expanded "Observable behavior change" from one bullet to four — now lists `resume_task` error, `wait_task`/`get_task` session_id-can-be-empty, `submit_task` adds `bridge_session_id`, journal new-row shape change.
+- **P2 (submit_task contract ambiguity):** added explicit "submit_task contract (permanent)" subsection making clear `submit_task.session_id` is permanently the bridge id — backend cannot be produced synchronously — and consumers needing backend should use `wait_task`/`get_task`.
 
 ## Out of scope (deliberately tracked here so the next refactor doesn't re-litigate)
 
