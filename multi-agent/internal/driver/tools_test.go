@@ -145,8 +145,10 @@ func TestSubmitTaskRecordsDelegatedTask(t *testing.T) {
 		},
 	}
 	tools := newTestTools(t, sdk)
+	_, err := tools.BindThread(context.Background(), "thr-test")
+	require.NoError(t, err)
 
-	_, err := toolByName(t, tools, "submit_task").Call(context.Background(), json.RawMessage(`{"prompt":"do work","skill":"chat"}`))
+	_, err = toolByName(t, tools, "submit_task").Call(context.Background(), json.RawMessage(`{"prompt":"do work","skill":"chat"}`))
 	require.NoError(t, err)
 
 	records, err := tools.taskJournal.Recent(1, "task-submit")
@@ -1074,6 +1076,9 @@ func TestTool_SubmitTask_RegistersFilesAndDelegates(t *testing.T) {
 	}
 	obs := &fakeObserver{}
 	tools := newTestToolsWithObserver(t, sdk, obs)
+	if _, err := tools.BindThread(context.Background(), "thr-test"); err != nil {
+		t.Fatal(err)
+	}
 	args := json.RawMessage(`{
         "prompt": "merge these",
         "read_paths": ["` + in1 + `", "` + in2 + `"],
@@ -1181,6 +1186,9 @@ func TestTool_SubmitTask_ObserverLazyManifest(t *testing.T) {
 		},
 	}
 	tools := newTestTools(t, sdk)
+	if _, err := tools.BindThread(context.Background(), "thr-test"); err != nil {
+		t.Fatal(err)
+	}
 	tools.cfg.Observer.Enabled = true
 	tools.cfg.Observer.URL = observerServer.URL
 	tools.cfg.Observer.APIKey = "ak-test"
@@ -1226,6 +1234,9 @@ func TestTool_SubmitTask_ObserverLazyRejectsDirectory(t *testing.T) {
 		},
 	}
 	tools := newTestTools(t, sdk)
+	if _, err := tools.BindThread(context.Background(), "thr-test"); err != nil {
+		t.Fatal(err)
+	}
 	tools.cfg.Observer.Enabled = true
 	tools.cfg.Observer.URL = "http://observer.example"
 	tools.cfg.Observer.APIKey = "ak-test"
@@ -1350,6 +1361,9 @@ func TestTool_SubmitTask_EmitsSlaveTargetRoleForNonMasterTarget(t *testing.T) {
 	}
 	obs := &fakeObserver{}
 	tools := newTestToolsWithObserver(t, sdk, obs)
+	if _, err := tools.BindThread(context.Background(), "thr-test"); err != nil {
+		t.Fatal(err)
+	}
 	for _, tt := range tools.All() {
 		if tt.Name() == "submit_task" {
 			_, err := tt.Call(context.Background(), json.RawMessage(`{"prompt":"run it","target_display_name":"slave-prod"}`))
@@ -1378,6 +1392,9 @@ func TestTool_SubmitTask_RejectsAmbiguousTarget(t *testing.T) {
 		},
 	}
 	tools := newTestTools(t, sdk)
+	if _, err := tools.BindThread(context.Background(), "thr-test"); err != nil {
+		t.Fatal(err)
+	}
 	for _, tt := range tools.All() {
 		if tt.Name() == "submit_task" {
 			_, err := tt.Call(context.Background(), json.RawMessage(`{"prompt":"x"}`))
@@ -1682,6 +1699,10 @@ func TestSubmitTask_JSONSkill_NoManifestPrefix(t *testing.T) {
 				},
 			}
 			tools := newTestTools(t, sdk)
+			if isParentLinkDelegation(skill) {
+				_, bindErr := tools.BindThread(context.Background(), "thr-test")
+				require.NoError(t, bindErr)
+			}
 			args := json.RawMessage(`{
                 "prompt": "{\"server\":\"x\",\"tool\":\"y\",\"args\":{}}",
                 "target_display_name": "slave-1",
@@ -1741,12 +1762,14 @@ func TestSubmitTask_ChatStillGetsManifest(t *testing.T) {
 		},
 	}
 	tools := newTestTools(t, sdk)
+	_, err := tools.BindThread(context.Background(), "thr-test")
+	require.NoError(t, err)
 	args := json.RawMessage(`{
         "prompt": "do the thing",
         "target_display_name": "slave-1",
         "skill": "chat"
     }`)
-	_, err := toolByName(t, tools, "submit_task").Call(context.Background(), args)
+	_, err = toolByName(t, tools, "submit_task").Call(context.Background(), args)
 	require.NoError(t, err)
 	require.Contains(t, gotPrompt, "<USER_FILES_MANIFEST")
 }
@@ -1774,6 +1797,8 @@ func TestSubmitTaskReturnsSessionID(t *testing.T) {
 		},
 	}
 	tools := newTestTools(t, sdk)
+	_, err := tools.BindThread(context.Background(), "thr-test")
+	require.NoError(t, err)
 	submit := toolByName(t, tools, "submit_task")
 	raw, err := submit.Call(context.Background(),
 		json.RawMessage(`{"prompt":"hi","target_display_name":"slave-A"}`))
@@ -2027,6 +2052,9 @@ func TestSubmitTask_DegradesUpdateWriteTaskFailureToWarning(t *testing.T) {
 		},
 	}
 	tools := newTestTools(t, sdk)
+	if _, bindErr := tools.BindThread(context.Background(), "thr-test"); bindErr != nil {
+		t.Fatal(bindErr)
+	}
 	tools.cfg.Observer.Enabled = true
 	tools.cfg.Observer.URL = observerServer.URL
 	tools.cfg.Observer.APIKey = "ak-test"
@@ -2235,19 +2263,113 @@ func TestWaitTask_DegradesSyncWritesFailureToWarning(t *testing.T) {
 
 // --- loom_origin stamping tests (P2 Task 6) ---
 
-// writeLoomOriginCurrentFile sets up a CODEX_HOME temp dir with a current
-// marker file so loomOriginMarker() can read the parent session.
-func writeLoomOriginCurrentFile(t *testing.T, sessionID string) string {
-	t.Helper()
-	home := t.TempDir()
-	dir := filepath.Join(home, "loom-meta")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
+// TestSubmitTask_ChatSkill_FailsWithoutBindThread codifies the fail-fast
+// guard: a parent-link submission with read_paths AND write_paths
+// supplied returns the actionable error before any token / audit / observer
+// side effect. We MUST supply paths here — without them the registration /
+// audit / observer-artifact code wouldn't run anyway and the assertion
+// would be vacuous (a misplaced guard would still pass). Picking a real
+// readable file and a writable parent-dir target makes the assertion meaningful.
+func TestSubmitTask_ChatSkill_FailsWithoutBindThread(t *testing.T) {
+	delegated := false
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "slave", DisplayName: "slave", Status: "available",
+					Card: json.RawMessage(`{"skills":["chat"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			delegated = true
+			return &agentsdk.DelegateTaskResponse{TaskID: "should-not-reach"}, nil
+		},
 	}
-	if err := os.WriteFile(filepath.Join(dir, "current"), []byte(sessionID), 0o600); err != nil {
-		t.Fatal(err)
+	tools := newLoomTestTools(t, sdk, "" /*home*/, "drv-1", "d1")
+	tools.cfg.DriverDefaults.DisableUIDCheck = true
+	// NO BindThread call — guard must reject.
+
+	// Build a real read_path (a temp file) and a write_path (target under
+	// the configured WorkDir). Both routes through the manifest / audit /
+	// observer-write registration code, so any misplaced guard would leave
+	// observable state and fail the assertion below.
+	readPath := filepath.Join(t.TempDir(), "input.txt")
+	require.NoError(t, os.WriteFile(readPath, []byte("hi"), 0o644))
+	writePath := filepath.Join(tools.cfg.DriverDefaults.WorkDir, "out.txt")
+
+	auditSizeBefore, err := os.Stat(filepath.Join(tools.cfg.DriverDefaults.AuditLogDir, "audit.log"))
+	require.NoError(t, err)
+
+	argsJSON, _ := json.Marshal(map[string]interface{}{
+		"prompt":              "hi",
+		"skill":               "chat",
+		"target_display_name": "slave",
+		"read_paths":          []string{readPath},
+		"write_paths":         []map[string]interface{}{{"path": writePath, "overwrite": true}},
+	})
+	_, err = toolByName(t, tools, "submit_task").Call(context.Background(), argsJSON)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "driver not bound to a codex thread")
+	require.False(t, delegated, "DelegateTask must NOT be called when bind missing")
+
+	// 1) FileRegistry must contain no blob, no write token, no observer
+	//    artifact. snapshotForTest below returns the union of all live maps.
+	snap := tools.reg.snapshotForTest()
+	require.Equal(t, 0, snap.Blobs, "no blobs registered")
+	require.Equal(t, 0, snap.Dirs, "no dir tokens registered")
+	require.Equal(t, 0, snap.Writes, "no write tokens registered")
+	require.Equal(t, 0, snap.ObserverArtifacts, "no observer artifacts registered")
+
+	// 2) AuditLog file must not have grown (no register_read /
+	//    register_write entries appended).
+	auditSizeAfter, err := os.Stat(filepath.Join(tools.cfg.DriverDefaults.AuditLogDir, "audit.log"))
+	require.NoError(t, err)
+	require.Equal(t, auditSizeBefore.Size(), auditSizeAfter.Size(),
+		"audit log must not grow when bind guard short-circuits")
+}
+
+// TestSubmitTask_BashSkill_SucceedsWithoutBindThread codifies the narrowed-
+// guard semantic: bash is not parent-link, so submit_task runs without bind
+// AND systemContext stays empty (not stamped with a stale marker).
+func TestSubmitTask_BashSkill_SucceedsWithoutBindThread(t *testing.T) {
+	var captured agentsdk.DelegateTaskRequest
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "slave-bash", DisplayName: "slave-bash", Status: "available",
+					Card: json.RawMessage(`{"skills":["bash"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			captured = req
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-bash"}, nil
+		},
 	}
-	return home
+	tools := newLoomTestTools(t, sdk, "", "drv-1", "d1")
+	// NO BindThread call.
+
+	_, err := toolByName(t, tools, "submit_task").Call(context.Background(),
+		json.RawMessage(`{"prompt":"run","skill":"bash","target_display_name":"slave-bash"}`))
+	require.NoError(t, err)
+	require.Equal(t, "bash", captured.Skill)
+	require.Empty(t, captured.SystemContext,
+		"bash submissions must NOT carry a loom_origin marker even after Q1")
+}
+
+// TestSubmitTask_FanoutDefault_FailsWithoutBindThread covers the empty-skill
+// case (defaults to fanout, which IS parent-link).
+func TestSubmitTask_FanoutDefault_FailsWithoutBindThread(t *testing.T) {
+	tools := newLoomTestTools(t, &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "m", DisplayName: "master", Status: "available",
+					Card: json.RawMessage(`{"skills":["fanout"]}`)},
+			}, nil
+		},
+	}, "", "drv-1", "d1")
+	_, err := toolByName(t, tools, "submit_task").Call(context.Background(),
+		json.RawMessage(`{"prompt":"hi"}`))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "driver not bound to a codex thread")
 }
 
 // newLoomTestTools creates test tools with CODEX_HOME, ShortID, and DisplayName set.
@@ -2268,8 +2390,6 @@ func TestSubmitTaskDefaultStampsLoomOrigin(t *testing.T) {
 		displayName  = "prod-driver"
 		markerSessID = "thr-parent"
 	)
-	home := writeLoomOriginCurrentFile(t, markerSessID)
-
 	var captured agentsdk.DelegateTaskRequest
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
@@ -2283,7 +2403,7 @@ func TestSubmitTaskDefaultStampsLoomOrigin(t *testing.T) {
 			return &agentsdk.DelegateTaskResponse{TaskID: "task-1"}, nil
 		},
 	}
-	tools := newLoomTestTools(t, sdk, home, shortID, displayName)
+	tools := newLoomTestTools(t, sdk, "" /*codexHome unused*/, shortID, displayName)
 	_, err := tools.BindThread(context.Background(), markerSessID)
 	require.NoError(t, err)
 
@@ -2316,8 +2436,6 @@ func TestSubmitTaskDefaultStampsLoomOrigin(t *testing.T) {
 // also stamps the loom_origin marker.
 // target_display_name is required because resolveTarget auto-selects by fanout skill.
 func TestSubmitTaskChatStampsLoomOrigin(t *testing.T) {
-	home := writeLoomOriginCurrentFile(t, "thr-chat")
-
 	var captured agentsdk.DelegateTaskRequest
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
@@ -2331,7 +2449,7 @@ func TestSubmitTaskChatStampsLoomOrigin(t *testing.T) {
 			return &agentsdk.DelegateTaskResponse{TaskID: "task-2"}, nil
 		},
 	}
-	tools := newLoomTestTools(t, sdk, home, "drv-2", "driver-2")
+	tools := newLoomTestTools(t, sdk, "", "drv-2", "driver-2")
 	_, err := tools.BindThread(context.Background(), "thr-chat")
 	require.NoError(t, err)
 
@@ -2348,8 +2466,6 @@ func TestSubmitTaskChatStampsLoomOrigin(t *testing.T) {
 // skill="bash" (a terminal non-codex skill) does NOT stamp the loom_origin marker.
 // target_display_name is required because resolveTarget only auto-selects fanout agents.
 func TestSubmitTaskBashDoesNotStampLoomOrigin(t *testing.T) {
-	home := writeLoomOriginCurrentFile(t, "thr-bash")
-
 	var captured agentsdk.DelegateTaskRequest
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
@@ -2363,11 +2479,9 @@ func TestSubmitTaskBashDoesNotStampLoomOrigin(t *testing.T) {
 			return &agentsdk.DelegateTaskResponse{TaskID: "task-3"}, nil
 		},
 	}
-	tools := newLoomTestTools(t, sdk, home, "drv-3", "driver-3")
-	_, err := tools.BindThread(context.Background(), "thr-bash")
-	require.NoError(t, err)
+	tools := newLoomTestTools(t, sdk, "", "drv-3", "driver-3")
 
-	_, err = toolByName(t, tools, "submit_task").Call(context.Background(),
+	_, err := toolByName(t, tools, "submit_task").Call(context.Background(),
 		json.RawMessage(`{"prompt":"run bash","skill":"bash","target_display_name":"slave-bash"}`))
 	require.NoError(t, err)
 
@@ -2379,8 +2493,6 @@ func TestSubmitTaskBashDoesNotStampLoomOrigin(t *testing.T) {
 // TestSubmitContractTaskStampsLoomOrigin verifies that submit_contract_task stamps
 // loom_origin when routing to a chat-capable slave.
 func TestSubmitContractTaskStampsLoomOrigin(t *testing.T) {
-	home := writeLoomOriginCurrentFile(t, "thr-contract")
-
 	var captured agentsdk.DelegateTaskRequest
 	sdk := &fakeSDK{
 		discoverFunc: func() ([]agentsdk.AgentCard, error) {
@@ -2395,7 +2507,7 @@ func TestSubmitContractTaskStampsLoomOrigin(t *testing.T) {
 			return &agentsdk.DelegateTaskResponse{TaskID: "task-c"}, nil
 		},
 	}
-	tools := newLoomTestTools(t, sdk, home, "drv-4", "driver-4")
+	tools := newLoomTestTools(t, sdk, "", "drv-4", "driver-4")
 	_, err := tools.BindThread(context.Background(), "thr-contract")
 	require.NoError(t, err)
 
@@ -2414,8 +2526,6 @@ func TestSubmitContractTaskStampsLoomOrigin(t *testing.T) {
 // TestResumeTaskStampsLoomOrigin verifies that resume_task stamps loom_origin
 // on its chat_resume delegation.
 func TestResumeTaskStampsLoomOrigin(t *testing.T) {
-	home := writeLoomOriginCurrentFile(t, "thr-resume")
-
 	var captured agentsdk.DelegateTaskRequest
 	// Two distinct ids: agentserver bridges every task to a `cse_<uuid>`
 	// session, while the slave's chat backend reports its own thread id in
@@ -2442,7 +2552,7 @@ func TestResumeTaskStampsLoomOrigin(t *testing.T) {
 			return &agentsdk.DelegateTaskResponse{TaskID: "T-resume-2", SessionID: "cse_bridge-2"}, nil
 		},
 	}
-	tools := newLoomTestTools(t, sdk, home, "drv-5", "driver-5")
+	tools := newLoomTestTools(t, sdk, "", "drv-5", "driver-5")
 	_, err := tools.BindThread(context.Background(), "thr-resume")
 	require.NoError(t, err)
 
@@ -2499,6 +2609,9 @@ func submitTaskForTerminalTest(t *testing.T, taskID string) (*Tools, string) {
 		},
 	}
 	tools := newTestTools(t, sdk)
+	if _, bindErr := tools.BindThread(context.Background(), "thr-test"); bindErr != nil {
+		t.Fatal(bindErr)
+	}
 	_, err := toolByName(t, tools, "submit_task").Call(context.Background(),
 		json.RawMessage(`{"prompt":"do work","skill":"chat","target_display_name":"slave-2"}`))
 	require.NoError(t, err)
@@ -2543,6 +2656,9 @@ func TestWaitTaskWithFailedStatusWritesTerminalRecord(t *testing.T) {
 		},
 	}
 	tools := newTestTools(t, sdk)
+	if _, bindErr := tools.BindThread(context.Background(), "thr-test"); bindErr != nil {
+		t.Fatal(bindErr)
+	}
 	_, err := toolByName(t, tools, "submit_task").Call(context.Background(),
 		json.RawMessage(`{"prompt":"do work","skill":"chat","target_display_name":"slave-2"}`))
 	require.NoError(t, err)
@@ -2605,6 +2721,9 @@ func TestGetTaskStatusChangeAppendsSecondTerminalRow(t *testing.T) {
 		},
 	}
 	tools := newTestTools(t, sdk)
+	if _, bindErr := tools.BindThread(context.Background(), "thr-test"); bindErr != nil {
+		t.Fatal(bindErr)
+	}
 	_, err := toolByName(t, tools, "submit_task").Call(context.Background(),
 		json.RawMessage(`{"prompt":"do work","skill":"chat","target_display_name":"slave-2"}`))
 	require.NoError(t, err)
@@ -2688,6 +2807,9 @@ func TestResumeTaskRecoversPriorChildAgentID(t *testing.T) {
 		},
 	}
 	tools := newTestTools(t, sdk)
+	if _, bindErr := tools.BindThread(context.Background(), "thr-test"); bindErr != nil {
+		t.Fatal(bindErr)
+	}
 
 	// First: submit_task so the journal has a record with ChildAgentID="sl2"
 	_, err := toolByName(t, tools, "submit_task").Call(context.Background(),

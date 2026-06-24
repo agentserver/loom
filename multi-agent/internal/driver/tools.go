@@ -78,6 +78,7 @@ func isParentLinkDelegation(skill string) bool {
 // validThreadIDPattern accepts opaque backend-native session ids:
 //   - Codex emits UUIDv7 (e.g. 019ef3bd-42c8-7731-85b7-7177ae747389)
 //   - Other backends or tests may pass non-UUID strings (e.g. "thr-parent")
+//
 // Rejects unexpanded placeholders (`${VAR}`), shell metachars, whitespace,
 // newlines, slashes, and anything longer than 128 chars — values that would
 // persist as broken links in loom-meta sidecars otherwise.
@@ -514,6 +515,20 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		return nil, &MCPToolError{Message: "skill " + skill + " takes JSON-only prompts; read_paths/write_paths cannot be conveyed"}
 	}
 
+	// === capture-and-fail-fast guard ===
+	// Runs BEFORE manifest construction, RegisterFile, RegisterWrite,
+	// observer artifact creation, AuditLog writes. An unbound parent-link
+	// submission must leave NO trace.
+	var parentThreadID string
+	if isParentLinkDelegation(skill) {
+		pid, err := s.t.requireBoundThread()
+		if err != nil {
+			return nil, &MCPToolError{Message: err.Error()}
+		}
+		parentThreadID = pid
+	}
+	// === END guard ===
+
 	manifest := Manifest{}
 	for _, p := range args.ReadPaths {
 		absP, err := filepath.Abs(p)
@@ -621,25 +636,13 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	} else {
 		finalPrompt = manifest.Encode() + "\n\n" + args.Prompt
 	}
-	// Before:
-	//   systemContext := ""
-	//   if isParentLinkDelegation(skill) {
-	//       if m := s.t.loomOriginMarker(); m != "" {
-	//           systemContext = m
-	//       }
-	//   }
-	// After (temporary — Task 4 will move the requireBoundThread call to the
-	// top of Call() and fail-fast there; this preserves the LEGACY best-effort
-	// semantics just long enough to keep the tree compiling):
 	systemContext := ""
 	if isParentLinkDelegation(skill) {
-		if pid, err := s.t.requireBoundThread(); err == nil {
-			systemContext = agentbackend.BuildLoomOrigin(
-				s.t.cfg.Credentials.ShortID,
-				s.t.cfg.Discovery.DisplayName,
-				pid,
-			)
-		}
+		systemContext = agentbackend.BuildLoomOrigin(
+			s.t.cfg.Credentials.ShortID,
+			s.t.cfg.Discovery.DisplayName,
+			parentThreadID, // captured at top; never re-Loaded
+		)
 	}
 	resp, err := s.t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
 		TargetID:       targetID,
