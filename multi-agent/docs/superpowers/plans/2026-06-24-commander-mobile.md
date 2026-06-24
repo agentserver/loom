@@ -31,7 +31,9 @@ The following constraints come from the spec and apply to every task — never v
 internal/commanderhub/webapp/src/
   hooks/
     useMediaQuery.ts                 # matchMedia React hook
+    useMediaQuery.test.ts            # vitest for the hook
     useOverlayHistory.ts             # stable controller + factory
+    useOverlayHistory.test.ts        # vitest for the controller
   components/
     MobileShell.tsx                  # < 1024px shell
     MobileShell.test.tsx
@@ -39,6 +41,7 @@ internal/commanderhub/webapp/src/
     MobileDrawer.test.tsx
     FilePreviewSheet.tsx             # full-viewport Radix Dialog
     FilePreviewSheet.test.tsx
+  CommanderApp.mobile.test.tsx       # mobile-branch vitest (task 8)
 ```
 
 **Modified files:**
@@ -92,7 +95,7 @@ Tasks below are ordered to land green-bar after each step:
 - Consumes: nothing from earlier tasks.
 - Produces:
   - `@radix-ui/react-dialog` available for import as `* as Dialog`.
-  - `useMediaQuery(query: string): boolean` — re-renders the caller when the match flips. SSR-safe: returns `false` on first render if `window` is undefined.
+  - `useMediaQuery(query: string, options?: { onChange?: (matches: boolean) => void }): boolean` — re-renders the caller when the match flips. SSR-safe: returns `false` on first render if `window` is undefined. The optional `onChange` fires **synchronously inside the matchMedia change handler, before** the hook calls `setMatches` (so the caller can run side-effects — for example `history.go(...)` — before React commits the new render). `onChange` is captured in a ref so the hook does not re-attach the listener whenever the callback identity changes.
 
 - [ ] **Step 1: Write the failing hook test**
 
@@ -146,6 +149,24 @@ test('re-renders when the media query flips', () => {
   act(() => ctrl.flip(true));
   expect(result.current).toBe(true);
 });
+
+test('invokes onChange synchronously before the new render', () => {
+  const ctrl = installMatchMedia(true);
+  const order: string[] = [];
+  const onChange = vi.fn((next: boolean) => {
+    // At the moment onChange runs, the hook has not yet called setMatches,
+    // so any side-effect (history.go, state reset) runs before React commits.
+    order.push(`onChange:${next}`);
+  });
+  const { result } = renderHook(() => useMediaQuery('(max-width: 1023px)', { onChange }));
+  order.push(`initial:${result.current}`);
+  act(() => ctrl.flip(false));
+  order.push(`after:${result.current}`);
+  expect(onChange).toHaveBeenCalledWith(false);
+  // The synchronous-before-commit ordering: onChange precedes the post-flip
+  // render observation.
+  expect(order).toEqual(['initial:true', 'onChange:false', 'after:false']);
+});
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -158,14 +179,25 @@ Expected: FAIL — `Cannot find module './useMediaQuery'`.
 Create `internal/commanderhub/webapp/src/hooks/useMediaQuery.ts`:
 
 ```ts
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
-export function useMediaQuery(query: string): boolean {
+export function useMediaQuery(
+  query: string,
+  options?: { onChange?: (matches: boolean) => void },
+): boolean {
   const [matches, setMatches] = useState(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
       return false;
     }
     return window.matchMedia(query).matches;
+  });
+
+  // Keep the latest onChange in a ref so changing identity does not re-attach
+  // the listener, but the synchronous call inside the handler still uses the
+  // most-recently-passed callback.
+  const onChangeRef = useRef(options?.onChange);
+  useEffect(() => {
+    onChangeRef.current = options?.onChange;
   });
 
   useEffect(() => {
@@ -174,7 +206,12 @@ export function useMediaQuery(query: string): boolean {
     }
     const mql = window.matchMedia(query);
     setMatches(mql.matches);
-    const handler = (event: MediaQueryListEvent) => setMatches(event.matches);
+    const handler = (event: MediaQueryListEvent) => {
+      // Run the consumer's side-effects (e.g. history.go) BEFORE updating
+      // state, so React's next render observes the post-side-effect world.
+      onChangeRef.current?.(event.matches);
+      setMatches(event.matches);
+    };
     mql.addEventListener('change', handler);
     return () => mql.removeEventListener('change', handler);
   }, [query]);
@@ -444,9 +481,15 @@ Refs: #30"
   ```ts
   mobileLeading?: ReactNode;   // rendered as first flex child of .chat-header
   mobileTrailing?: ReactNode;  // rendered as last flex child of .chat-header
-  empty?: boolean;             // when true, composer textarea + button forced disabled
+  empty?: boolean;             // when true, composer textarea + button forced
+                               // disabled AND the message list shows the
+                               // centered hint copy below in place of messages.
   ```
-  Default (`mobileLeading`/`mobileTrailing` unset, `empty` unset) preserves today's behavior exactly.
+  When `empty` is true, the message list renders a single `<p>` with the
+  literal text `No sessions yet — open Sessions to pick one once a daemon
+  appears` (spec §First-screen behavior) inside a `.message-list-empty`
+  wrapper. Default (`mobileLeading`/`mobileTrailing` unset, `empty` unset)
+  preserves today's behavior exactly.
 
 - [ ] **Step 1: Read the existing test file to preserve style**
 
@@ -475,7 +518,7 @@ test('renders mobileLeading and mobileTrailing slots inside chat-header', () => 
   expect(within(header as HTMLElement).getByRole('button', { name: 'R' })).toBeInTheDocument();
 });
 
-test('empty=true forces composer textarea + send button to disabled', () => {
+test('empty=true forces composer disabled and shows the no-sessions hint', () => {
   render(
     <ChatWorkspace
       daemonID=""
@@ -488,6 +531,9 @@ test('empty=true forces composer textarea + send button to disabled', () => {
   );
   expect(screen.getByLabelText('输入提示词')).toBeDisabled();
   expect(screen.getByRole('button', { name: '发送' })).toBeDisabled();
+  expect(
+    screen.getByText('No sessions yet — open Sessions to pick one once a daemon appears'),
+  ).toBeInTheDocument();
 });
 
 test('empty=false (default) keeps composer enabled at turnState idle', () => {
@@ -570,15 +616,21 @@ export function ChatWorkspace({
       </header>
       {/* message-list and composer unchanged */}
       <div data-testid="message-list" className="message-list" ref={messageListRef}>
-        {messages.map((msg, index) => {
-          const role = msg.role || 'assistant';
-          const text = msg.text || '';
-          return (
-            <article key={index} className={`message message-${role}`}>
-              <MessageRenderer text={text} />
-            </article>
-          );
-        })}
+        {empty ? (
+          <p className="message-list-empty">
+            No sessions yet — open Sessions to pick one once a daemon appears
+          </p>
+        ) : (
+          messages.map((msg, index) => {
+            const role = msg.role || 'assistant';
+            const text = msg.text || '';
+            return (
+              <article key={index} className={`message message-${role}`}>
+                <MessageRenderer text={text} />
+              </article>
+            );
+          })
+        )}
       </div>
       <form
         className="composer"
@@ -1684,11 +1736,15 @@ Overlay state hoisting (spec §Component Structure #6):
 - The matchMedia mobile→desktop transition handler (below) calls all three setters with their closed/null values **before** flipping the local `isNonDesktop` view state, so the desktop shell never inherits stale overlay flags and a rotation back to mobile starts from a clean state.
 
 The auto-select rule (spec §First-screen behavior):
-- Helper `pickAutoSession(tree)`: scans `tree.daemons` in order; for each daemon scans `daemon.sessions` in order, returning the first whose `origin !== 'subagent'` AND whose `parent_id` is empty (or its parent is not present in the same daemon). If none found, fall back to the first session of any kind. Returns `null` if no session anywhere.
+- Helper `pickAutoSession(tree)` mirrors `DaemonSessionTree.buildCrossDaemonTree`: it scans `tree.daemons` in order; for each daemon scans `daemon.sessions` in order, returning the first session whose `origin` is **neither** `'subagent'` **nor** `'agent_task'` with a `parent_id` that resolves to another session in the whole tree. If every session is a resolvable child, fall back to the first session of any kind so the user lands on chat content. Returns `null` only when no session of any kind exists.
 - A `hasAutoSelectedRef` guards one-shot behavior; it resets only when `authRequired` flips false → true.
 - `tryAutoSelect(tree)`: when `!hasAutoSelectedRef.current && isNonDesktop && selected == null`, call `pickAutoSession(tree)`; if non-null, call `selectSession(...)` and set the ref.
 - Invoke `tryAutoSelect` (a) inside `loadTree().then` after `setTree(nextTree)` and (b) from a `useEffect` keyed on `[isNonDesktop, tree]`.
-- A separate `useEffect` watches `isNonDesktop` transitions from true → false: it calls `overlay.drainForBreakpoint()`, then resets every overlay UI flag (`setSessionsOpen(false)`, `setFilesOpen(false)`, `setPreviewPayload(null)`), then the breakpoint flag flips (React re-renders, `MobileShell` unmounts).
+- The matchMedia `onChange` callback (passed into `useMediaQuery`) is the **first** thing to run on a breakpoint transition. When it observes a `true → false` change (mobile → desktop) it runs, synchronously, in this exact order:
+  1. `overlay.drainForBreakpoint()` (history.go(-len)).
+  2. `setSessionsOpen(false)`, `setFilesOpen(false)`, `setPreviewPayload(null)` to flush overlay UI state.
+  3. The hook then calls its own `setMatches(false)`.
+  Because all three React `setState` calls happen inside the same microtask before React commits, the desktop shell never renders with stale overlay flags or phantom history entries — they're cleared in the same render cycle as the shell swap. Using `useEffect([isNonDesktop])` would be too late (React would have already committed the desktop shell once).
 - A `useEffect(() => () => overlay.reset(), [overlay])` runs on full unmount (route change, logout) and only detaches the listener (no history mutation).
 
 - [ ] **Step 1: Add failing mobile-branch tests**
@@ -1811,6 +1867,26 @@ test('auto-select falls back to subagent when only subagent sessions exist', asy
   render(<CommanderApp />);
   await waitFor(() => expect(screen.getByText('Subagent only')).toBeInTheDocument());
 });
+
+test('auto-select skips agent_task whose parent_id resolves in the tree', async () => {
+  installMatchMedia(true);
+  vi.stubGlobal('fetch', mockTreeFetch({
+    daemons: [
+      {
+        daemon_id: 'd1', display_name: 'prod', kind: 'codex', status: 'ok',
+        sessions: [
+          // agent_task with a resolvable parent — DaemonSessionTree renders
+          // this nested under parent-1, so it must NOT be auto-selected.
+          { daemon_id: 'd1', session_id: 'task-1', kind: 'codex', title: 'Nested task', origin: 'agent_task', parent_id: 'parent-1', turn_state: 'idle', active_worker: false, awaiting_approval: false },
+          // The resolvable parent — this is the legitimate top-level row.
+          { daemon_id: 'd1', session_id: 'parent-1', kind: 'codex', title: 'Parent root', origin: 'user', turn_state: 'idle', active_worker: false, awaiting_approval: false },
+        ],
+      },
+    ],
+  }));
+  render(<CommanderApp />);
+  await waitFor(() => expect(screen.getByText('Parent root')).toBeInTheDocument());
+});
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1840,15 +1916,25 @@ Add the helper near other top-level functions (above `CommanderApp`):
 ```tsx
 function pickAutoSession(tree: CommanderTree | null) {
   if (!tree) return null;
-  const isTopLevel = (session: SessionRow, presentIDs: Set<string>) =>
-    session.origin !== 'subagent' || !session.parent_id || !presentIDs.has(session.parent_id);
+  // Match DaemonSessionTree.buildCrossDaemonTree: a session is a child
+  // (non-top-level) when its origin is 'subagent' or 'agent_task' AND its
+  // parent_id resolves to another session anywhere in the tree. Roots are
+  // every other session; on mobile we auto-select the first root.
+  const allIDs = new Set<string>();
   for (const daemon of tree.daemons) {
-    const ids = new Set((daemon.sessions || []).map((s) => s.session_id));
+    for (const s of daemon.sessions || []) allIDs.add(s.session_id);
+  }
+  const isChild = (s: SessionRow) =>
+    (s.origin === 'subagent' || s.origin === 'agent_task') &&
+    !!s.parent_id &&
+    allIDs.has(s.parent_id);
+  for (const daemon of tree.daemons) {
     for (const s of daemon.sessions || []) {
-      if (isTopLevel(s, ids)) return { daemonID: daemon.daemon_id, sessionID: s.session_id };
+      if (!isChild(s)) return { daemonID: daemon.daemon_id, sessionID: s.session_id };
     }
   }
-  // Fall back to the first session of any kind.
+  // Fall back to the first session of any kind so mobile never lands in the
+  // empty state when sessions actually exist.
   for (const daemon of tree.daemons) {
     for (const s of daemon.sessions || []) {
       return { daemonID: daemon.daemon_id, sessionID: s.session_id };
@@ -1861,33 +1947,36 @@ function pickAutoSession(tree: CommanderTree | null) {
 Inside `CommanderApp` add (place after the existing `useState` hooks for `tree`/`error`/`authRequired`/`login`/`selected`/`sessionDetail`/`turnState`):
 
 ```tsx
-const isNonDesktop = useMediaQuery('(max-width: 1023px)');
 const overlay = useOverlayHistory();
 const hasAutoSelectedRef = useRef(false);
-const wasNonDesktopRef = useRef(isNonDesktop);
 
 // Hoisted overlay UI state (spec §Component Structure #6).
 const [sessionsOpen, setSessionsOpen] = useState(false);
 const [filesOpen, setFilesOpen] = useState(false);
 const [previewPayload, setPreviewPayload] = useState<FilePreviewPayload | null>(null);
 
+// matchMedia onChange runs BEFORE the hook's setState commits the new
+// isNonDesktop value, so we can drain history + reset overlay flags in the
+// same microtask as the shell swap. See spec §Browser back as drawer/sheet
+// close → Edge cases (breakpoint crossing).
+const isNonDesktop = useMediaQuery('(max-width: 1023px)', {
+  onChange: (nextIsNonDesktop) => {
+    if (!nextIsNonDesktop) {
+      // mobile -> desktop transition: drain pushed history AND reset overlay
+      // UI state so a rotation back to mobile does not auto-reopen an overlay
+      // whose backing history entries were already consumed.
+      overlay.drainForBreakpoint();
+      setSessionsOpen(false);
+      setFilesOpen(false);
+      setPreviewPayload(null);
+    }
+  },
+});
+
 useEffect(() => {
   // Reset the auto-select guard on full logout (false -> true).
   if (authRequired) hasAutoSelectedRef.current = false;
 }, [authRequired]);
-
-useEffect(() => {
-  // mobile -> desktop transition: drain pushed history AND reset overlay UI
-  // state so a rotation back to mobile does not auto-reopen an overlay whose
-  // backing history entries were already consumed.
-  if (wasNonDesktopRef.current && !isNonDesktop) {
-    overlay.drainForBreakpoint();
-    setSessionsOpen(false);
-    setFilesOpen(false);
-    setPreviewPayload(null);
-  }
-  wasNonDesktopRef.current = isNonDesktop;
-}, [isNonDesktop, overlay]);
 
 useEffect(() => () => overlay.reset(), [overlay]);
 
@@ -2045,6 +2134,14 @@ Append:
   background: #fff; color: #26364d;
 }
 .chat-header-trigger:hover { background: #f4f7fb; }
+
+.message-list-empty {
+  margin: auto;
+  padding: 24px 16px;
+  text-align: center;
+  color: #69768a;
+  font-size: 14px;
+}
 ```
 
 - [ ] **Step 4: Append the mobile / tablet-portrait stylesheet block**
@@ -2261,6 +2358,26 @@ const fileMocks = {
   goMod: { path: 'go.mod', size: 40, content: 'module x' },
   readme: { path: 'README.md', size: 80, content: '# project' },
 };
+
+// The default treePayload at the top of this file uses
+// turn_state: 'answering' so the existing desktop test exercises an
+// in-flight turn. Mobile tests below want an idle composer; install
+// this fixture by overriding the tree route at the top of each mobile
+// test that needs to type into the composer.
+const idleTreePayload = {
+  daemons: [
+    {
+      ...treePayload.daemons[0],
+      sessions: [
+        { ...treePayload.daemons[0].sessions[0], turn_state: 'idle' },
+      ],
+    },
+  ],
+};
+
+async function mockIdleTree(page: import('@playwright/test').Page) {
+  await page.route('**/api/commander/tree', (route) => route.fulfill({ json: idleTreePayload }));
+}
 ```
 
 - [ ] **Step 3: Add tests 1–10**
@@ -2270,6 +2387,7 @@ Append (verbatim — copy below into the file; do not paraphrase):
 ```ts
 test('non-desktop: auto-selects first session and chat is live', async ({ page }, testInfo) => {
   if (testInfo.project.name === 'chromium-desktop') test.skip();
+  await mockIdleTree(page);
   await page.goto('/commander/');
   await expect(page.getByRole('heading', { level: 1, name: /Fix commander session cache latency/ })).toBeVisible();
   await expect(page.getByLabel('输入提示词')).toBeEnabled();
@@ -2281,10 +2399,14 @@ test('non-desktop: empty tree renders disabled composer + hint', async ({ page }
   await page.goto('/commander/');
   await expect(page.getByLabel('输入提示词')).toBeDisabled();
   await expect(page.getByRole('button', { name: '发送' })).toBeDisabled();
+  await expect(
+    page.getByText('No sessions yet — open Sessions to pick one once a daemon appears'),
+  ).toBeVisible();
 });
 
 test('non-desktop: open sessions drawer, select session, send prompt', async ({ page }, testInfo) => {
   if (testInfo.project.name === 'chromium-desktop') test.skip();
+  await mockIdleTree(page);
   let turnCalled = false;
   await page.route('**/api/commander/daemons/d1/sessions/s1/turn', async (route) => {
     turnCalled = true;
@@ -2304,6 +2426,7 @@ test('non-desktop: open sessions drawer, select session, send prompt', async ({ 
 
 test('non-desktop: open files drawer, preview file, then preview a second', async ({ page }, testInfo) => {
   if (testInfo.project.name === 'chromium-desktop') test.skip();
+  await mockIdleTree(page);
   await page.route('**/api/commander/daemons/d1/sessions/s1/files?path=.', (route) => route.fulfill({ json: fileMocks.rootListing }));
   await page.route('**/api/commander/daemons/d1/sessions/s1/files/content?path=go.mod', (route) => route.fulfill({ json: fileMocks.goMod }));
   await page.route('**/api/commander/daemons/d1/sessions/s1/files/content?path=README.md', (route) => route.fulfill({ json: fileMocks.readme }));
@@ -2325,6 +2448,7 @@ test('non-desktop: open files drawer, preview file, then preview a second', asyn
 
 test('non-desktop: browser back closes overlays in stack order', async ({ page }, testInfo) => {
   if (testInfo.project.name === 'chromium-desktop') test.skip();
+  await mockIdleTree(page);
   await page.route('**/api/commander/daemons/d1/sessions/s1/files?path=.', (route) => route.fulfill({ json: fileMocks.rootListing }));
   await page.route('**/api/commander/daemons/d1/sessions/s1/files/content?path=go.mod', (route) => route.fulfill({ json: fileMocks.goMod }));
   await page.goto('about:blank');
@@ -2346,6 +2470,7 @@ test('non-desktop: browser back closes overlays in stack order', async ({ page }
 
 test('non-desktop: no horizontal overflow at 360/390/430 and 834', async ({ page }, testInfo) => {
   if (testInfo.project.name === 'chromium-desktop') test.skip();
+  await mockIdleTree(page);
   await page.goto('/commander/');
   for (const w of [360, 390, 430, 834]) {
     await page.setViewportSize({ width: w, height: 844 });
@@ -2358,6 +2483,7 @@ test('non-desktop: no horizontal overflow at 360/390/430 and 834', async ({ page
 
 test('non-desktop: drawer interactive controls meet 44px hit area', async ({ page }, testInfo) => {
   if (testInfo.project.name === 'chromium-desktop') test.skip();
+  await mockIdleTree(page);
   await page.route('**/api/commander/daemons/d1/sessions/s1/files?path=.', (route) => route.fulfill({ json: fileMocks.rootListing }));
   await page.route('**/api/commander/daemons/d1/sessions/s1/files/content?path=go.mod', (route) => route.fulfill({ json: fileMocks.goMod }));
   await page.goto('/commander/');
@@ -2412,6 +2538,7 @@ test('desktop: no auto-select preserves current behavior', async ({ page }, test
 
 test('non-desktop: resizing to desktop while two overlays are stacked leaves no phantom history', async ({ page }, testInfo) => {
   if (testInfo.project.name !== 'chromium-mobile') test.skip();
+  await mockIdleTree(page);
   await page.route('**/api/commander/daemons/d1/sessions/s1/files?path=.', (route) => route.fulfill({ json: fileMocks.rootListing }));
   await page.route('**/api/commander/daemons/d1/sessions/s1/files/content?path=go.mod', (route) => route.fulfill({ json: fileMocks.goMod }));
   await page.goto('about:blank');
@@ -2442,6 +2569,7 @@ Add a new test at the end of the file:
 ```ts
 test('non-desktop: chat default state baseline screenshot', async ({ page }, testInfo) => {
   if (testInfo.project.name === 'chromium-desktop') test.skip();
+  await mockIdleTree(page);
   await page.goto('/commander/');
   await expect(page.getByLabel('输入提示词')).toBeEnabled();
   const name = testInfo.project.name === 'chromium-mobile' ? 'commander-mobile.png' : 'commander-tablet-portrait.png';
@@ -2450,6 +2578,7 @@ test('non-desktop: chat default state baseline screenshot', async ({ page }, tes
 
 test('non-desktop: mobile sessions drawer + file preview screenshots', async ({ page }, testInfo) => {
   if (testInfo.project.name !== 'chromium-mobile') test.skip();
+  await mockIdleTree(page);
   await page.route('**/api/commander/daemons/d1/sessions/s1/files?path=.', (route) => route.fulfill({ json: fileMocks.rootListing }));
   await page.route('**/api/commander/daemons/d1/sessions/s1/files/content?path=go.mod', (route) => route.fulfill({ json: fileMocks.goMod }));
   await page.goto('/commander/');
