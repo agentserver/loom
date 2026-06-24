@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, expect, test, vi } from 'vitest';
 import { CommanderApp } from './CommanderApp';
 
@@ -251,4 +251,65 @@ test('no session is auto-selected on desktop viewport', async () => {
     String(c[0]).includes('/sessions/a'),
   ).length;
   expect(sessionCalls).toBe(0);
+});
+
+test('mobile: click + on daemon creates pending session in draft phase, drawer closes, composer enabled with empty messages, no detail fetch issued', async () => {
+  installMatchMedia(true);
+  const fetchFn = vi.fn(async (input: RequestInfo | URL) => {
+    const url = new URL(String(input), 'http://commander.test');
+    if (url.pathname === '/api/commander/tree') {
+      return treeWith([{ session_id: 'a', title: 'Session A' }]);
+    }
+    if (url.pathname.endsWith('/files')) {
+      return jsonResponse({ root: '/repo', path: '.', entries: [] });
+    }
+    if (/\/sessions\/[^/]+$/.test(url.pathname)) {
+      return jsonResponse({ session: { ID: 'a', Title: 'Session A' }, messages: [] });
+    }
+    return jsonResponse({});
+  });
+  vi.stubGlobal('fetch', fetchFn);
+  render(<CommanderApp />);
+  await screen.findByText('Session A');
+  fireEvent.click(screen.getByRole('button', { name: 'Sessions' }));
+  const isDetailURL = (input: unknown) =>
+    /\/api\/commander\/daemons\/[^/]+\/sessions\/[^/]+$/.test(String(input));
+  const detailsBefore = fetchFn.mock.calls.filter(([url]) => isDetailURL(url)).length;
+  fireEvent.click(screen.getByRole('button', { name: /新建 session: prod-codex/ }));
+  await waitFor(() => expect(screen.queryByTestId('drawer-left')).not.toBeInTheDocument());
+  expect(screen.getByLabelText('输入提示词')).toBeEnabled();
+  // The draft path must short-circuit detail fetch — no new detail call.
+  const detailsAfter = fetchFn.mock.calls.filter(([url]) => isDetailURL(url)).length;
+  expect(detailsAfter).toBe(detailsBefore);
+});
+
+test('mobile: re-clicking + on same daemon while draft pending exists does NOT mint a fresh UUID', async () => {
+  installMatchMedia(true);
+  stubFetch([{ session_id: 'a', title: 'Session A' }]);
+  render(<CommanderApp />);
+  await screen.findByText('Session A');
+  fireEvent.click(screen.getByRole('button', { name: 'Sessions' }));
+  fireEvent.click(screen.getByRole('button', { name: /新建 session: prod-codex/ }));
+  await waitFor(() => expect(screen.queryByTestId('drawer-left')).not.toBeInTheDocument());
+  fireEvent.click(screen.getByRole('button', { name: 'Sessions' }));
+  expect(screen.getByText('新建会话(待提交)')).toBeInTheDocument();
+  // Re-click + on the same daemon — should NOT add a second virtual row.
+  fireEvent.click(screen.getByRole('button', { name: /新建 session: prod-codex/ }));
+  await waitFor(() => expect(screen.queryByTestId('drawer-left')).not.toBeInTheDocument());
+  fireEvent.click(screen.getByRole('button', { name: 'Sessions' }));
+  expect(screen.getAllByText('新建会话(待提交)')).toHaveLength(1);
+});
+
+test('mobile: × discard on draft row clears pendingSession + selected', async () => {
+  installMatchMedia(true);
+  stubFetch([{ session_id: 'a', title: 'Session A' }]);
+  render(<CommanderApp />);
+  await screen.findByText('Session A');
+  fireEvent.click(screen.getByRole('button', { name: 'Sessions' }));
+  fireEvent.click(screen.getByRole('button', { name: /新建 session: prod-codex/ }));
+  await waitFor(() => expect(screen.queryByTestId('drawer-left')).not.toBeInTheDocument());
+  fireEvent.click(screen.getByRole('button', { name: 'Sessions' }));
+  expect(screen.getByText('新建会话(待提交)')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: '丢弃草稿' }));
+  expect(screen.queryByText('新建会话(待提交)')).not.toBeInTheDocument();
 });
