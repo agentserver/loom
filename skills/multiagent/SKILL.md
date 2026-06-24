@@ -34,6 +34,166 @@ If an outer MCP client times out, a stdio session is interrupted, or a long
 the task was lost. The driver records each delegated `task_id` locally as soon
 as agentserver returns it.
 
+## Initialization (REQUIRED before any submit_task)
+
+You MUST bind the driver to its parent codex thread once per session,
+BEFORE calling any parent-link skill (`submit_task` / `resume_task` /
+`submit_contract_task` with skill ∈ {`chat`, `chat_resume`, `fanout`,
+`fanout_strict`, `route`} — i.e. anything that spawns a nested codex on a
+slave). Bash-only / powershell-only submissions don't need this.
+
+**Step 1** — run this discovery script as a shell tool call. **Pipe the
+script body into bash via a quoted heredoc** (`bash <<'DISCOVER_EOF' ...
+DISCOVER_EOF`) rather than `bash -c '...'`. The script contains
+single-quoted regex literals (`UUID_RE='^[0-9a-fA-F]{8}-...$'`) that would
+conflict with single quotes around a `-c` argument. The quoted heredoc
+form (`<<'DISCOVER_EOF'`) disables variable / command expansion AND
+preserves the script byte-for-byte, satisfying the CI drift check.
+
+**Critical**: do NOT wrap the invocation in `THREAD_ID=$(...)` or any other
+shell-variable assignment. Shell-tool calls do not persist environment
+between invocations — a variable set in one tool call vanishes before the
+next. The script must print the thread_id to stdout so the model sees it
+directly in the tool-call response. The model then copies that value
+verbatim into the `bind_thread` MCP call.
+
+```
+bash <<'DISCOVER_EOF'
+#!/usr/bin/env bash
+# discover-thread.sh — print the current codex thread_id to stdout, or
+# exit non-zero with an explanation on stderr. Deterministic; no heuristics.
+#
+# Signals allowed:
+#   1. $CODEX_THREAD_ID (codex itself wrote it, or a forwarder did)
+#   2. /proc/<ppid>/fd open rollout file under $CODEX_HOME/sessions/
+#      with exact UUID suffix (Linux)
+#
+# Cwd-based or "newest thread" sqlite lookup is INTENTIONALLY OMITTED —
+# the same cwd routinely hosts multiple codex threads, and "newest" can
+# silently mis-attribute to the wrong one.
+#
+# /proc/<ppid>/fd matches MUST be:
+#   - under $CODEX_HOME/sessions/ (canonicalized prefix)
+#   - basename ends with -<UUID>.jsonl
+# Across the parent-chain walk we collect UNIQUE thread_id candidates;
+# exactly 1 → emit it; 0 → fall to manual fallback; >1 → fail loud and
+# print the candidates so operators can see the invariant violation.
+
+set -euo pipefail
+
+UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+valid() { [[ "$1" =~ $UUID_RE ]]; }
+
+# Source 1: env
+if [[ -n "${CODEX_THREAD_ID:-}" ]] && valid "$CODEX_THREAD_ID"; then
+    echo "$CODEX_THREAD_ID"
+    exit 0
+fi
+
+# Source 2: Linux /proc/<pid>/fd walk
+CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+# Canonicalize so symlinked CODEX_HOME doesn't false-negative the prefix
+# check (gopsutil-side fd readlinks return realpath).
+SESSIONS_ROOT=$(cd "$CODEX_HOME/sessions" 2>/dev/null && pwd -P || true)
+
+if [[ -n "$SESSIONS_ROOT" && -d "/proc/$PPID/fd" ]]; then
+    declare -A seen=()
+    pid=$PPID
+    for _ in 1 2 3 4 5; do
+        [[ "$pid" -gt 1 ]] || break
+        if [[ -d "/proc/$pid/fd" ]]; then
+            for fd in /proc/$pid/fd/*; do
+                target=$(readlink -f "$fd" 2>/dev/null) || continue
+                # Reject anything not under sessions root
+                [[ "$target" == "$SESSIONS_ROOT"/* ]] || continue
+                # Extract trailing UUID (validate strict shape)
+                cand=$(printf '%s\n' "$target" | sed -nE \
+                    's|.*-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$|\1|p')
+                if [[ -n "$cand" ]] && valid "$cand"; then
+                    seen["$cand"]=1
+                fi
+            done
+        fi
+        pid=$(awk '/^PPid:/{print $2}' "/proc/$pid/status" 2>/dev/null || echo 1)
+    done
+
+    case "${#seen[@]}" in
+        1)
+            for k in "${!seen[@]}"; do echo "$k"; done
+            exit 0
+            ;;
+        0)
+            : # fall through to manual-fallback message below
+            ;;
+        *)
+            {
+                echo "discover-thread: parent codex appears to hold MORE THAN ONE"
+                echo "open rollout fd under $SESSIONS_ROOT. Refusing to guess."
+                echo "Candidate thread_ids:"
+                for k in "${!seen[@]}"; do echo "  - $k"; done
+                echo "Next: use /status in codex to identify the correct id"
+                echo "and call driver.bind_thread(thread_id=...) directly."
+            } >&2
+            exit 2
+            ;;
+    esac
+fi
+
+# All sources failed — explicit fail with operator-actionable message.
+{
+    echo "discover-thread: could not determine the parent codex thread_id."
+    echo ""
+    echo "Tried:"
+    echo "  1. \$CODEX_THREAD_ID env (unset or malformed)"
+    if [[ -d "/proc/$PPID/fd" ]]; then
+        if [[ -z "${SESSIONS_ROOT:-}" ]]; then
+            echo "  2. /proc/<ppid>/fd scan (skipped — \$CODEX_HOME/sessions missing)"
+        else
+            echo "  2. /proc/<ppid>/fd scan under $SESSIONS_ROOT (no match)"
+        fi
+    else
+        echo "  2. /proc/<ppid>/fd scan (skipped — not on Linux)"
+    fi
+    echo ""
+    echo "Next steps:"
+    echo "  - In your codex session, type /status. Find the line"
+    echo "    starting with 'thread_id:' and copy the UUID."
+    echo "  - Then call driver.bind_thread(thread_id=<that uuid>) manually."
+} >&2
+exit 1
+DISCOVER_EOF
+```
+
+It prints the thread_id to stdout, or exits non-zero with an actionable
+message on stderr. Exit codes: 0 = success, 1 = no source resolved,
+2 = multi-candidate invariant violation.
+
+**Step 2** — read the UUID from Step 1's stdout, then call `bind_thread`
+with that value as a literal argument. Expect `{ "bound": true,
+"thread_id": "..." }` in the response:
+
+```
+driver.bind_thread(thread_id="<paste the UUID from Step 1's stdout here>")
+```
+
+If Step 1 exits non-zero (typical on macOS / Windows without
+`CODEX_THREAD_ID` set, or in containers without /proc access), or if
+running on native Windows (cmd / PowerShell, no bash — skip Step 1
+entirely), ask the user:
+
+> "I need your current Codex thread id to set up parent linkage.
+>  In your codex session, run `/status` and paste the UUID after
+>  `thread_id:` here."
+
+Then call `bind_thread` with that value.
+
+If you skip this step entirely, every parent-link submission will fail
+with: "driver not bound to a codex thread; call `bind_thread` first ..."
+
+**Re-binding mid-session** (e.g. after `/resume` switches to a different
+codex thread) is supported: just re-run discovery and call `bind_thread`
+again — the new value replaces the old one.
+
 ## Default Workflow
 
 1. Call `inspect_capabilities` before planning nontrivial work.
