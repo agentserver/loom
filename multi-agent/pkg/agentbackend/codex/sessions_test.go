@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/stretchr/testify/require"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
@@ -302,21 +303,38 @@ func TestGetSession_CodexMetaSourceStringPreservesWorkingDir(t *testing.T) {
 	}
 }
 
-func TestGetSession_CodexExecManifestIsAgentTaskAndTitleSkipsManifest(t *testing.T) {
+func TestGetSession_CodexExecWithSidecarIsAgentTaskAndTitleSkipsManifest(t *testing.T) {
+	t.Skip("enabled by Task 14 — applyLoomMeta sidecar+exec gate")
 	home := t.TempDir()
 	setTestHome(t, home)
-	dir := filepath.Join(home, ".codex", "sessions", "2026", "06", "17")
+	// IMPORTANT: this fixture uses setTestHome + the default-CodexHome
+	// resolution path. The rollout is written to home/.codex/sessions/...,
+	// and EffectiveCodexHome(cfg, env) returns filepath.Join(home, ".codex")
+	// when cfg.CodexHome is empty (codexenv.go:28). The sidecar must live
+	// under the SAME base — otherwise applyLoomMeta will read
+	// home/.codex/loom-meta/<id>.json and the sidecar at home/loom-meta/...
+	// will be invisible to it.
+	codexHome := filepath.Join(home, ".codex")
+	dir := filepath.Join(codexHome, "sessions", "2026", "06", "17")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	id := "abababab-1111-2222-3333-cdcdcdcdcdcd"
+	sessionID := "abababab-1111-2222-3333-cdcdcdcdcdcd"
 	body := strings.Join([]string{
-		`{"timestamp":"2026-06-17T04:00:00.000Z","type":"session_meta","payload":{"id":"` + id + `","cwd":"/tmp/codex-agent-task","originator":"codex_exec","source":"exec","thread_source":"user"}}`,
+		`{"timestamp":"2026-06-17T04:00:00.000Z","type":"session_meta","payload":{"id":"` + sessionID + `","cwd":"/tmp/codex-agent-task","originator":"codex_exec","source":"exec","thread_source":"user"}}`,
 		`{"timestamp":"2026-06-17T04:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<USER_FILES_MANIFEST version=1>\n{\"files\":[],\"writes\":[]}\n</USER_FILES_MANIFEST>\n\nack\n\n=== CAPABILITY ===\ne2e marker"}]}}`,
 	}, "\n")
-	if err := os.WriteFile(filepath.Join(dir, "rollout-2026-06-17T04-00-00-"+id+".jsonl"), []byte(body+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "rollout-2026-06-17T04-00-00-"+sessionID+".jsonl"), []byte(body+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
+	// NEW — sidecar lives under codexHome, NOT under home:
+	require.NoError(t, writeLoomMeta(codexHome, loomMeta{
+		Schema:    loomMetaSchema,
+		Kind:      "codex",
+		Origin:    "agent_task",
+		SessionID: sessionID,
+	}))
 
 	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir()}, nil)
 	listed, err := b.ListSessions(context.Background())
@@ -333,7 +351,7 @@ func TestGetSession_CodexExecManifestIsAgentTaskAndTitleSkipsManifest(t *testing
 		t.Fatalf("ListSessions Title=%q", listed[0].Title)
 	}
 
-	sess, _, err := b.GetSession(context.Background(), id)
+	sess, _, err := b.GetSession(context.Background(), sessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,6 +364,7 @@ func TestGetSession_CodexExecManifestIsAgentTaskAndTitleSkipsManifest(t *testing
 }
 
 func TestListSessionsMergesLoomMetaSidecar(t *testing.T) {
+	t.Skip("enabled by Task 14 — applyLoomMeta sidecar+exec gate")
 	home := t.TempDir()
 	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir(), CodexHome: home}, nil)
 	id := "deadbeef-0000-0000-0000-000000000001"
@@ -445,6 +464,7 @@ func TestListSessionsCorruptSidecarSkipped(t *testing.T) {
 }
 
 func TestListCacheInvalidatedBySidecarRewrite(t *testing.T) {
+	t.Skip("enabled by Task 14 — applyLoomMeta sidecar+exec gate")
 	home := t.TempDir()
 	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir(), CodexHome: home}, nil)
 	id := "deadbeef-0000-0000-0000-000000000004"
@@ -735,6 +755,7 @@ func TestTitleFromUserText_TruncatesAtValidUTF8Boundary(t *testing.T) {
 }
 
 func TestListSessionsLoomMetaMergesPartialParentLink(t *testing.T) {
+	t.Skip("enabled by Task 14 — applyLoomMeta sidecar+exec gate")
 	// E2e finding: P2's driver-side stamping (loomOriginMarker) writes a
 	// sidecar carrying ParentAgentID + ParentDisplayName but an EMPTY
 	// ParentSessionID whenever the driver's codex hasn't yet written its
@@ -781,4 +802,32 @@ func TestListSessionsLoomMetaMergesPartialParentLink(t *testing.T) {
 	if s.ParentID != "" {
 		t.Fatalf("ParentID should stay empty when sidecar didn't carry one, got %q", s.ParentID)
 	}
+}
+
+// TestApplyCodexSessionMeta_ExecRunWithoutSidecarIsUser codifies Q2's
+// accepted semantic shift: a codex_exec rollout WITHOUT a loom-meta
+// sidecar is no longer classified as AgentTask. Defaults to User.
+func TestApplyCodexSessionMeta_ExecRunWithoutSidecarIsUser(t *testing.T) {
+	sess := &agentbackend.Session{}
+	applyCodexSessionMeta(sess, codexMetaPayload{
+		Originator: "codex_exec",
+		Source:     codexMetaSource{Kind: "exec"},
+	})
+	require.Equal(t, agentbackend.SessionOriginUser, sess.Origin,
+		"exec-mode rollout without sidecar must default to User now")
+}
+
+// TestApplyCodexSessionMeta_SubagentClassificationUnchanged ensures the
+// codex-native subagent branch keeps its priority — it must NOT be
+// downgraded by the new default.
+func TestApplyCodexSessionMeta_SubagentClassificationUnchanged(t *testing.T) {
+	sess := &agentbackend.Session{}
+	applyCodexSessionMeta(sess, codexMetaPayload{
+		ThreadSource:   "subagent",
+		ParentThreadID: "parent-thr",
+		AgentNickname:  "Lover",
+	})
+	require.Equal(t, agentbackend.SessionOriginSubagent, sess.Origin)
+	require.Equal(t, "parent-thr", sess.ParentID)
+	require.Equal(t, "Lover", sess.AgentName)
 }

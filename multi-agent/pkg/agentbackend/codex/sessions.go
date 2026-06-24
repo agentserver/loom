@@ -333,10 +333,9 @@ func applyCodexSessionMeta(sess *agentbackend.Session, p codexMetaPayload) {
 		sess.AgentRole = firstNonEmpty(p.AgentRole, spawn.AgentRole)
 		return
 	}
-	if p.Originator == "codex_exec" || p.Source.Kind == "exec" {
-		sess.Origin = agentbackend.SessionOriginAgentTask
-		return
-	}
+	// REMOVED in Q2: codex_exec / source==exec → SessionOriginAgentTask.
+	// agent_task is now granted exclusively by applyLoomMeta when a sidecar
+	// confirms an exec-mode rollout originated from a loom agent (Task 14).
 	if sess.Origin == "" {
 		sess.Origin = agentbackend.SessionOriginUser
 	}
