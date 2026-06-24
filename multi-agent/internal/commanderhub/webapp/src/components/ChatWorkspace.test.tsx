@@ -129,3 +129,44 @@ test('empty=false (default) keeps composer enabled at turnState idle', () => {
   expect(screen.getByLabelText('输入提示词')).toBeEnabled();
   expect(screen.getByRole('button', { name: '发送' })).toBeEnabled();
 });
+
+test('composerLocked=true forces textarea + send button disabled regardless of turnState', () => {
+  render(
+    <ChatWorkspace
+      daemonID="d1"
+      sessionID="s1"
+      session={null}
+      turnState="idle"
+      onSend={vi.fn()}
+      composerLocked
+    />,
+  );
+  expect(screen.getByLabelText('输入提示词')).toBeDisabled();
+  expect(screen.getByRole('button', { name: '发送' })).toBeDisabled();
+});
+
+test('composerNote="..." renders .composer-note above composer; omitted means no .composer-note', () => {
+  const { rerender, container } = render(
+    <ChatWorkspace
+      daemonID="d1"
+      sessionID="s1"
+      session={null}
+      turnState="idle"
+      onSend={vi.fn()}
+      composerNote="daemon 离线 — 无法提交,等待 daemon 上线或选择其它会话"
+    />,
+  );
+  expect(screen.getByText('daemon 离线 — 无法提交,等待 daemon 上线或选择其它会话')).toBeInTheDocument();
+  expect(container.querySelector('.composer-note')).not.toBeNull();
+
+  rerender(
+    <ChatWorkspace
+      daemonID="d1"
+      sessionID="s1"
+      session={null}
+      turnState="idle"
+      onSend={vi.fn()}
+    />,
+  );
+  expect(container.querySelector('.composer-note')).toBeNull();
+});
