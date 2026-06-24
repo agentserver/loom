@@ -79,8 +79,15 @@ Concrete changes:
 - **Mobile / tablet portrait only.** Desktop keeps its current "no session
   selected by default" behavior.
 - On the first `loadTree` resolution after mount, if and only if
-  `isNonDesktop && selected == null && a session exists`, `CommanderApp`
-  auto-selects the first daemon's first non-subagent session.
+  `isNonDesktop && selected == null`, `CommanderApp` auto-selects the
+  first visible session it finds by scanning `tree.daemons` in order and,
+  for each daemon, scanning `daemon.sessions` in order. A session is
+  considered selectable when `DaemonSessionTree` would render it as a
+  top-level (non-subagent) row — i.e. `session.origin !== 'subagent'` or
+  the session has no resolvable `parent_id` inside this tree. If every
+  daemon's top-level sessions are exhausted, the scan falls back to the
+  first subagent session it sees so the user still lands on chat content.
+  Only if no session of any kind exists does the empty state render.
 - Subsequent `loadTree` refreshes do not auto-select again: an explicit
   user selection (or an explicit user clear) is never overridden. A
   `hasAutoSelectedRef` flag in `CommanderApp` guards this.
@@ -129,18 +136,20 @@ visible overlay order top-to-bottom.
 - Page reload: history entries our shell pushed remain in browser history
   but the ref is empty on mount; the `popstate` handler ignores them per
   the rule above.
-- Programmatic navigation away (e.g. logout link): no special handling
-  needed — overlays unmount with the route.
-- Breakpoint crossing (e.g. tablet rotated to landscape, `< 1024px →
-  ≥ 1024px`) or any `MobileShell` unmount: a single
-  `useEffect(..., [])` cleanup pops every commander-pushed history entry
-  by calling `history.back()` once per id remaining in
-  `overlayStackRef.current` before the shell unmounts. Concretely the
-  effect captures the stack length at cleanup time and calls
-  `window.history.go(-len)` once — equivalent to N back steps but does
-  not require waiting on intermediate `popstate` events. After the cleanup
-  fires, the ref is cleared and the React state for each overlay is reset
-  to closed. The user never has to press Back to consume phantom entries.
+- Programmatic navigation away (e.g. logout link, browser address bar):
+  no `history.go(...)` cleanup. The cleanup logic only removes the
+  `popstate` listener and clears `overlayStackRef.current`; user-initiated
+  navigation completes normally.
+- Breakpoint crossing (`< 1024px → ≥ 1024px`, e.g. tablet rotated to
+  landscape) is the **only** case that actively consumes pushed history
+  entries. The matchMedia change handler in `CommanderApp` runs before
+  swapping shells: if `overlayStackRef.current.length > 0`, it captures
+  `len = overlayStackRef.current.length`, clears the ref, then calls
+  `window.history.go(-len)` once (equivalent to N back steps without
+  waiting on intermediate `popstate` events). Only after that does it
+  flip the React state (`mobile → desktop`). The user never has to press
+  Back to consume phantom entries. Plain unmount paths (route change,
+  `authRequired` flip, page close) skip the `history.go` call.
 
 ## Component Structure
 
@@ -209,8 +218,10 @@ visible overlay order top-to-bottom.
    - Uses `useMediaQuery('(max-width: 1023px)')` (a ~10-line inline hook).
    - Auto-select rule (mobile-only, one-shot): keep a
      `hasAutoSelectedRef = useRef(false)`. After `loadTree` resolves, if
-     `!hasAutoSelectedRef.current && isNonDesktop && selected == null` and
-     a session exists, call `selectSession(...)` and set the ref to true.
+     `!hasAutoSelectedRef.current && isNonDesktop && selected == null`,
+     scan `tree.daemons` per the First-screen behavior section to find the
+     first selectable session (top-level first, subagent as fallback). If
+     one is found, call `selectSession(...)` and set the ref to true.
      Resetting the ref happens only on full logout (`authRequired`
      transition from false → true), so a deliberate clear is respected.
    - When `useMediaQuery` is true: render `<MobileShell>`; otherwise render
@@ -365,8 +376,9 @@ Add new tests, each guarded so they run on `chromium-mobile` and
      closes preview sheet but leaves Files drawer; second `goBack` closes
      Files drawer.
 
-6. **`non-desktop: no horizontal overflow at 360/390/430`**
-   - Loop `page.setViewportSize` over the three widths.
+6. **`non-desktop: no horizontal overflow at 360/390/430 and 834`**
+   - Loop `page.setViewportSize` over `[360, 390, 430, 834]` (phone trio
+     + the 834 tablet portrait width called out in acceptance criteria).
    - Assert `documentElement.scrollWidth <= clientWidth`.
    - Assert `[Sessions]` and `[Files]` header buttons have rendered hit
      areas ≥ 44×44px.
@@ -397,19 +409,23 @@ Add new tests, each guarded so they run on `chromium-mobile` and
    - Click the session in the daemon tree → chat header now shows the
      mock session title and the detail endpoint has been requested.
 
-10. **`non-desktop: resizing to desktop while overlay is open does not
-    leave phantom history`** (chromium-mobile only; uses
-    `page.setViewportSize`)
+10. **`non-desktop: resizing to desktop while overlay is open consumes
+    phantom history`** (chromium-mobile only; uses `page.setViewportSize`)
+    - Setup: `page.goto('about:blank')` first to establish a known
+      previous entry, then `page.goto('/commander/')`. This guarantees
+      the browser has a non-commander entry to navigate back to.
     - Auto-selected first session is visible.
-    - Click `[Sessions]` → drawer open.
+    - Snapshot `historyBefore = await page.evaluate(() => history.length)`.
+    - Click `[Sessions]` → drawer open. Assert
+      `history.length === historyBefore + 1` (one push by MobileShell).
+    - Click `[Files]` → assert `history.length === historyBefore + 2`.
     - Resize viewport to `1280×900` → `MobileShell` unmounts, desktop
-      three-pane shell renders.
-    - Record `window.history.length` after resize.
-    - Trigger one `page.goBack()` → assert the page navigates away from
-      `/commander/` (or pops out of the test fixture), not just closes
-      something invisible. Equivalent assertion: after `goBack`,
-      `window.location.pathname` differs from the pre-back value, proving
-      no phantom overlay entry remained.
+      three-pane shell renders. Assert
+      `history.length === historyBefore` (the breakpoint-cross cleanup
+      consumed both pushed entries via one `history.go(-2)` call).
+    - Trigger one `page.goBack()` → assert
+      `page.url() === 'about:blank'`, proving no phantom overlay entry
+      remained.
 
 ### Screenshots (snapshot tests)
 - `commander-desktop.png` — kept (existing).
@@ -428,8 +444,11 @@ Add new tests, each guarded so they run on `chromium-mobile` and
 
 ### Vitest unit tests
 - `MobileShell.test.tsx` (new): mock `matchMedia`, assert MobileShell renders
-  at 1023px and desktop grid renders at 1024px; auto-select-first-session
-  behavior; empty-tree state disables composer.
+  at 1023px and desktop grid renders at 1024px; auto-select scans across
+  daemons (case A: first daemon has no sessions, second daemon has one →
+  second daemon's session is selected; case B: only subagent sessions exist
+  → fallback selects the first subagent; case C: nothing → empty state);
+  empty-tree state disables composer.
 - `MobileDrawer.test.tsx` (new): controlled open/close, ESC closes,
   overlay-click closes, `aria-modal="true"` present; `history.pushState`
   is called on open and `popstate` triggers close.
@@ -447,7 +466,7 @@ Add new tests, each guarded so they run on `chromium-mobile` and
 | Issue criterion                                                                 | Implementation                                                                  | Coverage                                                       |
 | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | -------------------------------------------------------------- |
 | Usable at 360, 390, 430                                                         | Single-column chat + drawers                                                    | Viewport-loop e2e test + chromium-mobile screenshot @ 412      |
-| Usable at 768, 834                                                              | tablet-portrait Playwright project                                              | Full mobile flows + screenshot @ 768                           |
+| Usable at 768, 834                                                              | tablet-portrait Playwright project (768 baseline) + 834 width covered by viewport-loop in test 6 | Full mobile flows + screenshot @ 768 + overflow/hit-area assertion @ 834 |
 | Usable at 1024–1180                                                             | Existing 3-pane grid (breakpoint moved to 1024)                                 | Existing desktop project remains green                         |
 | Login, daemon/session navigation, chat, file access/copy without desktop view   | Auth-required mobile path; Sessions drawer; Files drawer + persistent state; FilePreviewSheet | Login mobile flow (test 8) + Sessions flow (test 3) + Files multi-file flow (test 4) |
 | Critical panes not `display: none`                                              | React-state-controlled Radix dialogs                                            | DOM assertions in flow tests + MobileDrawer unit test          |
