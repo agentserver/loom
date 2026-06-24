@@ -63,15 +63,17 @@ type PendingSession = {
   prevent the unsubmitted draft from being silently discarded.
 - `'submitting'` — the first turn POST completed with `done`. The
   backend now has the session. Detail fetch is **enabled** (the row
-  exists server-side; subsequent turn replies should refresh the
-  transcript). Other-daemon `+` buttons are **re-enabled** (the user
-  has committed; no draft to lose). The virtual row stays visible until
-  `loadTree` returns a real row with the same UUID.
+  exists server-side; the live transcript replaces the empty
+  placeholder render). Other-daemon `+` buttons **remain disabled**
+  (with the "等待新会话出现在列表中" title) until `loadTree` confirms
+  the real row and clears `pendingSession` — single-slot pending can't
+  hold a second placeholder. The virtual row stays visible throughout.
 
 This lives in `CommanderApp` state alongside `selected`, `tree`,
 `sessionDetail`. At most one pending session exists at a time across
-the whole app, but the `'submitting'` phase is non-blocking, so the
-single-slot limit only constrains drafts.
+the whole app in EITHER phase; the single-slot limit holds until
+`loadTree` confirms the real row. `'submitting'` is normally resolved
+within one tree-fetch round-trip.
 
 ### Visibility rule
 
