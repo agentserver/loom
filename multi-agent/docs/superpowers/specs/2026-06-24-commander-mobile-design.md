@@ -121,11 +121,28 @@ without prop-drilling refs.
 }
 ```
 
-Internals: a closure-scoped `stack: OverlayID[]` (not a React ref, so the
-matchMedia handler reads the live array without needing a ref forwarded
-across shell components), one `popstate` listener attached on first
-`open()` and detached by `reset()`, and the same `{ commanderOverlay: id }`
-payload on every `history.pushState`.
+Internals — `useOverlayHistory` returns a **stable controller instance**.
+The hook body wraps the controller in `useRef`:
+
+```ts
+const ref = useRef<OverlayController | null>(null);
+if (ref.current == null) ref.current = createOverlayController();
+return ref.current;
+```
+
+`createOverlayController()` is a plain factory (not a React hook) whose
+closure owns:
+- `stack: OverlayID[]` — the live overlay stack
+- `listener: ((e: PopStateEvent) => void) | null` — attached on first
+  `open()` and detached by `reset()`
+- `popHandlers: Set<(id: OverlayID) => void>` — subscribers registered
+  via `onPop`
+
+`open()` / `closeTop()` / `reset()` / `drainForBreakpoint()` / `onPop()`
+mutate the closure state, so re-renders of `CommanderApp` never reset
+the stack and the matchMedia handler always reads the live array
+without prop-drilling refs. Every `history.pushState` payload uses the
+same `{ commanderOverlay: id }` shape.
 
 `MobileShell` calls `useOverlayHistory()` indirectly via props
 (`openOverlay`, `closeOverlay`, and a subscription to `onPop` that flips
@@ -421,13 +438,17 @@ Add new tests, each guarded so they run on `chromium-mobile` and
 
 8. **`non-desktop: login screen is touch-friendly`** (auth-required path)
    - Mock `/api/commander/tree` to return 401 so `authRequired` is true.
-   - Assert login button and verify-URL anchor both have
-     `boundingBox().height >= 44`.
+   - Mock `POST /api/commander/login` to return a fake `login_id` +
+     `verification_uri_complete`. Mock `/api/commander/login/poll` to
+     respond `pending` (no real OAuth round-trip; we never resolve).
    - Assert `documentElement.scrollWidth <= clientWidth` at the project
      viewport.
-   - Mock `POST /api/commander/login` to return a fake `login_id` +
-     `verification_uri_complete`; click button; assert the verify-URL link
-     becomes visible. (No real OAuth round-trip.)
+   - Assert login button has `boundingBox().height >= 44` (anchor not
+     yet rendered — `login.verifyURL` is undefined until the button
+     click).
+   - Click login button → wait for the verify-URL anchor to become
+     visible; then assert its `boundingBox().height >= 44` and
+     `width >= 44`.
 
 9. **`desktop: no auto-select preserves current behavior`** (chromium-desktop only)
    - Tree mock returns one daemon with one session. Spy on
