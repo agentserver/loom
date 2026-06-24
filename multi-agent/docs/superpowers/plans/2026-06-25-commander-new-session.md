@@ -42,7 +42,7 @@ internal/commanderhub/webapp/src/
     DaemonSessionTree.tsx       # +/X buttons + virtual row + props
     DaemonSessionTree.test.tsx  # +7 cases
     MobileShell.tsx             # thread new props through
-  styles.css                    # 3 new selectors
+  styles.css                    # 3 new selectors + mobile .daemon-row min-height bump
   e2e/
     commander.spec.ts           # +2 e2e tests, extend test 7
 ```
@@ -597,6 +597,10 @@ Append to the end of `internal/commanderhub/webapp/src/styles.css`:
 }
 
 @media (max-width: 1023px) {
+  /* daemon-row default height is 32px (set in styles.css line ~116). A 44px
+     + button would overflow and visually collide with the first session
+     row. Raise the row's min-height so the button sits inside the row. */
+  .daemon-row { min-height: 44px; height: auto; }
   .daemon-new-session-btn {
     width: 44px;
     height: 44px;
@@ -959,42 +963,23 @@ Open `internal/commanderhub/webapp/src/CommanderApp.tsx`. Apply the edits in thi
   );
 ```
 
-- [ ] **Step 4: Run tests to verify pass**
+- [ ] **Step 4: Run tests to verify partial pass (mobile tests will fail until Task 5)**
 
-The Task 4 tests still depend on Task 5 (`MobileShell` plumbing). They will keep failing until Task 5 is done. Run only the non-mobile CommanderApp + the existing desktop suite to confirm no regression:
+The 3 new mobile tests in this Task depend on Task 5 (`MobileShell` plumbing) being done before the `+` button is reachable inside the drawer. They will keep failing until Step 1 of Task 5 lands.
+
+Run only the desktop suite + the build to confirm no regression in already-green tests:
 
 ```
 npm test -- src/CommanderApp.test.tsx
+npm run build
 ```
-Expected: PASS (no regressions).
+Expected: PASS + build clean.
 
-Then run the full suite:
-```
-npm test
-```
-Expected: existing tests pass; the 3 new mobile tests still FAIL because `MobileShell` doesn't forward the props yet. **This is expected** — Task 5 wires the forwarding and turns them green.
-
-- [ ] **Step 5: Commit (yes, with the 3 mobile tests still failing — Task 5 turns them green)**
-
-```bash
-git add internal/commanderhub/webapp/src/CommanderApp.tsx \
-        internal/commanderhub/webapp/src/CommanderApp.mobile.test.tsx
-git commit -m "feat(commander): hoist pendingSession into CommanderApp + wire helpers
-
-Owns a single pendingSession slot in 'draft' | 'submitting' phase.
-createPendingSession (with idempotent same-daemon re-select),
-discardPendingSession, draft-aware detail-fetch short-circuit,
-sendPrompt post-done phase flip, loadTree-clears-pending-on-real-row,
-and composerLocked/composerNote computed for the daemon-offline case.
-DaemonSessionTree (desktop) and ChatWorkspace get the new props
-directly; MobileShell forwarding lands in the next commit.
-
-Refs: #30 follow-up"
-```
+Do **NOT** commit yet. Proceed straight to Task 5 — the commit at the end of Task 5 covers both Task 4's source edits and Task 5's MobileShell forwarding, so the resulting commit is green (no failing tests left behind in git history).
 
 ---
 
-### Task 5: `MobileShell` — thread the five new props through
+### Task 5: `MobileShell` — thread the five new props through, then commit Tasks 4+5 together
 
 **Files:**
 - Modify: `internal/commanderhub/webapp/src/components/MobileShell.tsx`
@@ -1125,17 +1110,28 @@ npm run build
 ```
 Expected: tsc + vite build succeed.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit Tasks 4 + 5 together**
 
 ```bash
-git add internal/commanderhub/webapp/src/components/MobileShell.tsx
-git commit -m "feat(commander): forward pending/discard/lock/note props through MobileShell
+git add internal/commanderhub/webapp/src/CommanderApp.tsx \
+        internal/commanderhub/webapp/src/CommanderApp.mobile.test.tsx \
+        internal/commanderhub/webapp/src/components/MobileShell.tsx
+git commit -m "feat(commander): hoist pendingSession + forward through MobileShell
 
-handleCreate wraps onCreateSession so tapping + inside the Sessions
-drawer also closes it (mirrors handleSelectSession). pendingSession +
-onDiscardSession flow into the wrapped DaemonSessionTree;
-composerLocked + composerNote flow into ChatWorkspace. Mobile path
-now matches the desktop path bit-for-bit.
+CommanderApp owns a single pendingSession slot in 'draft' |
+'submitting' phase. createPendingSession (with idempotent same-daemon
+re-select), discardPendingSession, draft-aware detail-fetch
+short-circuit, sendPrompt post-done phase flip (NOT gated by
+isCurrentTurn — server-side session was created regardless of where
+the user navigated), loadTree-clears-pending-on-real-row, and
+composerLocked/composerNote computed for the daemon-offline case.
+MobileShell threads pending / onCreateSession / onDiscardSession /
+composerLocked / composerNote into its wrapped DaemonSessionTree +
+ChatWorkspace. handleCreate wrapper closes the Sessions drawer after
++ (mirrors handleSelectSession).
+
+Tasks 4 and 5 commit together so the working tree stays green — the
+3 new mobile tests pass only once MobileShell forwards the props.
 
 Refs: #30 follow-up"
 ```
@@ -1286,9 +1282,13 @@ test('non-desktop: + in Sessions drawer creates pending, drawer closes, turn →
 
 - [ ] **Step 3: Extend the existing test 7 (`drawer interactive controls meet 44px hit area`) to cover `.daemon-new-session-btn` AND `.session-discard-btn`**
 
-Find the existing test by searching for the string `drawer interactive controls meet 44px hit area`. After the existing assertions that loop `.session-row`, `.session-toggle`, etc., add assertions for both new buttons.
+Find the existing test by searching for the string `drawer interactive controls meet 44px hit area`. After the existing assertions that loop `.session-row`, `.session-toggle`, etc. and before the line `await page.goBack();` (which closes the Sessions drawer to open Files next), insert the new assertions AND **REPLACE** that `await page.goBack();` line with our own deterministic close.
 
-The `.daemon-new-session-btn` is always rendered (when daemon is `ok`), so the loop just needs to add it after the existing session-row block. The `.session-discard-btn` only renders on a draft virtual row, so the test must first click `+` to create one. Add the following inside the test body, AFTER the block that opens the Sessions drawer + asserts existing controls' hit areas:
+The `.daemon-new-session-btn` is always rendered (when daemon is `ok`), so the loop just needs to be added after the existing session-row block. The `.session-discard-btn` only renders on a draft virtual row, so the test must first click `+` to create one. The whole block also takes responsibility for closing the Sessions drawer at the end (clicking the drawer's own close button) so the test does NOT call `page.goBack()` afterward — `goBack()` after our re-select would have no overlay history to pop and would navigate the test out of `/commander/`, breaking the subsequent Files drawer assertions.
+
+Apply this edit verbatim:
+1. Add the `.daemon-new-session-btn` and `.session-discard-btn` assertions before the existing `await page.goBack();` line.
+2. **Delete the `await page.goBack();` line** — the snippet below ends by clicking the drawer's own close button instead.
 
 ```ts
   // New + button must also meet the 44x44 rule on mobile.
@@ -1315,8 +1315,16 @@ The `.daemon-new-session-btn` is always rendered (when daemon is `ok`), so the l
     await expect(reopened.locator('.session-discard-btn')).toHaveCount(0);
     // Re-select s1 explicitly: the discard cleared selected, and on mobile
     // a fresh auto-select would re-pick s1 anyway, but make it deterministic.
+    // This click also closes the drawer (handleSelectSession routes through
+    // closeOverlay), so we do NOT need (and MUST NOT use) page.goBack() to
+    // close it — that would have no overlay history to pop and would
+    // navigate the test out of /commander/.
     await reopened.getByRole('button', { name: /Fix commander session cache latency/ }).click();
     await expect(page.getByTestId('drawer-left')).toHaveCount(0);
+  } else {
+    // + is disabled (some other pending exists in the fixture). Just close
+    // the drawer the same way the original test did.
+    await page.goBack();
   }
 ```
 
