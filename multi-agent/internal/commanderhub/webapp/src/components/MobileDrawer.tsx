@@ -23,6 +23,7 @@ export function MobileDrawer({
           className={`mobile-drawer mobile-drawer-${side}`}
           data-testid={`drawer-${side}`}
           aria-modal="true"
+          aria-describedby={undefined}
         >
           <header className="mobile-drawer-header">
             <Dialog.Title className="mobile-drawer-title">{title}</Dialog.Title>
