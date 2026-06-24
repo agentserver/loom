@@ -1951,26 +1951,32 @@ test('auto-select skips agent_task whose parent_id resolves in the tree', async 
 });
 
 test('auto-select uses owner-keyed parent lookup so same session_id across daemons does not falsely link', async () => {
-  // Two daemons both report session_id 's1'. The second daemon's 's1' is an
-  // agent_task whose parent_id 's1' could be confused with the first daemon's
-  // 's1' if the lookup used the global session_id set. With owner-keyed
-  // namespacing, the second 's1' has no resolvable parent in its OWN owner
-  // namespace and stays a root — so the first daemon's 's1' (scanned first)
-  // is the auto-selected session.
+  // Regression: A buggy implementation that uses a global Set<session_id>
+  // would treat 'agent_task with parent_id="root-1"' as a child (because
+  // root-1 exists in the FIRST daemon), skip it, and fall through to the
+  // first daemon's root. To actually catch that bug, the candidate that
+  // owner-key lookup would correctly classify as a ROOT must appear FIRST
+  // in the scan order so a global-id impl skips it (and picks the wrong
+  // one), but owner-keyed impl correctly returns it.
   installMatchMedia(true);
   vi.stubGlobal('fetch', mockTreeFetch({
     daemons: [
-      { daemon_id: 'd1', display_name: 'prod-a', kind: 'codex', status: 'ok', sessions: [
-        { daemon_id: 'd1', session_id: 's1', kind: 'codex', title: 'First daemon root', origin: 'user', turn_state: 'idle', active_worker: false, awaiting_approval: false },
-      ]},
+      // FIRST in scan order. Owner-keyed: parent_id 'root-1' belongs to
+      // owner namespace 'daemon:d2' (this session's own daemon), so it
+      // resolves to no session in d2 → this is a ROOT → auto-selected.
+      // Global-id impl: parent_id 'root-1' is in the global set (lives in
+      // d1) → skipped → wrong session picked from d1.
       { daemon_id: 'd2', display_name: 'prod-b', kind: 'codex', status: 'ok', sessions: [
-        // Same session_id, different daemon, no owner_agent_id => effectiveOwner is daemon:d2.
-        { daemon_id: 'd2', session_id: 's1', kind: 'codex', title: 'Second daemon root', origin: 'agent_task', parent_id: 's1', turn_state: 'idle', active_worker: false, awaiting_approval: false },
+        { daemon_id: 'd2', session_id: 'task-x', kind: 'codex', title: 'Owner-keyed root', origin: 'agent_task', parent_id: 'root-1', turn_state: 'idle', active_worker: false, awaiting_approval: false },
+      ]},
+      // SECOND. Just to give the global-id impl something to fall through to.
+      { daemon_id: 'd1', display_name: 'prod-a', kind: 'codex', status: 'ok', sessions: [
+        { daemon_id: 'd1', session_id: 'root-1', kind: 'codex', title: 'Wrong session picked by buggy impl', origin: 'user', turn_state: 'idle', active_worker: false, awaiting_approval: false },
       ]},
     ],
   }));
   render(<CommanderApp />);
-  await waitFor(() => expect(screen.getByText('First daemon root')).toBeInTheDocument());
+  await waitFor(() => expect(screen.getByText('Owner-keyed root')).toBeInTheDocument());
 });
 ```
 
@@ -2659,10 +2665,22 @@ test('non-desktop: login screen is touch-friendly', async ({ page }, testInfo) =
 
 test('desktop: no auto-select preserves current behavior', async ({ page }, testInfo) => {
   if (testInfo.project.name !== 'chromium-desktop') test.skip();
+  // Return the same title the existing top-of-file detail mock uses so the
+  // post-click heading assertion is unambiguous regardless of route ordering.
+  // detailFetched is the real desktop-no-auto-select gate.
   let detailFetched = false;
   await page.route('**/api/commander/daemons/d1/sessions/s1', (route) => {
     detailFetched = true;
-    return route.fulfill({ json: { session: { ID: 's1', Title: 'mocked' }, messages: [] } });
+    return route.fulfill({
+      json: {
+        session: {
+          ID: 's1',
+          Title: treePayload.daemons[0].sessions[0].title,
+          WorkingDir: treePayload.daemons[0].sessions[0].working_dir,
+        },
+        messages: [],
+      },
+    });
   });
   await page.goto('/commander/');
   await expect(page.getByRole('heading', { level: 1, name: 'Session' })).toBeVisible();
@@ -2684,9 +2702,22 @@ test('non-desktop: resizing to desktop while two overlays are stacked leaves no 
   await page.getByTestId('drawer-right').getByRole('button', { name: /打开文件 go.mod/ }).click();
   expect(await page.evaluate(() => (history.state as { commanderOverlay?: string } | null)?.commanderOverlay)).toBe('preview');
   await page.setViewportSize({ width: 1280, height: 900 });
-  await expect(page.locator('.commander-shell')).toBeVisible();
-  expect(await page.evaluate(() => (history.state as { commanderOverlay?: string } | null)?.commanderOverlay)).toBeFalsy();
+  // Wait for the shell swap: the desktop shell has the bare
+  // `.commander-shell` class (no `commander-shell-mobile`) and renders the
+  // file panel inline. `.commander-shell` alone matches BOTH shells
+  // (mobile carries `commander-shell commander-shell-mobile`), so wait on
+  // a desktop-only locator instead.
+  await expect(page.locator('.commander-shell:not(.commander-shell-mobile)')).toBeVisible();
+  await expect(page.getByTestId('file-panel')).toBeVisible();
+  // history.go(-2) is asynchronous; poll until the controller's payload is
+  // drained so the test does not race the matchMedia handler.
+  await expect.poll(async () =>
+    page.evaluate(() => (history.state as { commanderOverlay?: string } | null)?.commanderOverlay ?? null),
+  ).toBeNull();
+
   await page.setViewportSize({ width: 390, height: 844 });
+  // Wait for MobileShell to remount before asserting overlays are absent.
+  await expect(page.locator('.commander-shell-mobile')).toBeVisible();
   await expect(page.getByTestId('file-preview-sheet')).toHaveCount(0);
   await expect(page.getByTestId('drawer-right')).toHaveCount(0);
   const before = page.url();
