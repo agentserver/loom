@@ -1503,8 +1503,11 @@ test('clicking Sessions calls overlay.open + setSessionsOpen(true); drawer rende
 
 test('selecting a session in the drawer forwards onSelect and asks overlay.closeTop("sessions")', () => {
   const { overlay, setSessionsOpen, onSelect, rerender } = renderShell();
-  const closeSpy = vi.spyOn(overlay, 'closeTop');
-  // Open drawer via re-render (CommanderApp would do this after click).
+  // Simulate CommanderApp's open path: push 'sessions' onto the controller's
+  // stack so handleSelectSession's closeOverlay helper takes the "top
+  // matches" branch and exercises closeTop instead of the empty-stack
+  // fallback covered by the next test.
+  overlay.open('sessions');
   rerender(
     <MobileShell
       daemons={daemons}
@@ -1523,9 +1526,7 @@ test('selecting a session in the drawer forwards onSelect and asks overlay.close
     />,
   );
   const drawer = screen.getByTestId('drawer-left');
-  // To exercise selection without depending on real history mutations, stub open()/closeTop().
-  vi.spyOn(overlay, 'open').mockImplementation(() => {});
-  closeSpy.mockImplementation(() => {});
+  const closeSpy = vi.spyOn(overlay, 'closeTop').mockImplementation(() => {});
   fireEvent.click(within(drawer).getByRole('button', { name: /Session one/ }));
   expect(onSelect).toHaveBeenCalledWith('d1', 's1');
   expect(closeSpy).toHaveBeenCalledWith('sessions');
@@ -1793,6 +1794,7 @@ Create `internal/commanderhub/webapp/src/CommanderApp.mobile.test.tsx`:
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { CommanderApp } from './CommanderApp';
+import type { CommanderTree } from './api/types';
 
 type MQLListener = (ev: MediaQueryListEvent) => void;
 
@@ -1816,20 +1818,18 @@ function installMatchMedia(initialMatches: boolean) {
   };
 }
 
-function mockTreeFetch(tree: {
-  daemons: Array<{
-    daemon_id: string;
-    sessions?: Array<{ session_id: string; title: string }>;
-  }>;
-}) {
-  // Build a sessionID -> title map so each detail response carries the right
-  // title; otherwise every detail responds with one hard-coded title and the
-  // 'Subagent only' / 'Parent root' / multi-daemon tests below would fail
-  // their text assertions.
-  const titleByID = new Map<string, string>();
+function mockTreeFetch(tree: CommanderTree) {
+  // Build a (daemonID, sessionID) -> title map so each detail response
+  // carries the right title even when two daemons share a session_id.
+  // Otherwise the owner-key regression test (which uses 's1' in both
+  // daemons) would race-overwrite the map entry and assert against the
+  // wrong title.
+  const titleByOwner = new Map<string, string>();
+  const detailKey = (daemonID: string, sessionID: string) =>
+    `${daemonID} ${sessionID}`;
   for (const daemon of tree.daemons) {
     for (const s of daemon.sessions || []) {
-      titleByID.set(s.session_id, s.title);
+      titleByOwner.set(detailKey(daemon.daemon_id, s.session_id), s.title);
     }
   }
   return vi.fn(async (input: RequestInfo) => {
@@ -1837,10 +1837,13 @@ function mockTreeFetch(tree: {
     if (url.includes('/api/commander/tree')) {
       return new Response(JSON.stringify(tree), { status: 200 });
     }
-    const detailMatch = url.match(/\/api\/commander\/daemons\/[^/]+\/sessions\/([^/?]+)$/);
+    const detailMatch = url.match(
+      /\/api\/commander\/daemons\/([^/]+)\/sessions\/([^/?]+)$/,
+    );
     if (detailMatch) {
-      const sessionID = decodeURIComponent(detailMatch[1]);
-      const title = titleByID.get(sessionID) ?? sessionID;
+      const daemonID = decodeURIComponent(detailMatch[1]);
+      const sessionID = decodeURIComponent(detailMatch[2]);
+      const title = titleByOwner.get(detailKey(daemonID, sessionID)) ?? sessionID;
       return new Response(
         JSON.stringify({ session: { ID: sessionID, Title: title }, messages: [] }),
         { status: 200 },
@@ -1859,7 +1862,7 @@ afterEach(() => {
 
 beforeEach(() => window.history.replaceState(null, '', window.location.pathname));
 
-const oneSessionTree = {
+const oneSessionTree: CommanderTree = {
   daemons: [
     {
       daemon_id: 'd1', display_name: 'prod', kind: 'codex', status: 'ok',
