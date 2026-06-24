@@ -838,10 +838,11 @@ Open `internal/commanderhub/webapp/src/CommanderApp.tsx`. Apply the edits in thi
 
 ```tsx
       if (turnError) throw turnError;
-      if (!isCurrentTurn()) return;
-      // If this turn just completed the first prompt of a draft pending session,
-      // flip phase to 'submitting' and trigger a tree refresh. loadTree will
-      // clear pending once the real row appears.
+      // pending phase flip + loadTree MUST run independent of isCurrentTurn():
+      // the server-side session was created regardless of whether the user has
+      // since navigated to a different session. If we gated this on
+      // isCurrentTurn(), a quick navigation away would leave the virtual row
+      // visible forever and lock other daemons' + buttons.
       const pendingNow = pendingSessionRef.current;
       if (
         pendingNow != null
@@ -852,10 +853,11 @@ Open `internal/commanderhub/webapp/src/CommanderApp.tsx`. Apply the edits in thi
         pendingSessionRef.current = flipped;
         setPendingSession(flipped);
         void loadTree();
-        // Detail fetch will be re-run by the [selected, tree, pendingSession]
-        // effect once setPendingSession commits.
+        // Detail fetch is handled by the [selected, tree, pendingSession]
+        // effect when it re-runs on the phase change. We don't issue one here.
         return;
       }
+      if (!isCurrentTurn()) return;
       const detail = await apiGet<SessionDetail>(sessionPath(submitted.daemonID, submitted.sessionID));
       if (isCurrentTurn()) setSessionDetail(detail);
 ```
@@ -1204,7 +1206,7 @@ test('desktop: + button creates pending row, turn POSTs, tree refresh swaps plac
   await page.getByRole('button', { name: '发送' }).click();
   await expect.poll(() => turnRequestCount).toBeGreaterThanOrEqual(1);
   // A second tree-fetch MUST happen after the turn (loadTree post-done).
-  await expect.poll(() => treeRequestCount).toBeGreaterThanOrEqual(treesBeforeClick + 2);
+  await expect.poll(() => treeRequestCount).toBeGreaterThanOrEqual(treesBeforeClick + 1);
   // Virtual row disappears (pendingSession cleared by loadTree-saw-real-row)
   await expect(page.locator('.daemon-tree').getByText('新建会话(待提交)')).toHaveCount(0);
   await expect(page.locator('.daemon-tree').getByText('新建会话(同步中…)')).toHaveCount(0);
@@ -1272,7 +1274,7 @@ test('non-desktop: + in Sessions drawer creates pending, drawer closes, turn →
   await page.getByLabel('输入提示词').fill('hello');
   await page.getByRole('button', { name: '发送' }).click();
   await expect.poll(() => turnRequestCount).toBeGreaterThanOrEqual(1);
-  await expect.poll(() => treeRequestCount).toBeGreaterThanOrEqual(treesBeforeClick + 2);
+  await expect.poll(() => treeRequestCount).toBeGreaterThanOrEqual(treesBeforeClick + 1);
   // Open the drawer again to inspect the tree
   await page.getByRole('button', { name: 'Sessions' }).click();
   const drawer2 = page.getByTestId('drawer-left');
