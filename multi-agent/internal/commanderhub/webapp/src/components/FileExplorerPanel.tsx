@@ -52,6 +52,7 @@ export function FileExplorerPanel({
   sessionID,
   renderMode = 'inline',
   onPreview,
+  onPreviewRequest,
 }: {
   daemonID: string;
   sessionID: string;
@@ -61,6 +62,8 @@ export function FileExplorerPanel({
     fullPath: string;
     displayPath: string;
   }) => void;
+  /** Called synchronously at click time (before the async fetch) when renderMode='sheet'. */
+  onPreviewRequest?: () => void;
 }) {
   const [root, setRoot] = useState('');
   const [entries, setEntries] = useState<FileEntry[]>([]);
@@ -69,6 +72,15 @@ export function FileExplorerPanel({
   const [error, setError] = useState('');
   const previewRequestRef = useRef(0);
   const listingRequestRef = useRef(0);
+
+  // Invalidate any in-flight openFile fetch when the component unmounts.
+  // Without this, a pending fetch can still call onPreview after the parent
+  // has been replaced (e.g. mobile→desktop resize), restoring preview state.
+  useEffect(() => {
+    return () => {
+      previewRequestRef.current += 1;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -105,6 +117,9 @@ export function FileExplorerPanel({
     previewRequestRef.current = requestID;
     if (renderMode === 'inline') setPreview(null);
     setError('');
+    // Notify the parent synchronously at click time so that history push
+    // (overlay.open('preview')) happens before the async fetch resolves.
+    if (renderMode === 'sheet') onPreviewRequest?.();
     try {
       const result = await apiGet<FileReadResult>(fileContentPath(daemonID, sessionID, entry.path));
       if (previewRequestRef.current !== requestID) return;
