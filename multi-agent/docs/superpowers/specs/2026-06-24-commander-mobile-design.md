@@ -181,13 +181,23 @@ same `{ commanderOverlay: id }` shape.
   user-initiated navigation completes normally.
 - Breakpoint crossing (`< 1024px → ≥ 1024px`, e.g. tablet rotated to
   landscape) is the **only** case that actively consumes pushed history
-  entries. The matchMedia change handler in `CommanderApp` calls
-  `controller.drainForBreakpoint()` **before** swapping shells: it
-  captures `len = stack.length`, clears the stack, then calls
-  `window.history.go(-len)` once if `len > 0`. Only after that does it
-  flip the local `isNonDesktop` state, which triggers `MobileShell`
-  unmount + desktop shell mount. The user never has to press Back to
-  consume phantom entries.
+  entries. The matchMedia change handler in `CommanderApp` performs three
+  steps in order, **before** swapping shells:
+  1. `controller.drainForBreakpoint()` — captures `len = stack.length`,
+     clears the stack, then calls `window.history.go(-len)` once if
+     `len > 0`.
+  2. Reset the React overlay UI state owned by `CommanderApp`:
+     `setSessionsOpen(false)`, `setFilesOpen(false)`,
+     `setPreviewPayload(null)`. This guarantees that when the viewport
+     later returns to `< 1024px` (rotate back to portrait), `MobileShell`
+     remounts with every overlay closed and an empty history stack —
+     not with stale `filesOpen=true` that would re-render an overlay the
+     drained history can no longer close via Back.
+  3. Flip `isNonDesktop` to false, triggering `MobileShell` unmount +
+     desktop shell mount.
+
+  The user never has to press Back to consume phantom entries, and
+  rotating back to mobile starts from a clean overlay state.
 
 ## Component Structure
 
@@ -428,13 +438,19 @@ Add new tests, each guarded so they run on `chromium-mobile` and
      + the 834 tablet portrait width called out in acceptance criteria).
    - Assert `documentElement.scrollWidth <= clientWidth`.
    - Assert `[Sessions]` and `[Files]` header buttons have rendered hit
-     areas ≥ 44×44px.
+     areas with **both** `height >= 44` **and** `width >= 44`.
 
 7. **`non-desktop: drawer interactive controls meet 44px hit area`**
+   - Use a `assertHitArea = (locator) => box.height >= 44 && box.width >= 44`
+     helper applied uniformly. Both dimensions are required for every
+     control listed; height-only assertions are explicitly disallowed
+     because a 200×24 row still fails the touch-target rule.
    - Open Sessions drawer; for each `.session-row`, `.session-toggle`, and
-     close (×) button, assert `boundingBox().height >= 44`.
+     close (×) button, call `assertHitArea`.
    - Open Files drawer; for each `.file-row` and `.file-copy-button`,
-     assert `boundingBox().height >= 44 && width >= 44`.
+     call `assertHitArea`.
+   - Open the preview sheet; for the close (×) and "Copy path" buttons,
+     call `assertHitArea`.
 
 8. **`non-desktop: login screen is touch-friendly`** (auth-required path)
    - Mock `/api/commander/tree` to return 401 so `authRequired` is true.
@@ -478,10 +494,16 @@ Add new tests, each guarded so they run on `chromium-mobile` and
       focus trap), so a real user can never reach a two-entry stack
       that way. The legitimate two-entry stack is `files` → `preview`.
     - Resize viewport to `1280×900` → matchMedia change handler runs
-      `drainForBreakpoint()` (one `history.go(-2)`) before
-      `MobileShell` unmounts. Assert
+      `drainForBreakpoint()` (one `history.go(-2)`), resets overlay UI
+      state, then flips `isNonDesktop`. Assert
       `history.state?.commanderOverlay == null` (no overlay token
-      lives on the current entry; the controller drained the stack).
+      lives on the current entry; the controller drained the stack)
+      and the desktop three-pane shell is visible.
+    - Resize viewport back to `390×844` → `MobileShell` remounts.
+      Assert neither the Files drawer nor the preview sheet auto-reopens
+      (no `[data-testid="file-panel"]` inside an open Radix dialog,
+      no preview sheet visible) — proves the breakpoint cleanup reset
+      overlay UI state, not just history.
     - Trigger one `page.goBack()` → assert `page.url() === 'about:blank'`,
       proving Back reaches the sentinel page in a single step rather
       than first popping invisible overlay entries.
