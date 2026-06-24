@@ -35,11 +35,11 @@ type DirectoryNode = {
   loading?: boolean;
 };
 
-function isAbsolutePath(path: string) {
+export function isAbsolutePath(path: string) {
   return path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path) || path.startsWith('\\\\');
 }
 
-function fullPath(root: string, path: string) {
+export function fullPath(root: string, path: string) {
   if (!root || path === '.' || isAbsolutePath(path)) return path;
   const separator = root.includes('\\') ? '\\' : '/';
   const cleanRoot = root.replace(/[\\/]+$/, '');
@@ -47,7 +47,21 @@ function fullPath(root: string, path: string) {
   return `${cleanRoot}${separator}${cleanPath}`;
 }
 
-export function FileExplorerPanel({ daemonID, sessionID }: { daemonID: string; sessionID: string }) {
+export function FileExplorerPanel({
+  daemonID,
+  sessionID,
+  renderMode = 'inline',
+  onPreview,
+}: {
+  daemonID: string;
+  sessionID: string;
+  renderMode?: 'inline' | 'sheet';
+  onPreview?: (payload: {
+    preview: FileReadResult;
+    fullPath: string;
+    displayPath: string;
+  }) => void;
+}) {
   const [root, setRoot] = useState('');
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [directories, setDirectories] = useState<Record<string, DirectoryNode>>({});
@@ -89,11 +103,20 @@ export function FileExplorerPanel({ daemonID, sessionID }: { daemonID: string; s
     if (entry.kind !== 'file' || !daemonID || !sessionID) return;
     const requestID = previewRequestRef.current + 1;
     previewRequestRef.current = requestID;
-    setPreview(null);
+    if (renderMode === 'inline') setPreview(null);
     setError('');
     try {
       const result = await apiGet<FileReadResult>(fileContentPath(daemonID, sessionID, entry.path));
-      if (previewRequestRef.current === requestID) setPreview(result);
+      if (previewRequestRef.current !== requestID) return;
+      if (renderMode === 'sheet') {
+        onPreview?.({
+          preview: result,
+          fullPath: fullPath(root, entry.path),
+          displayPath: entry.path,
+        });
+        return;
+      }
+      setPreview(result);
     } catch (err) {
       if (previewRequestRef.current === requestID) {
         setError(err instanceof Error ? err.message : String(err));
@@ -189,7 +212,7 @@ export function FileExplorerPanel({ daemonID, sessionID }: { daemonID: string; s
     <aside className="file-panel" data-testid="file-panel">
       <div className="file-list">{renderEntries(entries)}</div>
       {error ? <div className="file-error">{error}</div> : null}
-      <FilePreview preview={preview} />
+      {renderMode === 'inline' ? <FilePreview preview={preview} /> : null}
     </aside>
   );
 }

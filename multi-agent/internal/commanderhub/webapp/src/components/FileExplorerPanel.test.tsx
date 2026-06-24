@@ -186,3 +186,80 @@ test('copies full paths for windows roots', async () => {
 
   expect(writeText).toHaveBeenCalledWith('C:\\repo\\src\\main.go');
 });
+
+test('renderMode="sheet" calls onPreview with { preview, fullPath, displayPath } and omits inline preview', async () => {
+  const onPreview = vi.fn();
+  const fetchMock = vi.fn(async (input: RequestInfo) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.includes('/files?path=.')) {
+      return new Response(JSON.stringify({
+        root: '/root/project',
+        path: '.',
+        entries: [{ name: 'go.mod', path: 'go.mod', kind: 'file', size: 12 }],
+      }), { status: 200 });
+    }
+    if (url.includes('/files/content?path=go.mod')) {
+      return new Response(JSON.stringify({ path: 'go.mod', size: 12, content: 'module x' }), { status: 200 });
+    }
+    return new Response('not found', { status: 404 });
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(
+    <FileExplorerPanel
+      daemonID="d1"
+      sessionID="s1"
+      renderMode="sheet"
+      onPreview={onPreview}
+    />,
+  );
+
+  await screen.findByText('go.mod');
+  // Sheet mode must NOT render the inline preview region.
+  expect(screen.queryByText('No file selected')).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: /打开文件 go.mod/ }));
+  await vi.waitFor(() => expect(onPreview).toHaveBeenCalledTimes(1));
+  expect(onPreview.mock.calls[0][0]).toEqual({
+    preview: expect.objectContaining({ path: 'go.mod', content: 'module x' }),
+    fullPath: '/root/project/go.mod',
+    displayPath: 'go.mod',
+  });
+});
+
+test('renderMode="sheet" preserves directory expansion across external rerender (sheet open/close cycle)', async () => {
+  const fetchMock = vi.fn(async (input: RequestInfo) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.includes('/files?path=.')) {
+      return new Response(JSON.stringify({
+        root: '/root/project',
+        path: '.',
+        entries: [
+          { name: 'cmd', path: 'cmd', kind: 'dir' },
+          { name: 'go.mod', path: 'go.mod', kind: 'file', size: 12 },
+        ],
+      }), { status: 200 });
+    }
+    if (url.includes('/files?path=cmd')) {
+      return new Response(JSON.stringify({
+        root: '/root/project',
+        path: 'cmd',
+        entries: [{ name: 'main.go', path: 'cmd/main.go', kind: 'file', size: 4 }],
+      }), { status: 200 });
+    }
+    return new Response('not found', { status: 404 });
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  const { rerender } = render(
+    <FileExplorerPanel daemonID="d1" sessionID="s1" renderMode="sheet" onPreview={vi.fn()} />,
+  );
+  await screen.findByText('cmd');
+  fireEvent.click(screen.getByRole('button', { name: /展开目录 cmd/ }));
+  await screen.findByText('main.go');
+
+  // Simulate the parent rerendering the same component instance
+  // (e.g. because the file-preview sheet opened/closed elsewhere).
+  rerender(<FileExplorerPanel daemonID="d1" sessionID="s1" renderMode="sheet" onPreview={vi.fn()} />);
+  expect(screen.getByText('main.go')).toBeInTheDocument();
+});
