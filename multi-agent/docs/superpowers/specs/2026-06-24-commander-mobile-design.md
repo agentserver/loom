@@ -103,53 +103,74 @@ Concrete changes:
 
 ### Browser back as drawer/sheet close
 
-`MobileShell` maintains a `overlayStackRef = useRef<OverlayID[]>([])` (where
-`OverlayID` is `'sessions' | 'files' | 'preview'`). The stack mirrors the
-visible overlay order top-to-bottom.
+The overlay history controller is **owned by `CommanderApp`**, not
+`MobileShell`. This keeps a single source of truth that survives the
+mobile↔desktop shell swap, and lets the matchMedia handler reach the stack
+without prop-drilling refs.
+
+`CommanderApp` instantiates one controller via a custom hook
+`useOverlayHistory()` that returns:
+
+```
+{
+  open(id: OverlayID): void,    // push history + record in stack
+  closeTop(id: OverlayID): void,// history.back() if id is on top; no-op otherwise
+  reset(): void,                // detach listener, clear stack — no history changes
+  drainForBreakpoint(): void,   // breakpoint-only: history.go(-len) then clear
+  onPop(handler): unsubscribe,  // subscribe to overlay-driven popstate events
+}
+```
+
+Internals: a closure-scoped `stack: OverlayID[]` (not a React ref, so the
+matchMedia handler reads the live array without needing a ref forwarded
+across shell components), one `popstate` listener attached on first
+`open()` and detached by `reset()`, and the same `{ commanderOverlay: id }`
+payload on every `history.pushState`.
+
+`MobileShell` calls `useOverlayHistory()` indirectly via props
+(`openOverlay`, `closeOverlay`, and a subscription to `onPop` that flips
+`sessionsOpen` / `filesOpen` / `previewPayload`).
 
 **Opening an overlay**
-1. Push the id onto `overlayStackRef.current`.
-2. Call `history.pushState({ commanderOverlay: id }, '')`. Each open pushes
-   exactly one history entry (preview stacked on Files therefore pushes a
-   second entry).
-3. Flip the corresponding React state (`sessionsOpen` / `filesOpen` /
-   `previewPayload`) to render the overlay.
+1. `controller.open(id)` pushes `id` onto `stack`.
+2. Calls `history.pushState({ commanderOverlay: id }, '')`. Each open
+   pushes exactly one history entry (preview stacked on Files therefore
+   pushes a second entry).
+3. The shell flips the matching React state to render the overlay.
 
 **Closing via UI (close button, overlay click, ESC, session selection)**
-- If `overlayStackRef.current[length-1]` matches the overlay being closed,
-  call `history.back()` and let the `popstate` handler do the React state
+- `controller.closeTop(id)`: if `stack.at(-1) === id`, call
+  `history.back()` and let the `popstate` handler do the React state
   update. This keeps the back stack in sync.
-- If the ref is empty (defensive: e.g. SSR-style remount), close the React
-  state directly without touching history.
+- If `stack` is empty (defensive: e.g. SSR-style remount), the shell
+  closes the React state directly without touching history.
 
 **Closing via browser Back**
-- The single `popstate` listener pops the top of `overlayStackRef.current`
-  and flips the matching React state to closed. It does **not** inspect
-  the new history state — the local stack is the source of truth for which
-  overlay is on top. It does inspect `event.state`: if the new top is one
-  of our `{ commanderOverlay }` entries and the local stack is empty, the
-  user navigated forward into commander again — ignore.
+- The single `popstate` listener pops the top of `stack` and emits an
+  `onPop(id)` event so the shell flips the matching React state to
+  closed. It does **not** inspect the new history state — the local stack
+  is the source of truth for which overlay is on top.
 - If the local stack is empty when `popstate` fires, the event is a
   non-overlay navigation; do nothing (the browser leaves commander).
 
 **Edge cases**
-- Page reload: history entries our shell pushed remain in browser history
-  but the ref is empty on mount; the `popstate` handler ignores them per
-  the rule above.
-- Programmatic navigation away (e.g. logout link, browser address bar):
-  no `history.go(...)` cleanup. The cleanup logic only removes the
-  `popstate` listener and clears `overlayStackRef.current`; user-initiated
-  navigation completes normally.
+- Page reload: history entries the controller pushed remain in browser
+  history but the in-memory stack is empty on mount; the `popstate`
+  handler ignores them per the rule above. Reload also means no listener
+  is attached until the user opens an overlay again.
+- Programmatic navigation away (logout link, address bar): no
+  `history.go(...)` cleanup. `CommanderApp` calls `controller.reset()` on
+  full unmount, which only detaches the listener and clears the stack;
+  user-initiated navigation completes normally.
 - Breakpoint crossing (`< 1024px → ≥ 1024px`, e.g. tablet rotated to
   landscape) is the **only** case that actively consumes pushed history
-  entries. The matchMedia change handler in `CommanderApp` runs before
-  swapping shells: if `overlayStackRef.current.length > 0`, it captures
-  `len = overlayStackRef.current.length`, clears the ref, then calls
-  `window.history.go(-len)` once (equivalent to N back steps without
-  waiting on intermediate `popstate` events). Only after that does it
-  flip the React state (`mobile → desktop`). The user never has to press
-  Back to consume phantom entries. Plain unmount paths (route change,
-  `authRequired` flip, page close) skip the `history.go` call.
+  entries. The matchMedia change handler in `CommanderApp` calls
+  `controller.drainForBreakpoint()` **before** swapping shells: it
+  captures `len = stack.length`, clears the stack, then calls
+  `window.history.go(-len)` once if `len > 0`. Only after that does it
+  flip the local `isNonDesktop` state, which triggers `MobileShell`
+  unmount + desktop shell mount. The user never has to press Back to
+  consume phantom entries.
 
 ## Component Structure
 
@@ -162,7 +183,10 @@ visible overlay order top-to-bottom.
      mobileTrailing={<FilesButton/>} empty={hasNoSelection}>`.
    - Hosts two `<MobileDrawer>` instances (Sessions left, Files right) and a
      single `<FilePreviewSheet>` stacked over the Files drawer.
-   - Owns the `history.pushState` / `popstate` bridging for back-to-close.
+   - **Does not own** the overlay history controller; receives
+     `openOverlay`, `closeOverlay`, and a subscription to `onPop` as props
+     from `CommanderApp` so the controller survives the shell swap on
+     breakpoint crossings.
 
 2. **`MobileDrawer.tsx`** — controlled Radix Dialog wrapper.
    - Props: `side: 'left' | 'right'`, `open`, `onOpenChange`, `title`,
@@ -216,6 +240,12 @@ visible overlay order top-to-bottom.
 6. **`CommanderApp.tsx`** — branch on the media query, hoist drawer state,
    and auto-select on mobile only.
    - Uses `useMediaQuery('(max-width: 1023px)')` (a ~10-line inline hook).
+   - Owns `useOverlayHistory()` (see Browser Back section). The
+     `useMediaQuery` matchMedia change handler calls
+     `controller.drainForBreakpoint()` before flipping `isNonDesktop`
+     from true to false, so the desktop shell never inherits phantom
+     history entries. Full-unmount paths call `controller.reset()`
+     instead, which leaves history untouched.
    - Auto-select rule (mobile-only, one-shot): keep a
      `hasAutoSelectedRef = useRef(false)`. After `loadTree` resolves, if
      `!hasAutoSelectedRef.current && isNonDesktop && selected == null`,
@@ -409,23 +439,31 @@ Add new tests, each guarded so they run on `chromium-mobile` and
    - Click the session in the daemon tree → chat header now shows the
      mock session title and the detail endpoint has been requested.
 
-10. **`non-desktop: resizing to desktop while overlay is open consumes
-    phantom history`** (chromium-mobile only; uses `page.setViewportSize`)
+10. **`non-desktop: resizing to desktop while two overlays are stacked
+    leaves no phantom history`** (chromium-mobile only; uses
+    `page.setViewportSize`)
     - Setup: `page.goto('about:blank')` first to establish a known
       previous entry, then `page.goto('/commander/')`. This guarantees
       the browser has a non-commander entry to navigate back to.
     - Auto-selected first session is visible.
-    - Snapshot `historyBefore = await page.evaluate(() => history.length)`.
-    - Click `[Sessions]` → drawer open. Assert
-      `history.length === historyBefore + 1` (one push by MobileShell).
-    - Click `[Files]` → assert `history.length === historyBefore + 2`.
-    - Resize viewport to `1280×900` → `MobileShell` unmounts, desktop
-      three-pane shell renders. Assert
-      `history.length === historyBefore` (the breakpoint-cross cleanup
-      consumed both pushed entries via one `history.go(-2)` call).
-    - Trigger one `page.goBack()` → assert
-      `page.url() === 'about:blank'`, proving no phantom overlay entry
-      remained.
+    - Click `[Files]` → Files drawer open. Assert
+      `history.state?.commanderOverlay === 'files'` (controller push
+      observed).
+    - Click `go.mod` in the file tree → preview sheet opens stacked over
+      Files. Assert `history.state?.commanderOverlay === 'preview'` (a
+      second push).
+    - **Why this pair of overlays:** Sessions and Files share the same
+      header trigger row; opening one closes / blocks the other (modal
+      focus trap), so a real user can never reach a two-entry stack
+      that way. The legitimate two-entry stack is `files` → `preview`.
+    - Resize viewport to `1280×900` → matchMedia change handler runs
+      `drainForBreakpoint()` (one `history.go(-2)`) before
+      `MobileShell` unmounts. Assert
+      `history.state?.commanderOverlay == null` (no overlay token
+      lives on the current entry; the controller drained the stack).
+    - Trigger one `page.goBack()` → assert `page.url() === 'about:blank'`,
+      proving Back reaches the sentinel page in a single step rather
+      than first popping invisible overlay entries.
 
 ### Screenshots (snapshot tests)
 - `commander-desktop.png` — kept (existing).
