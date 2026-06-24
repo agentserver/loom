@@ -1237,6 +1237,17 @@ func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	if args.LastTaskID == "" || args.Answer == "" {
 		return nil, &MCPToolError{Message: "last_task_id and answer are required"}
 	}
+
+	// === NEW: unconditional bind guard.
+	// resume_task is always parent-link (every resume produces a
+	// chat_resume delegation that spawns a nested slave codex session).
+	// Runs BEFORE GetTask so unbound resumes don't even consume an RPC.
+	parentThreadID, err := r.t.requireBoundThread()
+	if err != nil {
+		return nil, &MCPToolError{Message: err.Error()}
+	}
+	// === END guard ===
+
 	info, err := r.t.sdk.GetTask(ctx, args.LastTaskID, true)
 	if err != nil {
 		return nil, &MCPToolError{Message: "get_task: " + err.Error()}
@@ -1294,22 +1305,16 @@ func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		timeout = 600
 	}
 
-	// Before:
-	//   SystemContext: r.t.loomOriginMarker(),
-	// After (temporary):
-	sysCtx := ""
-	if pid, err := r.t.requireBoundThread(); err == nil {
-		sysCtx = agentbackend.BuildLoomOrigin(
-			r.t.cfg.Credentials.ShortID,
-			r.t.cfg.Discovery.DisplayName,
-			pid,
-		)
-	}
+	systemContext := agentbackend.BuildLoomOrigin(
+		r.t.cfg.Credentials.ShortID,
+		r.t.cfg.Discovery.DisplayName,
+		parentThreadID,
+	)
 	resp, err := r.t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
 		TargetID:       info.TargetID,
 		Skill:          "chat_resume",
 		Prompt:         string(body),
-		SystemContext:  sysCtx,
+		SystemContext:  systemContext,
 		TimeoutSeconds: timeout,
 	})
 	if err != nil {
