@@ -1106,18 +1106,20 @@ export function MobileShell({
 
 (Leave the other props — `mobileLeading`, `mobileTrailing`, `empty` — as they are; just add the two new lines.)
 
-1e) Find the `<FileExplorerPanel>` invocation in the Files drawer. Apply the `disableFiles` suppression by passing empty IDs when set, to short-circuit the panel's eager `/files?path=.` fetch:
+1e) Find the existing `<FileExplorerPanel>` invocation in the Files drawer. **Only change the `daemonID` and `sessionID` lines** to apply the `disableFiles` suppression — leave every other prop (`renderMode`, `onPreviewRequest`, `onPreview`, plus any others) exactly as today. The existing `onPreviewRequest={handlePreviewRequest}` callback is what pushes the preview history entry synchronously on click; preserving it is critical so the mobile preview/back e2e doesn't race.
+
+The edit looks like (`...` standing for any existing props you must leave intact):
 
 ```tsx
         <FileExplorerPanel
           daemonID={disableFiles ? '' : (selected?.daemonID || '')}
           sessionID={disableFiles ? '' : (selected?.sessionID || '')}
           renderMode="sheet"
-          onPreview={(payload) => { setPreviewPayload(payload); overlay.open('preview'); }}
+          onPreviewRequest={handlePreviewRequest}
+          onPreview={handlePreview}
+          /* ... any other props the existing call carries — unchanged ... */
         />
 ```
-
-(Leave any other props on `<FileExplorerPanel>` as they are; only the `daemonID` and `sessionID` lines change to use the `disableFiles` ternary.)
 
 - [ ] **Step 2: Run mobile tests to verify pass**
 
