@@ -228,7 +228,7 @@ Expected: `package.json` `dependencies` gains `@radix-ui/react-dialog`; `package
 - [ ] **Step 5: Run hook test + typecheck**
 
 Run from `internal/commanderhub/webapp/`:
-- `npm test -- src/hooks/useMediaQuery.test.ts` → expected: PASS (2 tests).
+- `npm test -- src/hooks/useMediaQuery.test.ts` → expected: PASS (3 tests).
 - `npm run build` → expected: tsc + vite build both succeed.
 
 - [ ] **Step 6: Commit**
@@ -1541,6 +1541,18 @@ test('overlay.onPop("sessions") triggers setSessionsOpen(false)', () => {
   expect(setSessionsOpen).toHaveBeenCalledWith(false);
 });
 
+test('closing a drawer with empty overlay stack falls back to setOpen(false), never gets stuck', () => {
+  // Defensive case: a remount / double-close could leave the controller's
+  // stack empty while the React state still says sessionsOpen=true.
+  // Clicking close (or pressing ESC, which Radix routes through onOpenChange)
+  // must close the drawer instead of no-op'ing via closeTop.
+  const { overlay, setSessionsOpen } = renderShell({ sessionsOpen: true });
+  expect(overlay.stackSnapshot()).toEqual([]); // pre-condition
+  const closeBtn = screen.getByRole('button', { name: /关闭 Sessions/ });
+  fireEvent.click(closeBtn);
+  expect(setSessionsOpen).toHaveBeenCalledWith(false);
+});
+
 test('empty=true when selected == null (composer disabled via ChatWorkspace)', () => {
   renderShell({ selected: null });
   expect(screen.getByLabelText('输入提示词')).toBeDisabled();
@@ -1612,9 +1624,35 @@ export function MobileShell({
     setFilesOpen(true);
   }
 
+  // Generic "close this overlay" — if the controller's stack has this id on
+  // top, go through history.back() so the back stack stays consistent. If the
+  // stack is empty or out of sync (defensive: SSR remount, double-fire), the
+  // shell closes the React state directly so the user is never stuck with a
+  // visible overlay that has no way to dismiss it (spec §Closing via UI).
+  function closeOverlay(
+    id: 'sessions' | 'files' | 'preview',
+    setOpen: (next: boolean) => void,
+  ) {
+    const stack = overlay.stackSnapshot();
+    if (stack.length > 0 && stack[stack.length - 1] === id) {
+      overlay.closeTop(id);
+    } else {
+      setOpen(false);
+    }
+  }
+
+  function closePreview() {
+    const stack = overlay.stackSnapshot();
+    if (stack.length > 0 && stack[stack.length - 1] === 'preview') {
+      overlay.closeTop('preview');
+    } else {
+      setPreviewPayload(null);
+    }
+  }
+
   function handleSelectSession(daemonID: string, sessionID: string) {
     onSelect(daemonID, sessionID);
-    overlay.closeTop('sessions');
+    closeOverlay('sessions', setSessionsOpen);
   }
 
   function handlePreview(payload: FilePreviewPayload) {
@@ -1658,7 +1696,7 @@ export function MobileShell({
       <MobileDrawer
         open={sessionsOpen}
         onOpenChange={(next) => {
-          if (!next) overlay.closeTop('sessions');
+          if (!next) closeOverlay('sessions', setSessionsOpen);
           else openSessions();
         }}
         side="left"
@@ -1669,7 +1707,7 @@ export function MobileShell({
       <MobileDrawer
         open={filesOpen}
         onOpenChange={(next) => {
-          if (!next) overlay.closeTop('files');
+          if (!next) closeOverlay('files', setFilesOpen);
           else openFiles();
         }}
         side="right"
@@ -1685,7 +1723,7 @@ export function MobileShell({
       <FilePreviewSheet
         open={previewPayload != null}
         onOpenChange={(next) => {
-          if (!next) overlay.closeTop('preview');
+          if (!next) closePreview();
         }}
         payload={previewPayload}
       />
@@ -1697,7 +1735,7 @@ export function MobileShell({
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `npm test -- src/components/MobileShell.test.tsx`
-Expected: PASS (4 tests).
+Expected: PASS (6 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -1778,14 +1816,35 @@ function installMatchMedia(initialMatches: boolean) {
   };
 }
 
-function mockTreeFetch(tree: unknown) {
+function mockTreeFetch(tree: {
+  daemons: Array<{
+    daemon_id: string;
+    sessions?: Array<{ session_id: string; title: string }>;
+  }>;
+}) {
+  // Build a sessionID -> title map so each detail response carries the right
+  // title; otherwise every detail responds with one hard-coded title and the
+  // 'Subagent only' / 'Parent root' / multi-daemon tests below would fail
+  // their text assertions.
+  const titleByID = new Map<string, string>();
+  for (const daemon of tree.daemons) {
+    for (const s of daemon.sessions || []) {
+      titleByID.set(s.session_id, s.title);
+    }
+  }
   return vi.fn(async (input: RequestInfo) => {
     const url = typeof input === 'string' ? input : input.url;
     if (url.includes('/api/commander/tree')) {
       return new Response(JSON.stringify(tree), { status: 200 });
     }
-    if (url.includes('/api/commander/daemons/')) {
-      return new Response(JSON.stringify({ session: { ID: 's1', Title: 'Session one' }, messages: [] }), { status: 200 });
+    const detailMatch = url.match(/\/api\/commander\/daemons\/[^/]+\/sessions\/([^/?]+)$/);
+    if (detailMatch) {
+      const sessionID = decodeURIComponent(detailMatch[1]);
+      const title = titleByID.get(sessionID) ?? sessionID;
+      return new Response(
+        JSON.stringify({ session: { ID: sessionID, Title: title }, messages: [] }),
+        { status: 200 },
+      );
     }
     return new Response('not found', { status: 404 });
   });
@@ -1887,6 +1946,29 @@ test('auto-select skips agent_task whose parent_id resolves in the tree', async 
   render(<CommanderApp />);
   await waitFor(() => expect(screen.getByText('Parent root')).toBeInTheDocument());
 });
+
+test('auto-select uses owner-keyed parent lookup so same session_id across daemons does not falsely link', async () => {
+  // Two daemons both report session_id 's1'. The second daemon's 's1' is an
+  // agent_task whose parent_id 's1' could be confused with the first daemon's
+  // 's1' if the lookup used the global session_id set. With owner-keyed
+  // namespacing, the second 's1' has no resolvable parent in its OWN owner
+  // namespace and stays a root — so the first daemon's 's1' (scanned first)
+  // is the auto-selected session.
+  installMatchMedia(true);
+  vi.stubGlobal('fetch', mockTreeFetch({
+    daemons: [
+      { daemon_id: 'd1', display_name: 'prod-a', kind: 'codex', status: 'ok', sessions: [
+        { daemon_id: 'd1', session_id: 's1', kind: 'codex', title: 'First daemon root', origin: 'user', turn_state: 'idle', active_worker: false, awaiting_approval: false },
+      ]},
+      { daemon_id: 'd2', display_name: 'prod-b', kind: 'codex', status: 'ok', sessions: [
+        // Same session_id, different daemon, no owner_agent_id => effectiveOwner is daemon:d2.
+        { daemon_id: 'd2', session_id: 's1', kind: 'codex', title: 'Second daemon root', origin: 'agent_task', parent_id: 's1', turn_state: 'idle', active_worker: false, awaiting_approval: false },
+      ]},
+    ],
+  }));
+  render(<CommanderApp />);
+  await waitFor(() => expect(screen.getByText('First daemon root')).toBeInTheDocument());
+});
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1911,23 +1993,40 @@ import { MobileShell } from './components/MobileShell';
 import type { FilePreviewPayload } from './components/FilePreviewSheet';
 ```
 
-Add the helper near other top-level functions (above `CommanderApp`):
+Add the helper near other top-level functions (above `CommanderApp`).
+It mirrors `DaemonSessionTree.buildCrossDaemonTree` by using the same
+owner-key namespacing (`effectiveOwner` + `parentOwnerFor`) so cross-daemon
+sessions that happen to share a `session_id` are not mistaken for
+parent/child:
 
 ```tsx
+function effectiveOwner(s: SessionRow): string {
+  return s.owner_agent_id ?? `daemon:${s.daemon_id}`;
+}
+
+function parentOwnerFor(s: SessionRow): string {
+  return s.parent_agent_id ?? effectiveOwner(s);
+}
+
+function ownerKey(owner: string, sessionID: string): string {
+  return `${owner}\0${sessionID}`;
+}
+
 function pickAutoSession(tree: CommanderTree | null) {
   if (!tree) return null;
-  // Match DaemonSessionTree.buildCrossDaemonTree: a session is a child
-  // (non-top-level) when its origin is 'subagent' or 'agent_task' AND its
-  // parent_id resolves to another session anywhere in the tree. Roots are
-  // every other session; on mobile we auto-select the first root.
-  const allIDs = new Set<string>();
+  // Build the set of resolved-child owner keys with the same logic
+  // DaemonSessionTree uses, so a session_id collision across daemons does
+  // not cause us to skip a real top-level row.
+  const presentOwnerKeys = new Set<string>();
   for (const daemon of tree.daemons) {
-    for (const s of daemon.sessions || []) allIDs.add(s.session_id);
+    for (const s of daemon.sessions || []) {
+      presentOwnerKeys.add(ownerKey(effectiveOwner(s), s.session_id));
+    }
   }
   const isChild = (s: SessionRow) =>
     (s.origin === 'subagent' || s.origin === 'agent_task') &&
     !!s.parent_id &&
-    allIDs.has(s.parent_id);
+    presentOwnerKeys.has(ownerKey(parentOwnerFor(s), s.parent_id));
   for (const daemon of tree.daemons) {
     for (const s of daemon.sessions || []) {
       if (!isChild(s)) return { daemonID: daemon.daemon_id, sessionID: s.session_id };
