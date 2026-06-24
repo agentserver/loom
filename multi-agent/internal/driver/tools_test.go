@@ -3057,3 +3057,103 @@ func TestSubmitContractTaskDriverFanoutFailWithoutBind_NoObserverSideEffect(t *t
 	require.EqualValues(t, 0, atomic.LoadInt64(&observerReqs),
 		"observer must see ZERO requests when bind guard short-circuits")
 }
+
+// TestSubmitContractTaskPathB_ChatSkill_FailsWithoutBindThread is the
+// Path B mirror of T6's _DriverFanoutFailsWithoutBind. A single
+// chat-capable slave makes the contract route via selectTarget (Path B)
+// rather than driver_fanout. Without bind_thread the guard MUST fire
+// before SaveResourceSnapshot, before DelegateTask, and before any
+// observer side effect.
+//
+// Observer wiring uses the same enable-relay pattern as
+// _NoObserverSideEffect (T6) so the assertion is meaningful — without
+// Enabled/URL/TokenSource all set, NewObserverRelay returns nil and the
+// SaveResourceSnapshot call is a vacuous no-op (see observer_relay.go:44).
+func TestSubmitContractTaskPathB_ChatSkill_FailsWithoutBindThread(t *testing.T) {
+	var observerReqs int64
+	observerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&observerReqs, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer observerSrv.Close()
+
+	delegated := false
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			// Exactly ONE chat slave → route falls through driver_fanout
+			// (which needs >=2 matches) and into Path B selectTarget.
+			return []agentsdk.AgentCard{
+				{AgentID: "sbx-driver", DisplayName: "driver", Status: "available"},
+				{AgentID: "slave-chat", DisplayName: "slave-chat", Status: "available",
+					Card: json.RawMessage(`{"skills":["chat"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			delegated = true
+			return &agentsdk.DelegateTaskResponse{TaskID: "should-not-reach"}, nil
+		},
+	}
+
+	obs := &fakeObserver{}
+	tools := newTestToolsWithObserver(t, sdk, obs)
+	tools.cfg.Observer.Enabled = true
+	tools.cfg.Observer.URL = observerSrv.URL
+	tools.relay = NewObserverRelay(tools.cfg, toTokenSource(obs))
+	require.NotNil(t, tools.relay, "relay must be non-nil — otherwise observer assertion is vacuous")
+	// NO BindThread call — Path B with chat skill must reject.
+
+	tc := testTaskContract()
+	tc.ExecutionPolicy.Routing = contract.RoutingDirectFirst
+	tc.CapabilityRequirements.Skills = []string{"chat"}
+	raw, err := json.Marshal(map[string]interface{}{
+		"contract":            tc,
+		"skill":               "chat",
+		"target_display_name": "slave-chat",
+	})
+	require.NoError(t, err)
+
+	_, err = submitContractToolForTest(t, tools).Call(context.Background(), raw)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "driver not bound to a codex thread")
+	require.False(t, delegated, "DelegateTask must NOT be called when bind missing")
+	require.EqualValues(t, 0, atomic.LoadInt64(&observerReqs),
+		"observer must see ZERO requests when Path B bind guard short-circuits")
+}
+
+// TestSubmitContractTaskPathB_BashSkillOverride_SucceedsWithoutBind covers
+// the exotic corner case: a contract submitted with an explicit bash skill
+// override, no target_display_name, single slave matching the contract.
+// Path B's resolved skill is bash → not parent-link → no bind required →
+// no SystemContext stamping.
+func TestSubmitContractTaskPathB_BashSkillOverride_SucceedsWithoutBind(t *testing.T) {
+	var captured agentsdk.DelegateTaskRequest
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "sbx-driver", DisplayName: "driver", Status: "available"},
+				{AgentID: "slave-bash", DisplayName: "slave-bash", Status: "available",
+					Card: json.RawMessage(`{"skills":["bash"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			captured = req
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-b"}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	tc := testTaskContract()
+	tc.ExecutionPolicy.Routing = contract.RoutingDirectFirst
+	tc.CapabilityRequirements.Skills = []string{"bash"}
+	raw, err := json.Marshal(map[string]interface{}{
+		"contract":            tc,
+		"skill":               "bash",
+		"target_display_name": "slave-bash",
+	})
+	require.NoError(t, err)
+
+	_, err = submitContractToolForTest(t, tools).Call(context.Background(), raw)
+	require.NoError(t, err)
+	require.Equal(t, "bash", captured.Skill)
+	require.Empty(t, captured.SystemContext)
+}
