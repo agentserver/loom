@@ -304,7 +304,6 @@ func TestGetSession_CodexMetaSourceStringPreservesWorkingDir(t *testing.T) {
 }
 
 func TestGetSession_CodexExecWithSidecarIsAgentTaskAndTitleSkipsManifest(t *testing.T) {
-	t.Skip("enabled by Task 14 — applyLoomMeta sidecar+exec gate")
 	home := t.TempDir()
 	setTestHome(t, home)
 	// IMPORTANT: this fixture uses setTestHome + the default-CodexHome
@@ -364,7 +363,6 @@ func TestGetSession_CodexExecWithSidecarIsAgentTaskAndTitleSkipsManifest(t *test
 }
 
 func TestListSessionsMergesLoomMetaSidecar(t *testing.T) {
-	t.Skip("enabled by Task 14 — applyLoomMeta sidecar+exec gate")
 	home := t.TempDir()
 	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir(), CodexHome: home}, nil)
 	id := "deadbeef-0000-0000-0000-000000000001"
@@ -464,7 +462,6 @@ func TestListSessionsCorruptSidecarSkipped(t *testing.T) {
 }
 
 func TestListCacheInvalidatedBySidecarRewrite(t *testing.T) {
-	t.Skip("enabled by Task 14 — applyLoomMeta sidecar+exec gate")
 	home := t.TempDir()
 	b := New(agentbackend.Config{Bin: "codex", WorkDir: t.TempDir(), CodexHome: home}, nil)
 	id := "deadbeef-0000-0000-0000-000000000004"
@@ -755,7 +752,6 @@ func TestTitleFromUserText_TruncatesAtValidUTF8Boundary(t *testing.T) {
 }
 
 func TestListSessionsLoomMetaMergesPartialParentLink(t *testing.T) {
-	t.Skip("enabled by Task 14 — applyLoomMeta sidecar+exec gate")
 	// E2e finding: P2's driver-side stamping (loomOriginMarker) writes a
 	// sidecar carrying ParentAgentID + ParentDisplayName but an EMPTY
 	// ParentSessionID whenever the driver's codex hasn't yet written its
@@ -830,4 +826,83 @@ func TestApplyCodexSessionMeta_SubagentClassificationUnchanged(t *testing.T) {
 	require.Equal(t, agentbackend.SessionOriginSubagent, sess.Origin)
 	require.Equal(t, "parent-thr", sess.ParentID)
 	require.Equal(t, "Lover", sess.AgentName)
+}
+
+// TestApplyLoomMeta_PreservesSubagentClassification — Gate 1: a sidecar
+// must never demote or relabel a codex-native subagent.
+func TestApplyLoomMeta_PreservesSubagentClassification(t *testing.T) {
+	base := t.TempDir()
+	sess := &agentbackend.Session{
+		ID:     "sess-1",
+		Origin: agentbackend.SessionOriginSubagent,
+	}
+	require.NoError(t, writeLoomMeta(base, loomMeta{
+		Schema: loomMetaSchema, Kind: "codex",
+		Origin: "agent_task", SessionID: "sess-1",
+		ParentAgentID: "drv-1", ParentDisplayName: "Driver",
+		ParentSessionID: "thr-X",
+	}))
+	applyLoomMeta(base, sess, true /*rolloutIsExec*/)
+	require.Equal(t, agentbackend.SessionOriginSubagent, sess.Origin)
+}
+
+// TestApplyLoomMeta_RequiresExecModeRollout — Gate 2: an interactive
+// (non-exec) rollout must not be upgraded even if a sidecar is present.
+func TestApplyLoomMeta_RequiresExecModeRollout(t *testing.T) {
+	base := t.TempDir()
+	sess := &agentbackend.Session{
+		ID:     "sess-1",
+		Origin: agentbackend.SessionOriginUser,
+	}
+	require.NoError(t, writeLoomMeta(base, loomMeta{
+		Schema: loomMetaSchema, Kind: "codex",
+		Origin: "agent_task", SessionID: "sess-1",
+		ParentSessionID: "thr-X",
+	}))
+	applyLoomMeta(base, sess, false /*rolloutIsExec*/)
+	require.Equal(t, agentbackend.SessionOriginUser, sess.Origin,
+		"non-exec rollouts must not be upgraded to AgentTask")
+}
+
+// TestApplyLoomMeta_UpgradesExecModeWithSidecar — happy path.
+func TestApplyLoomMeta_UpgradesExecModeWithSidecar(t *testing.T) {
+	base := t.TempDir()
+	sess := &agentbackend.Session{
+		ID:     "sess-1",
+		Origin: agentbackend.SessionOriginUser,
+	}
+	require.NoError(t, writeLoomMeta(base, loomMeta{
+		Schema: loomMetaSchema, Kind: "codex",
+		Origin: "agent_task", SessionID: "sess-1",
+		ParentSessionID: "thr-X", ParentAgentID: "drv-1", ParentDisplayName: "Driver",
+	}))
+	applyLoomMeta(base, sess, true /*rolloutIsExec*/)
+	require.Equal(t, agentbackend.SessionOriginAgentTask, sess.Origin)
+	require.Equal(t, "thr-X", sess.ParentID)
+	require.Equal(t, "drv-1", sess.ParentAgentID)
+	require.Equal(t, "Driver", sess.ParentDisplayName)
+}
+
+// TestScanCodexSession_MultiSessionMeta_ExecFlagAccumulates — when a
+// rollout contains multiple session_meta records, OR-accumulator ensures
+// a later record without exec fields cannot demote an earlier true.
+func TestScanCodexSession_MultiSessionMeta_ExecFlagAccumulates(t *testing.T) {
+	base := t.TempDir()
+	sessID := "sess-multi"
+	// Write a rollout file with TWO session_meta records: first has
+	// originator=codex_exec, second has none.
+	rollout := filepath.Join(base, "sessions/2026/06/23/rollout-2026-06-23T17-08-20-"+sessID+".jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(rollout), 0o755))
+	require.NoError(t, os.WriteFile(rollout, []byte(strings.Join([]string{
+		`{"timestamp":"2026-06-23T17:08:20Z","type":"session_meta","payload":{"id":"` + sessID + `","originator":"codex_exec","source":{"kind":"exec"}}}`,
+		`{"timestamp":"2026-06-23T17:08:21Z","type":"session_meta","payload":{"id":"` + sessID + `"}}`,
+	}, "\n")+"\n"), 0o644))
+	require.NoError(t, writeLoomMeta(base, loomMeta{
+		Schema: loomMetaSchema, Kind: "codex",
+		Origin: "agent_task", SessionID: sessID,
+	}))
+
+	res := scanCodexSession(rollout, sessID, false /*withMessages*/, base)
+	require.Equal(t, agentbackend.SessionOriginAgentTask, res.session.Origin,
+		"rolloutIsExec must remain true after a later session_meta without exec fields")
 }
