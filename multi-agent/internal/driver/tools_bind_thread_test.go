@@ -82,3 +82,67 @@ func TestBindResult_JSONTags(t *testing.T) {
 	require.NoError(t, err)
 	require.JSONEq(t, `{"bound":true,"thread_id":"t","agent_id":"a","display_name":"d"}`, string(b))
 }
+
+// TestBindThreadTool_RegisteredInAll is the non-gated regression for the
+// "method exists but tool not wired into MCP" failure mode. If All() drops
+// the registration, tools/list won't surface bind_thread and codex can't
+// call it; tests that go through Tools.BindThread directly wouldn't notice.
+func TestBindThreadTool_RegisteredInAll(t *testing.T) {
+	tools := newLoomTestTools(t, &fakeSDK{}, "" /*home*/, "drv-1", "prod-driver")
+
+	var found Tool
+	for _, tool := range tools.All() {
+		if tool.Name() == "bind_thread" {
+			found = tool
+			break
+		}
+	}
+	require.NotNil(t, found, "bind_thread missing from Tools.All() — wrapper not registered")
+
+	// Schema sanity: must require thread_id.
+	var schema struct {
+		Required   []string                          `json:"required"`
+		Properties map[string]map[string]interface{} `json:"properties"`
+	}
+	require.NoError(t, json.Unmarshal(found.InputSchema(), &schema))
+	require.Contains(t, schema.Required, "thread_id")
+	require.Contains(t, schema.Properties, "thread_id")
+
+	// Round-trip Call: valid UUIDv7 must produce a BindResult-shaped response.
+	raw, err := found.Call(context.Background(),
+		json.RawMessage(`{"thread_id":"019ef3bd-42c8-7731-85b7-7177ae747389"}`))
+	require.NoError(t, err)
+	var got BindResult
+	require.NoError(t, json.Unmarshal(raw, &got))
+	require.Equal(t, BindResult{
+		Bound:       true,
+		ThreadID:    "019ef3bd-42c8-7731-85b7-7177ae747389",
+		AgentID:     "drv-1",
+		DisplayName: "prod-driver",
+	}, got)
+}
+
+// TestBindThreadTool_Call_InvalidJSON exercises the json.Unmarshal error
+// path: the wrapper must convert it into an MCPToolError so codex sees a
+// clean JSON-RPC -32000 instead of a generic Go error string.
+func TestBindThreadTool_Call_InvalidJSON(t *testing.T) {
+	tools := newLoomTestTools(t, &fakeSDK{}, "", "drv-1", "d1")
+	tool := toolByName(t, tools, "bind_thread")
+	_, err := tool.Call(context.Background(), json.RawMessage(`{not json}`))
+	require.Error(t, err)
+	var mcpErr *MCPToolError
+	require.ErrorAs(t, err, &mcpErr, "wrapper must return *MCPToolError")
+	require.Contains(t, mcpErr.Message, "invalid args")
+}
+
+// TestBindThreadTool_Call_ValidatorRejection ensures validator errors from
+// the underlying BindThread are also rewrapped as MCPToolError.
+func TestBindThreadTool_Call_ValidatorRejection(t *testing.T) {
+	tools := newLoomTestTools(t, &fakeSDK{}, "", "drv-1", "d1")
+	tool := toolByName(t, tools, "bind_thread")
+	_, err := tool.Call(context.Background(), json.RawMessage(`{"thread_id":"${VAR}"}`))
+	require.Error(t, err)
+	var mcpErr *MCPToolError
+	require.ErrorAs(t, err, &mcpErr)
+	require.Contains(t, mcpErr.Message, "invalid thread_id format")
+}

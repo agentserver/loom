@@ -231,6 +231,7 @@ func (t *Tools) All() []Tool {
 		&statSlaveFileTool{t},
 		&draftTaskContractTool{t},
 		&dryRunContractTool{t},
+		&bindThreadTool{t}, // ← NEW: must be registered for codex tools/list to see it
 		&submitTaskTool{t},
 		&submitContractTaskTool{t},
 		&getTaskTool{t},
