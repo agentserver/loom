@@ -4,8 +4,8 @@ go 1.26.2
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/agentserver/agentserver v0.48.1
-	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 // direct for commander; version selected by agentserver v0.48.1
+	github.com/agentserver/agentserver v0.69.9
+	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 // direct for commander; version selected by agentserver v0.69.9
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/minio/minio-go/v7 v7.2.0
 	github.com/stretchr/testify v1.11.1
