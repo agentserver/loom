@@ -8,6 +8,7 @@ import (
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/yourorg/multi-agent/internal/contract"
 	"github.com/yourorg/multi-agent/internal/observer"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
 type submitContractTaskTool struct{ t *Tools }
@@ -76,7 +77,18 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 		if s.t.contractRunner == nil {
 			return nil, &MCPToolError{Message: "driver_fanout route is recommended but no driver contract runner is configured"}
 		}
-		result, err := s.t.contractRunner.Run(ctx, finalPrompt, s.t.loomOriginMarker())
+		// Path A (driver_fanout) — Before:
+		//   result, err := s.t.contractRunner.Run(ctx, finalPrompt, s.t.loomOriginMarker())
+		// After (temporary):
+		marker := ""
+		if pid, err := s.t.requireBoundThread(); err == nil {
+			marker = agentbackend.BuildLoomOrigin(
+				s.t.cfg.Credentials.ShortID,
+				s.t.cfg.Discovery.DisplayName,
+				pid,
+			)
+		}
+		result, err := s.t.contractRunner.Run(ctx, finalPrompt, marker)
 		if err != nil {
 			return nil, &MCPToolError{Message: "driver fanout: " + err.Error()}
 		}
@@ -97,10 +109,22 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 	if timeout == 0 {
 		timeout = s.t.cfg.DriverDefaults.TaskTimeoutSec
 	}
+	// Path B — Before:
+	//   systemContext := ""
+	//   if isParentLinkDelegation(skill) {
+	//       if m := s.t.loomOriginMarker(); m != "" {
+	//           systemContext = m
+	//       }
+	//   }
+	// After (temporary):
 	systemContext := ""
 	if isParentLinkDelegation(skill) {
-		if m := s.t.loomOriginMarker(); m != "" {
-			systemContext = m
+		if pid, err := s.t.requireBoundThread(); err == nil {
+			systemContext = agentbackend.BuildLoomOrigin(
+				s.t.cfg.Credentials.ShortID,
+				s.t.cfg.Discovery.DisplayName,
+				pid,
+			)
 		}
 	}
 	resp, err := s.t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
