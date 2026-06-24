@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
@@ -46,6 +48,7 @@ type Tools struct {
 	observer       ObserverSink
 	relay          *ObserverRelay
 	contractRunner ContractRunner
+	parentThread   atomic.Pointer[string] // nil = not yet bound; set by BindThread
 }
 
 // NewTools constructs a Tools bundle.
@@ -71,6 +74,43 @@ func isParentLinkDelegation(skill string) bool {
 		return true
 	}
 	return false
+}
+
+// validThreadIDPattern accepts opaque backend-native session ids:
+//   - Codex emits UUIDv7 (e.g. 019ef3bd-42c8-7731-85b7-7177ae747389)
+//   - Other backends or tests may pass non-UUID strings (e.g. "thr-parent")
+// Rejects unexpanded placeholders (`${VAR}`), shell metachars, whitespace,
+// newlines, slashes, and anything longer than 128 chars — values that would
+// persist as broken links in loom-meta sidecars otherwise.
+const validThreadIDPattern = `^[A-Za-z0-9._-]{1,128}$`
+
+var validThreadID = regexp.MustCompile(validThreadIDPattern)
+
+// BindResult is the structured response returned to MCP callers and direct
+// Go callers. Marshaled by bindThreadTool.Call (see bind_thread_tool.go).
+type BindResult struct {
+	Bound       bool   `json:"bound"`
+	ThreadID    string `json:"thread_id"`
+	AgentID     string `json:"agent_id"`
+	DisplayName string `json:"display_name"`
+}
+
+// BindThread validates and stores the parent thread id. Tests call this
+// directly; the MCP-facing bindThreadTool wraps it so the wire surface and
+// direct-call surface stay in lockstep. ctx is reserved for future audit-log
+// hooks; not used today (Store is non-blocking and never errors).
+func (t *Tools) BindThread(_ context.Context, threadID string) (BindResult, error) {
+	id := strings.TrimSpace(threadID)
+	if !validThreadID.MatchString(id) {
+		return BindResult{}, fmt.Errorf("invalid thread_id format: must match %s", validThreadIDPattern)
+	}
+	t.parentThread.Store(&id)
+	return BindResult{
+		Bound:       true,
+		ThreadID:    id,
+		AgentID:     t.cfg.Credentials.ShortID,
+		DisplayName: t.cfg.Discovery.DisplayName,
+	}, nil
 }
 
 // loomOriginMarker returns the loom_origin marker for the current driver
