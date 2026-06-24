@@ -192,6 +192,8 @@ func TestSubmitContractTaskRoutesToSingleMatchingSlave(t *testing.T) {
 		},
 	}
 	tools := newTestTools(t, sdk)
+	_, err := tools.BindThread(context.Background(), "thr-routes-slave")
+	require.NoError(t, err)
 	tc := testTaskContract()
 	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
 	require.NoError(t, err)
@@ -225,7 +227,10 @@ func TestSubmitContractTaskReturnsDirectSlaveRoute(t *testing.T) {
 	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
 	require.NoError(t, err)
 
-	out, err := submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	tools := newTestTools(t, sdk)
+	_, err = tools.BindThread(context.Background(), "thr-direct-slave-route")
+	require.NoError(t, err)
+	out, err := submitContractToolForTest(t, tools).Call(context.Background(), raw)
 	require.NoError(t, err)
 	require.Contains(t, string(out), `"route":"direct_slave"`)
 	require.Equal(t, "slave-a", lastDelegate.TargetID)
@@ -250,7 +255,10 @@ func TestSubmitContractTaskReturnsMasterFanoutRoute(t *testing.T) {
 	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
 	require.NoError(t, err)
 
-	out, err := submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	tools := newTestTools(t, sdk)
+	_, err = tools.BindThread(context.Background(), "thr-master-fanout-route")
+	require.NoError(t, err)
+	out, err := submitContractToolForTest(t, tools).Call(context.Background(), raw)
 	require.NoError(t, err)
 	require.Contains(t, string(out), `"route":"master_fanout"`)
 	require.Equal(t, "m1", lastDelegate.TargetID)
@@ -276,7 +284,10 @@ func TestSubmitContractTaskMasterOnlyStillDelegatesToMasterFanout(t *testing.T) 
 	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
 	require.NoError(t, err)
 
-	out, err := submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	tools := newTestTools(t, sdk)
+	_, err = tools.BindThread(context.Background(), "thr-master-only-fanout")
+	require.NoError(t, err)
+	out, err := submitContractToolForTest(t, tools).Call(context.Background(), raw)
 	require.NoError(t, err)
 	require.Contains(t, string(out), `"route":"master_fanout"`)
 	require.Equal(t, "m1", lastDelegate.TargetID)
@@ -311,6 +322,8 @@ func TestSubmitContractTaskUsesDriverFanoutWhenRecommended(t *testing.T) {
 	require.NoError(t, err)
 
 	tools := newTestTools(t, sdk)
+	_, err = tools.BindThread(context.Background(), "thr-fanout-uses")
+	require.NoError(t, err)
 	runner := &fakeContractRunner{result: orchestration.RunnerResult{Summary: "driver summary"}}
 	tools.SetContractRunner(runner)
 
@@ -344,7 +357,10 @@ func TestSubmitContractTaskDriverFanoutRequiresConfiguredRunner(t *testing.T) {
 	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
 	require.NoError(t, err)
 
-	_, err = submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	tools := newTestTools(t, sdk)
+	_, err = tools.BindThread(context.Background(), "thr-fanout-norunner")
+	require.NoError(t, err)
+	_, err = submitContractToolForTest(t, tools).Call(context.Background(), raw)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "driver_fanout route is recommended but no driver contract runner is configured")
 	require.False(t, delegated)
@@ -369,7 +385,10 @@ func TestSubmitContractTaskDirectRouteUsesCapabilityAwareMatch(t *testing.T) {
 	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
 	require.NoError(t, err)
 
-	out, err := submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	tools := newTestTools(t, sdk)
+	_, err = tools.BindThread(context.Background(), "thr-capability-match")
+	require.NoError(t, err)
+	out, err := submitContractToolForTest(t, tools).Call(context.Background(), raw)
 	require.NoError(t, err)
 	require.Contains(t, string(out), `"route":"direct_slave"`)
 	require.Equal(t, "slave-b", lastDelegate.TargetID)
@@ -395,7 +414,10 @@ func TestSubmitContractTaskExplicitSlaveTargetReturnsDirectRoute(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	out, err := submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	tools := newTestTools(t, sdk)
+	_, err = tools.BindThread(context.Background(), "thr-explicit-slave")
+	require.NoError(t, err)
+	out, err := submitContractToolForTest(t, tools).Call(context.Background(), raw)
 	require.NoError(t, err)
 	require.Contains(t, string(out), `"route":"direct_slave"`)
 	require.Equal(t, "slave-a", lastDelegate.TargetID)
@@ -425,7 +447,10 @@ func TestSubmitContractTaskExplicitMasterTargetBypassesDriverFanoutBlock(t *test
 	})
 	require.NoError(t, err)
 
-	out, err := submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	tools := newTestTools(t, sdk)
+	_, err = tools.BindThread(context.Background(), "thr-explicit-master")
+	require.NoError(t, err)
+	out, err := submitContractToolForTest(t, tools).Call(context.Background(), raw)
 	require.NoError(t, err)
 	require.Contains(t, string(out), `"route":"master_fanout"`)
 	require.Equal(t, "m1", lastDelegate.TargetID)
@@ -449,7 +474,10 @@ func TestSubmitContractTaskIgnoresOfflineSlaveAndFallsBackToAvailableMaster(t *t
 	raw, err := json.Marshal(map[string]interface{}{"contract": testTaskContract()})
 	require.NoError(t, err)
 
-	out, err := submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	tools := newTestTools(t, sdk)
+	_, err = tools.BindThread(context.Background(), "thr-offline-slave-master-fallback")
+	require.NoError(t, err)
+	out, err := submitContractToolForTest(t, tools).Call(context.Background(), raw)
 	require.NoError(t, err)
 	require.Contains(t, string(out), `"task_id":"task-1"`)
 	require.Equal(t, "sbx-master", lastDelegate.TargetID)
@@ -474,7 +502,10 @@ func TestSubmitContractTaskDisallowsMasterFallbackWhenPolicyForbidsMaster(t *tes
 	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
 	require.NoError(t, err)
 
-	_, err = submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	tools := newTestTools(t, sdk)
+	_, err = tools.BindThread(context.Background(), "thr-no-master-fallback")
+	require.NoError(t, err)
+	_, err = submitContractToolForTest(t, tools).Call(context.Background(), raw)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "master fallback is not allowed")
 	require.False(t, delegated)
@@ -496,7 +527,10 @@ func TestSubmitContractTaskDoesNotFallbackToUnavailableMaster(t *testing.T) {
 	raw, err := json.Marshal(map[string]interface{}{"contract": testTaskContract()})
 	require.NoError(t, err)
 
-	_, err = submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	tools := newTestTools(t, sdk)
+	_, err = tools.BindThread(context.Background(), "thr-unavailable-master")
+	require.NoError(t, err)
+	_, err = submitContractToolForTest(t, tools).Call(context.Background(), raw)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no fanout-skilled agent available")
 	require.False(t, delegated)
@@ -521,7 +555,10 @@ func TestSubmitContractTaskAllowedTargetsRestrictsDirectRoute(t *testing.T) {
 	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
 	require.NoError(t, err)
 
-	out, err := submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	tools := newTestTools(t, sdk)
+	_, err = tools.BindThread(context.Background(), "thr-allowed-targets")
+	require.NoError(t, err)
+	out, err := submitContractToolForTest(t, tools).Call(context.Background(), raw)
 	require.NoError(t, err)
 	require.Contains(t, string(out), `"task_id":"task-1"`)
 	require.Equal(t, "slave-b", lastDelegate.TargetID)
@@ -546,7 +583,10 @@ func TestSubmitContractTaskAllowedTargetsRejectsFallbackTarget(t *testing.T) {
 	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
 	require.NoError(t, err)
 
-	_, err = submitContractToolForTest(t, newTestTools(t, sdk)).Call(context.Background(), raw)
+	tools := newTestTools(t, sdk)
+	_, err = tools.BindThread(context.Background(), "thr-rejected-target")
+	require.NoError(t, err)
+	_, err = submitContractToolForTest(t, tools).Call(context.Background(), raw)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "target is not allowed by contract")
 	require.False(t, delegated)
@@ -582,6 +622,8 @@ func TestSubmitContractTaskReturnsWarningWhenTaskContractSaveFailsAfterDelegate(
 	tools.cfg.Observer.APIKey = "ak-test"
 	tools.cfg.Observer.TokenStatePath = "/tmp/test-observer-token"
 	tools.relay = NewObserverRelay(tools.cfg, stubTokenSource("test-token"))
+	_, err := tools.BindThread(context.Background(), "thr-task-contract-warn")
+	require.NoError(t, err)
 	raw, err := json.Marshal(map[string]interface{}{"contract": testTaskContract()})
 	require.NoError(t, err)
 
@@ -624,6 +666,8 @@ func TestSubmitContractTaskReturnsWarningWhenResourceSnapshotSaveFailsAfterDeleg
 	tools.cfg.Observer.APIKey = "ak-test"
 	tools.cfg.Observer.TokenStatePath = "/tmp/test-observer-token"
 	tools.relay = NewObserverRelay(tools.cfg, stubTokenSource("test-token"))
+	_, err := tools.BindThread(context.Background(), "thr-snapshot-warn")
+	require.NoError(t, err)
 	raw, err := json.Marshal(map[string]interface{}{"contract": testTaskContract()})
 	require.NoError(t, err)
 
@@ -2176,6 +2220,8 @@ func TestSubmitContractTask_DegradesRecordDelegatedTaskFailureToWarning(t *testi
 		},
 	}
 	tools := newTestTools(t, sdk)
+	_, err := tools.BindThread(context.Background(), "thr-degrade-journal")
+	require.NoError(t, err)
 	// Close the journal file underneath so the next Append fails with
 	// "file already closed". recordDelegatedTask propagates that error,
 	// which the tool must degrade to a warning rather than returning.
@@ -2520,9 +2566,12 @@ func TestSubmitContractTaskStampsLoomOrigin(t *testing.T) {
 	_, err = submitContractToolForTest(t, tools).Call(context.Background(), raw)
 	require.NoError(t, err)
 
-	if _, _, ok := agentbackend.ParseLoomOrigin(captured.SystemContext); !ok {
+	p, _, ok := agentbackend.ParseLoomOrigin(captured.SystemContext)
+	if !ok {
 		t.Fatalf("submit_contract_task chat delegation must be stamped with loom_origin, got SystemContext=%q", captured.SystemContext)
 	}
+	require.Equal(t, "thr-contract", p.SessionID,
+		"captured parent thread id MUST equal the value passed to BindThread")
 }
 
 // TestResumeTask_FailsWithoutBindThread codifies that resume_task is always
@@ -2790,6 +2839,8 @@ func TestSubmitContractTaskDirectMatchPersistsChildAgentID(t *testing.T) {
 		},
 	}
 	tools := newTestTools(t, sdk)
+	_, err := tools.BindThread(context.Background(), "thr-child-agent-id")
+	require.NoError(t, err)
 	tc := testTaskContract()
 	tc.ExecutionPolicy.Routing = contract.RoutingDirectFirst
 	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
@@ -2911,4 +2962,98 @@ func TestSubmitContractTaskDriverFanoutCarriesLoomOrigin(t *testing.T) {
 	if p.AgentID != "drv-5" || p.DisplayName != "driver-5" {
 		t.Errorf("unexpected ParentLink: %+v", p)
 	}
+	require.Equal(t, "thr-fanout", p.SessionID)
+}
+
+// TestSubmitContractTaskDriverFanoutFailsWithoutBind exercises Path A: two
+// slaves match → route = driver_fanout → guard must fire before the
+// contractRunner.Run call. No BindThread setup.
+func TestSubmitContractTaskDriverFanoutFailsWithoutBind(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "sbx-driver", DisplayName: "driver", Status: "available"},
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available",
+					Card: json.RawMessage(`{"skills":["chat"],"mcp_tools":[{"server":"csv_profiler","name":"profile_orders_csv"}]}`)},
+				{AgentID: "slave-b", DisplayName: "slave-b", Status: "available",
+					Card: json.RawMessage(`{"skills":["chat"],"mcp_tools":[{"server":"csv_profiler","name":"profile_orders_csv"}]}`)},
+			}, nil
+		},
+	}
+	tc := testTaskContract()
+	tc.ExecutionPolicy.Routing = contract.RoutingDirectFirst
+	tc.CapabilityRequirements.Skills = nil
+	tc.CapabilityRequirements.Tools = []string{"csv_profiler/profile_orders_csv"}
+	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
+	require.NoError(t, err)
+
+	tools := newTestTools(t, sdk)
+	tools.SetContractRunner(&fakeContractRunner{result: orchestration.RunnerResult{Summary: "x"}})
+	// NO BindThread call.
+
+	_, err = submitContractToolForTest(t, tools).Call(context.Background(), raw)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "driver not bound to a codex thread")
+}
+
+// TestSubmitContractTaskDriverFanoutFailWithoutBind_NoObserverSideEffect is
+// the side-effect guard: a recording httptest observer must see ZERO
+// requests when the bind guard short-circuits. Catches an implementation
+// that leaves SaveResourceSnapshot in its pre-guard position
+// (contract_tools.go:62 today).
+//
+// IMPORTANT — observer wiring. `NewObserverRelay` returns nil unless
+// (a) cfg.Observer.Enabled = true, (b) cfg.Observer.URL is set, AND
+// (c) a non-nil TokenSource is passed (see observer_relay.go:44). The
+// default newTestTools uses obs=nil, which makes the relay nil and any
+// SaveResourceSnapshot a no-op — without these three knobs the test would
+// pass even with the bug present. We construct an observer that satisfies
+// all three, then point the relay at the recording server.
+func TestSubmitContractTaskDriverFanoutFailWithoutBind_NoObserverSideEffect(t *testing.T) {
+	var observerReqs int64
+	observerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&observerReqs, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer observerSrv.Close()
+
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "sbx-driver", DisplayName: "driver", Status: "available"},
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available",
+					Card: json.RawMessage(`{"skills":["chat"],"mcp_tools":[{"server":"csv_profiler","name":"profile_orders_csv"}]}`)},
+				{AgentID: "slave-b", DisplayName: "slave-b", Status: "available",
+					Card: json.RawMessage(`{"skills":["chat"],"mcp_tools":[{"server":"csv_profiler","name":"profile_orders_csv"}]}`)},
+			}, nil
+		},
+	}
+	// Use newTestToolsWithObserver with a fakeObserver that is non-nil AND
+	// satisfies TokenSource (fakeObserver.Token() returns "fake-token"
+	// today — see tools_test.go:80). This makes toTokenSource(obs) non-nil.
+	obs := &fakeObserver{}
+	tools := newTestToolsWithObserver(t, sdk, obs)
+	tools.SetContractRunner(&fakeContractRunner{})
+	// Wire the relay against the recording server. Both Enabled and URL
+	// are mandatory per observer_relay.go:44.
+	tools.cfg.Observer.Enabled = true
+	tools.cfg.Observer.URL = observerSrv.URL
+	tools.relay = NewObserverRelay(tools.cfg, toTokenSource(obs))
+	require.NotNil(t, tools.relay,
+		"relay must be non-nil — without this the SaveResourceSnapshot call is a no-op and the test is vacuous")
+	// NO BindThread call.
+
+	tc := testTaskContract()
+	tc.ExecutionPolicy.Routing = contract.RoutingDirectFirst
+	tc.CapabilityRequirements.Skills = nil
+	tc.CapabilityRequirements.Tools = []string{"csv_profiler/profile_orders_csv"}
+	raw, err := json.Marshal(map[string]interface{}{"contract": tc})
+	require.NoError(t, err)
+
+	_, err = submitContractToolForTest(t, tools).Call(context.Background(), raw)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "driver not bound to a codex thread")
+	require.EqualValues(t, 0, atomic.LoadInt64(&observerReqs),
+		"observer must see ZERO requests when bind guard short-circuits")
 }

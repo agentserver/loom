@@ -50,21 +50,19 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 		return nil, &MCPToolError{Message: "invalid contract: " + err.Error()}
 	}
 
-	cards, err := s.t.sdk.DiscoverAgents(ctx)
+	// --- Pure / read-only block: allowed BEFORE the bind guard. None of
+	// these are observable side effects. ---
+	cards, err := s.t.sdk.DiscoverAgents(ctx) // read-only RPC #1
 	if err != nil {
 		return nil, &MCPToolError{Message: "discover agents: " + err.Error()}
 	}
 	snapshot := contract.NewResourceSnapshot(cards, s.t.cfg.Credentials.SandboxID)
-	warnings := []string{}
 	snapshotBody, err := json.Marshal(snapshot)
 	if err != nil {
 		return nil, &MCPToolError{Message: "encode resource snapshot: " + err.Error()}
 	}
-	if err := s.t.observerRelay().SaveResourceSnapshot(ctx, snapshotBody); err != nil {
-		warnings = append(warnings, "observer save resource snapshot: "+err.Error())
-	}
-
 	report := analyzeContractCapabilities(cards, s.t.cfg.Credentials.SandboxID, tc)
+
 	body := strings.TrimSpace(args.Prompt)
 	if body == "" {
 		body = tc.Intent.Goal
@@ -73,21 +71,51 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 	if err != nil {
 		return nil, &MCPToolError{Message: "encode contract envelope: " + err.Error()}
 	}
-	if args.TargetDisplayName == "" && report.RecommendedRoute == routeDriverFanout {
+
+	// --- Compute needsBind in memory BEFORE running selectTarget. ---
+	// Path A: route lands on driver_fanout AND no explicit target override.
+	//   driver_fanout always spawns nested codex on the driver → always
+	//   parent-link → unconditional bind.
+	// Path B: resolve the skill the same way selectTarget would
+	//   (mirrors contract_tools.go:175-184 defaulting). For master/fanout
+	//   targets the default is "fanout"; for slave/direct it's "chat".
+	//   Without targetRole we can't perfectly mirror the default — but
+	//   both "fanout" and "chat" are in isParentLinkDelegation's set, so
+	//   in practice every non-override Path B is parent-link. The only
+	//   non-parent-link Path B is an explicit skillOverride to bash /
+	//   powershell, which is exotic for contract submissions but legal.
+	pathA := args.TargetDisplayName == "" && report.RecommendedRoute == routeDriverFanout
+	pathBSkill := args.Skill
+	if pathBSkill == "" {
+		pathBSkill = "chat" // defensive default; selectTarget may upgrade to fanout
+	}
+	needsBind := pathA || isParentLinkDelegation(pathBSkill)
+
+	var parentThreadID string
+	if needsBind {
+		pid, err := s.t.requireBoundThread()
+		if err != nil {
+			return nil, &MCPToolError{Message: err.Error()}
+		}
+		parentThreadID = pid
+	}
+
+	// --- Now-and-only-now: side-effecting operations. ---
+	warnings := []string{}
+	if err := s.t.observerRelay().SaveResourceSnapshot(ctx, snapshotBody); err != nil {
+		warnings = append(warnings, "observer save resource snapshot: "+err.Error())
+	}
+
+	// Path A — driver_fanout early return.
+	if pathA {
 		if s.t.contractRunner == nil {
 			return nil, &MCPToolError{Message: "driver_fanout route is recommended but no driver contract runner is configured"}
 		}
-		// Path A (driver_fanout) — Before:
-		//   result, err := s.t.contractRunner.Run(ctx, finalPrompt, s.t.loomOriginMarker())
-		// After (temporary):
-		marker := ""
-		if pid, err := s.t.requireBoundThread(); err == nil {
-			marker = agentbackend.BuildLoomOrigin(
-				s.t.cfg.Credentials.ShortID,
-				s.t.cfg.Discovery.DisplayName,
-				pid,
-			)
-		}
+		marker := agentbackend.BuildLoomOrigin(
+			s.t.cfg.Credentials.ShortID,
+			s.t.cfg.Discovery.DisplayName,
+			parentThreadID,
+		)
 		result, err := s.t.contractRunner.Run(ctx, finalPrompt, marker)
 		if err != nil {
 			return nil, &MCPToolError{Message: "driver fanout: " + err.Error()}
@@ -100,6 +128,9 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 		})
 	}
 
+	// Path B — normal selectTarget. Note: this issues a second
+	// (read-only) DiscoverAgents inside resolveTarget. Documented in the
+	// spec as an acceptable duplicate; out-of-scope to refactor here.
 	targetID, targetName, targetShortID, skill, route, err := s.selectTarget(ctx, cards, tc, args.TargetDisplayName, args.Skill)
 	if err != nil {
 		return nil, err
@@ -109,24 +140,21 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 	if timeout == 0 {
 		timeout = s.t.cfg.DriverDefaults.TaskTimeoutSec
 	}
-	// Path B — Before:
-	//   systemContext := ""
-	//   if isParentLinkDelegation(skill) {
-	//       if m := s.t.loomOriginMarker(); m != "" {
-	//           systemContext = m
-	//       }
-	//   }
-	// After (temporary):
+
+	// If selectTarget resolved to a non-parent-link skill (e.g. an
+	// explicit bash override on a slave that supports it), our needsBind
+	// computation above may have been conservatively true. That's
+	// acceptable — we captured the thread id but won't use it. The
+	// SystemContext stays empty in that branch:
 	systemContext := ""
 	if isParentLinkDelegation(skill) {
-		if pid, err := s.t.requireBoundThread(); err == nil {
-			systemContext = agentbackend.BuildLoomOrigin(
-				s.t.cfg.Credentials.ShortID,
-				s.t.cfg.Discovery.DisplayName,
-				pid,
-			)
-		}
+		systemContext = agentbackend.BuildLoomOrigin(
+			s.t.cfg.Credentials.ShortID,
+			s.t.cfg.Discovery.DisplayName,
+			parentThreadID, // safe even if 0 — but isParentLinkDelegation guarantees needsBind was true above
+		)
 	}
+
 	resp, err := s.t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
 		TargetID:       targetID,
 		Skill:          skill,
@@ -137,9 +165,9 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 	if err != nil {
 		return nil, &MCPToolError{Message: "delegate: " + err.Error()}
 	}
-	// DelegateTask succeeded — slave is already running. From here on, any
-	// helper failure degrades to a warning rather than an error so Claude
-	// always learns the task_id. See §1.1 #1 of docs/review-2026-06-13.md.
+
+	// --- DelegateTask succeeded — from here helper failures degrade to
+	// warnings (existing contract; do not change). ---
 	if err := s.t.recordDelegatedTask(delegatedTaskRecord{
 		Tool:              s.Name(),
 		Response:          resp,
