@@ -1394,9 +1394,8 @@ Refs: #30"
   - On mount, subscribes to `overlay.onPop` to flip the appropriate setter in response to browser Back. Unsubscribes on unmount.
   - `[Sessions]` click → `overlay.open('sessions'); setSessionsOpen(true)`.
   - `[Files]` click → `overlay.open('files'); setFilesOpen(true)`.
-  - Sessions drawer's `<DaemonSessionTree onSelect>` wraps the prop callback so it also calls `overlay.closeTop('sessions')` (which triggers popstate → `setSessionsOpen(false)`).
+  - All UI close paths (drawer/sheet close button, ESC, overlay click, session selection inside the Sessions drawer) route through a `closeOverlay(id, setter)` helper that defers to `overlay.closeTop(id)` when the controller's stack top matches `id` AND falls back to the React setter directly when the stack is empty or out of sync (defensive: SSR remount, double-fire, popstate race). Preview close uses an equivalent `closePreview()` that sets `previewPayload` to `null` when the fallback applies. This prevents the "stuck visible overlay with no dismiss" failure mode covered by the spec §Closing via UI defensive clause.
   - Files drawer's `<FileExplorerPanel renderMode="sheet" onPreview={p => { setPreviewPayload(p); overlay.open('preview'); }}>`.
-  - Preview sheet `onOpenChange(false)` → `overlay.closeTop('preview')`.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -2277,6 +2276,9 @@ Append:
   .session-row-line { grid-template-columns: 44px minmax(0, 1fr); }
   .session-row { min-height: 44px; }
   .file-row { min-height: 44px; }
+  /* Widen the copy-button column from 30px to 44px so the .file-copy-button
+     touch target is not clipped by the grid + drawer overflow-x: hidden. */
+  .file-row-line { grid-template-columns: minmax(0, 1fr) 44px; }
   .file-copy-button { width: 44px; min-width: 44px; height: 44px; }
 
   /* Drawer + sheet — overlay shared across both */
