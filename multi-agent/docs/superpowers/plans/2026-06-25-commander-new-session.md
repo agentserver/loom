@@ -473,7 +473,7 @@ Then inside the per-daemon JSX block (right before the existing `(daemon.session
 
 ```tsx
               {isPendingRowVisible(daemon.daemon_id) && pendingSession ? (
-                <div className="session-row-line" data-testid="pending-session-row">
+                <div className="session-row-line session-row-line-pending" data-testid="pending-session-row">
                   <span className="session-toggle-spacer" />
                   <button
                     type="button"
@@ -572,8 +572,14 @@ Append to the end of `internal/commanderhub/webapp/src/styles.css`:
   background: #fff;
 }
 
+/* Pending virtual row has 3 columns (toggle-spacer, row, × discard) instead
+   of the 2-column .session-row-line default. Override grid template here. */
+.session-row-line-pending {
+  grid-template-columns: 24px minmax(0, 1fr) 28px;
+  align-items: center;
+}
+
 .session-discard-btn {
-  margin-left: 6px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -612,6 +618,10 @@ Append to the end of `internal/commanderhub/webapp/src/styles.css`:
     height: 44px;
     min-width: 44px;
     min-height: 44px;
+  }
+  /* Widen the pending row's × column to match the 44px discard button. */
+  .session-row-line-pending {
+    grid-template-columns: 44px minmax(0, 1fr) 44px;
   }
 }
 ```
@@ -963,19 +973,18 @@ Open `internal/commanderhub/webapp/src/CommanderApp.tsx`. Apply the edits in thi
   );
 ```
 
-- [ ] **Step 4: Run tests to verify partial pass (mobile tests will fail until Task 5)**
+- [ ] **Step 4: Run desktop unit tests to confirm no regression (do NOT run `npm run build` yet)**
 
-The 3 new mobile tests in this Task depend on Task 5 (`MobileShell` plumbing) being done before the `+` button is reachable inside the drawer. They will keep failing until Step 1 of Task 5 lands.
+The 3 new mobile tests in this Task depend on Task 5 (`MobileShell` plumbing) being done before the `+` button is reachable inside the drawer. They will keep failing until Step 1 of Task 5 lands. Similarly, **`npm run build` would fail at this point** because the new props passed to `<MobileShell>` are not yet declared in `MobileShell`'s prop type — TypeScript would reject the JSX. We defer the build to Task 5 Step 4 once `MobileShell` has been updated.
 
-Run only the desktop suite + the build to confirm no regression in already-green tests:
+Run only the desktop unit suite:
 
 ```
 npm test -- src/CommanderApp.test.tsx
-npm run build
 ```
-Expected: PASS + build clean.
+Expected: PASS (no regressions). Do **not** run `npm run build` or `npm test` (the whole suite) here.
 
-Do **NOT** commit yet. Proceed straight to Task 5 — the commit at the end of Task 5 covers both Task 4's source edits and Task 5's MobileShell forwarding, so the resulting commit is green (no failing tests left behind in git history).
+Do **NOT** commit yet. Proceed straight to Task 5 — the commit at the end of Task 5 covers both Task 4's source edits and Task 5's MobileShell forwarding, so the resulting commit is green (no failing tests + build clean).
 
 ---
 
