@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Plus, X } from 'lucide-react';
 import type { DaemonTree } from '../api/types';
 import type { SessionRow } from '../api/types';
 import { effectiveOwner, ownerKey, parentOwnerFor } from '../api/ownerKey';
@@ -76,10 +77,20 @@ export function DaemonSessionTree({
   daemons,
   selected,
   onSelect,
+  pendingSession,
+  onCreateSession,
+  onDiscardSession,
 }: {
   daemons: DaemonTree[];
   selected: { daemonID: string; sessionID: string } | null;
   onSelect: (daemonID: string, sessionID: string) => void;
+  pendingSession?: {
+    daemonID: string;
+    sessionID: string;
+    phase: 'draft' | 'submitting';
+  } | null;
+  onCreateSession?: (daemonID: string) => void;
+  onDiscardSession?: (sessionID: string) => void;
 }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
@@ -90,6 +101,13 @@ export function DaemonSessionTree({
 
   const rootsByDaemon = buildCrossDaemonTree(daemons);
   const daemonByID = new Map(daemons.map(d => [d.daemon_id, d.display_name || d.daemon_id]));
+
+  function isPendingRowVisible(daemonID: string): boolean {
+    if (!pendingSession || pendingSession.daemonID !== daemonID) return false;
+    const daemon = daemons.find((d) => d.daemon_id === daemonID);
+    const sessions = daemon?.sessions ?? [];
+    return !sessions.some((s) => s.session_id === pendingSession.sessionID);
+  }
 
   function renderNode(node: SessionNode, depth: number) {
     const { session } = node;
@@ -179,10 +197,57 @@ export function DaemonSessionTree({
             <span className={`online-dot online-dot-${daemon.status}`} />
             <strong>{daemon.display_name || daemon.daemon_id}</strong>
             <span>{daemon.kind}</span>
-            <span className="daemon-status">{daemon.status}</span>
+            {daemon.status === 'ok' && onCreateSession ? (() => {
+              const otherDaemonPending = pendingSession != null && pendingSession.daemonID !== daemon.daemon_id;
+              const disabledTitle = pendingSession?.phase === 'submitting'
+                ? '等待新会话出现在列表中'
+                : '先发送或丢弃当前草稿';
+              return (
+                <button
+                  type="button"
+                  className="daemon-new-session-btn"
+                  aria-label={`新建 session: ${daemon.display_name || daemon.daemon_id}`}
+                  disabled={otherDaemonPending}
+                  title={otherDaemonPending ? disabledTitle : undefined}
+                  onClick={() => onCreateSession(daemon.daemon_id)}
+                >
+                  <Plus size={16} />
+                </button>
+              );
+            })() : (
+              <span className="daemon-status">{daemon.status}</span>
+            )}
           </div>
           {daemon.error ? <p className="daemon-error">{daemon.error}</p> : null}
           <div className="session-list">
+            {isPendingRowVisible(daemon.daemon_id) && pendingSession ? (
+              <div className="session-row-line session-row-line-pending" data-testid="pending-session-row">
+                <span className="session-toggle-spacer" />
+                <button
+                  type="button"
+                  className={`session-row${selected?.sessionID === pendingSession.sessionID ? ' selected' : ''}`}
+                  onClick={() => onSelect(daemon.daemon_id, pendingSession.sessionID)}
+                >
+                  <span className="session-title">
+                    {pendingSession.phase === 'submitting' ? '新建会话(同步中…)' : '新建会话(待提交)'}
+                  </span>
+                  <span className="session-meta">{daemon.display_name || daemon.daemon_id}</span>
+                </button>
+                {pendingSession.phase === 'draft' && onDiscardSession ? (
+                  <button
+                    type="button"
+                    className="session-discard-btn"
+                    aria-label="丢弃草稿"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onDiscardSession(pendingSession.sessionID);
+                    }}
+                  >
+                    <X size={14} />
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
             {(rootsByDaemon.get(daemon.daemon_id) ?? []).map((node) =>
               renderNode(node, 0)
             )}
