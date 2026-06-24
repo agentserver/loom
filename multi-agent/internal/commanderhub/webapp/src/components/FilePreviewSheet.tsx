@@ -27,6 +27,7 @@ export function FilePreviewSheet({
         <Dialog.Content
           className="file-preview-sheet"
           data-testid="file-preview-sheet"
+          aria-describedby={undefined}
         >
           <header className="file-preview-sheet-header">
             <Dialog.Close asChild>
