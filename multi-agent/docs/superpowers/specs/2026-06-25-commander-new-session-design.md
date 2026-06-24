@@ -216,9 +216,10 @@ release the draft lock without submitting or reloading.
 ### `MobileShell.tsx`
 
 - New props on `MobileShell`: `pendingSession`, `onCreateSession`,
-  `composerLocked?`, `composerNote?`. The first two are forwarded into the
-  wrapped `<DaemonSessionTree>`. The last two are forwarded into the
-  wrapped `<ChatWorkspace>`.
+  `onDiscardSession`, `composerLocked?`, `composerNote?`. The first
+  three are forwarded into the wrapped `<DaemonSessionTree>` (so the
+  `×` discard button on the virtual row works inside the Sessions
+  drawer). The last two are forwarded into the wrapped `<ChatWorkspace>`.
 - The Sessions drawer's `onSelect` already routes through
   `closeOverlay('sessions', setSessionsOpen)` — `onCreateSession` is
   wrapped by a local `handleCreate(daemonID)` that calls the prop and
