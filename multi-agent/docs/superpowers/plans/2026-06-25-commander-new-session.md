@@ -665,65 +665,76 @@ Behavior (all per spec):
 - `loadTree.then`: after `setTree(nextTree)`, if `pendingSessionRef.current != null` and `nextTree.daemons` contains a session with that UUID under the matching daemon, `setPendingSession(null)` and clear the ref.
 - Compute `pendingDaemonOffline = pendingSession?.phase === 'draft' && pendingSession != null && (tree?.daemons.find(d => d.daemon_id === pendingSession.daemonID)?.status ?? 'offline') !== 'ok'`. Pass `composerLocked={pendingDaemonOffline}` + `composerNote={pendingDaemonOffline ? 'daemon 离线 — 无法提交,等待 daemon 上线或选择其它会话' : undefined}` to `ChatWorkspace` only when selected matches pending and phase is draft; otherwise pass both undefined.
 
-- [ ] **Step 1: Add failing mobile tests**
+- [ ] **Step 1: Add failing mobile tests (and the `fireEvent` import they need)**
 
-Append to `internal/commanderhub/webapp/src/CommanderApp.mobile.test.tsx` (do not modify existing tests; reuse the existing `installMatchMedia`, `mockTreeFetch`, `idleTreePayload` / `oneSessionTree` helpers at the top). Add three new tests:
+Open `internal/commanderhub/webapp/src/CommanderApp.mobile.test.tsx`. Add `fireEvent` to the testing-library import on line 1:
+
+```tsx
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+```
+
+Then append three new tests at the bottom of the file. They reuse the existing `installMatchMedia` and `treeWith` / `stubFetch` helpers (defined at the top of the file). Some tests need to inspect the fetch mock's call history, so build the fetch mock inline instead of going through `stubFetch`:
 
 ```tsx
 test('mobile: click + on daemon creates pending session in draft phase, drawer closes, composer enabled with empty messages, no detail fetch issued', async () => {
   installMatchMedia(true);
-  const fetchMock = mockTreeFetch(oneSessionTree);
-  vi.stubGlobal('fetch', fetchMock);
+  const fetchFn = vi.fn(async (input: RequestInfo | URL) => {
+    const url = new URL(String(input), 'http://commander.test');
+    if (url.pathname === '/api/commander/tree') {
+      return treeWith([{ session_id: 'a', title: 'Session A' }]);
+    }
+    if (url.pathname.endsWith('/files')) {
+      return jsonResponse({ root: '/repo', path: '.', entries: [] });
+    }
+    if (/\/sessions\/[^/]+$/.test(url.pathname)) {
+      return jsonResponse({ session: { ID: 'a', Title: 'Session A' }, messages: [] });
+    }
+    return jsonResponse({});
+  });
+  vi.stubGlobal('fetch', fetchFn);
   render(<CommanderApp />);
-  await waitFor(() => expect(screen.getByText('Session one')).toBeInTheDocument());
-  // open Sessions drawer
+  await screen.findByText('Session A');
   fireEvent.click(screen.getByRole('button', { name: 'Sessions' }));
-  const detailsBefore = fetchMock.mock.calls.filter(([url]) => /\/api\/commander\/daemons\/[^/]+\/sessions\/[^/]+$/.test(String(url))).length;
-  fireEvent.click(screen.getByRole('button', { name: /新建 session: prod/ }));
-  // drawer closes
+  const isDetailURL = (input: unknown) =>
+    /\/api\/commander\/daemons\/[^/]+\/sessions\/[^/]+$/.test(String(input));
+  const detailsBefore = fetchFn.mock.calls.filter(([url]) => isDetailURL(url)).length;
+  fireEvent.click(screen.getByRole('button', { name: /新建 session: prod-codex/ }));
   await waitFor(() => expect(screen.queryByTestId('drawer-left')).not.toBeInTheDocument());
-  // composer is enabled
   expect(screen.getByLabelText('输入提示词')).toBeEnabled();
-  // No detail fetch for the new UUID
-  const detailsAfter = fetchMock.mock.calls.filter(([url]) => /\/api\/commander\/daemons\/[^/]+\/sessions\/[^/]+$/.test(String(url))).length;
+  // The draft path must short-circuit detail fetch — no new detail call.
+  const detailsAfter = fetchFn.mock.calls.filter(([url]) => isDetailURL(url)).length;
   expect(detailsAfter).toBe(detailsBefore);
 });
 
 test('mobile: re-clicking + on same daemon while draft pending exists does NOT mint a fresh UUID', async () => {
   installMatchMedia(true);
-  vi.stubGlobal('fetch', mockTreeFetch(oneSessionTree));
+  stubFetch([{ session_id: 'a', title: 'Session A' }]);
   render(<CommanderApp />);
-  await waitFor(() => expect(screen.getByText('Session one')).toBeInTheDocument());
+  await screen.findByText('Session A');
   fireEvent.click(screen.getByRole('button', { name: 'Sessions' }));
-  fireEvent.click(screen.getByRole('button', { name: /新建 session: prod/ }));
-  await waitFor(() => expect(screen.queryByTestId('drawer-left')).not.toBeInTheDocument());
-  // Capture the pending session ID via the virtual row appearing in the drawer
-  fireEvent.click(screen.getByRole('button', { name: 'Sessions' }));
-  const firstPendingTitle = screen.getByText('新建会话(待提交)');
-  expect(firstPendingTitle).toBeInTheDocument();
-  // Re-click + on same daemon
-  fireEvent.click(screen.getByRole('button', { name: /新建 session: prod/ }));
+  fireEvent.click(screen.getByRole('button', { name: /新建 session: prod-codex/ }));
   await waitFor(() => expect(screen.queryByTestId('drawer-left')).not.toBeInTheDocument());
   fireEvent.click(screen.getByRole('button', { name: 'Sessions' }));
-  // Still ONE virtual row, not two
+  expect(screen.getByText('新建会话(待提交)')).toBeInTheDocument();
+  // Re-click + on the same daemon — should NOT add a second virtual row.
+  fireEvent.click(screen.getByRole('button', { name: /新建 session: prod-codex/ }));
+  await waitFor(() => expect(screen.queryByTestId('drawer-left')).not.toBeInTheDocument());
+  fireEvent.click(screen.getByRole('button', { name: 'Sessions' }));
   expect(screen.getAllByText('新建会话(待提交)')).toHaveLength(1);
 });
 
-test('mobile: × on draft row clears pendingSession + selected', async () => {
+test('mobile: × discard on draft row clears pendingSession + selected', async () => {
   installMatchMedia(true);
-  vi.stubGlobal('fetch', mockTreeFetch(oneSessionTree));
+  stubFetch([{ session_id: 'a', title: 'Session A' }]);
   render(<CommanderApp />);
-  await waitFor(() => expect(screen.getByText('Session one')).toBeInTheDocument());
+  await screen.findByText('Session A');
   fireEvent.click(screen.getByRole('button', { name: 'Sessions' }));
-  fireEvent.click(screen.getByRole('button', { name: /新建 session: prod/ }));
+  fireEvent.click(screen.getByRole('button', { name: /新建 session: prod-codex/ }));
   await waitFor(() => expect(screen.queryByTestId('drawer-left')).not.toBeInTheDocument());
   fireEvent.click(screen.getByRole('button', { name: 'Sessions' }));
   expect(screen.getByText('新建会话(待提交)')).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: '丢弃草稿' }));
   expect(screen.queryByText('新建会话(待提交)')).not.toBeInTheDocument();
-  // pending was selected; after discard, selected should be cleared → ChatWorkspace
-  // shows the no-selection fallback or auto-selects again (mobile rule). Either way,
-  // the virtual row is gone.
 });
 ```
 
@@ -1143,12 +1154,12 @@ Refs: #30 follow-up"
 Open `internal/commanderhub/webapp/src/e2e/commander.spec.ts`. Find the existing `desktop:` test block. After the last desktop test (or in any sensible location among the existing desktop tests), append:
 
 ```ts
-test('desktop: create new session via + button and send first prompt', async ({ page }, testInfo) => {
+test('desktop: + button creates pending row, turn POSTs, tree refresh swaps placeholder with real row', async ({ page }, testInfo) => {
   if (testInfo.project.name !== 'chromium-desktop') test.skip();
   let turnRequestCount = 0;
   let treeRequestCount = 0;
   let createdSessionUUID = '';
-  // Tree-route returns the new session once a turn was successfully POSTed.
+  // Tree-route surfaces the new session ONLY after a turn was POSTed.
   await page.route('**/api/commander/tree', async (route) => {
     treeRequestCount += 1;
     const base = idleTreePayload.daemons[0];
@@ -1165,7 +1176,6 @@ test('desktop: create new session via + button and send first prompt', async ({ 
   });
   await page.route('**/api/commander/daemons/d1/sessions/*/turn', async (route, request) => {
     turnRequestCount += 1;
-    // The URL contains the UUID we sent. Extract it for the tree-route to surface.
     const match = String(request.url()).match(/\/sessions\/([^/]+)\/turn$/);
     if (match) createdSessionUUID = decodeURIComponent(match[1]);
     await route.fulfill({
@@ -1174,7 +1184,6 @@ test('desktop: create new session via + button and send first prompt', async ({ 
     });
   });
   await page.route('**/api/commander/daemons/d1/sessions/*', async (route, request) => {
-    // Detail fetch. Return a minimal session payload for whatever ID was asked.
     const match = String(request.url()).match(/\/sessions\/([^/]+)$/);
     const sid = match ? decodeURIComponent(match[1]) : 'unknown';
     await route.fulfill({
@@ -1182,17 +1191,27 @@ test('desktop: create new session via + button and send first prompt', async ({ 
     });
   });
   await page.goto('/commander/');
+  await expect.poll(() => treeRequestCount).toBeGreaterThanOrEqual(1);
+  const treesBeforeClick = treeRequestCount;
   // Click + on the daemon row
   await page.getByRole('button', { name: /新建 session: prod/ }).click();
-  // Chat header shows the placeholder title and composer is enabled
+  // Placeholder visible: virtual row in tree + draft title in chat header + composer enabled
+  await expect(page.locator('.daemon-tree').getByText('新建会话(待提交)')).toBeVisible();
   await expect(page.getByRole('heading', { level: 1, name: '新建会话' })).toBeVisible();
   await expect(page.getByLabel('输入提示词')).toBeEnabled();
-  // Submit a prompt
+  // Submit a prompt — POST the first turn
   await page.getByLabel('输入提示词').fill('hi');
   await page.getByRole('button', { name: '发送' }).click();
-  await expect.poll(() => turnRequestCount).toBeGreaterThan(0);
-  // After turn completes + tree refresh + detail re-fetch, the chat header
-  // transitions to the real backend title.
+  await expect.poll(() => turnRequestCount).toBeGreaterThanOrEqual(1);
+  // A second tree-fetch MUST happen after the turn (loadTree post-done).
+  await expect.poll(() => treeRequestCount).toBeGreaterThanOrEqual(treesBeforeClick + 2);
+  // Virtual row disappears (pendingSession cleared by loadTree-saw-real-row)
+  await expect(page.locator('.daemon-tree').getByText('新建会话(待提交)')).toHaveCount(0);
+  await expect(page.locator('.daemon-tree').getByText('新建会话(同步中…)')).toHaveCount(0);
+  // Real row from backend appears in the tree
+  await expect(page.locator('.daemon-tree').getByText('Real title from backend')).toBeVisible();
+  // Chat header transitions to the real backend title (no longer shows draft placeholder)
+  await expect(page.getByRole('heading', { level: 1, name: '新建会话' })).toHaveCount(0);
   await expect(page.getByRole('heading', { level: 1, name: 'Real title from backend' })).toBeVisible();
 });
 ```
@@ -1202,12 +1221,31 @@ test('desktop: create new session via + button and send first prompt', async ({ 
 Append (skip-guard for desktop):
 
 ```ts
-test('non-desktop: create new session via + in Sessions drawer, send prompt', async ({ page }, testInfo) => {
+test('non-desktop: + in Sessions drawer creates pending, drawer closes, turn → tree refresh swaps placeholder with real row', async ({ page }, testInfo) => {
   if (testInfo.project.name === 'chromium-desktop') test.skip();
-  await mockIdleTree(page);
   let turnRequestCount = 0;
-  await page.route('**/api/commander/daemons/d1/sessions/*/turn', async (route) => {
+  let treeRequestCount = 0;
+  let createdSessionUUID = '';
+  // Drive the tree directly so we can surface the new session after the turn,
+  // instead of using mockIdleTree which returns a fixed body.
+  await page.route('**/api/commander/tree', async (route) => {
+    treeRequestCount += 1;
+    const base = idleTreePayload.daemons[0];
+    const sessions = [...base.sessions];
+    if (turnRequestCount > 0 && createdSessionUUID) {
+      sessions.unshift({
+        ...base.sessions[0],
+        session_id: createdSessionUUID,
+        title: 'Real title from backend',
+        turn_state: 'idle',
+      });
+    }
+    await route.fulfill({ json: { daemons: [{ ...base, sessions }] } });
+  });
+  await page.route('**/api/commander/daemons/d1/sessions/*/turn', async (route, request) => {
     turnRequestCount += 1;
+    const match = String(request.url()).match(/\/sessions\/([^/]+)\/turn$/);
+    if (match) createdSessionUUID = decodeURIComponent(match[1]);
     await route.fulfill({
       body: 'event: done\ndata: {"result":{}}\n\n',
       headers: { 'content-type': 'text/event-stream' },
@@ -1221,31 +1259,52 @@ test('non-desktop: create new session via + in Sessions drawer, send prompt', as
     });
   });
   await page.goto('/commander/');
-  // Open the Sessions drawer
+  await expect.poll(() => treeRequestCount).toBeGreaterThanOrEqual(1);
+  const treesBeforeClick = treeRequestCount;
   await page.getByRole('button', { name: 'Sessions' }).click();
   await expect(page.getByTestId('drawer-left')).toBeVisible();
-  // Click + on the daemon row inside the drawer
-  const sessionsDrawer = page.getByTestId('drawer-left');
-  await sessionsDrawer.getByRole('button', { name: /新建 session: prod/ }).click();
-  // Drawer closes; chat workspace visible with empty messages + active composer
+  await page.getByTestId('drawer-left').getByRole('button', { name: /新建 session: prod/ }).click();
+  // Drawer closes; placeholder header + active composer
   await expect(page.getByTestId('drawer-left')).toHaveCount(0);
   await expect(page.getByRole('heading', { level: 1, name: '新建会话' })).toBeVisible();
   await expect(page.getByLabel('输入提示词')).toBeEnabled();
   // Submit prompt
   await page.getByLabel('输入提示词').fill('hello');
   await page.getByRole('button', { name: '发送' }).click();
-  await expect.poll(() => turnRequestCount).toBeGreaterThan(0);
+  await expect.poll(() => turnRequestCount).toBeGreaterThanOrEqual(1);
+  await expect.poll(() => treeRequestCount).toBeGreaterThanOrEqual(treesBeforeClick + 2);
+  // Open the drawer again to inspect the tree
+  await page.getByRole('button', { name: 'Sessions' }).click();
+  const drawer2 = page.getByTestId('drawer-left');
+  await expect(drawer2.getByText('新建会话(待提交)')).toHaveCount(0);
+  await expect(drawer2.getByText('新建会话(同步中…)')).toHaveCount(0);
+  await expect(drawer2.getByText('Real title from backend')).toBeVisible();
 });
 ```
 
-- [ ] **Step 3: Extend the existing test 7 (`drawer interactive controls meet 44px hit area`)**
+- [ ] **Step 3: Extend the existing test 7 (`drawer interactive controls meet 44px hit area`) to cover `.daemon-new-session-btn` AND `.session-discard-btn`**
 
-Find the existing test by searching for the string `drawer interactive controls meet 44px hit area`. After the existing assertions that loop `.session-row`, `.session-toggle`, etc., add an assertion for `.daemon-new-session-btn`. Locate the block that opens the Sessions drawer (`await page.getByRole('button', { name: 'Sessions' }).click();`) and append (after the existing close-button hit-area assertion):
+Find the existing test by searching for the string `drawer interactive controls meet 44px hit area`. After the existing assertions that loop `.session-row`, `.session-toggle`, etc., add assertions for both new buttons.
+
+The `.daemon-new-session-btn` is always rendered (when daemon is `ok`), so the loop just needs to add it after the existing session-row block. The `.session-discard-btn` only renders on a draft virtual row, so the test must first click `+` to create one. Add the following inside the test body, AFTER the block that opens the Sessions drawer + asserts existing controls' hit areas:
 
 ```ts
   // New + button must also meet the 44x44 rule on mobile.
   for (const plus of await left.locator('.daemon-new-session-btn').all()) {
     await assertHitArea(plus, '.daemon-new-session-btn');
+  }
+  // Click + to materialize a pending draft row, then verify × discard hit area.
+  // We can only do this if the + is enabled (it is, in this single-daemon fixture).
+  const firstPlus = left.locator('.daemon-new-session-btn').first();
+  if (await firstPlus.isEnabled()) {
+    await firstPlus.click();
+    // The drawer closes after +; reopen to inspect the virtual row.
+    await page.getByRole('button', { name: 'Sessions' }).click();
+    const reopened = page.getByTestId('drawer-left');
+    await expect(reopened).toBeVisible();
+    const discard = reopened.locator('.session-discard-btn').first();
+    await expect(discard).toBeVisible();
+    await assertHitArea(discard, '.session-discard-btn');
   }
 ```
 
