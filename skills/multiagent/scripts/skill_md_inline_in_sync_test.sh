@@ -23,8 +23,11 @@ fi
 # Extract the heredoc body. Tightened awk state machine:
 #   p=1 after "## Initialization" header (defense-in-depth section anchor)
 #   flag=1 after the ACTUAL heredoc opener `^bash <<'DISCOVER_EOF'$`
-#     — anchored to start-of-line so prose backtick-mentions on lines that
-#       read <<'DISCOVER_EOF' mid-line are ignored.
+#     — the opener regex is built via `-v opener=...` so it matches LITERAL
+#       single quotes around DISCOVER_EOF, not arbitrary single characters.
+#       Earlier `/^bash <<.DISCOVER_EOF.$/` form used `.` as wildcard so a
+#       mutated opener like `bash <<xDISCOVER_EOFy` (or with double quotes,
+#       or backslashes) would still match — codex review round 2 catch.
 #   exit when we hit the closing `DISCOVER_EOF` line.
 #
 # Stream awk's output STRAIGHT TO A FILE (not a command-substitution
@@ -34,9 +37,12 @@ fi
 # compare equal to the canonical script.
 extracted=$(mktemp -t skill-md-extract.XXXXXX)
 trap 'rm -f "$extracted" /tmp/skill-drift.$$.diff' EXIT
-awk '
+# OPENER carries the literal opener line shape; passed via -v so awk's own
+# regex engine doesn't have to escape single quotes inline.
+OPENER="bash <<'DISCOVER_EOF'"
+awk -v opener="$OPENER" '
     /^## Initialization/ {p=1}
-    p && /^bash <<.DISCOVER_EOF.$/ {flag=1; next}
+    p && $0 == opener {flag=1; next}
     flag && /^DISCOVER_EOF$/ {exit}
     flag {print}
 ' "$SKILL_MD" > "$extracted"
