@@ -436,6 +436,13 @@ export function CommanderApp() {
     }
     const sid = crypto.randomUUID();
     const next: PendingSession = { daemonID, sessionID: sid, phase: 'draft' };
+    // Ordering: ref first so any synchronous reader (e.g. a re-entrant
+    // call from a render-path effect) sees the new pending; then state
+    // batched. selectSession last so the effect at line ~308 reads BOTH
+    // the new `selected` AND the new `pendingSession` in the next commit
+    // and takes the draft short-circuit branch (no apiGet on the fake
+    // UUID). The detail-fetch effect's dep array MUST include
+    // `pendingSession` for this to hold — see line ~334.
     pendingSessionRef.current = next;
     setPendingSession(next);
     selectSession(daemonID, sid);
@@ -473,6 +480,11 @@ export function CommanderApp() {
   if (error) return <div className="login-shell">加载失败: {error}</div>;
   if (!tree) return <div className="login-shell">加载中</div>;
 
+  // Note: `pendingDaemonOffline` uses `?? 'offline'` as a defensive default
+  // when the daemon row isn't in tree. The `!tree` early-return at line ~474
+  // (`if (!tree) return ...`) ensures the JSX consuming these derived values
+  // is never rendered while `tree` is null, so the default never user-facing
+  // flashes the composer lock during initial load.
   const selectedIsPendingDraft = pendingSession != null
     && selected?.sessionID === pendingSession.sessionID
     && pendingSession.phase === 'draft';
