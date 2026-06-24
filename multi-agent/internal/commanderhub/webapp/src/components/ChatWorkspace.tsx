@@ -35,6 +35,8 @@ export function ChatWorkspace({
   mobileLeading,
   mobileTrailing,
   empty,
+  composerLocked,
+  composerNote,
 }: {
   daemonID: string;
   sessionID: string;
@@ -44,11 +46,14 @@ export function ChatWorkspace({
   mobileLeading?: ReactNode;
   mobileTrailing?: ReactNode;
   empty?: boolean;
+  composerLocked?: boolean;
+  composerNote?: string;
 }) {
   const title = sessionString(session?.session, 'Title', 'title') || 'Session';
   const cwd = sessionString(session?.session, 'WorkingDir', 'working_dir');
   const disabled =
     empty === true ||
+    composerLocked === true ||
     ['queued', 'answering', 'awaiting_approval'].includes(turnState);
   const messages = session?.messages || [];
   const messageListRef = useRef<HTMLDivElement>(null);
@@ -89,6 +94,7 @@ export function ChatWorkspace({
           })
         )}
       </div>
+      {composerNote ? <p className="composer-note">{composerNote}</p> : null}
       <form
         className="composer"
         onSubmit={async (event) => {
