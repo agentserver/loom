@@ -1295,8 +1295,10 @@ The `.daemon-new-session-btn` is always rendered (when daemon is `ok`), so the l
   for (const plus of await left.locator('.daemon-new-session-btn').all()) {
     await assertHitArea(plus, '.daemon-new-session-btn');
   }
-  // Click + to materialize a pending draft row, then verify × discard hit area.
-  // We can only do this if the + is enabled (it is, in this single-daemon fixture).
+  // Click + to materialize a pending draft row, then verify × discard hit
+  // area, then click × so the test's subsequent steps (Files drawer + go.mod
+  // assertion) still target the original session s1 — not the pending UUID
+  // for which no /files route was mocked.
   const firstPlus = left.locator('.daemon-new-session-btn').first();
   if (await firstPlus.isEnabled()) {
     await firstPlus.click();
@@ -1307,6 +1309,14 @@ The `.daemon-new-session-btn` is always rendered (when daemon is `ok`), so the l
     const discard = reopened.locator('.session-discard-btn').first();
     await expect(discard).toBeVisible();
     await assertHitArea(discard, '.session-discard-btn');
+    // Discard the draft so the rest of the test goes back to selected=s1
+    // and the existing /files?path=. mock keeps matching.
+    await discard.click();
+    await expect(reopened.locator('.session-discard-btn')).toHaveCount(0);
+    // Re-select s1 explicitly: the discard cleared selected, and on mobile
+    // a fresh auto-select would re-pick s1 anyway, but make it deterministic.
+    await reopened.getByRole('button', { name: /Fix commander session cache latency/ }).click();
+    await expect(page.getByTestId('drawer-left')).toHaveCount(0);
   }
 ```
 
