@@ -320,7 +320,26 @@ test('non-desktop: drawer interactive controls meet 44px hit area', async ({ pag
   expect(sessionToggles.length).toBeGreaterThan(0);
   for (const toggle of sessionToggles) await assertHitArea(toggle, '.session-toggle');
   await assertHitArea(left.locator('.mobile-drawer-close'), 'drawer-left close');
-  await page.goBack();
+
+  // New-session hit area: + button inside the Sessions drawer
+  await assertHitArea(left.locator('.daemon-new-session-btn'), '.daemon-new-session-btn');
+  // Click + to materialize a draft virtual row; handleCreate closes the drawer.
+  await left.locator('.daemon-new-session-btn').click();
+  // Drawer closes after + is clicked.
+  await expect(page.getByTestId('drawer-left')).toHaveCount(0);
+  // Re-open Sessions drawer to access the pending virtual row and its × button.
+  await page.getByRole('button', { name: 'Sessions' }).click();
+  const drawerWithPending = page.getByTestId('drawer-left');
+  await expect(drawerWithPending.locator('[data-testid="pending-session-row"]')).toBeVisible();
+  await assertHitArea(drawerWithPending.locator('.session-discard-btn'), '.session-discard-btn');
+  // Discard the draft — restores the no-pending state.
+  await drawerWithPending.locator('.session-discard-btn').click();
+  await expect(drawerWithPending.locator('[data-testid="pending-session-row"]')).toHaveCount(0);
+  // Re-select s1 by clicking its session-row button so handleSelectSession
+  // closes the drawer. Use .session-row (not the toggle button) to avoid the
+  // strict-mode violation — the s1 toggle aria-label also matches the regex.
+  await drawerWithPending.locator('.session-row').filter({ hasText: /Fix commander session cache latency/ }).click();
+  await expect(page.getByTestId('drawer-left')).toHaveCount(0);
 
   await page.getByRole('button', { name: 'Files' }).click();
   const right = page.getByTestId('drawer-right');
@@ -440,4 +459,166 @@ test('non-desktop: mobile sessions drawer + file preview screenshots', async ({ 
   await page.getByTestId('drawer-right').getByRole('button', { name: /打开文件 go.mod/ }).click();
   await expect(page.getByTestId('file-preview-sheet')).toBeVisible();
   await expect(page).toHaveScreenshot('commander-mobile-file-preview.png');
+});
+
+test('desktop: + button creates pending row, turn POSTs, tree refresh swaps placeholder with real row', async ({ page }, testInfo) => {
+  if (testInfo.project.name !== 'chromium-desktop') test.skip();
+
+  const newSessionTitle = 'Real title from backend';
+
+  // The app generates a random UUID for the new session via crypto.randomUUID().
+  // Capture it from the first turn request so the tree mock can include the real row.
+  let capturedSID: string | null = null;
+  let treeRequestCount = 0;
+  await page.route('**/api/commander/tree', (route) => {
+    treeRequestCount++;
+    const sessions = [{ ...treePayload.daemons[0].sessions[0], turn_state: 'idle' as const }];
+    // Once we have the real session ID (captured from the turn request), include
+    // it in subsequent tree responses so the virtual row is replaced.
+    if (capturedSID != null) {
+      sessions.push({
+        ...treePayload.daemons[0].sessions[0],
+        session_id: capturedSID,
+        title: newSessionTitle,
+        turn_state: 'idle' as const,
+      });
+    }
+    return route.fulfill({ json: { daemons: [{ ...treePayload.daemons[0], sessions }] } });
+  });
+
+  let turnCalled = false;
+  // Wildcard detail mock: handles the detail fetch for the new UUID session
+  // after turn completes. The glob `sessions/*` matches single-segment IDs
+  // (e.g. /sessions/s1, /sessions/<uuid>) but NOT /sessions/*/turn or
+  // /sessions/*/files (those have an extra path segment).
+  await page.route('**/api/commander/daemons/d1/sessions/*', (route) => {
+    const url = route.request().url();
+    const sid = url.match(/\/sessions\/([^/?]+)(?:\?|$)/)?.[1] ?? '';
+    return route.fulfill({
+      json: { session: { ID: sid, Title: newSessionTitle, WorkingDir: '/root/project' }, messages: [] },
+    });
+  });
+  // Turn route registered AFTER the wildcard so it takes precedence (LIFO).
+  await page.route('**/api/commander/daemons/d1/sessions/*/turn', async (route) => {
+    // Capture the UUID from the URL for use in the tree mock above.
+    const url = route.request().url();
+    const match = url.match(/\/sessions\/([^/]+)\/turn/);
+    if (match) capturedSID = match[1];
+    turnCalled = true;
+    await route.fulfill({ body: 'event: done\ndata: {"result":{}}\n\n', headers: { 'content-type': 'text/event-stream' } });
+  });
+
+  await page.goto('/commander/');
+  const treesBeforeClick = treeRequestCount;
+
+  // Click + to create a draft virtual row.
+  const newSessionBtn = page.locator('.daemon-new-session-btn');
+  await expect(newSessionBtn).toBeVisible();
+  await newSessionBtn.click();
+
+  // Virtual row with '待提交' appears in the tree.
+  const daemonTree = page.getByTestId('daemon-tree');
+  await expect(daemonTree.locator('[data-testid="pending-session-row"]')).toBeVisible();
+  await expect(daemonTree.getByText('待提交', { exact: false })).toBeVisible();
+
+  // Send a prompt — this fires the turn POST against the random UUID.
+  await page.getByLabel('输入提示词').fill('bootstrap this session');
+  await page.getByRole('button', { name: '发送' }).click();
+  await expect.poll(() => turnCalled).toBe(true);
+
+  // After the turn, phase flips to 'submitting' → text briefly shows '同步中…'.
+  // loadTree is then called; subsequent tree responses include the real row.
+  // Poll until tree refresh resolved the pending session.
+  await expect.poll(() => treeRequestCount).toBeGreaterThanOrEqual(treesBeforeClick + 1);
+  await expect(daemonTree.getByText('待提交', { exact: false })).toHaveCount(0);
+  await expect(daemonTree.getByText('同步中…', { exact: false })).toHaveCount(0);
+
+  // The real backend title must now appear in the tree.
+  await expect(daemonTree.getByRole('button', { name: new RegExp(newSessionTitle) })).toBeVisible();
+});
+
+test('non-desktop: + in Sessions drawer creates pending, drawer closes, turn → tree refresh swaps placeholder with real row', async ({ page }, testInfo) => {
+  if (testInfo.project.name === 'chromium-desktop') test.skip();
+
+  const newSessionTitle = 'Real title from backend';
+
+  // The app generates a random UUID for the pending session; capture it from
+  // the turn request so the tree mock can include the real row afterwards.
+  let capturedSID: string | null = null;
+  let treeRequestCount = 0;
+  await page.route('**/api/commander/tree', (route) => {
+    treeRequestCount++;
+    const sessions = [{ ...treePayload.daemons[0].sessions[0], turn_state: 'idle' as const }];
+    if (capturedSID != null) {
+      sessions.push({
+        ...treePayload.daemons[0].sessions[0],
+        session_id: capturedSID,
+        title: newSessionTitle,
+        turn_state: 'idle' as const,
+      });
+    }
+    return route.fulfill({ json: { daemons: [{ ...treePayload.daemons[0], sessions }] } });
+  });
+
+  let turnCalled = false;
+  // Wildcard detail mock for any session ID (LIFO: registered before turn handler).
+  await page.route('**/api/commander/daemons/d1/sessions/*', (route) => {
+    const url = route.request().url();
+    const sid = url.match(/\/sessions\/([^/?]+)(?:\?|$)/)?.[1] ?? '';
+    return route.fulfill({
+      json: { session: { ID: sid, Title: newSessionTitle, WorkingDir: '/root/project' }, messages: [] },
+    });
+  });
+  // Turn route registered AFTER wildcard detail so it has higher priority (LIFO).
+  await page.route('**/api/commander/daemons/d1/sessions/*/turn', async (route) => {
+    const url = route.request().url();
+    const match = url.match(/\/sessions\/([^/]+)\/turn/);
+    if (match) capturedSID = match[1];
+    turnCalled = true;
+    await route.fulfill({ body: 'event: done\ndata: {"result":{}}\n\n', headers: { 'content-type': 'text/event-stream' } });
+  });
+
+  await page.goto('/commander/');
+  const treesBeforeClick = treeRequestCount;
+
+  // Open Sessions drawer and click the + button inside it.
+  await page.getByRole('button', { name: 'Sessions' }).click();
+  const sessionsDrawer = page.getByTestId('drawer-left');
+  await expect(sessionsDrawer).toBeVisible();
+  await expect(sessionsDrawer.locator('.daemon-new-session-btn')).toBeVisible();
+  await sessionsDrawer.locator('.daemon-new-session-btn').click();
+
+  // handleCreate closes the drawer after calling onCreateSession.
+  await expect(page.getByTestId('drawer-left')).toHaveCount(0);
+
+  // Re-open Sessions drawer to verify the virtual pending row is present.
+  await page.getByRole('button', { name: 'Sessions' }).click();
+  const drawerWithPending = page.getByTestId('drawer-left');
+  await expect(drawerWithPending.locator('[data-testid="pending-session-row"]')).toBeVisible();
+  await expect(drawerWithPending.getByText('待提交', { exact: false })).toBeVisible();
+  // Close drawer before sending prompt.
+  // page.goBack() is NOT used here — at this point only one overlay entry has
+  // been pushed (the re-open of the drawer after + was clicked). A goBack()
+  // would pop that entry correctly in isolation but the previous goBack() that
+  // closed the drawer after clicking + already consumed the first entry; if a
+  // future path adjustment changes the push count this comment documents why
+  // we use an explicit close instead of goBack(). See the brief's note: goBack()
+  // after overlays in this test risks navigating out of /commander/.
+  await page.getByTestId('drawer-left').getByRole('button', { name: /^关闭/ }).click();
+  await expect(page.getByTestId('drawer-left')).toHaveCount(0);
+
+  // Send a prompt using the composer (focused on the new draft session).
+  await page.getByLabel('输入提示词').fill('hello from mobile new session');
+  await page.getByRole('button', { name: '发送' }).click();
+  await expect.poll(() => turnCalled).toBe(true);
+
+  // Poll until tree refresh resolved the pending session.
+  await expect.poll(() => treeRequestCount).toBeGreaterThanOrEqual(treesBeforeClick + 1);
+
+  // Re-open Sessions drawer to confirm the virtual row is gone and real title appears.
+  await page.getByRole('button', { name: 'Sessions' }).click();
+  const drawerAfter = page.getByTestId('drawer-left');
+  await expect(drawerAfter.getByText('待提交', { exact: false })).toHaveCount(0);
+  await expect(drawerAfter.getByText('同步中…', { exact: false })).toHaveCount(0);
+  await expect(drawerAfter.getByRole('button', { name: new RegExp(newSessionTitle) })).toBeVisible();
 });
