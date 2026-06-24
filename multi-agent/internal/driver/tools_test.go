@@ -1958,6 +1958,7 @@ func TestResumeTaskHappy(t *testing.T) {
 		},
 	}
 	tools := newTestTools(t, sdk)
+	_, _ = tools.BindThread(context.Background(), "thr-happy")
 	raw, err := toolByName(t, tools, "resume_task").Call(context.Background(),
 		json.RawMessage(`{"last_task_id":"T-1","answer":"yes","timeout_sec":2}`))
 	if err != nil {
@@ -1998,6 +1999,7 @@ func TestResumeTaskRejectsWhenNotAwaitingUser(t *testing.T) {
 		},
 	}
 	tools := newTestTools(t, sdk)
+	_, _ = tools.BindThread(context.Background(), "thr-notawaiting")
 	_, err := toolByName(t, tools, "resume_task").Call(context.Background(),
 		json.RawMessage(`{"last_task_id":"T-1","answer":"a"}`))
 	if err == nil || !strings.Contains(err.Error(), "not awaiting_user") {
@@ -2521,6 +2523,33 @@ func TestSubmitContractTaskStampsLoomOrigin(t *testing.T) {
 	if _, _, ok := agentbackend.ParseLoomOrigin(captured.SystemContext); !ok {
 		t.Fatalf("submit_contract_task chat delegation must be stamped with loom_origin, got SystemContext=%q", captured.SystemContext)
 	}
+}
+
+// TestResumeTask_FailsWithoutBindThread codifies that resume_task is always
+// parent-link and refuses to operate when the driver is unbound, without
+// even querying agentserver for the prior task.
+func TestResumeTask_FailsWithoutBindThread(t *testing.T) {
+	getCalled := false
+	delegated := false
+	sdk := &fakeSDK{
+		getTaskFunc: func(id string, includeOutput bool) (*agentsdk.TaskInfo, error) {
+			getCalled = true
+			return nil, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			delegated = true
+			return nil, nil
+		},
+	}
+	tools := newLoomTestTools(t, sdk, "" /*home*/, "drv-1", "d1")
+	// NO BindThread call.
+
+	_, err := toolByName(t, tools, "resume_task").Call(context.Background(),
+		json.RawMessage(`{"last_task_id":"T-1","answer":"yes"}`))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "driver not bound to a codex thread")
+	require.False(t, getCalled, "GetTask must not be called when bind missing")
+	require.False(t, delegated, "DelegateTask must not be called when bind missing")
 }
 
 // TestResumeTaskStampsLoomOrigin verifies that resume_task stamps loom_origin
