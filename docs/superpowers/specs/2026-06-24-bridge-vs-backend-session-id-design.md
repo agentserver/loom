@@ -170,14 +170,24 @@ This makes a one-time read-time correction: a deployment that runs the new binar
 
 ```go
 // NewBackend builds a ref from a known backend-native id (kind marker,
-// loom_origin marker, executor.Result, sidecar read).
-// Panics if backendID is empty (caller bug — checked at construction time).
+// loom_origin marker, executor.Result, sidecar read, slave's own session id).
+// Panics if backendID is empty — this is for internal invariant enforcement
+// where the caller has already validated the id. For external/user-input
+// paths (e.g. commander.Handler.SessionTurn) callers MUST validate first
+// and return an error themselves, not catch the panic.
+//
+// agentID may be empty when no cross-agent identity is needed (e.g. when
+// wrapping at a local backend seam where there is exactly one Backend
+// instance and the ref's "owning agent" is implicit). All driver-side
+// callers MUST populate agentID; only seams below the driver may leave
+// it empty (slave's resumeAdapter, internal commander handler).
 func NewBackend(kind Kind, agentID, backendID string) SessionRef
 
 // NewBridgeOnly wraps an agentsdk response that has only the bridge id.
 // Used at the driver↔agentsdk seam; downstream code that needs Backend
 // must error if it sees !HasBackend().
-// Panics if bridgeID is empty (caller bug).
+// Panics if bridgeID is empty (caller bug — agentsdk always returns one
+// or returns an error before reaching this constructor).
 func NewBridgeOnly(kind Kind, agentID, bridgeID string) SessionRef
 
 // WithBackend returns a copy of r with Backend filled. The only legitimate
@@ -193,6 +203,29 @@ func NewBridgeOnly(kind Kind, agentID, bridgeID string) SessionRef
 func (r SessionRef) WithBackend(backendID string) SessionRef
 ```
 
+**`agentID` source at each P2 wrap site:**
+
+| Site | `kind` source | `agentID` source |
+|---|---|---|
+| `internal/driver/tools.go` `resumeTaskTool.Call` (P1 site) | `targetCard.Kind()` from `agentsdk.AgentCard` already discovered earlier in Call() | `slaveShortID` already computed earlier in Call() from same card |
+| `internal/driver/tools.go` `submit_task` agentsdk seam (P1 site, `NewBridgeOnly`) | same | same |
+| `cmd/slave-agent/main.go` `resumeAdapter.RunResume` (P2 seam) | `a.b.Kind()` (Backend interface already exposes Kind()) | **empty string** — see note below |
+| `internal/commander/handler.go` `SessionTurn` (P2) | `h.Backend.Kind()` | **empty string** — see note below |
+| `pkg/agentbackend/*/executor_test.go` (P2 test fixtures) | the kind constant for that package's test (`KindCodex` / `KindClaude` / `KindOpencode`) | empty in tests — fixtures don't model cross-agent identity |
+
+**Why empty `agentID` is OK at slave / commander / executor seams:** the `AgentID` field on `SessionRef` is a **disambiguator across agents**, used when the same `Backend` value type might serve multiple agents (driver does — it routes to N slaves; each `SessionRef` carries which slave's session it is). Slave-side seams have exactly **one** backend instance owned by exactly **one** agent process; there is nothing to disambiguate. Same for `commander.Handler` which is constructed once per agent process and serves only that agent's sessions. Plumbing an `AgentID` through these seams would be ceremonial without changing the type-safety guarantee that `Backend` ≠ `Bridge` (which is the actual bug-prevention goal).
+
+**Validate-then-wrap at user-input seams.** `commander.Handler.SessionTurn` accepts `id string` from a higher-level caller. Before `NewBackend(kind, "", id)`, the handler MUST check `id != ""` and return an error if empty — propagating the constructor panic to a panic-mid-request is wrong. Spec-mandated pseudo-code at both call sites (lines 61 + 65 of `internal/commander/handler.go`):
+
+```go
+if id == "" {
+    return result.Result{}, fmt.Errorf("commander: empty session id; cannot resume")
+}
+return h.Backend.RunResume(ctx, agentbackend.NewBackend(h.Backend.Kind(), "", id), prompt, sink)
+```
+
+P1's driver `resume_task` already does this validation (the `if kw.SessionID == ""` check above). The slave's `resumeAdapter.RunResume` body should add a symmetric guard before wrapping.
+
 There is intentionally **no** `NewBoth` constructor that takes both at once — pairing happens via `WithBackend` on an existing bridge-only ref, so the code path that does the pairing is also the one that has to look up the backend id.
 
 ### PR 1 — types + driver boundary (fixes #29 bug)
@@ -200,7 +233,7 @@ There is intentionally **no** `NewBoth` constructor that takes both at once — 
 Changes:
 
 1. **`pkg/agentbackend/sessionref.go`** — new file: the type, constructors (`NewBackend`, `NewBridgeOnly`, `WithBackend`), and predicates (`IsZero`, `HasBackend`, `String`). **No JSON methods on SessionRef.** JSON ownership lives on containing structs (`TaskJournal.Record`, response builders) per the rationale above.
-2. **`pkg/agentbackend/sessionref_test.go`** — new file: table-driven tests for `IsZero`, `HasBackend`, `String`, and the three constructors (including panic preconditions on `WithBackend`). **No marshal/unmarshal tests on SessionRef** — those live on `task_journal_test.go` per Record's flatten ownership.
+2. **`pkg/agentbackend/sessionref_test.go`** — new file: table-driven tests for `IsZero`, `HasBackend`, `String`, and the constructors. **No marshal/unmarshal tests on SessionRef** (no JSON methods to test). Constructor panic-preconditions covered here: `NewBackend("", agentID, "")` panics; `NewBridgeOnly(kind, agentID, "")` panics; `WithBackend("")` panics; `WithBackend(...)` on a ref with `Backend != ""` panics; `WithBackend(...)` on a ref with `Bridge == ""` panics.
 3. **`internal/driver/tools.go`** — every line touching `SessionID` / `session_id` / `ChildSessionID` migrates to `SessionRef`. Concretely:
    - `delegatedTaskRecord.Response` was used for `Response.SessionID` (bridge); wrap into `NewBridgeOnly(kind, agentShortID, resp.SessionID)` at the agentsdk seam, stash as `SessionRef` on the record.
    - The two response-builder paths in `wait_task` / `get_task` that today do `firstNonEmpty(sessionIDFromMarker(...), info.SessionID)`: split — extract `markerBackendID = sessionIDFromMarker(...)` and `bridgeID = info.SessionID` separately, build a `SessionRef{Backend: markerBackendID, Bridge: bridgeID, ...}`, then emit both as sibling JSON fields. **Wire change**: `session_id` becomes empty (rather than fall back to bridge) when the marker was absent; `bridge_session_id` is the new explicit sibling. The "Wire format additive-only" constraint above documents this exception and the migration path for consumers.
@@ -233,9 +266,9 @@ What does NOT change in P1:
 - `pkg/agentbackend/codex/*`, `claude/*`, `opencode/*` — completely untouched.
 - `pkg/agentbackend/loomorigin.go` — `ParentLink.SessionID` (the `session` field in the marker) stays bare `string`. Driver construction of the marker writes `ref.Backend` into it.
 - `pkg/agentbackend/codex/loommeta.go` — sidecar struct stays bare `string`.
-- `internal/executor/chat_resume.go` ResumeBackend interface — stays bare `string` (will move in P2 along with its single implementor).
-- `internal/commander/handler.go` RunResume call sites — stay bare `string` (will move in P2).
-- `cmd/slave-agent/main.go` backendExecutor.RunResume adapter — stays bare `string` (will move in P2).
+- `internal/executor/chat_resume.go` `ResumeBackend` interface — **permanently** stays bare `string` to avoid the import cycle `agentbackend → executor → agentbackend` (see P2 "Why ResumeBackend stays string" below). Its single implementor in `cmd/slave-agent` is the wrap seam.
+- `internal/commander/handler.go` `Backend.RunResume` call sites — stay bare `string` in P1; in P2 the **call sites** wrap into `SessionRef` (validate `id != ""` first, then `NewBackend(h.Backend.Kind(), "", id)`), but no interface in the commander package itself changes signature.
+- `cmd/slave-agent/main.go` `resumeAdapter.RunResume` (NOT `backendExecutor` — the correct type is `resumeAdapter struct{ b agentbackend.Backend }` at line ~466) — its signature stays string in both P1 and P2 (it implements `executor.ResumeBackend`). In P2 its body changes to wrap the string into a SessionRef before calling `a.b.RunResume(ref, ...)`.
 
 ### PR 2 — promote `SessionRef` into `Backend.RunResume`
 
@@ -255,10 +288,10 @@ What does NOT change in P1:
 | `pkg/agentbackend/opencode/backend.go` `executorForWorkDir(...).RunResume(...)` | wrapper | signature change |
 | `internal/executor/chat_resume.go` `ResumeBackend` interface + caller | local interface alias of Backend.RunResume | **STAYS bare `string`** — see "Why ResumeBackend stays string" below |
 | `internal/executor/chat_resume_test.go` `fakeResumeBackend` stub | test stub | **STAYS bare `string`** (same reason) |
-| `internal/commander/handler.go` two call sites (lines 61 + 65) | commander session-turn handler fallback | wrap bare string `id` into `NewBackend(kind, agentID, id)` before call. The commander handler's `Backend.RunResume(ctx, id, prompt, sink)` calls use an `id` value originating from the commander session id (which the surrounding code treats as a backend-native id — the session id of the agent's prior conversation, not a bridge id). Document this in the call site with a comment so future readers know why this is `NewBackend` not `NewBridgeOnly`. |
+| `internal/commander/handler.go` two call sites (lines 61 + 65) | commander session-turn handler fallback | wrap bare string `id` into `NewBackend(h.Backend.Kind(), "", id)` before call. The `id` value originates from the commander session id (which the surrounding code treats as a backend-native id — the session id of the agent's prior conversation, not a bridge id). Validate `id != ""` first and return an error if empty (NewBackend would otherwise panic, which is wrong for a user-input seam). Empty `AgentID` is intentional — Handler serves only its own agent's sessions, no cross-agent disambiguation needed. Document in the call-site comment so future readers know why this is `NewBackend` not `NewBridgeOnly`, and why AgentID is empty. |
 | `internal/commander/handler_test.go` | test stubs / assertions | wrap test ids with `NewBackend(...)`; assertions on `RunResume(ctx, "id", ...)` become `RunResume(ctx, ref, ...)` with `ref.Backend == "id"` |
 | `internal/commanderhub/proxy_test.go` | test stub for fake Backend | signature change on the stub |
-| `cmd/slave-agent/main.go` `backendExecutor.RunResume(ctx, sid, ans, s)` | the slave-side adapter implementing `executor.ResumeBackend` (string signature) AND forwarding into `agentbackend.Backend.RunResume` (new SessionRef signature) | the adapter is **the seam**: takes a string `sid` from `executor.ResumeBackend`, wraps as `NewBackend(kind, agentID, sid)` before calling the agentbackend layer. No signature change to `backendExecutor.RunResume` itself — only its body changes. |
+| `cmd/slave-agent/main.go` `resumeAdapter.RunResume(ctx, sid, ans, s)` (correct type name; not `backendExecutor` which is the *task* executor adapter) | the slave-side adapter implementing `executor.ResumeBackend` (string signature) AND forwarding into `agentbackend.Backend.RunResume` (new SessionRef signature) | the adapter is **the seam**: takes a string `sid` from `executor.ResumeBackend`, wraps as `NewBackend(a.b.Kind(), "", sid)` (empty AgentID — see "agentID source" table) before calling the agentbackend layer. Body MUST first validate `sid != ""` and return an error if empty, instead of letting NewBackend panic. No signature change to `resumeAdapter.RunResume` itself — only its body changes. |
 | `pkg/agentbackend/codex/backend_resume_test.go` | direct `b.RunResume(ctx, id, ...)` call | wrap id as SessionRef in test |
 | `pkg/agentbackend/codex/executor_test.go` | 4 sites calling `ex.RunResume(ctx, "thr-...", ...)` | wrap each as `NewBackend(KindCodex, "", "thr-...")` |
 | `pkg/agentbackend/claude/backend_resume_test.go` | `b.RunResume(ctx, id, ...)` call | wrap as SessionRef |
@@ -267,7 +300,7 @@ What does NOT change in P1:
 | `pkg/agentbackend/opencode/executor_test.go` | `b.RunResume(ctx, "sess-abc", ...)` | wrap as SessionRef |
 | `internal/driver/tools.go::resumeTaskTool.Call` | the driver caller | stops unwrapping `ref.Backend` to string; passes `ref` directly. |
 
-Total: **18 files** touched in P2. The expansion from the round-1 spec catches (a) the import-cycle constraint and (b) the test-stub surface that must change in lockstep with the interface signature. Without all of these, `go test ./...` does not compile.
+Total: **23 unique files** in the P2 inventory (verified by counting rows in the table above and de-duplicating). This includes 12 production files + 11 test files. `internal/driver/tools.go` appears once though it has only one P2 site (resumeTaskTool.Call already changed in P1; in P2 it stops unwrapping `ref.Backend` to string). The expansion from the round-1 spec catches (a) the import-cycle constraint and (b) the test-stub surface that must change in lockstep with the interface signature. Without all of these, `go test ./...` does not compile.
 
 **Why `executor.ResumeBackend` stays `string` (NOT SessionRef):** `pkg/agentbackend/backend.go:8` imports `internal/executor` for the `Task` / `Sink` / `Result` type aliases. The reverse import (`internal/executor` → `pkg/agentbackend`) does NOT exist today. Promoting `executor.ResumeBackend` to take a `SessionRef` would require importing `pkg/agentbackend.SessionRef` into `internal/executor` — which forms `agentbackend → executor → agentbackend`, a Go-rejected import cycle. So `executor.ResumeBackend` keeps `(ctx, sessionID string, ...)`; the `cmd/slave-agent` adapter is the seam that wraps that string into a `SessionRef` before calling the underlying `agentbackend.Backend.RunResume(ref, ...)`. Below the seam, the type is enforced; above the seam (only one direct caller, `ChatResumeExecutor`), the contract is that `sessionID` is the slave's own backend-native id — already enforced by where it's sourced from (kind marker JSON).
 
@@ -306,7 +339,7 @@ All other paths (kind marker / loom_origin marker / loom-meta sidecar / `Backend
 
 | Layer | Tests added/changed |
 |---|---|
-| `pkg/agentbackend/sessionref_test.go` (new) | IsZero, HasBackend, String formatting, Marshal+Unmarshal round-trip, Unmarshal of legacy single-field JSON, Unmarshal of full new shape, constructors set fields correctly. |
+| `pkg/agentbackend/sessionref_test.go` (new) | IsZero, HasBackend, String formatting, constructors (`NewBackend`/`NewBridgeOnly`/`WithBackend`) set fields correctly, panic preconditions on all three constructors. **No JSON tests** — SessionRef has no JSON methods; JSON shape lives on Record + response builders. |
 | `internal/driver/tools_test.go` | Existing TaskInfo-construction fixtures updated; new `TestResumeTask_RefusesBridgeOnlyFallback`; new `TestWaitTask_BridgeAndBackendBothInResponse` that asserts the new `bridge_session_id` field appears alongside the existing `session_id` field. |
 | `internal/driver/task_journal_test.go` | New `TestRecord_MarshalFlattensSessionRefIntoSiblings` (proves flat output, not nested), `TestRecord_UnmarshalLegacyBridgeSessionID` (cse_ prefix → Bridge), `TestRecord_UnmarshalLegacyBackendSessionID` (uuid shape → Backend), `TestRecord_RoundTripModernRow` (both fields populated). All flatten/unmarshal/classifier logic lives on `Record`, not on `SessionRef`. |
 | `pkg/agentbackend/backend_test.go` (P2) | `nilBackend.RunResume` signature update. |
@@ -345,6 +378,16 @@ Three P1 (blocking) + two P2 findings against commit `9d2f4f7`. All real and rep
 - **P1 (P2 call-site inventory incomplete for `go test ./...`):** expanded from 13 sites to 18. Added every test file that calls `b.RunResume(ctx, "literal-id", ...)`: `internal/commander/handler_test.go`, `internal/commanderhub/proxy_test.go`, `pkg/agentbackend/codex/backend_resume_test.go`, `pkg/agentbackend/codex/executor_test.go` (4 sites), `pkg/agentbackend/claude/backend_resume_test.go`, `pkg/agentbackend/claude/executor_test.go`, `pkg/agentbackend/opencode/backend_resume_test.go` (2 sites), `pkg/agentbackend/opencode/executor_test.go`.
 - **P2 (observable behavior section contradicted the journal/response changes):** expanded "Observable behavior change" from one bullet to four — now lists `resume_task` error, `wait_task`/`get_task` session_id-can-be-empty, `submit_task` adds `bridge_session_id`, journal new-row shape change.
 - **P2 (submit_task contract ambiguity):** added explicit "submit_task contract (permanent)" subsection making clear `submit_task.session_id` is permanently the bridge id — backend cannot be produced synchronously — and consumers needing backend should use `wait_task`/`get_task`.
+
+### Codex round 3 (2026-06-24)
+
+One P1 + three P2 + one P3 against commit `65e76e5`. All real. Resolutions:
+
+- **P1 (Testing table stale "Marshal+Unmarshal" on sessionref_test):** updated the testing-table row for `sessionref_test.go` to drop all JSON test claims and replace with "constructor panic preconditions". Symmetric with lines 202-203 / 343 saying SessionRef has no JSON methods.
+- **P2 (agentID source undefined at wrap sites):** added a new "agentID source at each P2 wrap site" table to the spec, documenting kind+agentID source per site. **`AgentID` is intentionally empty** at `resumeAdapter` / `commander.Handler` / executor test fixtures because those seams own exactly one backend instance — disambiguation is meaningless. Driver-side construction (P1) keeps populating `AgentID` from the discovered slave `short_id`. Added a "Why empty `agentID` is OK" paragraph documenting the rationale.
+- **P2 (NewBackend panic dangerous at user-input seams):** updated `NewBackend` doc to say it's "for internal invariant enforcement" and that external/user-input paths MUST validate first. Added explicit "Validate-then-wrap at user-input seams" paragraph with pseudo-code for `commander.Handler.SessionTurn`. Both `resumeAdapter` and commander handler now MUST guard `id != ""` before calling `NewBackend`.
+- **P2 ("will move in P2" stale + wrong adapter name):** rewrote the P1 "What does NOT change" bullets for `internal/executor/chat_resume.go`, `commander/handler.go`, and `cmd/slave-agent/main.go` to no longer claim they "move". Corrected `backendExecutor` to `resumeAdapter` (verified by reading line 466 of `cmd/slave-agent/main.go`).
+- **P3 (inventory count inconsistent):** verified actual unique-file count via `awk` extraction of table rows. Changed "Total: 13 files" → "Total: 23 unique files" (12 production + 11 test). Marked the entry shape clearly.
 
 ## Out of scope (deliberately tracked here so the next refactor doesn't re-litigate)
 
