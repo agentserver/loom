@@ -26,30 +26,38 @@ fi
 #     — anchored to start-of-line so prose backtick-mentions on lines that
 #       read <<'DISCOVER_EOF' mid-line are ignored.
 #   exit when we hit the closing `DISCOVER_EOF` line.
-inlined=$(awk '
+#
+# Stream awk's output STRAIGHT TO A FILE (not a command-substitution
+# variable) — `$(awk ...)` strips ALL trailing newlines, so a heredoc
+# that drifted by adding blank lines before its terminator would be
+# rebuilt as a single trailing `\n` via `printf '%s\n'` and falsely
+# compare equal to the canonical script.
+extracted=$(mktemp -t skill-md-extract.XXXXXX)
+trap 'rm -f "$extracted" /tmp/skill-drift.$$.diff' EXIT
+awk '
     /^## Initialization/ {p=1}
     p && /^bash <<.DISCOVER_EOF.$/ {flag=1; next}
     flag && /^DISCOVER_EOF$/ {exit}
     flag {print}
-' "$SKILL_MD")
+' "$SKILL_MD" > "$extracted"
 
-if [[ -z "$inlined" ]]; then
+if [[ ! -s "$extracted" ]]; then
     echo "skill_md_inline_in_sync_test: could not extract heredoc body from $SKILL_MD" >&2
     echo "Expected a 'bash <<'\'DISCOVER_EOF\''' block inside the '## Initialization' section." >&2
     exit 1
 fi
 
-# Compare byte-for-byte. Use diff for a readable failure message.
-if ! diff -u "$SCRIPT_FILE" <(printf '%s\n' "$inlined") >/tmp/skill-drift.$$.diff 2>&1; then
+# Compare byte-for-byte by diffing the two real files. `diff` honors
+# trailing newlines and intra-file blank lines exactly; no shell-string
+# truncation can hide drift.
+if ! diff -u "$SCRIPT_FILE" "$extracted" >/tmp/skill-drift.$$.diff 2>&1; then
     {
         echo "skill_md_inline_in_sync_test: FAILED — SKILL.md heredoc body has drifted from $SCRIPT_FILE."
         echo "Either copy the canonical script into the heredoc, or update the script and re-paste."
         echo "---"
         cat /tmp/skill-drift.$$.diff
     } >&2
-    rm -f /tmp/skill-drift.$$.diff
     exit 1
 fi
 
-rm -f /tmp/skill-drift.$$.diff
 echo "ok - SKILL.md heredoc matches discover-thread.sh"
