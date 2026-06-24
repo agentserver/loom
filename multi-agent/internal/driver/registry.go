@@ -273,6 +273,28 @@ func (r *FileRegistry) LookupObserverArtifact(id string) (path, kind string, ok 
 	return entry.path, entry.kind, true
 }
 
+// FileRegistrySnapshot is a count-of-each-bucket view used by tests to
+// assert "no side effects" without touching internal fields.
+type FileRegistrySnapshot struct {
+	Blobs             int
+	Dirs              int
+	Writes            int
+	ObserverArtifacts int
+}
+
+// snapshotForTest returns bucket counts for the live registry. Test-only;
+// kept lowercase to stay package-private.
+func (r *FileRegistry) snapshotForTest() FileRegistrySnapshot {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return FileRegistrySnapshot{
+		Blobs:             len(r.blobs),
+		Dirs:              len(r.dirs),
+		Writes:            len(r.writes),
+		ObserverArtifacts: len(r.observerArtifacts),
+	}
+}
+
 func newToken() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
