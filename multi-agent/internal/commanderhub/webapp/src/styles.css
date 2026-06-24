@@ -18,7 +18,7 @@ body,
 body {
   margin: 0;
   min-width: 320px;
-  min-height: 100vh;
+  min-height: 100dvh;
 }
 
 button,
@@ -27,7 +27,7 @@ textarea {
 }
 
 .login-shell {
-  min-height: 100vh;
+  min-height: 100dvh;
   display: grid;
   place-items: center;
   color: #5b6678;
@@ -85,7 +85,7 @@ textarea {
 }
 
 .commander-shell {
-  height: 100vh;
+  height: 100dvh;
   min-height: 0;
   overflow: hidden;
   display: grid;
@@ -490,13 +490,120 @@ textarea {
   cursor: not-allowed;
 }
 
-@media (max-width: 900px) {
-  .commander-shell {
+.chat-header-slot { display: flex; align-items: center; }
+.chat-header-title { min-width: 0; flex: 1; }
+.chat-header-trigger {
+  display: inline-flex; align-items: center; gap: 6px;
+  min-width: 44px; min-height: 44px;
+  padding: 0 10px;
+  border: 1px solid #d9e1ec; border-radius: 8px;
+  background: #fff; color: #26364d;
+}
+.chat-header-trigger:hover { background: #f4f7fb; }
+
+.message-list-empty {
+  margin: auto;
+  padding: 24px 16px;
+  text-align: center;
+  color: #69768a;
+  font-size: 14px;
+}
+
+@media (max-width: 1023px) {
+  .commander-shell,
+  .commander-shell-mobile {
     grid-template-columns: 1fr;
   }
 
-  .daemon-tree,
-  .file-panel {
-    display: none;
+  /* Single-header chat: hide turn-status when too narrow only via ellipsis already in place. */
+  .composer { padding: 10px 12px; padding-bottom: max(10px, env(safe-area-inset-bottom)); }
+  .composer textarea { font-size: 16px; min-height: 44px; }
+  .composer button { min-height: 44px; min-width: 44px; }
+
+  .login-panel button, .login-panel a { min-height: 44px; min-width: 44px; }
+
+  /* Hit-area bumps */
+  .session-toggle, .session-toggle-spacer {
+    width: 44px; min-width: 44px; height: 44px;
+  }
+  .session-row-line { grid-template-columns: 44px minmax(0, 1fr); }
+  .session-row { min-height: 44px; }
+  .file-row { min-height: 44px; }
+  /* Widen the copy-button column from 30px to 44px so the .file-copy-button
+     touch target is not clipped by the grid + drawer overflow-x: hidden. */
+  .file-row-line { grid-template-columns: minmax(0, 1fr) 44px; }
+  .file-copy-button { width: 44px; min-width: 44px; height: 44px; }
+
+  /* Drawer + sheet — overlay shared across both */
+  .mobile-overlay {
+    position: fixed; inset: 0;
+    background: rgba(15, 23, 42, 0.45);
+    z-index: 20;
+  }
+  .mobile-drawer {
+    position: fixed; top: 0; bottom: 0;
+    background: #fff; z-index: 21;
+    display: flex; flex-direction: column;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    box-shadow: 0 4px 24px rgba(15, 23, 42, 0.18);
+    transition: transform 200ms ease-out;
+    height: 100dvh;
+  }
+  .mobile-drawer-left  { left: 0;  width: min(320px, 88vw); transform: translateX(0); }
+  .mobile-drawer-right { right: 0; width: min(360px, 92vw); transform: translateX(0); }
+  .mobile-drawer[data-state="closed"].mobile-drawer-left  { transform: translateX(-100%); }
+  .mobile-drawer[data-state="closed"].mobile-drawer-right { transform: translateX(100%); }
+  @media (prefers-reduced-motion: reduce) {
+    .mobile-drawer { transition: none; }
+  }
+  .mobile-drawer-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 12px; border-bottom: 1px solid #d9e1ec;
+  }
+  .mobile-drawer-title { margin: 0; font-size: 16px; color: #253348; }
+  .mobile-drawer-close {
+    width: 44px; height: 44px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 0; background: transparent; color: #506074;
+  }
+  .mobile-drawer-body { flex: 1; overflow-y: auto; overflow-x: hidden; }
+
+  .file-preview-sheet {
+    position: fixed; inset: 0; z-index: 22;
+    background: #fff;
+    display: flex; flex-direction: column;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    height: 100dvh;
+  }
+  .file-preview-sheet-header {
+    display: grid;
+    grid-template-columns: 44px 1fr auto;
+    align-items: center;
+    gap: 8px;
+    height: 56px;
+    padding: 0 12px;
+    border-bottom: 1px solid #d9e1ec;
+  }
+  .file-preview-sheet-close {
+    width: 44px; height: 44px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 0; background: transparent; color: #506074;
+  }
+  .file-preview-sheet-path {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: #253348;
+  }
+  .file-preview-sheet-copy {
+    display: inline-flex; align-items: center; gap: 6px;
+    min-height: 44px; min-width: 44px;
+    padding: 0 10px;
+    border: 1px solid #d9e1ec; border-radius: 8px;
+    background: #fff; color: #26364d;
+  }
+  .file-preview-sheet-body {
+    flex: 1; overflow: auto; max-height: calc(100dvh - 56px);
   }
 }
+
