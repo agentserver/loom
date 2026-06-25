@@ -68,17 +68,27 @@ Pinned to the live observer. No `webServer` block — assumes observer
 manually). A single `chromium-desktop` project; mobile coverage stays
 in the existing mocked suite. Wires a `globalSetup` that performs
 the cached-or-live login dance and writes the resulting storageState
-to a path the spec consumes via `use.storageState`.
+to a **deterministic cache path** that both the config and the
+helper agree on at module load (no `process.env` round-trip:
+Playwright evaluates the config BEFORE globalSetup runs, so env vars
+set inside globalSetup do not reach `use.storageState`).
 
 Key settings:
 
 - `baseURL: 'http://127.0.0.1:18091'`
-- `globalSetup: './src/e2e/live-login.ts'` (the helper's default export)
-- `use.storageState: <path>` (resolved from `STORAGE_STATE` env var
-  set by globalSetup) — same path globalSetup writes to.
+- `globalSetup: './src/e2e/live-login.ts'` (helper's default export)
+- `use.storageState: STORAGE_STATE_PATH` — a const imported from
+  `./src/e2e/live-login.ts`, resolved against `__dirname` to
+  `<repo>/multi-agent/tests/prod_test/.playwright/observer-session.json`.
+  globalSetup writes to that same path. Both config and helper
+  reference the same exported const so they cannot drift.
+- `testMatch: 'commander-live.spec.ts'` — pin so the existing
+  `commander.spec.ts` mocked suite does NOT get picked up under
+  `testDir: './src/e2e'`.
 - `timeout: 120_000` — generous for codex first-turn cold start.
-- `expect: { timeout: 10_000 }` — generous for daemon-tree refresh after
-  rebind (loadTree() runs after `done`, codex itself can take seconds).
+- `expect: { timeout: 10_000 }` — generous for daemon-tree refresh
+  after rebind (loadTree() runs after `done`, codex can take
+  seconds).
 - `retries: 0` — flaky e2e against a real backend should fail loudly,
   not retry-mask.
 - Single test project: `chromium-desktop` at 1440x960. Same viewport
@@ -89,27 +99,44 @@ Key settings:
 Default-export an async function with the Playwright globalSetup
 signature `(config: FullConfig) => Promise<void>`. Behavior:
 
-1. Resolve the cache path:
-   `tests/prod_test/.playwright/observer-session.json` relative to
-   the webapp's project root.
+1. Use the exported `STORAGE_STATE_PATH` constant for both the cache
+   path and the eventual storageState write target. Computed via
+   `path.resolve(__dirname, '../../tests/prod_test/.playwright/observer-session.json')`
+   so both the config and the spec resolve to the SAME on-disk file
+   under `multi-agent/tests/prod_test/.playwright/`. `mkdir -p` the
+   parent dir on the first write.
 2. **TCP probe** `127.0.0.1:18091` and `127.0.0.1:18092` with a
    2-second timeout each. If either is down, throw with a clear
    message telling the user to start observer + driver first. Don't
-   bother continuing — every test would fail anyway.
+   bother continuing — every test would fail anyway. The probe only
+   confirms ports are open, NOT that the driver-codex daemon is
+   registered with observer; that readiness check happens in step
+   7 below, after auth.
 3. **Validate the cached cookie if present.** If the cache file
-   exists, launch a one-off browser context with
-   `storageState: <cache path>`, request `/api/commander/tree`, and
-   check the response. 200 means the cookie still works — skip to
-   step 6. 401 means the cookie expired — fall through to step 4.
-   File missing → also fall through. (No mtime/TTL guessing: we
-   trust the server's own answer.)
+   exists AND is parseable JSON, launch a one-off browser context
+   with `storageState: <cache path>`, request
+   `/api/commander/tree`, and check the response. 200 means the
+   cookie still works — skip to step 7. 401 means the cookie
+   expired — fall through to step 4. File missing OR
+   parse error → also fall through; treat parse errors as cache
+   miss, never as a fatal. (No mtime/TTL guessing: we trust the
+   server's own answer.)
 
 4. **Live login path:** launch a headed browser (so the user can
    visually confirm the page loaded), navigate to
-   `http://127.0.0.1:18091/commander/`. Click the "用 agentserver
-   登录" button. Wait for `POST /api/commander/login` response;
-   extract `verification_uri_complete` from the body. Print to
-   stdout in a banner:
+   `http://127.0.0.1:18091/commander/`. Attach the response waiter
+   BEFORE clicking to avoid a race:
+
+   ```ts
+   const [loginResp] = await Promise.all([
+     page.waitForResponse('**/api/commander/login'),
+     page.getByRole('button', { name: '用 agentserver 登录' }).click(),
+   ]);
+   const body = await loginResp.json();
+   const verifyURL = body.verification_uri_complete as string;
+   ```
+
+   Print to stdout in a banner:
 
    ```
    ╔══════════════════════════════════════════════════════════════╗
@@ -128,20 +155,30 @@ signature `(config: FullConfig) => Promise<void>`. Behavior:
    commander tree to appear — selector
    `getByTestId('daemon-tree')`. The webapp's poll loop swaps the
    login UI for the tree when the cookie lands. As soon as it
-   appears, save `storageState` to the cache path and close the
-   browser.
+   appears, save `storageState` to `STORAGE_STATE_PATH`.
 
    ```ts
    await expect(page.getByTestId('daemon-tree')).toBeVisible({
      timeout: 600_000,
    });
-   await context.storageState({ path: cachePath });
+   // Atomic write: storageState → temp file → rename. Prevents
+   // partial JSON if globalSetup is killed mid-save.
+   const tmp = STORAGE_STATE_PATH + '.tmp';
+   await context.storageState({ path: tmp });
+   fs.renameSync(tmp, STORAGE_STATE_PATH);
    ```
 
-6. **Hand off to specs.** Set `process.env.STORAGE_STATE = cachePath`
-   so `playwright.live.config.ts`'s `use.storageState` picks it up.
-   Playwright re-reads `process.env` after globalSetup, so this
-   works without a config-level hack.
+6. Close the browser. The config already points
+   `use.storageState` at `STORAGE_STATE_PATH`, so the spec picks up
+   the cookie automatically.
+
+7. **Daemon readiness poll.** Before returning from globalSetup,
+   open a fresh API request context with the storageState and poll
+   `GET /api/commander/tree` until the response contains a daemon
+   with `kind: 'codex'` and `status: 'ok'`. Up to 30s, 1s interval.
+   If timed out, throw with a clear message (`driver-codex daemon
+   not registered with observer — check driver logs`). This
+   prevents the spec from racing the daemon-link handshake.
 
 Cookie clearance / re-login is manual: the user deletes
 `tests/prod_test/.playwright/observer-session.json` and runs again.
@@ -166,32 +203,42 @@ Steps:
    `data-session-id` attribute. Capture that placeholder ID into a
    variable.
 
-3. Intercept the next `POST /api/commander/daemons/*/sessions/*/turn`
-   request — assert the JSON body contains `fresh: true`. This
-   confirms the frontend is correctly flagging the first turn.
+3. Pre-attach a `page.waitForRequest('**/turn')` waiter and a
+   `page.waitForResponse('**/turn')` waiter (the turn POST returns
+   an SSE stream). Type a short prompt ("say hi") into the composer.
+   Click send. Resolve the request waiter; parse its `postData()`
+   JSON; assert `fresh === true`. This is the only assertion that
+   proves the frontend flagged the first turn correctly.
 
-4. Type a short prompt ("say hi") into the composer. Click send.
+4. Resolve the SSE response. Read its body in chunks; parse the
+   final `event: done\ndata: {...}\n\n` frame. Extract
+   `data.result.session_id` — this is the REAL backend-minted ID
+   the test will pin to. Save it as `realID`.
 
-5. Wait up to 60 seconds for either:
-   - an assistant chunk to render in the chat workspace
-     (`getByRole('article')` or whatever the chunk element is — TBD
-     at implementation time after looking at the actual DOM), OR
-   - the `done` event SSE frame is processed (turn-state in the row
-     transitions away from `queued`/`answering`).
+5. Assert `realID` is a well-formed UUID **and not equal to** the
+   placeholder captured in step 2. (Catches both regressions:
+   backend didn't mint a fresh ID, or backend echoed the
+   placeholder.)
 
-6. Assert: the placeholder row disappears from the tree (it was
-   pending; it should clear after `loadTree()` runs post-rebind), and
-   in its place a new row exists whose `data-session-id` is a
-   well-formed UUID **and** is NOT equal to the placeholder captured
-   in step 2.
+6. Wait up to 30 seconds for the daemon-tree to refresh and contain
+   a session row whose `data-session-id` exactly equals `realID`.
+   This proves the frontend's loadTree() saw the new row AND the
+   placeholder row was rebound (not stacked).
 
-7. Assert: the chat workspace still shows codex's response under
-   the new (real) session ID — selection follows the rebind.
+7. Assert the chat workspace shows the new session selected, by
+   waiting for a `GET /api/commander/daemons/<daemonID>/sessions/<realID>`
+   detail request that returns 200. This proves `selected` was
+   rebound to the real ID and the detail effect fired against the
+   correct URL.
 
-If any of these fail, the fresh-id rebind has regressed. Step 6 is
-the load-bearing assertion — pre-pr33, the placeholder row would
-stay forever and codex would 32600 with "no rollout found"; the
-test would time out at step 5.
+If any of these fail, the fresh-id rebind has regressed. Step 5 +
+step 6 together are the load-bearing assertion — pre-pr33, the
+backend 32600'd with "no rollout found" so step 4 would time out;
+post-pr33 but with a broken hub rekey, step 6 would fail because
+the tree never shows the real ID under the daemon. The two-step
+"capture exact ID from SSE, then assert exact ID present in tree"
+shape eliminates false-positives from any stale codex sessions that
+might exist on this driver.
 
 ### Frontend changes (minimal)
 
