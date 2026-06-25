@@ -306,7 +306,17 @@ export function CommanderApp() {
     const row = tree?.daemons
       .find((daemon) => daemon.daemon_id === selected.daemonID)
       ?.sessions?.find((session) => session.session_id === selected.sessionID);
-    setTurnState(row?.turn_state || 'idle');
+    if (row) {
+      setTurnState(row.turn_state || 'idle');
+    } else if (pendingSession?.sessionID === selected.sessionID && pendingSession.phase === 'submitting') {
+      // Submitting pending: backend just minted the real session ID but
+      // loadTree() hasn't returned the new row yet. Don't reset
+      // turnState to 'idle' — sendPrompt's onEvent just set it
+      // (e.g. 'awaiting_approval'). Resetting here would briefly
+      // re-enable the composer while the backend is still waiting.
+    } else {
+      setTurnState('idle');
+    }
 
     // Draft pending — backend has no row yet; render an empty placeholder.
     if (
@@ -408,6 +418,14 @@ export function CommanderApp() {
     let realSessionID = '';
     try {
       await postTurn(submitted.daemonID, submitted.sessionID, text, (event, data) => {
+        // Capture the real backend session ID BEFORE the isCurrentTurn
+        // guard. If the user has navigated away from the placeholder, we
+        // still need this value so the post-stream pending flip below
+        // can rebind to the real ID — otherwise the virtual "syncing"
+        // row never clears (loadTree() only matches by sessionID).
+        if (event === 'done' && isRecord(data) && isRecord(data.result) && typeof data.result.session_id === 'string') {
+          realSessionID = data.result.session_id;
+        }
         if (!isCurrentTurn()) return;
         if (event === 'status') {
           const statusText = isRecord(data) && typeof data.text === 'string' ? data.text : '';
@@ -424,9 +442,6 @@ export function CommanderApp() {
           setCurrentTurnState('answering');
         } else if (event === 'done') {
           setCurrentTurnState(doneTurnState(data));
-          if (isRecord(data) && isRecord(data.result) && typeof data.result.session_id === 'string') {
-            realSessionID = data.result.session_id;
-          }
         } else if (event === 'error') {
           setCurrentTurnState('error');
           turnError = new Error(errorMessage(data));

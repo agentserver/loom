@@ -180,6 +180,7 @@ export function MobileShell({
           renderMode="sheet"
           onPreviewRequest={handlePreviewRequest}
           onPreview={handlePreview}
+          onPreviewDismiss={closePreview}
         />
       </MobileDrawer>
       <FilePreviewSheet
