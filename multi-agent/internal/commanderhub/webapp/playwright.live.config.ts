@@ -10,8 +10,14 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   globalSetup: './src/e2e/live-login.ts',
+  webServer: {
+    command: 'npx vite dev --port 4174 --host 127.0.0.1',
+    url: 'http://127.0.0.1:4174/commander/',
+    reuseExistingServer: true,
+    timeout: 30_000,
+  },
   use: {
-    baseURL: 'http://127.0.0.1:18091',
+    baseURL: 'http://127.0.0.1:4174',
     storageState: STORAGE_STATE_PATH,
     trace: 'retain-on-failure',
   },
