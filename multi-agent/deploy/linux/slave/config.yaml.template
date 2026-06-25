@@ -50,6 +50,9 @@ resources:
   tags:
     - __TAG__                       # add more tags as needed
 
+daemon:
+  auto_start: true
+
 observer:
   enabled: true
   telemetry_enabled: false

@@ -199,6 +199,9 @@ resources:
   tags:
 ${tag_lines%$'\n'}
 
+daemon:
+  auto_start: true
+
 observer:
   enabled: true
   telemetry_enabled: false
