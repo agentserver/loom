@@ -35,7 +35,7 @@ type (
 type Backend interface {
 	Kind() Kind
 	Run(ctx context.Context, t Task, sink Sink) (Result, error)
-	RunResume(ctx context.Context, sessionID, answer string, sink Sink) (Result, error)
+	RunResume(ctx context.Context, ref SessionRef, answer string, sink Sink) (Result, error)
 	LLM() LLMRunner
 	Permissions() PermissionsStore
 	Detect(ctx context.Context) error

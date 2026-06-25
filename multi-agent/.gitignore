@@ -33,5 +33,11 @@ cmd/master-agent/master-agent
 cmd/observer-server/observer-server
 cmd/slave-agent/slave-agent
 testdata/fake-mcp-stdio/fake-mcp-stdio
-/tests/prod_test/
+# prod_test tree holds OAuth creds, sqlite state, locally-rebuilt binaries —
+# all ignored. Use the per-entry negations below to whitelist repo docs.
+# (Pattern note: `/tests/prod_test/*` not `/tests/prod_test/` — git ignores
+# negation patterns for files inside a fully-ignored directory.)
+/tests/prod_test/*
+!/tests/prod_test/README.md
+!/tests/prod_test/E2E_RUNBOOK.md
 tests/claude_driver/.mcp.json

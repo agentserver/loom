@@ -3,6 +3,7 @@ package commander
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -54,6 +55,16 @@ func (h *Handler) GetSession(ctx context.Context, id string) (agentbackend.Sessi
 // Backend.Run with Origin=user, so the backend mints its own session
 // ID. That real ID is returned in Result.SessionID; marshalTurnResult
 // already serializes it as `result.session_id` in the terminal frame.
+//
+// Session-id discipline (see issue #29): the `id` parameter is a
+// backend-native session id and is wrapped via NewBackend before
+// reaching agentbackend.Backend.RunResume. The current topology has
+// commander directly in front of a single backend, so an
+// agentserver-bridge id (cse_…) cannot reach this seam — there is no
+// path for one to be passed as `id`. If commander is ever placed behind
+// a bridge transport, this entry point must validate the source of `id`
+// or accept a typed SessionRef from the caller; do NOT silently widen
+// it to accept either id shape.
 func (h *Handler) SessionTurn(ctx context.Context, id, prompt string, fresh bool, sink executor.Sink) (executor.Result, error) {
 	unlock := h.lockTurn(id)
 	defer unlock()
@@ -71,11 +82,17 @@ func (h *Handler) SessionTurn(ctx context.Context, id, prompt string, fresh bool
 			if !errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
 				agentbackend.WriteStatus(sink, agentbackend.StatusStarting, "hot worker unavailable; falling back to resume")
 			}
-			return h.Backend.RunResume(ctx, id, prompt, sink)
+			if id == "" {
+				return executor.Result{}, fmt.Errorf("commander: empty session id; cannot resume")
+			}
+			return h.Backend.RunResume(ctx, agentbackend.NewBackend(h.Backend.Kind(), "", id), prompt, sink)
 		}
 		return res, err
 	}
-	return h.Backend.RunResume(ctx, id, prompt, sink)
+	if id == "" {
+		return executor.Result{}, fmt.Errorf("commander: empty session id; cannot resume")
+	}
+	return h.Backend.RunResume(ctx, agentbackend.NewBackend(h.Backend.Kind(), "", id), prompt, sink)
 }
 
 // Close releases daemon-owned hot workers. Daemon.Run calls it during shutdown;

@@ -162,7 +162,7 @@ func TestCodexExecutorRunResumeDoesNotWriteSidecar(t *testing.T) {
 		`{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}`,
 	})
 	ex := newExecutor(agentbackend.Config{Bin: bin, WorkDir: t.TempDir(), CodexHome: home}, []string{"CODEX_HOME=" + home})
-	if _, err := ex.RunResume(context.Background(), "thr-resume", "continue", &captureSink{}); err != nil {
+	if _, err := ex.RunResume(context.Background(), agentbackend.NewBackend(agentbackend.KindCodex, "", "thr-resume"), "continue", &captureSink{}); err != nil {
 		t.Fatalf("RunResume: %v", err)
 	}
 	if _, ok := readLoomMeta(home, "thr-resume"); ok {
@@ -336,7 +336,7 @@ func main() {
 `, sentinel, `{"type":"thread.started","thread_id":"thr-1-resumed"}`))
 
 	ex := newExecutor(agentbackend.Config{Bin: script, WorkDir: t.TempDir()}, nil)
-	res, err := ex.RunResume(context.Background(), "thr-1", "the user's answer", &captureSink{})
+	res, err := ex.RunResume(context.Background(), agentbackend.NewBackend(agentbackend.KindCodex, "", "thr-1"), "the user's answer", &captureSink{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +382,7 @@ func main() {
 		WorkDir:   t.TempDir(),
 		ExtraArgs: []string{"--profile", "loom-test"},
 	}, []string{"CODEX_HOME=" + codexHome, "LOOM_TEST_ENV=present"})
-	_, err := ex.RunResume(context.Background(), "thr-1", "continue", &captureSink{})
+	_, err := ex.RunResume(context.Background(), agentbackend.NewBackend(agentbackend.KindCodex, "", "thr-1"), "continue", &captureSink{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -599,7 +599,7 @@ func TestCodexExecutorWritesCurrentSessionMarkerOnResume(t *testing.T) {
 		`{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}`,
 	})
 	ex := newExecutor(agentbackend.Config{Bin: bin, WorkDir: t.TempDir(), CodexHome: home}, []string{"CODEX_HOME=" + home})
-	if _, err := ex.RunResume(context.Background(), "thr-res", "continue", &captureSink{}); err != nil {
+	if _, err := ex.RunResume(context.Background(), agentbackend.NewBackend(agentbackend.KindCodex, "", "thr-res"), "continue", &captureSink{}); err != nil {
 		t.Fatalf("RunResume: %v", err)
 	}
 	// RunResume must NOT write a sidecar (P1) but MUST write the current marker.
@@ -608,6 +608,22 @@ func TestCodexExecutorWritesCurrentSessionMarkerOnResume(t *testing.T) {
 	}
 	if got := ReadCurrentSession(home); got != "thr-res" {
 		t.Fatalf("current marker = %q, want thr-res (RunResume updates marker)", got)
+	}
+}
+
+// TestExecutor_RunResume_RejectsBridgeOnlyRef proves the !ref.HasBackend()
+// guard returns an actionable error when called with a bridge-only ref,
+// without launching the codex CLI. Per spec §RunResume implementations
+// MUST reject bridge-only / zero refs.
+func TestExecutor_RunResume_RejectsBridgeOnlyRef(t *testing.T) {
+	ex := newExecutor(agentbackend.Config{Bin: "codex-must-not-run", WorkDir: t.TempDir()}, nil)
+	bridgeOnly := agentbackend.NewBridgeOnly(agentbackend.KindCodex, "ag-1", "cse_test_bridge")
+	_, err := ex.RunResume(context.Background(), bridgeOnly, "answer", &captureSink{})
+	if err == nil {
+		t.Fatal("expected error when ref has no Backend; got nil")
+	}
+	if !strings.Contains(err.Error(), "has no backend id") {
+		t.Errorf("error should explain missing backend id, got: %v", err)
 	}
 }
 

@@ -147,6 +147,10 @@ type delegatedTaskRecord struct {
 	Skill             string
 	Wait              bool
 	TimeoutSec        int
+	// SessionRef wraps Response.SessionID (the agentserver bridge id) into a
+	// typed SessionRef so downstream journal writes preserve the bridge/backend
+	// distinction. Driver-side construction: Kind is always empty (no source).
+	SessionRef agentbackend.SessionRef
 }
 
 func (t *Tools) recordDelegatedTask(rec delegatedTaskRecord) error {
@@ -156,7 +160,7 @@ func (t *Tools) recordDelegatedTask(rec delegatedTaskRecord) error {
 	if err := t.taskJournal.Append(TaskRecord{
 		Tool:              rec.Tool,
 		TaskID:            rec.Response.TaskID,
-		SessionID:         rec.Response.SessionID,
+		SessionRef:        rec.SessionRef,
 		TargetID:          rec.TargetID,
 		TargetDisplayName: rec.TargetDisplayName,
 		ChildAgentID:      rec.ChildAgentID,
@@ -188,10 +192,13 @@ func (t *Tools) recordTerminalChild(taskID, childSessionID, status string) {
 	if !ok {
 		return
 	}
-	if rec.Terminal && rec.ChildSessionID == childSessionID && rec.Status == status {
+	// childSessionID at this site is the BACKEND-NATIVE id reported by the
+	// slave's kind marker (sessionIDFromMarker output). Never a bridge id.
+	newChildRef := agentbackend.NewBackend("", rec.ChildAgentID, childSessionID)
+	if rec.Terminal && rec.ChildSessionRef.Backend == newChildRef.Backend && rec.Status == status {
 		return // already recorded this terminal state; idempotent no-op
 	}
-	rec.ChildSessionID = childSessionID
+	rec.ChildSessionRef = newChildRef
 	rec.Terminal = true
 	rec.TS = "" // let Append stamp a fresh timestamp
 	if status != "" {
@@ -662,6 +669,10 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	// run) or abandon it. See §1.1 #1 of the 2026-06-13 review.
 	var warnings []string
 
+	var sessRef agentbackend.SessionRef
+	if resp.SessionID != "" {
+		sessRef = agentbackend.NewBridgeOnly("", targetShortID, resp.SessionID)
+	}
 	if err := s.t.recordDelegatedTask(delegatedTaskRecord{
 		Tool:              s.Name(),
 		Response:          resp,
@@ -671,6 +682,7 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		Skill:             skill,
 		Wait:              false,
 		TimeoutSec:        timeout,
+		SessionRef:        sessRef,
 	}); err != nil {
 		warnings = append(warnings, "record delegated task: "+err.Error())
 		s.t.logHelperErr("driver_journal", "record_delegated_task", err)
@@ -697,8 +709,13 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	s.t.reg.TrackTask(resp.TaskID, writeTokens)
 
 	respMap := map[string]interface{}{
-		"task_id":             resp.TaskID,
+		"task_id": resp.TaskID,
+		// session_id keeps the bridge id permanently for back-compat consumers;
+		// bridge_session_id is the new explicit alias. submit_task is the
+		// permanent exception to "session_id always means backend" — no backend
+		// id exists synchronously at dispatch time. Spec §submit_task contract.
 		"session_id":          resp.SessionID,
+		"bridge_session_id":   resp.SessionID,
 		"target_id":           targetID,
 		"target_display_name": targetName,
 		"manifest":            manifest,
@@ -765,23 +782,24 @@ func (g *getTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMe
 			Status: "awaiting_user",
 		})
 		return json.Marshal(struct {
-			Status        string          `json:"status"`
-			IsFinal       bool            `json:"is_final"`
-			SessionID     string          `json:"session_id"`
-			CurrentTaskID string          `json:"current_task_id"`
-			TargetID      string          `json:"target_id"`
-			Question      json.RawMessage `json:"question"`
+			Status          string          `json:"status"`
+			IsFinal         bool            `json:"is_final"`
+			SessionID       string          `json:"session_id,omitempty"`
+			BridgeSessionID string          `json:"bridge_session_id,omitempty"`
+			CurrentTaskID   string          `json:"current_task_id"`
+			TargetID        string          `json:"target_id"`
+			Question        json.RawMessage `json:"question"`
 		}{
 			Status:  "awaiting_user",
 			IsFinal: false,
-			// markerSessionID comes from the slave's chat backend (codex thread id);
-			// info.SessionID is agentserver's task-bridge `cse_<uuid>` and would
-			// not resume the right session. Prefer the marker; fall back only when
-			// the marker is missing (e.g. observer disabled, no wrapper recorded).
-			SessionID:     firstNonEmpty(markerSessionID, info.SessionID),
-			CurrentTaskID: taskID,
-			TargetID:      info.TargetID,
-			Question:      question,
+			// session_id is the backend-native id from the slave's kind marker.
+			// bridge_session_id is the agentserver task-bridge id. Two siblings;
+			// consumers pick the one they need.
+			SessionID:       markerSessionID,
+			BridgeSessionID: info.SessionID,
+			CurrentTaskID:   taskID,
+			TargetID:        info.TargetID,
+			Question:        question,
 		})
 	}
 	g.t.emit(observer.Event{
@@ -796,6 +814,8 @@ func (g *getTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMe
 	}
 	return json.Marshal(struct {
 		Status              string `json:"status"`
+		SessionID           string `json:"session_id,omitempty"`
+		BridgeSessionID     string `json:"bridge_session_id,omitempty"`
 		Output              string `json:"output"`
 		FailureReason       string `json:"failure_reason"`
 		LatestProgress      string `json:"latest_progress"`
@@ -805,6 +825,8 @@ func (g *getTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMe
 		IsFinal             bool   `json:"is_final"`
 	}{
 		Status:              info.Status,
+		SessionID:           markerSessionID,
+		BridgeSessionID:     info.SessionID,
 		Output:              output,
 		FailureReason:       info.FailureReason,
 		LatestProgress:      progress.LatestProgress,
@@ -874,8 +896,9 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 			} else {
 				isAwaiting, unwrappedOutput, question = unwrapResultMarker(info)
 			}
-			if markerSess := sessionIDFromMarker(progress.FinalOutput, info.Output, string(info.Result)); markerSess != "" {
-				w.t.recordTerminalChild(taskID, markerSess, info.Status)
+			waitMarkerSessionID := sessionIDFromMarker(progress.FinalOutput, info.Output, string(info.Result))
+			if waitMarkerSessionID != "" {
+				w.t.recordTerminalChild(taskID, waitMarkerSessionID, info.Status)
 			}
 			if isAwaiting && info.Status == "completed" {
 				w.t.emit(observer.Event{
@@ -884,23 +907,24 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 					Status: "awaiting_user",
 				})
 				return json.Marshal(struct {
-					Status        string          `json:"status"`
-					IsFinal       bool            `json:"is_final"`
-					SessionID     string          `json:"session_id"`
-					CurrentTaskID string          `json:"current_task_id"`
-					TargetID      string          `json:"target_id"`
-					Question      json.RawMessage `json:"question"`
+					Status          string          `json:"status"`
+					IsFinal         bool            `json:"is_final"`
+					SessionID       string          `json:"session_id,omitempty"`
+					BridgeSessionID string          `json:"bridge_session_id,omitempty"`
+					CurrentTaskID   string          `json:"current_task_id"`
+					TargetID        string          `json:"target_id"`
+					Question        json.RawMessage `json:"question"`
 				}{
 					Status:  "awaiting_user",
 					IsFinal: false,
-					// Marker session id (slave codex thread) wins over agentserver's
-					// `cse_<uuid>` task-bridge session — see SessionID comment in
-					// get_task above. Fall back to info.SessionID only when the
-					// marker chain is empty.
-					SessionID:     firstNonEmpty(sessionIDFromMarker(info.Output, string(info.Result), progress.FinalOutput), info.SessionID),
-					CurrentTaskID: taskID,
-					TargetID:      info.TargetID,
-					Question:      question,
+					// session_id is the backend-native id from the slave's kind marker.
+					// bridge_session_id is the agentserver task-bridge id. Two siblings;
+					// consumers pick the one they need.
+					SessionID:       waitMarkerSessionID,
+					BridgeSessionID: info.SessionID,
+					CurrentTaskID:   taskID,
+					TargetID:        info.TargetID,
+					Question:        question,
 				})
 			}
 			w.t.emit(observer.Event{
@@ -928,6 +952,8 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 			output := unwrappedOutput
 			return json.Marshal(struct {
 				Status              string        `json:"status"`
+				SessionID           string        `json:"session_id,omitempty"`
+				BridgeSessionID     string        `json:"bridge_session_id,omitempty"`
 				Output              string        `json:"output"`
 				FailureReason       string        `json:"failure_reason"`
 				LatestProgress      string        `json:"latest_progress"`
@@ -939,6 +965,8 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 				Warnings            []string      `json:"warnings,omitempty"`
 			}{
 				Status:              info.Status,
+				SessionID:           waitMarkerSessionID,
+				BridgeSessionID:     info.SessionID,
 				Output:              output,
 				FailureReason:       info.FailureReason,
 				LatestProgress:      progress.LatestProgress,
@@ -1282,15 +1310,25 @@ func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		return nil, &MCPToolError{Message: fmt.Sprintf(
 			"not awaiting_user; status=%s, kind=%s", info.Status, kw.Kind)}
 	}
-	// kw.SessionID is the slave codex thread id (what chat_resume must target);
-	// info.SessionID is agentserver's task-bridge `cse_<uuid>` and would resume
-	// the wrong session. Prefer the marker; info.SessionID is only a defensive
-	// fallback for environments where the wrapper was missing (e.g. observer
-	// disabled AND the slave's TaskInfo.Output also lost it).
-	sessionID := firstNonEmpty(kw.SessionID, info.SessionID)
-	if sessionID == "" {
-		return nil, &MCPToolError{Message: "missing session_id; cannot resume"}
+	// kw.SessionID is the slave's backend-native id (codex thread / claude
+	// session / opencode session) extracted from the slave's kind marker.
+	// Falling back to info.SessionID would silently delegate chat_resume with
+	// the agentserver bridge id, which the backend cannot resume against —
+	// this was the issue #29 bug. The fix: error out instead of guessing.
+	if kw.SessionID == "" {
+		return nil, &MCPToolError{Message: "resume failed: slave never reported a backend session id; bridge id alone cannot resume a codex/claude conversation"}
 	}
+	slaveShortID := ""
+	if r.t.taskJournal != nil {
+		if prev, ok := r.t.taskJournal.LatestByTaskID(args.LastTaskID); ok {
+			slaveShortID = prev.ChildAgentID
+		}
+	}
+	// Driver has no backend-kind source (agentsdk.AgentCard carries no Kind);
+	// SessionRef.Kind stays empty. NewBackend only takes the backend id, so
+	// this construction site cannot accidentally use info.SessionID (bridge).
+	ref := agentbackend.NewBackend("", slaveShortID, kw.SessionID)
+	sessionID := ref.Backend
 
 	body, _ := json.Marshal(map[string]string{
 		"session_id": sessionID,
@@ -1323,7 +1361,7 @@ func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	// Recover ChildAgentID from the prior delegation journal record so the
 	// resume record carries the same agent shortID. Falls through to "" if the
 	// journal was rotated (acceptable degraded mode: terminal record still has
-	// ChildSessionID for session-only linking).
+	// ChildSessionRef for session-only linking).
 	var resumeChildAgentID string
 	if r.t.taskJournal != nil {
 		if prev, ok := r.t.taskJournal.LatestByTaskID(args.LastTaskID); ok {
@@ -1333,6 +1371,10 @@ func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 
 	// DelegateTask succeeded — degrade journal append failure to a log entry
 	// so we still wait on the resume. See §1.1 #1 of the 2026-06-13 review.
+	var resumeSessRef agentbackend.SessionRef
+	if resp.SessionID != "" {
+		resumeSessRef = agentbackend.NewBridgeOnly("", resumeChildAgentID, resp.SessionID)
+	}
 	if err := r.t.recordDelegatedTask(delegatedTaskRecord{
 		Tool:         r.Name(),
 		Response:     resp,
@@ -1341,6 +1383,7 @@ func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		Skill:        "chat_resume",
 		Wait:         true,
 		TimeoutSec:   timeout,
+		SessionRef:   resumeSessRef,
 	}); err != nil {
 		r.t.logHelperErr("driver_journal", "record_delegated_task", err)
 	}

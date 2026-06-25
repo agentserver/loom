@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
 type runSlaveBashTool struct{ t *Tools }
@@ -163,6 +164,10 @@ func (t *Tools) delegateShellTask(ctx context.Context, card agentsdk.AgentCard, 
 	// DelegateTask succeeded — degrade journal append failure to a log entry
 	// so we still return task_id (wait=false) or wait (wait=true). See
 	// §1.1 #1 of the 2026-06-13 review.
+	var sessRef agentbackend.SessionRef
+	if resp.SessionID != "" {
+		sessRef = agentbackend.NewBridgeOnly("", cardShortID(card), resp.SessionID)
+	}
 	if err := t.recordDelegatedTask(delegatedTaskRecord{
 		Tool:              toolName,
 		Response:          resp,
@@ -171,6 +176,7 @@ func (t *Tools) delegateShellTask(ctx context.Context, card agentsdk.AgentCard, 
 		Skill:             skill,
 		Wait:              wait,
 		TimeoutSec:        args.TimeoutSec,
+		SessionRef:        sessRef,
 	}); err != nil {
 		t.logHelperErr("driver_journal", "record_delegated_task", err)
 	}
@@ -287,6 +293,10 @@ func (t *Tools) delegatePermissionTask(ctx context.Context, toolName, targetAgen
 	// DelegateTask succeeded — degrade journal append failure to a log entry
 	// so we still wait on the permission task. See §1.1 #1 of the
 	// 2026-06-13 review.
+	var permSessRef agentbackend.SessionRef
+	if resp.SessionID != "" {
+		permSessRef = agentbackend.NewBridgeOnly("", cardShortID(card), resp.SessionID)
+	}
 	if err := t.recordDelegatedTask(delegatedTaskRecord{
 		Tool:              toolName,
 		Response:          resp,
@@ -294,6 +304,7 @@ func (t *Tools) delegatePermissionTask(ctx context.Context, toolName, targetAgen
 		TargetDisplayName: card.DisplayName,
 		Skill:             skill,
 		Wait:              true,
+		SessionRef:        permSessRef,
 	}); err != nil {
 		t.logHelperErr("driver_journal", "record_delegated_task", err)
 	}
@@ -382,22 +393,30 @@ func (t *Tools) waitDelegatedTask(ctx context.Context, taskID string, timeoutSec
 }
 
 func marshalDelegatedAwaitingUser(taskID string, info *agentsdk.TaskInfo, question json.RawMessage) (json.RawMessage, error) {
+	// session_id is the backend-native id from the slave's kind marker (may be
+	// empty when no marker was emitted). bridge_session_id is the agentserver
+	// task-bridge id. Matches the wait_task / get_task response contract from
+	// tools.go so resume_task → waitDelegatedTask cannot reintroduce the
+	// bridge/backend confusion #29 removed.
+	markerSessionID := sessionIDFromMarker(info.Output, string(info.Result))
 	return json.Marshal(struct {
-		TaskID        string          `json:"task_id"`
-		Status        string          `json:"status"`
-		IsFinal       bool            `json:"is_final"`
-		SessionID     string          `json:"session_id"`
-		CurrentTaskID string          `json:"current_task_id"`
-		TargetID      string          `json:"target_id"`
-		Question      json.RawMessage `json:"question"`
+		TaskID          string          `json:"task_id"`
+		Status          string          `json:"status"`
+		IsFinal         bool            `json:"is_final"`
+		SessionID       string          `json:"session_id,omitempty"`
+		BridgeSessionID string          `json:"bridge_session_id,omitempty"`
+		CurrentTaskID   string          `json:"current_task_id"`
+		TargetID        string          `json:"target_id"`
+		Question        json.RawMessage `json:"question"`
 	}{
-		TaskID:        firstNonEmpty(info.TaskID, taskID),
-		Status:        "awaiting_user",
-		IsFinal:       false,
-		SessionID:     info.SessionID,
-		CurrentTaskID: firstNonEmpty(info.TaskID, taskID),
-		TargetID:      info.TargetID,
-		Question:      question,
+		TaskID:          firstNonEmpty(info.TaskID, taskID),
+		Status:          "awaiting_user",
+		IsFinal:         false,
+		SessionID:       markerSessionID,
+		BridgeSessionID: info.SessionID,
+		CurrentTaskID:   firstNonEmpty(info.TaskID, taskID),
+		TargetID:        info.TargetID,
+		Question:        question,
 	})
 }
 

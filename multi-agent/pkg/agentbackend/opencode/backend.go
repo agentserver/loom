@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
@@ -40,12 +41,15 @@ func (b *Backend) Run(ctx context.Context, t agentbackend.Task, s agentbackend.S
 	return b.exec.Run(ctx, t, s)
 }
 
-func (b *Backend) RunResume(ctx context.Context, sessionID, answer string, s agentbackend.Sink) (agentbackend.Result, error) {
-	workDir, err := b.resumeWorkDir(ctx, sessionID)
+func (b *Backend) RunResume(ctx context.Context, ref agentbackend.SessionRef, answer string, s agentbackend.Sink) (agentbackend.Result, error) {
+	if !ref.HasBackend() {
+		return agentbackend.Result{}, fmt.Errorf("opencode.Backend.RunResume: SessionRef has no backend id (Bridge=%q); cannot resume", ref.Bridge)
+	}
+	workDir, err := b.resumeWorkDir(ctx, ref.Backend)
 	if err != nil {
 		return agentbackend.Result{}, err
 	}
-	return b.executorForWorkDir(workDir).RunResume(ctx, sessionID, answer, s)
+	return b.executorForWorkDir(workDir).RunResume(ctx, ref, answer, s)
 }
 
 func (b *Backend) LLM() agentbackend.LLMRunner                { return b.llm }

@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
 const (
@@ -17,20 +20,115 @@ const (
 )
 
 type TaskRecord struct {
-	TS                string `json:"ts"`
-	Event             string `json:"event"`
-	Tool              string `json:"tool"`
-	TaskID            string `json:"task_id"`
-	SessionID         string `json:"session_id,omitempty"`
-	TargetID          string `json:"target_id,omitempty"`
-	TargetDisplayName string `json:"target_display_name,omitempty"`
-	Skill             string `json:"skill,omitempty"`
-	Status            string `json:"status,omitempty"`
-	Wait              bool   `json:"wait"`
-	TimeoutSec        int    `json:"timeout_sec,omitempty"`
-	ChildSessionID    string `json:"child_session_id,omitempty"`
-	ChildAgentID      string `json:"child_agent_id,omitempty"`
-	Terminal          bool   `json:"terminal,omitempty"`
+	TS                string                  `json:"-"`
+	Event             string                  `json:"-"`
+	Tool              string                  `json:"-"`
+	TaskID            string                  `json:"-"`
+	TargetID          string                  `json:"-"`
+	TargetDisplayName string                  `json:"-"`
+	Skill             string                  `json:"-"`
+	Status            string                  `json:"-"`
+	Wait              bool                    `json:"-"`
+	TimeoutSec        int                     `json:"-"`
+	ChildAgentID      string                  `json:"-"`
+	Terminal          bool                    `json:"-"`
+	SessionRef        agentbackend.SessionRef `json:"-"`
+	ChildSessionRef   agentbackend.SessionRef `json:"-"`
+}
+
+// recordWire is the on-disk JSON shape. SessionRef and ChildSessionRef are
+// flattened to sibling fields (session_id + bridge_session_id +
+// child_session_id + child_bridge_session_id) — encoding/json does not
+// flatten nested struct fields into siblings on its own, so the marshal
+// path explicitly maps SessionRef.Backend / .Bridge to the wire keys.
+//
+// Read path uses the bridge-id prefix classifier ("^cse_" → Bridge, else
+// Backend) when ONLY the legacy single field is present. Modern rows that
+// carry the explicit bridge_session_id sibling bypass the classifier.
+type recordWire struct {
+	TS                   string `json:"ts"`
+	Event                string `json:"event"`
+	Tool                 string `json:"tool"`
+	TaskID               string `json:"task_id"`
+	SessionID            string `json:"session_id,omitempty"`
+	BridgeSessionID      string `json:"bridge_session_id,omitempty"`
+	TargetID             string `json:"target_id,omitempty"`
+	TargetDisplayName    string `json:"target_display_name,omitempty"`
+	Skill                string `json:"skill,omitempty"`
+	Status               string `json:"status,omitempty"`
+	Wait                 bool   `json:"wait"`
+	TimeoutSec           int    `json:"timeout_sec,omitempty"`
+	ChildSessionID       string `json:"child_session_id,omitempty"`
+	ChildBridgeSessionID string `json:"child_bridge_session_id,omitempty"`
+	ChildAgentID         string `json:"child_agent_id,omitempty"`
+	Terminal             bool   `json:"terminal,omitempty"`
+}
+
+// MarshalJSON flattens SessionRef.Backend/.Bridge as sibling JSON fields.
+func (r TaskRecord) MarshalJSON() ([]byte, error) {
+	return json.Marshal(recordWire{
+		TS:                   r.TS,
+		Event:                r.Event,
+		Tool:                 r.Tool,
+		TaskID:               r.TaskID,
+		SessionID:            r.SessionRef.Backend,
+		BridgeSessionID:      r.SessionRef.Bridge,
+		TargetID:             r.TargetID,
+		TargetDisplayName:    r.TargetDisplayName,
+		Skill:                r.Skill,
+		Status:               r.Status,
+		Wait:                 r.Wait,
+		TimeoutSec:           r.TimeoutSec,
+		ChildSessionID:       r.ChildSessionRef.Backend,
+		ChildBridgeSessionID: r.ChildSessionRef.Bridge,
+		ChildAgentID:         r.ChildAgentID,
+		Terminal:             r.Terminal,
+	})
+}
+
+// UnmarshalJSON inflates the wire shape and reconstructs SessionRef values.
+// Modern rows: explicit bridge_session_id is present → fields go to their
+// explicit targets. Legacy rows: only session_id is present → classifier
+// routes ^cse_ to Bridge, anything else to Backend.
+func (r *TaskRecord) UnmarshalJSON(data []byte) error {
+	var w recordWire
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	r.TS = w.TS
+	r.Event = w.Event
+	r.Tool = w.Tool
+	r.TaskID = w.TaskID
+	r.TargetID = w.TargetID
+	r.TargetDisplayName = w.TargetDisplayName
+	r.Skill = w.Skill
+	r.Status = w.Status
+	r.Wait = w.Wait
+	r.TimeoutSec = w.TimeoutSec
+	r.ChildAgentID = w.ChildAgentID
+	r.Terminal = w.Terminal
+	r.SessionRef = classifyLegacyID(w.SessionID, w.BridgeSessionID)
+	r.ChildSessionRef = classifyLegacyID(w.ChildSessionID, w.ChildBridgeSessionID)
+	r.ChildSessionRef.AgentID = w.ChildAgentID
+	return nil
+}
+
+// classifyLegacyID routes a journal row's id pair into a SessionRef.
+//   - If bridge is non-empty, this is a modern row: backend → Backend, bridge → Bridge.
+//   - If only id is set: ^cse_ prefix → Bridge, else → Backend (legacy classifier).
+//   - If both empty: zero ref.
+func classifyLegacyID(id, bridge string) agentbackend.SessionRef {
+	if bridge != "" {
+		// Modern row: explicit fields take precedence.
+		return agentbackend.SessionRef{Backend: id, Bridge: bridge}
+	}
+	if id == "" {
+		return agentbackend.SessionRef{}
+	}
+	if strings.HasPrefix(id, "cse_") {
+		return agentbackend.SessionRef{Bridge: id}
+	}
+	return agentbackend.SessionRef{Backend: id}
 }
 
 type TaskJournal struct {

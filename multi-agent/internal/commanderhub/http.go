@@ -384,6 +384,15 @@ func payloadAwaitingUser(payload []byte) bool {
 // payloadSessionID extracts the real backend session ID from a
 // terminal command_result payload (marshalTurnResult writes it as
 // result.session_id). Returns empty when absent or unparseable.
+//
+// The returned id is treated as a backend-native session id (used to
+// rekey the turn-state map from the client placeholder). This relies on
+// commander.marshalTurnResult emitting result.session_id from the
+// backend executor's Result.SessionID, not from any bridge id — see the
+// caveat in commander/http.go::marshalTurnResult and issue #29. If the
+// commander wire protocol ever splits into backend / bridge fields,
+// this helper must be updated to read the backend field explicitly
+// instead of falling through whatever happens to be in session_id.
 func payloadSessionID(payload []byte) string {
 	var body struct {
 		Result struct {

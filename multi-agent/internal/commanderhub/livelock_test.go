@@ -102,7 +102,7 @@ func TestStream_CancelFullBufferDoesNotWedgeReadLoop(t *testing.T) {
 
 	var emitted int64
 	backend := &tbBackend{
-		resumeFn: func(ctx context.Context, _, _ string, sink executor.Sink) (executor.Result, error) {
+		resumeFn: func(ctx context.Context, _ agentbackend.SessionRef, _ string, sink executor.Sink) (executor.Result, error) {
 			// Emit well beyond the 16-deep buffer. The consumer never drains, so ch
 			// saturates to its cap.
 			for i := 0; i < 40; i++ {

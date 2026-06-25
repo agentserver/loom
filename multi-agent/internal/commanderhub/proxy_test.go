@@ -21,16 +21,16 @@ import (
 type tbBackend struct {
 	listFn   func(context.Context) ([]agentbackend.Session, error)
 	getFn    func(context.Context, string) (agentbackend.Session, []agentbackend.SessionMessage, error)
-	resumeFn func(context.Context, string, string, executor.Sink) (executor.Result, error)
+	resumeFn func(context.Context, agentbackend.SessionRef, string, executor.Sink) (executor.Result, error)
 }
 
 func (b *tbBackend) Kind() agentbackend.Kind { return agentbackend.KindClaude }
 func (b *tbBackend) Run(context.Context, executor.Task, executor.Sink) (executor.Result, error) {
 	return executor.Result{}, nil
 }
-func (b *tbBackend) RunResume(ctx context.Context, id, ans string, sink executor.Sink) (executor.Result, error) {
+func (b *tbBackend) RunResume(ctx context.Context, ref agentbackend.SessionRef, ans string, sink executor.Sink) (executor.Result, error) {
 	if b.resumeFn != nil {
-		return b.resumeFn(ctx, id, ans, sink)
+		return b.resumeFn(ctx, ref, ans, sink)
 	}
 	return executor.Result{}, nil
 }
@@ -166,7 +166,7 @@ func TestProxy_SendCommandStreamTurn(t *testing.T) {
 		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
 	}}
 	hub, _, o, cleanup := dialFakeDaemon(t, resolver, "tok-alice", &tbBackend{
-		resumeFn: func(_ context.Context, _, _ string, sink executor.Sink) (executor.Result, error) {
+		resumeFn: func(_ context.Context, _ agentbackend.SessionRef, _ string, sink executor.Sink) (executor.Result, error) {
 			sink.Write("chunk", "one")
 			sink.Write("chunk", "two")
 			sink.Close()

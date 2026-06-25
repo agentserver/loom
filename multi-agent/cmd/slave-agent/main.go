@@ -360,6 +360,20 @@ func run(cfgPath string) error {
 			log.Printf("commander daemon disabled: %v", dErr)
 		} else {
 			g.Go(func() error {
+				// Wait for the yamux tunnel to actually attach to
+				// agentserver before dialing observer. Observer
+				// validates every WS handshake via agentserver's
+				// /api/agent/whoami; whoami returns 401/403 until the
+				// tunnel has put the sandbox into the running state.
+				// Without this gate the daemon races tn.Run and reliably
+				// gets bounced on cold start — the historical
+				// "slave-daemon-startup-race" symptom that left
+				// freshly-registered slaves invisible to commander UI.
+				select {
+				case <-tn.Ready():
+				case <-gctx.Done():
+					return nil
+				}
 				if rErr := daemon.Run(gctx); rErr != nil && rErr != context.Canceled {
 					return fmt.Errorf("commander daemon: %w", rErr)
 				}
@@ -468,8 +482,20 @@ type resumeAdapter struct{ b agentbackend.Backend }
 func (a resumeAdapter) Run(ctx context.Context, t executor.Task, s executor.Sink) (executor.Result, error) {
 	return a.b.Run(ctx, t, s)
 }
+
+// RunResume is the seam between internal/executor.ResumeBackend (bare string,
+// permanently — see spec §"Why ResumeBackend stays string") and the typed
+// agentbackend.Backend.RunResume(SessionRef) above the seam. The slave's
+// ChatResumeExecutor passes the slave's own backend-native session id (sourced
+// from the slave's kind marker output), so the wrap can populate
+// SessionRef.Backend with confidence; Kind comes from the Backend interface,
+// AgentID is empty (single-backend seam, no cross-agent disambiguation).
 func (a resumeAdapter) RunResume(ctx context.Context, sid, ans string, s executor.Sink) (executor.Result, error) {
-	return a.b.RunResume(ctx, sid, ans, s)
+	if sid == "" {
+		return executor.Result{}, fmt.Errorf("resumeAdapter: empty session id; cannot resume")
+	}
+	ref := agentbackend.NewBackend(a.b.Kind(), "", sid)
+	return a.b.RunResume(ctx, ref, ans, s)
 }
 
 func hasSkill(skills []string, want string) bool {

@@ -370,7 +370,7 @@ func main() {
 `, sentinel, `{"type":"system","session_id":"sess-1-resumed"}`))
 
 	ex := newExecutor(agentbackend.Config{Bin: script, WorkDir: t.TempDir()}, nil)
-	res, err := ex.RunResume(context.Background(), "sess-1", "the user's answer", &captureSink{})
+	res, err := ex.RunResume(context.Background(), agentbackend.NewBackend(agentbackend.KindClaude, "", "sess-1"), "the user's answer", &captureSink{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,6 +387,22 @@ func main() {
 	}
 	if res.AwaitingUser != nil {
 		t.Errorf("AwaitingUser should be nil for a non-pausing resume")
+	}
+}
+
+// TestExecutor_RunResume_RejectsBridgeOnlyRef proves the !ref.HasBackend()
+// guard returns an actionable error when called with a bridge-only ref,
+// without launching the claude CLI. Per spec §RunResume implementations
+// MUST reject bridge-only / zero refs.
+func TestExecutor_RunResume_RejectsBridgeOnlyRef(t *testing.T) {
+	ex := newExecutor(agentbackend.Config{Bin: "claude-must-not-run", WorkDir: t.TempDir()}, nil)
+	bridgeOnly := agentbackend.NewBridgeOnly(agentbackend.KindClaude, "ag-1", "cse_test_bridge")
+	_, err := ex.RunResume(context.Background(), bridgeOnly, "answer", &captureSink{})
+	if err == nil {
+		t.Fatal("expected error when ref has no Backend; got nil")
+	}
+	if !strings.Contains(err.Error(), "has no backend id") {
+		t.Errorf("error should explain missing backend id, got: %v", err)
 	}
 }
 

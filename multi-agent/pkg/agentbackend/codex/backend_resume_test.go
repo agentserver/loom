@@ -65,7 +65,7 @@ func main() {
 		WorkDir:   configDir,
 		ExtraArgs: []string{"--profile", "loom-test"},
 	}, []string{"CODEX_HOME=" + codexHome, "LOOM_BACKEND_ENV=present"})
-	if _, err := b.RunResume(context.Background(), id, "continue", &captureSink{}); err != nil {
+	if _, err := b.RunResume(context.Background(), agentbackend.NewBackend(agentbackend.KindCodex, "", id), "continue", &captureSink{}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(cwdPath)
