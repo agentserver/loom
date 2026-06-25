@@ -53,6 +53,7 @@ export function FileExplorerPanel({
   renderMode = 'inline',
   onPreview,
   onPreviewRequest,
+  onPreviewDismiss,
 }: {
   daemonID: string;
   sessionID: string;
@@ -64,6 +65,11 @@ export function FileExplorerPanel({
   }) => void;
   /** Called synchronously at click time (before the async fetch) when renderMode='sheet'. */
   onPreviewRequest?: () => void;
+  /** Called when the fetch following an onPreviewRequest fails AND it is
+   * still the latest request — so the parent can pop the matching back-stack
+   * entry it pushed in onPreviewRequest. Not called for superseded requests
+   * (those are owned by the newer click's lifecycle). */
+  onPreviewDismiss?: () => void;
 }) {
   const [root, setRoot] = useState('');
   const [entries, setEntries] = useState<FileEntry[]>([]);
@@ -135,6 +141,7 @@ export function FileExplorerPanel({
     } catch (err) {
       if (previewRequestRef.current === requestID) {
         setError(err instanceof Error ? err.message : String(err));
+        if (renderMode === 'sheet') onPreviewDismiss?.();
       }
     }
   }
