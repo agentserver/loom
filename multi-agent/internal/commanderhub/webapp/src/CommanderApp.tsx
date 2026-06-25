@@ -533,19 +533,31 @@ export function CommanderApp() {
   const selectedIsPendingDraft = pendingSession != null
     && selected?.sessionID === pendingSession.sessionID
     && pendingSession.phase === 'draft';
+  // `selectedIsPending` covers BOTH 'draft' and 'submitting' phases — used
+  // by file-fetch suppression so the right pane doesn't 404 against a
+  // session that's been server-created but not yet visible in list_sessions.
+  // The pending lifecycle ends when loadTree() sees the real row and clears
+  // pending — at that moment fileDaemonID/fileSessionID flip back to the
+  // real selected IDs and FileExplorerPanel's [daemonID, sessionID] effect
+  // re-fires with a real fetch.
+  const selectedIsPending = pendingSession != null
+    && selected?.sessionID === pendingSession.sessionID;
   const pendingDaemonOffline = pendingSession?.phase === 'draft'
     && (tree?.daemons.find((d) => d.daemon_id === pendingSession.daemonID)?.status ?? 'offline') !== 'ok';
   const composerLocked = selectedIsPendingDraft && pendingDaemonOffline;
   const composerNote = composerLocked
     ? 'daemon 离线 — 无法提交,等待 daemon 上线或选择其它会话'
     : undefined;
-  // Suppress FileExplorerPanel fetches when selected is a draft pending
-  // session — the backend has no row for it yet, so /files?path=. would
-  // 404 and surface a misleading error. Passing an empty sessionID
-  // short-circuits the panel's effect (see FileExplorerPanel.tsx — the
-  // useEffect bails when !daemonID || !sessionID).
-  const fileSessionID = selectedIsPendingDraft ? '' : (selected?.sessionID || '');
-  const fileDaemonID = selectedIsPendingDraft ? '' : (selected?.daemonID || '');
+  // Suppress FileExplorerPanel fetches whenever the selected session is
+  // pending (draft OR submitting). The backend has no row for a draft, and
+  // list_sessions hasn't seen the submitting session yet either (otherwise
+  // pending would have cleared) — so /files?path=. 404s in both phases.
+  // Passing an empty sessionID short-circuits the panel's effect (see
+  // FileExplorerPanel.tsx — the useEffect bails when !daemonID || !sessionID).
+  // When loadTree() finally clears pending, these flip to the real IDs and
+  // the panel's effect re-runs and fetches for real.
+  const fileSessionID = selectedIsPending ? '' : (selected?.sessionID || '');
+  const fileDaemonID = selectedIsPending ? '' : (selected?.daemonID || '');
 
   if (isNonDesktop) {
     return (
@@ -568,7 +580,7 @@ export function CommanderApp() {
         onDiscardSession={discardPendingSession}
         composerLocked={composerLocked}
         composerNote={composerNote}
-        disableFiles={selectedIsPendingDraft}
+        disableFiles={selectedIsPending}
       />
     );
   }
