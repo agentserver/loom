@@ -111,7 +111,8 @@ func TestHTTP_GetSessionOK(t *testing.T) {
 // one "event: chunk" per sink Write, then "event: done" with a result payload.
 func TestHTTP_PostTurnStreamsSSE(t *testing.T) {
 	h := &Handler{Backend: &fakeBackend{
-		resumeFn: func(_ context.Context, id, prompt string, sink executor.Sink) (executor.Result, error) {
+		resumeFn: func(_ context.Context, ref agentbackend.SessionRef, prompt string, sink executor.Sink) (executor.Result, error) {
+			id := ref.Backend
 			if id != "abc" {
 				t.Errorf("id=%q", id)
 			}
@@ -167,7 +168,7 @@ func TestHTTP_PostTurnStreamsSSE(t *testing.T) {
 
 func TestHTTP_PostTurnErrSessionNotFound(t *testing.T) {
 	h := &Handler{Backend: &fakeBackend{
-		resumeFn: func(_ context.Context, _, _ string, _ executor.Sink) (executor.Result, error) {
+		resumeFn: func(_ context.Context, _ agentbackend.SessionRef, _ string, _ executor.Sink) (executor.Result, error) {
 			return executor.Result{}, agentbackend.ErrSessionNotFound
 		},
 	}}

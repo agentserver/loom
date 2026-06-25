@@ -11,6 +11,7 @@ import (
 	"github.com/yourorg/multi-agent/internal/commander"
 	"github.com/yourorg/multi-agent/internal/executor"
 	"github.com/yourorg/multi-agent/internal/identity"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
 // TestStream_CancelWhileStreamingNoPanic is the regression test for the
@@ -39,7 +40,7 @@ func TestStream_CancelWhileStreamingNoPanic(t *testing.T) {
 	const chunks = 200
 	var sent int64
 	backend := &tbBackend{
-		resumeFn: func(ctx context.Context, _, _ string, sink executor.Sink) (executor.Result, error) {
+		resumeFn: func(ctx context.Context, _ agentbackend.SessionRef, _ string, sink executor.Sink) (executor.Result, error) {
 			for i := 0; i < chunks; i++ {
 				sink.Write("chunk", "x")
 				atomic.AddInt64(&sent, 1)

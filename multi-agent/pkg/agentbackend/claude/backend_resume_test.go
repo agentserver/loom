@@ -44,7 +44,7 @@ func main() {
 `, cwdPath))
 
 	b := New(agentbackend.Config{Bin: fakeBin, WorkDir: configDir}, nil)
-	if _, err := b.RunResume(context.Background(), id, "continue", &captureSink{}); err != nil {
+	if _, err := b.RunResume(context.Background(), agentbackend.NewBackend(agentbackend.KindClaude, "", id), "continue", &captureSink{}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(cwdPath)

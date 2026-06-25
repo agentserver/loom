@@ -16,7 +16,7 @@ import (
 type fakeBackend struct {
 	listFn   func(ctx context.Context) ([]agentbackend.Session, error)
 	getFn    func(ctx context.Context, id string) (agentbackend.Session, []agentbackend.SessionMessage, error)
-	resumeFn func(ctx context.Context, id, answer string, sink executor.Sink) (executor.Result, error)
+	resumeFn func(ctx context.Context, ref agentbackend.SessionRef, answer string, sink executor.Sink) (executor.Result, error)
 	workerFn func(ctx context.Context, sess agentbackend.Session) (agentbackend.SessionWorker, error)
 }
 
@@ -24,11 +24,11 @@ func (f *fakeBackend) Kind() agentbackend.Kind { return agentbackend.KindClaude 
 func (f *fakeBackend) Run(_ context.Context, _ executor.Task, _ executor.Sink) (executor.Result, error) {
 	return executor.Result{}, nil
 }
-func (f *fakeBackend) RunResume(ctx context.Context, id, answer string, sink executor.Sink) (executor.Result, error) {
+func (f *fakeBackend) RunResume(ctx context.Context, ref agentbackend.SessionRef, answer string, sink executor.Sink) (executor.Result, error) {
 	if f.resumeFn == nil {
 		return executor.Result{}, nil
 	}
-	return f.resumeFn(ctx, id, answer, sink)
+	return f.resumeFn(ctx, ref, answer, sink)
 }
 func (f *fakeBackend) LLM() agentbackend.LLMRunner                { return nil }
 func (f *fakeBackend) Permissions() agentbackend.PermissionsStore { return nil }
@@ -66,15 +66,15 @@ func (b *closingBackend) Close() error {
 
 type resumeOnlyBackend struct {
 	getFn    func(ctx context.Context, id string) (agentbackend.Session, []agentbackend.SessionMessage, error)
-	resumeFn func(ctx context.Context, id, answer string, sink executor.Sink) (executor.Result, error)
+	resumeFn func(ctx context.Context, ref agentbackend.SessionRef, answer string, sink executor.Sink) (executor.Result, error)
 }
 
 func (b *resumeOnlyBackend) Kind() agentbackend.Kind { return agentbackend.KindCodex }
 func (b *resumeOnlyBackend) Run(context.Context, executor.Task, executor.Sink) (executor.Result, error) {
 	return executor.Result{}, nil
 }
-func (b *resumeOnlyBackend) RunResume(ctx context.Context, id, answer string, sink executor.Sink) (executor.Result, error) {
-	return b.resumeFn(ctx, id, answer, sink)
+func (b *resumeOnlyBackend) RunResume(ctx context.Context, ref agentbackend.SessionRef, answer string, sink executor.Sink) (executor.Result, error) {
+	return b.resumeFn(ctx, ref, answer, sink)
 }
 func (b *resumeOnlyBackend) LLM() agentbackend.LLMRunner                { return nil }
 func (b *resumeOnlyBackend) Permissions() agentbackend.PermissionsStore { return nil }
@@ -193,7 +193,8 @@ func TestHandler_GetSessionPropagatesErrSessionNotFound(t *testing.T) {
 // RunResume event in order and the final Result is returned to the caller.
 func TestHandler_SessionTurnStreamsAndReturns(t *testing.T) {
 	h := &Handler{Backend: &fakeBackend{
-		resumeFn: func(_ context.Context, id, answer string, sink executor.Sink) (executor.Result, error) {
+		resumeFn: func(_ context.Context, ref agentbackend.SessionRef, answer string, sink executor.Sink) (executor.Result, error) {
+			id := ref.Backend
 			if id != "s1" {
 				t.Errorf("id=%q", id)
 			}
@@ -231,7 +232,7 @@ func TestHandler_OffModeBackendDoesNotFetchSessionBeforeResume(t *testing.T) {
 			getCalls.Add(1)
 			return agentbackend.Session{}, nil, errors.New("unexpected GetSession")
 		},
-		resumeFn: func(context.Context, string, string, executor.Sink) (executor.Result, error) {
+		resumeFn: func(context.Context, agentbackend.SessionRef, string, executor.Sink) (executor.Result, error) {
 			resumeCalls.Add(1)
 			return executor.Result{Summary: "fallback"}, nil
 		},
@@ -253,7 +254,7 @@ func TestHandler_OffModeBackendDoesNotFetchSessionBeforeResume(t *testing.T) {
 // swallow context errors, which daemon shutdown relies on.
 func TestHandler_SessionTurnRespectsContextCancel(t *testing.T) {
 	h := &Handler{Backend: &fakeBackend{
-		resumeFn: func(ctx context.Context, _, _ string, _ executor.Sink) (executor.Result, error) {
+		resumeFn: func(ctx context.Context, _ agentbackend.SessionRef, _ string, _ executor.Sink) (executor.Result, error) {
 			select {
 			case <-ctx.Done():
 				return executor.Result{}, ctx.Err()
@@ -286,7 +287,7 @@ func TestHandler_SessionTurnReusesHotWorkerAndReportsActive(t *testing.T) {
 			created.Add(1)
 			return worker, nil
 		},
-		resumeFn: func(context.Context, string, string, executor.Sink) (executor.Result, error) {
+		resumeFn: func(context.Context, agentbackend.SessionRef, string, executor.Sink) (executor.Result, error) {
 			fallback.Add(1)
 			return executor.Result{Summary: "fallback"}, nil
 		},
@@ -416,7 +417,7 @@ func TestHandler_SessionTurnFallsBackWhenWorkerUnavailable(t *testing.T) {
 		workerFn: func(context.Context, agentbackend.Session) (agentbackend.SessionWorker, error) {
 			return nil, agentbackend.ErrSessionWorkerUnavailable
 		},
-		resumeFn: func(context.Context, string, string, executor.Sink) (executor.Result, error) {
+		resumeFn: func(context.Context, agentbackend.SessionRef, string, executor.Sink) (executor.Result, error) {
 			fallback.Add(1)
 			return executor.Result{Summary: "fallback", SessionID: "s1"}, nil
 		},
@@ -442,7 +443,7 @@ func TestHandler_SessionTurnFallsBackWhenCachedWorkerUnhealthy(t *testing.T) {
 		workerFn: func(context.Context, agentbackend.Session) (agentbackend.SessionWorker, error) {
 			return worker, nil
 		},
-		resumeFn: func(context.Context, string, string, executor.Sink) (executor.Result, error) {
+		resumeFn: func(context.Context, agentbackend.SessionRef, string, executor.Sink) (executor.Result, error) {
 			fallback.Add(1)
 			return executor.Result{Summary: "fallback", SessionID: "s1"}, nil
 		},
@@ -494,7 +495,8 @@ func TestHandler_SessionTurnFallsBackWhenHotWorkerRunUnavailable(t *testing.T) {
 		workerFn: func(context.Context, agentbackend.Session) (agentbackend.SessionWorker, error) {
 			return worker, nil
 		},
-		resumeFn: func(_ context.Context, id, answer string, sink executor.Sink) (executor.Result, error) {
+		resumeFn: func(_ context.Context, ref agentbackend.SessionRef, answer string, sink executor.Sink) (executor.Result, error) {
+			id := ref.Backend
 			fallback.Add(1)
 			if id != "s1" || answer != "again" {
 				t.Fatalf("RunResume id=%q answer=%q, want s1/again", id, answer)
@@ -548,7 +550,7 @@ func TestHandler_SessionTurnDoesNotFallbackAfterWorkerRunError(t *testing.T) {
 		workerFn: func(context.Context, agentbackend.Session) (agentbackend.SessionWorker, error) {
 			return worker, nil
 		},
-		resumeFn: func(context.Context, string, string, executor.Sink) (executor.Result, error) {
+		resumeFn: func(context.Context, agentbackend.SessionRef, string, executor.Sink) (executor.Result, error) {
 			fallback.Add(1)
 			return executor.Result{Summary: "fallback"}, nil
 		},
@@ -596,7 +598,7 @@ func TestHandler_SessionTurnDoesNotFallbackAfterWorkerRunUnavailableDetail(t *te
 		workerFn: func(context.Context, agentbackend.Session) (agentbackend.SessionWorker, error) {
 			return worker, nil
 		},
-		resumeFn: func(context.Context, string, string, executor.Sink) (executor.Result, error) {
+		resumeFn: func(context.Context, agentbackend.SessionRef, string, executor.Sink) (executor.Result, error) {
 			fallback.Add(1)
 			return executor.Result{Summary: "fallback"}, nil
 		},
@@ -781,7 +783,7 @@ func TestHandler_CloseBeforeFirstTurnDisablesWorkerCache(t *testing.T) {
 			t.Fatal("worker should not be created after Handler.Close")
 			return nil, agentbackend.ErrSessionWorkerUnavailable
 		},
-		resumeFn: func(context.Context, string, string, executor.Sink) (executor.Result, error) {
+		resumeFn: func(context.Context, agentbackend.SessionRef, string, executor.Sink) (executor.Result, error) {
 			fallback.Add(1)
 			return executor.Result{Summary: "fallback"}, nil
 		},
@@ -833,7 +835,7 @@ func TestHandler_WorkerMaxNegativeDisablesWorkerCache(t *testing.T) {
 				t.Fatal("worker should not be created when WorkerMax is negative")
 				return nil, agentbackend.ErrSessionWorkerUnavailable
 			},
-			resumeFn: func(context.Context, string, string, executor.Sink) (executor.Result, error) {
+			resumeFn: func(context.Context, agentbackend.SessionRef, string, executor.Sink) (executor.Result, error) {
 				fallback.Add(1)
 				return executor.Result{Summary: "fallback"}, nil
 			},

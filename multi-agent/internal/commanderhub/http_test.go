@@ -151,7 +151,7 @@ func TestHTTP_TreeInvalidatesDaemonCacheAfterTurnCompletes(t *testing.T) {
 			}
 			return []agentbackend.Session{{ID: "s1", Kind: agentbackend.KindClaude, Title: title}}, nil
 		},
-		resumeFn: func(context.Context, string, string, executor.Sink) (executor.Result, error) {
+		resumeFn: func(context.Context, agentbackend.SessionRef, string, executor.Sink) (executor.Result, error) {
 			mu.Lock()
 			completed = true
 			mu.Unlock()
@@ -201,7 +201,7 @@ func TestHTTP_TreeInvalidatesDaemonCacheAfterTerminalStatus(t *testing.T) {
 			}
 			return []agentbackend.Session{{ID: "s1", Kind: agentbackend.KindClaude, Title: title}}, nil
 		},
-		resumeFn: func(ctx context.Context, _ string, _ string, sink executor.Sink) (executor.Result, error) {
+		resumeFn: func(ctx context.Context, _ agentbackend.SessionRef, _ string, sink executor.Sink) (executor.Result, error) {
 			mu.Lock()
 			completed = true
 			mu.Unlock()
@@ -341,7 +341,7 @@ func TestHTTP_FileRouteInvalidRequestMaps400(t *testing.T) {
 func TestHTTP_TurnStreamsSSE(t *testing.T) {
 	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
 	srv, hub, _, o, cookie, cleanup := commanderSetup(t, resolver, "tok-alice", &tbBackend{
-		resumeFn: func(_ context.Context, _, _ string, sink executor.Sink) (executor.Result, error) {
+		resumeFn: func(_ context.Context, _ agentbackend.SessionRef, _ string, sink executor.Sink) (executor.Result, error) {
 			sink.Write("chunk", "hello")
 			sink.Close()
 			return executor.Result{Summary: "done"}, nil
@@ -468,7 +468,7 @@ func TestHTTP_TerminalStatusEventsEndTurnWithoutDisconnectOverwrite(t *testing.T
 			closeReleaseBackend := func() { closeRelease.Do(func() { close(releaseBackend) }) }
 			resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
 			srv, hub, _, o, cookie, cleanup := commanderSetup(t, resolver, "tok-alice", &tbBackend{
-				resumeFn: func(ctx context.Context, _, _ string, sink executor.Sink) (executor.Result, error) {
+				resumeFn: func(ctx context.Context, _ agentbackend.SessionRef, _ string, sink executor.Sink) (executor.Result, error) {
 					agentbackend.WriteStatus(sink, tc.statusCode, tc.text)
 					close(statusWritten)
 					select {
@@ -522,7 +522,7 @@ func TestHTTP_TurnRejectsConcurrentSameSession(t *testing.T) {
 	var startedOnce sync.Once
 	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
 	srv, hub, _, o, cookie, cleanup := commanderSetup(t, resolver, "tok-alice", &tbBackend{
-		resumeFn: func(ctx context.Context, _, _ string, _ executor.Sink) (executor.Result, error) {
+		resumeFn: func(ctx context.Context, _ agentbackend.SessionRef, _ string, _ executor.Sink) (executor.Result, error) {
 			startedOnce.Do(func() { close(started) })
 			select {
 			case <-block:
@@ -585,7 +585,7 @@ func TestHTTP_TurnRejectsConcurrentSameSession(t *testing.T) {
 func TestHTTP_TurnErrorFrameLeavesStoreError(t *testing.T) {
 	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
 	srv, hub, _, o, cookie, cleanup := commanderSetup(t, resolver, "tok-alice", &tbBackend{
-		resumeFn: func(context.Context, string, string, executor.Sink) (executor.Result, error) {
+		resumeFn: func(context.Context, agentbackend.SessionRef, string, executor.Sink) (executor.Result, error) {
 			return executor.Result{}, errors.New("backend exploded")
 		},
 	})
@@ -613,7 +613,7 @@ func TestHTTP_TurnErrorFrameLeavesStoreError(t *testing.T) {
 func TestHTTP_TurnAwaitingUserLeavesStoreAwaitingApproval(t *testing.T) {
 	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
 	srv, hub, _, o, cookie, cleanup := commanderSetup(t, resolver, "tok-alice", &tbBackend{
-		resumeFn: func(context.Context, string, string, executor.Sink) (executor.Result, error) {
+		resumeFn: func(context.Context, agentbackend.SessionRef, string, executor.Sink) (executor.Result, error) {
 			return executor.Result{
 				AwaitingUser: &executor.AskUserPayload{
 					Kind:   "request_permission",
@@ -706,7 +706,7 @@ func TestHTTP_TurnRequestCanceledKeepsGuardUntilDaemonTerminal(t *testing.T) {
 	closeBlock := func() { blockOnce.Do(func() { close(block) }) }
 	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
 	srv, hub, _, o, cookie, cleanup := commanderSetup(t, resolver, "tok-alice", &tbBackend{
-		resumeFn: func(_ context.Context, _, _ string, _ executor.Sink) (executor.Result, error) {
+		resumeFn: func(_ context.Context, _ agentbackend.SessionRef, _ string, _ executor.Sink) (executor.Result, error) {
 			startedOnce.Do(func() { close(started) })
 			<-block
 			return executor.Result{Summary: "done"}, nil

@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/yourorg/multi-agent/internal/sessioncache"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
@@ -41,12 +42,15 @@ func (b *Backend) Run(ctx context.Context, t agentbackend.Task, sink agentbacken
 }
 
 // RunResume implements agentbackend.Backend.
-func (b *Backend) RunResume(ctx context.Context, sessionID, answer string, sink agentbackend.Sink) (agentbackend.Result, error) {
-	workDir, err := b.resumeWorkDir(ctx, sessionID)
+func (b *Backend) RunResume(ctx context.Context, ref agentbackend.SessionRef, answer string, sink agentbackend.Sink) (agentbackend.Result, error) {
+	if !ref.HasBackend() {
+		return agentbackend.Result{}, fmt.Errorf("claude.Backend.RunResume: SessionRef has no backend id (Bridge=%q); cannot resume", ref.Bridge)
+	}
+	workDir, err := b.resumeWorkDir(ctx, ref.Backend)
 	if err != nil {
 		return agentbackend.Result{}, err
 	}
-	return b.executorForWorkDir(workDir).RunResume(ctx, sessionID, answer, sink)
+	return b.executorForWorkDir(workDir).RunResume(ctx, ref, answer, sink)
 }
 
 // LLM implements agentbackend.Backend.

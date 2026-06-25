@@ -173,7 +173,7 @@ func main() {
 
 	b := New(agentbackend.Config{Bin: fakeBin, WorkDir: dir}, nil)
 	sink := &captureSink{}
-	_, _ = b.RunResume(context.Background(), "sess-abc", "yes please proceed", sink)
+	_, _ = b.RunResume(context.Background(), agentbackend.NewBackend(agentbackend.KindOpencode, "", "sess-abc"), "yes please proceed", sink)
 
 	argv, err := os.ReadFile(argvPath)
 	if err != nil {
@@ -332,5 +332,21 @@ func main() {
 	mcp, _ := merged["mcp"].(map[string]any)
 	if _, ok := mcp["loom_humanloop"]; !ok {
 		t.Errorf("loom_humanloop missing in empty-user-config case; merged=%v", merged)
+	}
+}
+
+// TestExecutor_RunResume_RejectsBridgeOnlyRef proves the !ref.HasBackend()
+// guard returns an actionable error when called with a bridge-only ref,
+// without launching the opencode CLI. Per spec §RunResume implementations
+// MUST reject bridge-only / zero refs.
+func TestExecutor_RunResume_RejectsBridgeOnlyRef(t *testing.T) {
+	b := New(agentbackend.Config{Bin: "opencode-must-not-run", WorkDir: t.TempDir()}, nil)
+	bridgeOnly := agentbackend.NewBridgeOnly(agentbackend.KindOpencode, "ag-1", "cse_test_bridge")
+	_, err := b.RunResume(context.Background(), bridgeOnly, "answer", &captureSink{})
+	if err == nil {
+		t.Fatal("expected error when ref has no Backend; got nil")
+	}
+	if !strings.Contains(err.Error(), "has no backend id") {
+		t.Errorf("error should explain missing backend id, got: %v", err)
 	}
 }

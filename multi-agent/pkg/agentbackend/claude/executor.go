@@ -248,7 +248,11 @@ func (e *executor) Run(ctx context.Context, t agentbackend.Task, sink agentbacke
 //
 // Like Run, RunResume injects the humanloop MCP server so the model can pause
 // AGAIN (multi-round questions are explicitly supported).
-func (e *executor) RunResume(ctx context.Context, sessionID, answer string, sink agentbackend.Sink) (agentbackend.Result, error) {
+func (e *executor) RunResume(ctx context.Context, ref agentbackend.SessionRef, answer string, sink agentbackend.Sink) (agentbackend.Result, error) {
+	if !ref.HasBackend() {
+		return agentbackend.Result{}, fmt.Errorf("claude.RunResume: SessionRef has no backend id (Bridge=%q); cannot resume backend session", ref.Bridge)
+	}
+	sessionID := ref.Backend
 	// Build a sub-executor with --resume <sessionID> prepended to ExtraArgs,
 	// then delegate to Run. The "User answered:" prefix is the contract
 	// between us and the model: the spec's CapabilityEpilogue paragraph (Task
