@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
 type unregisterSlaveMCPTool struct{ t *Tools }
@@ -62,6 +63,10 @@ func (u *unregisterSlaveMCPTool) Call(ctx context.Context, raw json.RawMessage) 
 	}
 	// DelegateTask succeeded — degrade journal append failure to a log entry
 	// so we still wait on the slave task. See §1.1 #1 of the 2026-06-13 review.
+	var sessRef agentbackend.SessionRef
+	if resp.SessionID != "" {
+		sessRef = agentbackend.NewBridgeOnly("", cardShortID(card), resp.SessionID)
+	}
 	if err := u.t.recordDelegatedTask(delegatedTaskRecord{
 		Tool:              u.Name(),
 		Response:          resp,
@@ -70,6 +75,7 @@ func (u *unregisterSlaveMCPTool) Call(ctx context.Context, raw json.RawMessage) 
 		Skill:             "unregister_mcp",
 		Wait:              true,
 		TimeoutSec:        args.TimeoutSec,
+		SessionRef:        sessRef,
 	}); err != nil {
 		u.t.logHelperErr("driver_journal", "record_delegated_task", err)
 	}

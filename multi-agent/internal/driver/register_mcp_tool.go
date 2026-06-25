@@ -6,6 +6,7 @@ import (
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/yourorg/multi-agent/internal/buildspec"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
 type registerSlaveMCPTool struct{ t *Tools }
@@ -67,6 +68,10 @@ func (r *registerSlaveMCPTool) Call(ctx context.Context, raw json.RawMessage) (j
 	}
 	// DelegateTask succeeded — degrade journal append failure to a log entry
 	// so we still wait on the slave task. See §1.1 #1 of the 2026-06-13 review.
+	var sessRef agentbackend.SessionRef
+	if resp.SessionID != "" {
+		sessRef = agentbackend.NewBridgeOnly("", cardShortID(card), resp.SessionID)
+	}
 	if err := r.t.recordDelegatedTask(delegatedTaskRecord{
 		Tool:              r.Name(),
 		Response:          resp,
@@ -75,6 +80,7 @@ func (r *registerSlaveMCPTool) Call(ctx context.Context, raw json.RawMessage) (j
 		Skill:             "register_mcp",
 		Wait:              true,
 		TimeoutSec:        args.TimeoutSec,
+		SessionRef:        sessRef,
 	}); err != nil {
 		r.t.logHelperErr("driver_journal", "record_delegated_task", err)
 	}

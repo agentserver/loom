@@ -158,7 +158,7 @@ func TestSubmitTaskRecordsDelegatedTask(t *testing.T) {
 	require.Equal(t, "agent-1", records[0].TargetID)
 	require.Equal(t, "master-1", records[0].TargetDisplayName)
 	require.Equal(t, "chat", records[0].Skill)
-	require.Equal(t, "session-1", records[0].SessionID)
+	require.Equal(t, "session-1", records[0].SessionRef.Bridge)
 	require.False(t, records[0].Wait)
 }
 
@@ -2709,7 +2709,7 @@ func TestGetTaskWritesTerminalChildRecord(t *testing.T) {
 	rec, ok := tools.taskJournal.LatestByTaskID(taskID)
 	require.True(t, ok)
 	require.True(t, rec.Terminal)
-	require.Equal(t, "child-sess", rec.ChildSessionID)
+	require.Equal(t, "child-sess", rec.ChildSessionRef.Backend)
 	require.Equal(t, "sl2", rec.ChildAgentID)
 	require.Equal(t, "completed", rec.Status)
 }
@@ -2749,7 +2749,7 @@ func TestWaitTaskWithFailedStatusWritesTerminalRecord(t *testing.T) {
 	rec, ok := tools.taskJournal.LatestByTaskID(taskID)
 	require.True(t, ok)
 	require.True(t, rec.Terminal)
-	require.Equal(t, "fail-sess", rec.ChildSessionID)
+	require.Equal(t, "fail-sess", rec.ChildSessionRef.Backend)
 	require.Equal(t, "sl2", rec.ChildAgentID)
 	require.Equal(t, "failed", rec.Status)
 }
