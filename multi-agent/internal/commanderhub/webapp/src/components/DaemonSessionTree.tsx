@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Plus, X } from 'lucide-react';
+import { ChevronDown, ChevronRight, Plus, X } from 'lucide-react';
 import type { DaemonTree } from '../api/types';
 import type { SessionRow } from '../api/types';
 import { effectiveOwner, ownerKey, parentOwnerFor } from '../api/ownerKey';
@@ -93,10 +93,57 @@ export function DaemonSessionTree({
   onDiscardSession?: (sessionID: string) => void;
 }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  // collapsedDaemons: in-memory set of daemon_ids the user folded. Default
+  // all daemons start expanded. The render path treats the daemon holding a
+  // 'draft' pending as forced-expanded (draft visibility invariant), so the
+  // user can always reach the × discard button.
+  const [collapsedDaemons, setCollapsedDaemons] = useState<Set<string>>(new Set());
 
   function toggle(daemonID: string, sessionID: string) {
     const key = sessionTreeKey(daemonID, sessionID);
     setExpanded((current) => ({ ...current, [key]: !current[key] }));
+  }
+
+  function toggleDaemonCollapse(daemonID: string) {
+    // Refuse to collapse the daemon that owns the current draft — the user
+    // must keep the virtual row + × discard visible to release the lock.
+    if (
+      pendingSession?.phase === 'draft'
+      && pendingSession.daemonID === daemonID
+      && !collapsedDaemons.has(daemonID)
+    ) {
+      return;
+    }
+    setCollapsedDaemons((prev) => {
+      const next = new Set(prev);
+      if (next.has(daemonID)) next.delete(daemonID);
+      else next.add(daemonID);
+      return next;
+    });
+  }
+
+  function isDaemonCollapsed(daemonID: string): boolean {
+    if (!collapsedDaemons.has(daemonID)) return false;
+    // Draft visibility invariant: even if state says collapsed (e.g. stale
+    // from before the draft was created), force expanded when this daemon
+    // owns the current draft.
+    if (pendingSession?.phase === 'draft' && pendingSession.daemonID === daemonID) {
+      return false;
+    }
+    return true;
+  }
+
+  function handleCreate(daemonID: string) {
+    if (!onCreateSession) return;
+    // Auto-expand so the user immediately sees the virtual row.
+    if (collapsedDaemons.has(daemonID)) {
+      setCollapsedDaemons((prev) => {
+        const next = new Set(prev);
+        next.delete(daemonID);
+        return next;
+      });
+    }
+    onCreateSession(daemonID);
   }
 
   const rootsByDaemon = buildCrossDaemonTree(daemons);
@@ -194,22 +241,30 @@ export function DaemonSessionTree({
       {daemons.map((daemon) => (
         <section className="daemon-group" key={daemon.daemon_id}>
           <div className={`daemon-row daemon-${daemon.status}`}>
+            <button
+              type="button"
+              className="daemon-collapse-btn"
+              aria-label={`${isDaemonCollapsed(daemon.daemon_id) ? '展开' : '收起'} daemon: ${daemon.display_name || daemon.daemon_id}`}
+              onClick={() => toggleDaemonCollapse(daemon.daemon_id)}
+            >
+              {isDaemonCollapsed(daemon.daemon_id) ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+            </button>
             <span className={`online-dot online-dot-${daemon.status}`} />
             <strong>{daemon.display_name || daemon.daemon_id}</strong>
             <span>{daemon.kind}</span>
             {daemon.status === 'ok' && onCreateSession ? (() => {
-              const otherDaemonPending = pendingSession != null && pendingSession.daemonID !== daemon.daemon_id;
-              const disabledTitle = pendingSession?.phase === 'submitting'
-                ? '等待新会话出现在列表中'
-                : '先发送或丢弃当前草稿';
+              // Only DRAFT pending blocks other-daemon +. 'submitting' is
+              // opportunistic and may be evicted by a new draft (the just-
+              // committed session will still arrive on next loadTree()).
+              const otherDaemonPending = pendingSession?.phase === 'draft' && pendingSession.daemonID !== daemon.daemon_id;
               return (
                 <button
                   type="button"
                   className="daemon-new-session-btn"
                   aria-label={`新建 session: ${daemon.display_name || daemon.daemon_id}`}
                   disabled={otherDaemonPending}
-                  title={otherDaemonPending ? disabledTitle : undefined}
-                  onClick={() => onCreateSession(daemon.daemon_id)}
+                  title={otherDaemonPending ? '先发送或丢弃当前草稿' : undefined}
+                  onClick={() => handleCreate(daemon.daemon_id)}
                 >
                   <Plus size={16} />
                 </button>
@@ -218,7 +273,8 @@ export function DaemonSessionTree({
               <span className="daemon-status">{daemon.status}</span>
             )}
           </div>
-          {daemon.error ? <p className="daemon-error">{daemon.error}</p> : null}
+          {!isDaemonCollapsed(daemon.daemon_id) && daemon.error ? <p className="daemon-error">{daemon.error}</p> : null}
+          {!isDaemonCollapsed(daemon.daemon_id) ? (
           <div className="session-list">
             {isPendingRowVisible(daemon.daemon_id) && pendingSession ? (
               <div className="session-row-line session-row-line-pending" data-testid="pending-session-row">
@@ -252,6 +308,7 @@ export function DaemonSessionTree({
               renderNode(node, 0)
             )}
           </div>
+          ) : null}
         </section>
       ))}
     </aside>

@@ -273,7 +273,7 @@ func publishCard(cfg *driver.Config) error {
 }
 
 func newAgentBackend(cfg *driver.Config) (agentbackend.Backend, error) {
-	cfg.Agent.CodexHome = agentbackend.ResolveCodexHome(cfg.Agent.CodexHome, cfg.Agent.LoomHome, cfg.Credentials.ShortID)
+	cfg.Agent.CodexHome = agentbackend.ResolveCodexHome(cfg.Agent.CodexHome, cfg.Agent.LoomHome, cfg.Credentials.ShortID, cfg.Agent.WorkDir)
 	return agentbackend.New(agentbackend.Config{
 		Kind:       agentbackend.Kind(cfg.Agent.Kind),
 		Bin:        cfg.Agent.Bin,

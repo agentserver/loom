@@ -299,19 +299,87 @@ test('+ button on other daemon disabled when draft pending exists; title says �
   expect(onCreateSession).not.toHaveBeenCalled();
 });
 
-test('+ button on other daemon disabled when submitting pending exists; title says 等待新会话出现在列表中', () => {
+test('+ button on other daemon ENABLED when only submitting pending exists (no permanent lockout)', () => {
+  const onCreateSession = vi.fn();
   render(
     <DaemonSessionTree
       daemons={twoOkDaemons}
       selected={null}
       onSelect={vi.fn()}
-      onCreateSession={vi.fn()}
+      onCreateSession={onCreateSession}
       pendingSession={{ daemonID: 'd1', sessionID: 'pending-uuid', phase: 'submitting' }}
     />,
   );
   const otherBtn = screen.getByRole('button', { name: /新建 session: other/ });
-  expect(otherBtn).toBeDisabled();
-  expect(otherBtn).toHaveAttribute('title', '等待新会话出现在列表中');
+  expect(otherBtn).toBeEnabled();
+  expect(otherBtn).not.toHaveAttribute('title');
+  fireEvent.click(otherBtn);
+  expect(onCreateSession).toHaveBeenCalledWith('d2');
+});
+
+test('daemon collapse: chevron toggles visibility of session list + daemon-error', () => {
+  render(
+    <DaemonSessionTree
+      daemons={[
+        {
+          daemon_id: 'd1',
+          display_name: 'prod-codex',
+          kind: 'codex',
+          status: 'ok',
+          error: 'oops',
+          sessions: [
+            { daemon_id: 'd1', session_id: 's1', kind: 'codex', title: 'Real session', origin: 'user', turn_state: 'idle', active_worker: false, awaiting_approval: false },
+          ],
+        },
+      ]}
+      selected={null}
+      onSelect={vi.fn()}
+      onCreateSession={vi.fn()}
+    />,
+  );
+  expect(screen.getByText('Real session')).toBeInTheDocument();
+  expect(screen.getByText('oops')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: /收起 daemon: prod-codex/ }));
+  expect(screen.queryByText('Real session')).not.toBeInTheDocument();
+  expect(screen.queryByText('oops')).not.toBeInTheDocument();
+  // + button still visible
+  expect(screen.getByRole('button', { name: /新建 session: prod-codex/ })).toBeInTheDocument();
+});
+
+test('daemon collapse: clicking + on collapsed daemon re-expands before onCreateSession fires', () => {
+  const onCreateSession = vi.fn();
+  render(
+    <DaemonSessionTree
+      daemons={oneOkDaemon}
+      selected={null}
+      onSelect={vi.fn()}
+      onCreateSession={onCreateSession}
+    />,
+  );
+  fireEvent.click(screen.getByRole('button', { name: /收起 daemon: prod-codex/ }));
+  expect(screen.queryByText('Real session')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: /新建 session: prod-codex/ }));
+  expect(onCreateSession).toHaveBeenCalledWith('d1');
+  // Daemon expanded again — real session row visible
+  expect(screen.getByText('Real session')).toBeInTheDocument();
+});
+
+test('daemon collapse: cannot collapse the daemon owning a draft pending (× must stay reachable)', () => {
+  render(
+    <DaemonSessionTree
+      daemons={oneOkDaemon}
+      selected={null}
+      onSelect={vi.fn()}
+      onCreateSession={vi.fn()}
+      onDiscardSession={vi.fn()}
+      pendingSession={{ daemonID: 'd1', sessionID: 'pending-uuid', phase: 'draft' }}
+    />,
+  );
+  // Chevron click is a no-op while draft is here
+  fireEvent.click(screen.getByRole('button', { name: /收起 daemon: prod-codex/ }));
+  // Virtual draft row + × discard still visible
+  expect(screen.getByText('新建会话(待提交)')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: '丢弃草稿' })).toBeInTheDocument();
 });
 
 test('pendingSession matching a daemon inserts a virtual row at top with draft title', () => {
