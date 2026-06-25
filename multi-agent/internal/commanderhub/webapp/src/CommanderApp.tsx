@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { apiGet, isTurnInFlightError, postTurn, sessionPath } from './api/client';
 import { effectiveOwner, ownerKey, parentOwnerFor } from './api/ownerKey';
 import type { CommanderTree, SessionDetail, SessionRow, TurnState } from './api/types';
+import { randomUUID } from './api/uuid';
 import { ChatWorkspace } from './components/ChatWorkspace';
 import { DaemonSessionTree } from './components/DaemonSessionTree';
 import { FileExplorerPanel } from './components/FileExplorerPanel';
@@ -479,7 +480,10 @@ export function CommanderApp() {
       selectSession(current.daemonID, current.sessionID);
       return;
     }
-    const sid = crypto.randomUUID();
+    // randomUUID() prefers crypto.randomUUID() (secure context only — i.e.
+    // localhost / https), with a getRandomValues-based fallback so the +
+    // button works when the user accesses commander over http://<lan-ip>.
+    const sid = randomUUID();
     const next: PendingSession = { daemonID, sessionID: sid, phase: 'draft' };
     // Ordering: ref first so any synchronous reader (e.g. a re-entrant
     // call from a render-path effect) sees the new pending; then state
