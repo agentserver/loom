@@ -18,8 +18,8 @@
 - **Bridge ≠ Backend invariant.** Constructors enforce: `NewBackend` only takes backend id; `NewBridgeOnly` only takes bridge id. `WithBackend` is the only pairing path.
 - **Driver-side `SessionRef.Kind` is empty.** Driver has no backend-kind source — `agentsdk.AgentCard` has no `Kind` field, discovery card body carries no backend kind. Driver-side refs are constructed with `kind=""`. Slave-side wraps populate `Kind` via `a.b.Kind()` (Backend interface exposes it).
 - **`Backend` is required for any backend-facing operation.** `RunResume`, `chat_resume` delegation, sidecar writes, cross-daemon nesting all require `Backend != ""`. If only `Bridge` is known, caller MUST error rather than guess.
-- **Two-PR landing, strict order.** P1 (Tasks 1–8) lands first. P2 (Tasks 9–13) depends on P1's `SessionRef` type and must rebase on master after P1 lands.
-- **Tests stay green at every commit.** Each task ends with `go test ./internal/driver/... && go vet ./...` (P1) or `go test ./... && go vet ./...` (P2) passing.
+- **Two-PR landing, strict order.** P1 (Tasks 1–7) lands first. P2 (Tasks 8–12) depends on P1's `SessionRef` type and must rebase on master after P1 lands.
+- **Tests stay green at every commit.** Each task ends with `go test ./internal/driver/... && go vet ./...` (P1) or `go test ./... && go vet ./...` (P2) passing. The journal-rename + production-code + test-fixture migration ships as a single atomic Task 2 commit so the tree never compiles red.
 - **`executor.ResumeBackend` permanently stays bare `string`.** `pkg/agentbackend/backend.go:8` imports `internal/executor` for `Task`/`Sink`/`Result` aliases; reverse import would form `agentbackend → executor → agentbackend` cycle. The `cmd/slave-agent/main.go::resumeAdapter` wraps the string into `SessionRef` at the seam.
 
 ---
@@ -732,39 +732,21 @@ go test ./internal/driver/ -run TestRecord_ -count=1
 ```
 Expected: PASS for all 5 tests.
 
-- [ ] **Step 5: Run full driver suite to catch compile errors in other files that touched `TaskRecord.SessionID` / `.ChildSessionID`**
+- [ ] **Step 5: Survey expected compile breakage (no commit yet)**
 
 ```
-go test ./internal/driver/... -count=1 2>&1 | head -80
+go build ./internal/driver/... 2>&1 | head -80
 ```
-Expected: COMPILE ERRORS in `tools.go` and `tools_test.go` referencing the old field names. **That is the next task's signal.** Note all the failing file:line references — Task 3 fixes them.
+Expected: COMPILE ERRORS in `tools.go` and `tools_test.go` referencing the removed `SessionID` / `ChildSessionID` field names. **Record each `file:line` —** Task 3 fixes the production sites; Task 4 fixes the test sites. Tasks 2, 3 and 4 land as one atomic commit at the end of Task 4 so the tree never compiles red.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Stage (do NOT commit yet)**
 
 ```
 git add multi-agent/internal/driver/task_journal.go multi-agent/internal/driver/task_journal_test.go
-git commit -m "feat(driver): typed SessionRef on TaskJournal.Record with legacy classifier (#29 P1.2)
-
-TaskRecord.SessionID / ChildSessionID (bare string) are replaced by
-typed SessionRef. JSON wire shape is unchanged on the happy path:
-session_id + child_session_id continue to carry the backend id;
-new optional bridge_session_id + child_bridge_session_id siblings
-carry the bridge id (omitempty).
-
-Legacy reader: rows that have only session_id are classified by
-^cse_ prefix — values starting with cse_ go to Bridge, otherwise
-Backend. This handles the pre-refactor reality where the driver
-wrote bridge ids (resp.SessionID from agentsdk) into session_id.
-
-NOTE: this commit deliberately breaks the build for tools.go and
-tools_test.go — those files still reference the removed field
-names. They are fixed in the next commit (atomic P1 migration).
-
-Issue #29.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-"
+git status -s   # confirm: A/M for task_journal.go + task_journal_test.go only
 ```
+
+Do NOT run `git commit` here. The atomic P1 migration commit ships at Task 4 Step 5 with `tools.go` + `tools_test.go` included. This preserves the global "tests stay green at every commit" constraint and bisectability.
 
 ---
 
@@ -829,14 +811,24 @@ func (t *Tools) recordDelegatedTask(rec delegatedTaskRecord) error {
 }
 ```
 
-Now find every place that constructs a `delegatedTaskRecord` (search for `delegatedTaskRecord{`):
+Now patch every place that constructs a `delegatedTaskRecord`. There are **ten** call sites across six files, and the variable that holds the slave short-id is NOT the same at every site. Use this exact source map:
 
-```
-git grep -n "delegatedTaskRecord{" multi-agent/internal/driver/
-```
+| File:line                              | Slave-short-id source                       |
+| -------------------------------------- | ------------------------------------------- |
+| `contract_tools.go:171`                | `targetShortID` (returned by `selectTarget`)|
+| `register_mcp_tool.go:70`              | `cardShortID(card)` (`card` is the loop var)|
+| `unregister_mcp_tool.go:65`            | `cardShortID(card)`                         |
+| `slave_tools.go:166`                   | `cardShortID(card)`                         |
+| `slave_tools.go:290`                   | `cardShortID(card)`                         |
+| `slave_file_tools.go:137`              | `cardShortID(card)`                         |
+| `slave_file_tools.go:358`              | `cardShortID(card)`                         |
+| `slave_file_tools.go:440`              | `cardShortID(card)`                         |
+| `tools.go:665` (`submit_task`)         | `targetShortID`                             |
+| `tools.go:1336` (`resume_task` record) | `resumeChildAgentID` (local from `prev`)    |
 
-At each construction site, add a `SessionRef: agentbackend.NewBridgeOnly("", <targetShortID>, resp.SessionID)` line. Example pattern (submit_task site, ~line 670):
+For each site, add a `SessionRef:` line using the matching variable. Two concrete examples:
 
+`submit_task` (tools.go ~line 665), `targetShortID` already in scope:
 ```go
 if err := s.t.recordDelegatedTask(delegatedTaskRecord{
 	Tool:              s.Name(),
@@ -851,17 +843,33 @@ if err := s.t.recordDelegatedTask(delegatedTaskRecord{
 }); err != nil { ... }
 ```
 
-Apply the same `SessionRef:` line at every `delegatedTaskRecord{` site — they all have `resp` and `targetShortID` in scope at that point. If a call site happens to receive a `resp.SessionID == ""` (which `NewBridgeOnly` would panic on), wrap the call in a guard:
+`register_mcp_tool.go:70` — `card` (an `agentsdk.AgentCard`) is in scope, NOT `targetShortID`:
+```go
+if err := r.t.recordDelegatedTask(delegatedTaskRecord{
+	Tool:              r.Name(),
+	Response:          resp,
+	TargetID:          card.AgentID,
+	TargetDisplayName: card.DisplayName,
+	Skill:             "register_mcp",
+	Wait:              true,
+	TimeoutSec:        args.TimeoutSec,
+	SessionRef:        agentbackend.NewBridgeOnly("", cardShortID(card), resp.SessionID),
+}); err != nil { ... }
+```
+
+(`cardShortID(c agentsdk.AgentCard) string` already exists at `tools.go:364`; reuse it.)
+
+`NewBridgeOnly` panics on empty bridge id. The agentsdk happy path always returns a non-empty `resp.SessionID`, but the call site is downstream of a successful `DelegateTask`. If a future agentsdk version starts returning empty bridge ids the panic would crash the driver process — guard once, at the seam, by checking before construction:
 
 ```go
 var sessRef agentbackend.SessionRef
 if resp.SessionID != "" {
-	sessRef = agentbackend.NewBridgeOnly("", targetShortID, resp.SessionID)
+	sessRef = agentbackend.NewBridgeOnly("", <slaveShortIDSource>, resp.SessionID)
 }
-// ... use sessRef in the struct literal
+// SessionRef: sessRef in the literal
 ```
 
-Use the guarded form only at sites where `resp.SessionID` is genuinely optional (none expected today, but defensive).
+The current contract guarantees `resp.SessionID != ""`, so the guard is defensive. Apply it only where the call site is on a non-error path that mutates the result before reaching `recordDelegatedTask` (none in the current tree); otherwise the inline `NewBridgeOnly(...)` form is fine.
 
 - [ ] **Step 2: Update `recordTerminalChild`**
 
@@ -920,45 +928,92 @@ Change to:
 
 Both fields carry the same bridge value.
 
-- [ ] **Step 4: Fix `wait_task` response (~line 781) and `get_task` response (~line 900)**
+- [ ] **Step 4: Fix `get_task` (~line 757–790) and `wait_task` (~line 870–950) responses — BOTH branches**
 
-Find the line:
+Each tool has TWO terminal response structs declared inline: an `awaiting_user` branch and a normal (`final` / completed) branch. Today only the `awaiting_user` branch surfaces `SessionID`; Task 4's `TestWaitTask_BridgeAndBackendBothInResponse` uses a `kind:"final"` fixture, so the normal branch must also emit `session_id` + `bridge_session_id`. Patch BOTH branches in BOTH tools.
+
+**4a. `get_task` awaiting_user (`tools.go:769–786`)** — replace:
 ```go
-SessionID:     firstNonEmpty(markerSessionID, info.SessionID),
-```
-
-(`markerSessionID` is the local around line 757 of `wait_task`; `sessionIDFromMarker(...)` is called directly in `get_task` at line 900.)
-
-For `wait_task`, replace:
-```go
-SessionID:     firstNonEmpty(markerSessionID, info.SessionID),
+return json.Marshal(struct {
+	Status        string          `json:"status"`
+	IsFinal       bool            `json:"is_final"`
+	SessionID     string          `json:"session_id"`
+	CurrentTaskID string          `json:"current_task_id"`
+	TargetID      string          `json:"target_id"`
+	Question      json.RawMessage `json:"question"`
+}{
+	Status:  "awaiting_user",
+	IsFinal: false,
+	// markerSessionID comes from the slave's chat backend (codex thread id);
+	// info.SessionID is agentserver's task-bridge `cse_<uuid>` and would
+	// not resume the right session. Prefer the marker; fall back only when
+	// the marker is missing (e.g. observer disabled, no wrapper recorded).
+	SessionID:     firstNonEmpty(markerSessionID, info.SessionID),
+	CurrentTaskID: taskID,
+	TargetID:      info.TargetID,
+	Question:      question,
+})
 ```
 with:
 ```go
-SessionID:       markerSessionID,        // backend (empty if marker was absent)
-BridgeSessionID: info.SessionID,         // bridge from agentsdk
-```
-
-The containing response struct (search for the struct definition around line 770 — declared inline as `var resp struct { ... }`) needs a new field. Find the inline declaration:
-
-```go
-var resp struct {
-	Status        string          `json:"status"`
-	IsFinal       bool            `json:"is_final"`
-	Output        string          `json:"output,omitempty"`
-	SessionID     string          `json:"session_id,omitempty"`
-	TargetID      string          `json:"target_id,omitempty"`
-	// ... other fields ...
-}
-```
-
-Add the new field next to `SessionID`:
-```go
+return json.Marshal(struct {
+	Status          string          `json:"status"`
+	IsFinal         bool            `json:"is_final"`
 	SessionID       string          `json:"session_id,omitempty"`
 	BridgeSessionID string          `json:"bridge_session_id,omitempty"`
+	CurrentTaskID   string          `json:"current_task_id"`
+	TargetID        string          `json:"target_id"`
+	Question        json.RawMessage `json:"question"`
+}{
+	Status:          "awaiting_user",
+	IsFinal:         false,
+	// session_id is the backend-native id from the slave's kind marker.
+	// bridge_session_id is the agentserver task-bridge id. Two siblings;
+	// consumers pick the one they need.
+	SessionID:       markerSessionID,
+	BridgeSessionID: info.SessionID,
+	CurrentTaskID:   taskID,
+	TargetID:        info.TargetID,
+	Question:        question,
+})
 ```
 
-Repeat the same change in `get_task` response (~line 900) — the inline struct should also be extended.
+**4b. `get_task` normal/final (`tools.go:798–815`)** — locate the trailing `json.Marshal(struct{...})` block below the `unwrapped` handling. Add two fields next to `Status`:
+```go
+return json.Marshal(struct {
+	Status              string `json:"status"`
+	SessionID           string `json:"session_id,omitempty"`
+	BridgeSessionID     string `json:"bridge_session_id,omitempty"`
+	Output              string `json:"output"`
+	FailureReason       string `json:"failure_reason"`
+	LatestProgress      string `json:"latest_progress"`
+	LatestProgressPhase string `json:"latest_progress_phase"`
+	LatestProgressAt    string `json:"latest_progress_at"`
+	FinalOutput         string `json:"final_output"`
+	IsFinal             bool   `json:"is_final"`
+}{
+	Status:              info.Status,
+	SessionID:           markerSessionID,
+	BridgeSessionID:     info.SessionID,
+	Output:              output,
+	FailureReason:       info.FailureReason,
+	LatestProgress:      progress.LatestProgress,
+	LatestProgressPhase: progress.LatestProgressPhase,
+	LatestProgressAt:    progress.LatestProgressAt,
+	FinalOutput:         finalOutput,
+	IsFinal:             progress.IsFinal || isTerminalStatus(info.Status),
+})
+```
+
+**4c. `wait_task` awaiting_user (`tools.go:887–905`)** — same shape as 4a. The current local is computed inline (`firstNonEmpty(sessionIDFromMarker(info.Output, string(info.Result), progress.FinalOutput), info.SessionID)`). First hoist it to a named local right BEFORE the `if isAwaiting && info.Status == "completed"` block:
+```go
+waitMarkerSessionID := sessionIDFromMarker(info.Output, string(info.Result), progress.FinalOutput)
+```
+Then replace the inline response struct with the same dual-field shape as 4a, using `waitMarkerSessionID` and `info.SessionID`.
+
+**4d. `wait_task` normal/final (`tools.go:940–960` — the trailing `json.Marshal(struct{...})` below `output := unwrappedOutput`)** — add `SessionID` + `BridgeSessionID` next to `Status`, populated from `waitMarkerSessionID` and `info.SessionID`. Same pattern as 4b.
+
+After all four edits, `firstNonEmpty(markerSessionID, info.SessionID)` should no longer appear in `tools.go` (`git grep firstNonEmpty multi-agent/internal/driver/tools.go` returns only the `resume_task` site, fixed in Step 5).
 
 - [ ] **Step 5: Rewrite `resume_task` (~line 1290)**
 
@@ -1001,42 +1056,22 @@ _ = ref // SessionRef constructed for type-discipline; wire JSON carries the pla
 
 If the linter complains about `_ = ref`, drop that line and just leave the construction effect: the value of `ref.Backend` is what gets used; `ref` itself does not need to be referenced again at runtime.
 
-- [ ] **Step 6: Build the package**
+- [ ] **Step 6: Build the package (do NOT commit yet)**
 
 ```
 cd multi-agent
-go vet ./internal/driver/
+go build ./internal/driver/
 ```
-Expected: no compile errors in `tools.go`. Test file (`tools_test.go`) will still error — fixed in Task 4.
+Expected: no compile errors in `tools.go`. Test file (`tools_test.go`) will still error — fixed in Task 4. Atomic commit ships at Task 4 Step 5.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7: Stage (no commit)**
 
 ```
 git add multi-agent/internal/driver/tools.go
-git commit -m "feat(driver): migrate tools.go to typed SessionRef (#29 P1.3)
-
-Five touch sites:
-- delegatedTaskRecord.SessionRef holds the bridge wrap from agentsdk
-  (NewBridgeOnly), persisted into TaskRecord.SessionRef.
-- recordTerminalChild writes child backend id into
-  TaskRecord.ChildSessionRef.Backend (was ChildSessionID string).
-- submit_task response emits both session_id (bridge, back-compat)
-  and bridge_session_id (new explicit alias).
-- wait_task / get_task responses split: session_id (backend, may be
-  empty) + bridge_session_id (bridge, may be empty). No more
-  firstNonEmpty(marker, bridge) fallback.
-- resume_task validates kw.SessionID != \"\" with actionable error;
-  no longer falls back to info.SessionID (bridge id) — this is the
-  #29 bug fix.
-
-tools_test.go still errors against this change; fixed in next commit
-(planned migration to atomic deliverable).
-
-Issue #29.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-"
+git status -s
 ```
+
+Do NOT commit. The atomic P1 migration commit ships at Task 4 Step 5 after `tools_test.go` is also green.
 
 ---
 
@@ -1095,24 +1130,65 @@ Expected: PASS for all existing tests.
 
 If tests fail because the assertion expected the old `firstNonEmpty` behavior, the test was encoding the bug. Fix the assertion to match the new wire contract (per the global-constraints "Wire format additive-only" exception list).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Atomic P1 migration commit (covers Tasks 2 + 3 + 4)**
+
+This is the first green commit of the P1 branch — `task_journal.go`, `task_journal_test.go`, `tools.go`, the eight other `delegatedTaskRecord{}` call sites (`contract_tools.go`, `register_mcp_tool.go`, `unregister_mcp_tool.go`, `slave_tools.go`, `slave_file_tools.go`), and `tools_test.go` all land together.
 
 ```
-git add multi-agent/internal/driver/tools_test.go
-git commit -m "test(driver): migrate tools_test.go fixtures to typed SessionRef (#29 P1.4)
+cd multi-agent
+go vet ./internal/driver/
+go test ./internal/driver/... -count=1
+```
+Expected: vet clean, ALL tests PASS.
 
-Mechanical migration of existing fixtures:
-- TaskRecord literals use SessionRef / ChildSessionRef instead of
-  removed SessionID / ChildSessionID fields.
-- Reads of record.SessionID become record.SessionRef.Backend (or
-  .Bridge where the original test intent was a cse_ value).
-- Response assertions for wait_task / get_task updated where the
-  test had encoded the firstNonEmpty fallback semantics — those
-  fixtures previously asserted bridge-on-marker-absent; now the
-  response splits session_id (backend, may be empty) from
-  bridge_session_id (explicit bridge alias).
+```
+git add multi-agent/internal/driver/task_journal.go \
+        multi-agent/internal/driver/task_journal_test.go \
+        multi-agent/internal/driver/tools.go \
+        multi-agent/internal/driver/contract_tools.go \
+        multi-agent/internal/driver/register_mcp_tool.go \
+        multi-agent/internal/driver/unregister_mcp_tool.go \
+        multi-agent/internal/driver/slave_tools.go \
+        multi-agent/internal/driver/slave_file_tools.go \
+        multi-agent/internal/driver/tools_test.go
+git commit -m "feat(driver): typed SessionRef across journal + tools (#29 P1.2)
 
-go test ./internal/driver/... is green at this commit.
+Atomic migration — green at this commit.
+
+Journal:
+- TaskRecord.SessionID / ChildSessionID (bare string) replaced by
+  typed SessionRef / ChildSessionRef.
+- Custom MarshalJSON flattens to sibling wire fields
+  (session_id + bridge_session_id + child_session_id +
+  child_bridge_session_id, omitempty).
+- UnmarshalJSON's legacy reader classifies single-field rows by
+  ^cse_ prefix — values starting with cse_ go to Bridge, otherwise
+  Backend. Modern rows with an explicit bridge_session_id sibling
+  bypass the classifier.
+
+Production tools.go + 8 other call sites:
+- delegatedTaskRecord.SessionRef holds the bridge wrap from
+  agentsdk (NewBridgeOnly), persisted into TaskRecord.SessionRef.
+  Slave-short-id source varies per site (targetShortID,
+  cardShortID(card), resumeChildAgentID).
+- recordTerminalChild writes the child backend id into
+  TaskRecord.ChildSessionRef.Backend.
+- submit_task response emits both session_id (bridge,
+  back-compat) and bridge_session_id (new explicit alias).
+- wait_task / get_task responses split into session_id (backend
+  from kind marker, may be empty) + bridge_session_id (bridge
+  from agentsdk, may be empty). Both awaiting_user and final
+  branches updated. firstNonEmpty(marker, bridge) is gone.
+- resume_task validates kw.SessionID != \"\" and returns an
+  actionable error; no longer falls back to info.SessionID
+  (the bridge id) — this is the #29 bug fix.
+
+Tests:
+- task_journal_test.go: flatten + legacy classifier +
+  round-trip coverage.
+- tools_test.go: existing fixtures migrated to typed SessionRef.
+  Response assertions adjusted where they encoded the old
+  firstNonEmpty fallback behavior.
 
 Issue #29.
 
@@ -1144,65 +1220,93 @@ Append to `multi-agent/internal/driver/tools_test.go`:
 // at the source, not buried inside the slave's "session not found" later.
 func TestResumeTask_RefusesEmptyMarker(t *testing.T) {
 	const (
-		taskID    = "task_test_29"
-		bridgeID  = "cse_fake_bridge_id"
-		slaveID   = "ag-slave"
-		targetID  = "sandbox-target"
+		taskID   = "task_test_29"
+		bridgeID = "cse_fake_bridge_id"
+		slaveID  = "ag-slave"
+		targetID = "sandbox-target"
 	)
 
-	// Set up: prior task exists in agentserver, but its TaskInfo.Output /
-	// .Result lacks a kind marker session_id. info.SessionID is the bridge.
+	// Capture every DelegateTask call so we can prove resume_task did NOT
+	// dispatch chat_resume with the bridge id (the pre-PR buggy path).
+	var delegateCalls []agentsdk.DelegateTaskRequest
+
 	sdk := &fakeSDK{
-		getTaskByID: map[string]*agentsdk.TaskInfo{
-			taskID: {
+		// Match the existing fixture shape: getTaskFunc is a single callback
+		// keyed on (id, includeOutput); switch on the requested id.
+		getTaskFunc: func(id string, includeOutput bool) (*agentsdk.TaskInfo, error) {
+			if id != taskID {
+				return nil, fmt.Errorf("unexpected GetTask id %q", id)
+			}
+			return &agentsdk.TaskInfo{
 				TaskID:    taskID,
 				Status:    "completed",
 				SessionID: bridgeID, // bridge id — must NOT be used for resume
 				TargetID:  targetID,
-				// Result is a valid awaiting_user payload with NO session_id.
-				Result: json.RawMessage(`{"kind":"awaiting_user","question":{"kind":"ask_user"}}`),
-			},
+				// Output carries an awaiting_user marker with NO session_id.
+				Output: `{"kind":"awaiting_user","question":{"kind":"ask_user"}}`,
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			delegateCalls = append(delegateCalls, req)
+			return &agentsdk.DelegateTaskResponse{TaskID: "should-never-happen", Status: "submitted"}, nil
 		},
 	}
 	tools := newTestTools(t, sdk)
+	// Bind a parent thread so resume_task passes its bind guard. Match the
+	// existing test convention used by TestResumeTaskHappy (the same file
+	// already calls tools.BindThread on a UUID-shaped string).
+	_, err := tools.BindThread(context.Background(), "019ef000-0000-0000-0000-000000000000")
+	require.NoError(t, err)
+
 	// Pre-populate the journal so resume_task can recover slaveShortID.
-	_ = tools.taskJournal.Append(TaskRecord{
+	require.NoError(t, tools.taskJournal.Append(TaskRecord{
 		Tool:         "submit_task",
 		TaskID:       taskID,
 		TargetID:     targetID,
 		ChildAgentID: slaveID,
-	})
-	// Driver must be bound for resume_task to pass the bind guard.
-	tools.parentThread.Store(strPtr("019ef000-0000-0000-0000-000000000000"))
+	}))
 
-	r := &resumeTaskTool{t: tools}
-	argsRaw := json.RawMessage(`{"last_task_id":"task_test_29","answer":"y"}`)
-	_, err := r.Call(context.Background(), argsRaw)
-	if err == nil {
-		t.Fatal("expected error when slave marker has no backend session id; got nil")
-	}
-	if mce, ok := err.(*MCPToolError); !ok || !strings.Contains(mce.Message, "slave never reported a backend session id") {
-		t.Fatalf("expected actionable bridge-fallback error, got: %v", err)
-	}
+	_, err = toolByName(t, tools, "resume_task").Call(context.Background(),
+		json.RawMessage(`{"last_task_id":"task_test_29","answer":"y"}`))
+	require.Error(t, err, "expected error when slave marker has no backend session id")
 
-	// CRITICAL: assert sdk.DelegateTask was NOT called with chat_resume +
-	// the bridge id (the pre-PR buggy behavior).
-	for _, call := range sdk.delegateCalls {
-		if call.Skill == "chat_resume" {
-			t.Errorf("expected zero chat_resume delegations; got one with session_id in prompt body. Prompt: %s", call.Prompt)
-		}
+	mce, ok := err.(*MCPToolError)
+	require.True(t, ok, "expected *MCPToolError, got %T", err)
+	require.Contains(t, mce.Message, "slave never reported a backend session id",
+		"expected actionable bridge-fallback error")
+
+	// CRITICAL: assert DelegateTask was NEVER called with chat_resume + the
+	// bridge id — that is the pre-PR buggy behavior this test guards.
+	for _, call := range delegateCalls {
+		require.NotEqual(t, "chat_resume", call.Skill,
+			"resume_task must not delegate chat_resume when only the bridge id is known")
 	}
 }
-
-func strPtr(s string) *string { return &s }
 ```
 
-Notes:
-- `fakeSDK.getTaskByID` and `delegateCalls` — verify they exist in the existing test fixture (`tools_test.go`). If they don't, adapt to whatever fields the existing fixture exposes (e.g. `fakeSDK.getTaskFn func(id string) (*agentsdk.TaskInfo, error)` and a slice of captured `DelegateTaskRequest`).
-- `tools.parentThread` is the bind-thread state from PR #31; tests in this file already set it via similar patterns — match the existing convention.
-- `strPtr` is a local helper because `atomic.Pointer[string].Store` takes a `*string`.
+Add to test-file imports (top of `tools_test.go`) only if missing:
+```go
+import (
+	"fmt"
+	// ...existing imports...
+)
+```
 
-If `fakeSDK` shape in this repo doesn't match the names above, look at the most recent existing test (e.g. `TestResumeTaskHappy`) to see the right pattern; rewrite the test using the same helpers but with the empty-marker fixture.
+Real fixture conventions used here (verified against the current
+`tools_test.go`):
+- `fakeSDK.getTaskFunc` and `fakeSDK.delegateFunc` are the actual field
+  names (see the struct at `tools_test.go:25`). There is NO
+  `getTaskByID` map and NO `delegateCalls` slice on the struct;
+  capture call history in a local slice inside `delegateFunc`.
+- `newTestTools(t, sdk)` is the constructor (`tools_test.go:80`).
+- `tools.BindThread(ctx, thr)` is how `TestSubmitTaskRecordsDelegatedTask`
+  (~`tools_test.go:147`) sets the bind state — reuse it instead of
+  manipulating `tools.parentThread` directly.
+- `toolByName(t, tools, "resume_task")` is the dispatcher helper used by
+  the rest of the file; do not construct `&resumeTaskTool{t: tools}` by
+  hand, that bypasses tool registration.
+- `require.*` is in scope: the file already imports
+  `github.com/stretchr/testify/require`.
 
 - [ ] **Step 2: Run the test**
 
@@ -1265,7 +1369,7 @@ Append to `multi-agent/internal/driver/tools_test.go`:
 // (from agentserver's TaskInfo) as sibling fields. Pre-PR the response
 // carried only session_id with firstNonEmpty(marker, bridge) semantics —
 // consumers couldn't distinguish which they got. This test pins the new
-// explicit two-field shape.
+// explicit two-field shape on the kind:"final" terminal branch (Task 3 §4d).
 func TestWaitTask_BridgeAndBackendBothInResponse(t *testing.T) {
 	const (
 		taskID    = "task_test_wait"
@@ -1273,39 +1377,46 @@ func TestWaitTask_BridgeAndBackendBothInResponse(t *testing.T) {
 		backendID = "019ef000-0000-0000-0000-000000000abc"
 	)
 	sdk := &fakeSDK{
-		getTaskByID: map[string]*agentsdk.TaskInfo{
-			taskID: {
+		getTaskFunc: func(id string, includeOutput bool) (*agentsdk.TaskInfo, error) {
+			if id != taskID {
+				return nil, fmt.Errorf("unexpected GetTask id %q", id)
+			}
+			return &agentsdk.TaskInfo{
 				TaskID:    taskID,
 				Status:    "completed",
 				SessionID: bridgeID,
-				Output:    `{"kind":"final","session_id":"` + backendID + `","summary":"done"}`,
-			},
+				// Kind:"final" terminal marker carrying the backend session id;
+				// this exercises Task 3 §4d (the normal/final branch update).
+				Output: `{"kind":"final","session_id":"` + backendID + `","summary":"done"}`,
+			}, nil
 		},
 	}
 	tools := newTestTools(t, sdk)
-	w := &waitTaskTool{t: tools}
-	argsRaw := json.RawMessage(`{"task_id":"task_test_wait","timeout_sec":1}`)
-	resp, err := w.Call(context.Background(), argsRaw)
-	if err != nil {
-		t.Fatalf("wait_task: %v", err)
-	}
+	_, err := tools.BindThread(context.Background(), "019ef000-0000-0000-0000-000000000abc")
+	require.NoError(t, err)
+
+	resp, err := toolByName(t, tools, "wait_task").Call(context.Background(),
+		json.RawMessage(`{"task_id":"task_test_wait","timeout_sec":1}`))
+	require.NoError(t, err, "wait_task")
+
 	var decoded struct {
 		SessionID       string `json:"session_id"`
 		BridgeSessionID string `json:"bridge_session_id"`
+		Status          string `json:"status"`
 	}
-	if err := json.Unmarshal(resp, &decoded); err != nil {
-		t.Fatalf("decode response: %v\nraw: %s", err, resp)
-	}
-	if decoded.SessionID != backendID {
-		t.Errorf("session_id = %q, want %q (backend from kind marker)", decoded.SessionID, backendID)
-	}
-	if decoded.BridgeSessionID != bridgeID {
-		t.Errorf("bridge_session_id = %q, want %q (bridge from agentsdk)", decoded.BridgeSessionID, bridgeID)
-	}
+	require.NoError(t, json.Unmarshal(resp, &decoded), "decode response: %s", resp)
+	require.Equal(t, backendID, decoded.SessionID,
+		"session_id should be the backend id from the kind marker")
+	require.Equal(t, bridgeID, decoded.BridgeSessionID,
+		"bridge_session_id should be the agentsdk bridge id")
 }
 ```
 
-(Adapt `fakeSDK.getTaskByID` and helper names to match the actual fixture in this repo; pattern same as Task 5.)
+Real fixture conventions (same as Task 5):
+- `getTaskFunc` is the existing field on `fakeSDK`, NOT `getTaskByID`.
+- Use `toolByName(t, tools, "wait_task")`, not a hand-constructed
+  `&waitTaskTool{t: tools}`.
+- `BindThread` is reused to satisfy the bind guard on the tool dispatcher.
 
 - [ ] **Step 2: Run the test**
 
