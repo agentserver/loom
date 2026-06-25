@@ -1611,7 +1611,7 @@ cd multi-agent
 go vet ./pkg/agentbackend/...
 go build ./pkg/agentbackend/...
 ```
-Expected: PASS. Test files within `pkg/agentbackend/*/*_test.go` and `internal/commanderhub/proxy_test.go` will still error — they ship as part of the **atomic P2 commit at Task 9 Step 5** so the tree never compiles red. Mirror of P1's Task 2/3/4 atomic pattern.
+Expected: PASS. Test files within `pkg/agentbackend/*/*_test.go` and `internal/commanderhub/proxy_test.go`, plus the production callers in `cmd/slave-agent/main.go` and `internal/commander/handler.go` (with their tests), will still error against the new signature. They all ship together as the **atomic P2 commit at Task 11 Step 4** so the tree never compiles red. Mirror of P1's Task 2/3/4 atomic pattern, scaled to cover every site touched by the interface signature change.
 
 - [ ] **Step 5: Stage (do NOT commit yet)**
 
@@ -1628,7 +1628,7 @@ git add multi-agent/pkg/agentbackend/backend.go \
 git status -s
 ```
 
-Do NOT commit. The atomic P2 commit (interface + test stub migration + negative-guard tests) ships at Task 9 Step 5. Subsequent tasks (10–12) cover the slave/commander wrap seams and the P2 wrap-up in their own commits.
+Do NOT commit. The atomic P2 commit (interface + every caller + every test) ships at Task 11 Step 4 because the slave-agent and commander production code also breaks under the new signature.
 
 ---
 
@@ -1729,9 +1729,7 @@ go test ./internal/commanderhub/... -count=1
 ```
 Expected: PASS.
 
-- [ ] **Step 5: Atomic P2 commit (covers Tasks 8 + 9)**
-
-This is the first green commit of the P2 branch — interface signature change + every test stub migration + negative-guard coverage land together. Same pattern as the P1 Task 4 Step 5 atomic commit.
+- [ ] **Step 5: Stage (do NOT commit yet)**
 
 ```
 git add multi-agent/pkg/agentbackend/codex/executor_test.go \
@@ -1742,35 +1740,10 @@ git add multi-agent/pkg/agentbackend/codex/executor_test.go \
         multi-agent/pkg/agentbackend/opencode/executor_test.go \
         multi-agent/pkg/agentbackend/opencode/backend_resume_test.go \
         multi-agent/internal/commanderhub/proxy_test.go
-# Production files from Task 8 are already staged.
-git commit -m "feat(agentbackend): Backend.RunResume takes SessionRef (#29 P2.1)
-
-Atomic interface promotion — green at this commit.
-
-Interface:
-- Backend.RunResume signature changes from (ctx, sessionID,
-  answer string, sink) to (ctx, ref SessionRef, answer, sink).
-- Every implementation (codex / claude / opencode + nilBackend
-  stub) starts with a !ref.HasBackend() guard that returns an
-  actionable error if the caller passes a bridge-only ref.
-- appserver_worker fallback wraps sessionID via NewBackend at
-  the seam (string still in scope from app-server state).
-
-Tests:
-- Every existing RunResume call site at the test layer
-  (executor_test.go, backend_resume_test.go,
-  appserver_worker_test.go, commanderhub/proxy_test.go) gets
-  the typed-ref construction.
-- Each backend gets a new negative-coverage test
-  (TestExecutor_RunResume_RejectsBridgeOnlyRef) that proves
-  the guard returns the actionable error without launching the
-  CLI.
-
-Issue #29.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-"
+git status -s
 ```
+
+Do NOT commit. Production callers in `cmd/slave-agent` and `internal/commander` still don't compile against the new signature; Tasks 10 + 11 fix them and Task 11 Step 4 is the first atomic P2 commit.
 
 ---
 
@@ -1819,38 +1792,22 @@ func (a resumeAdapter) RunResume(ctx context.Context, sid, ans string, s executo
 
 Ensure `fmt` is imported at the top of `main.go` (likely already is).
 
-- [ ] **Step 2: Build the binary**
+- [ ] **Step 2: Build the binary (do NOT commit yet)**
 
 ```
 cd multi-agent
 go build ./cmd/slave-agent/
 ```
-Expected: success.
+Expected: success. (`internal/commander` still red — fixed in Task 11.)
 
-- [ ] **Step 3: Run the slave-agent suite (if any)**
-
-```
-go test ./cmd/slave-agent/... -count=1
-```
-Expected: PASS (no tests in this dir likely; just verifies compile).
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Stage (no commit)**
 
 ```
 git add multi-agent/cmd/slave-agent/main.go
-git commit -m "fix(slave-agent): resumeAdapter wraps string→SessionRef at backend seam (#29 P2.3)
-
-The seam between internal/executor.ResumeBackend (string, stays this
-way to avoid an import cycle) and the now-typed
-agentbackend.Backend.RunResume(SessionRef). Validates sid != \"\"
-before wrapping (returning an error rather than letting NewBackend
-panic on empty input from a higher-level caller).
-
-Issue #29.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-"
+git status -s
 ```
+
+Do NOT commit. The atomic P2 commit ships at Task 11 Step 4 after `internal/commander` is also green.
 
 ---
 
@@ -1893,25 +1850,62 @@ if gotRef.Backend != "expected-id" { ... }
 
 And update any `fakeBackend.RunResume` stub signature to take `SessionRef`.
 
-- [ ] **Step 3: Run the suite**
+- [ ] **Step 3: Run the affected suites (all should now be green together)**
 
 ```
 cd multi-agent
+go vet ./...
+go test ./pkg/agentbackend/... -count=1
 go test ./internal/commander/... -count=1
+go test ./internal/commanderhub/... -count=1
+go test ./cmd/slave-agent/... -count=1
 ```
-Expected: PASS.
+Expected: PASS across all. If anything still errors, that's an overlooked caller — fix it now and include in the atomic commit below.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: Atomic P2 commit (covers Tasks 8 + 9 + 10 + 11)**
+
+Stage the commander files alongside the already-staged backend + slave files, then commit everything as one green commit.
 
 ```
 git add multi-agent/internal/commander/handler.go multi-agent/internal/commander/handler_test.go
-git commit -m "fix(commander): SessionTurn validates+wraps id into SessionRef (#29 P2.4)
+git status -s  # should list: backend.go, backend_test.go, codex/{executor,backend,appserver_worker,executor_test,backend_resume_test,appserver_worker_test}.go, claude/{executor,backend,executor_test,backend_resume_test}.go, opencode/{executor,backend,executor_test,backend_resume_test}.go, internal/commanderhub/proxy_test.go, cmd/slave-agent/main.go, internal/commander/handler.go, internal/commander/handler_test.go
+git commit -m "feat(agentbackend): Backend.RunResume takes SessionRef (#29 P2.1)
 
-Both Backend.RunResume call sites in handler.go now validate id != \"\"
-and wrap into NewBackend(h.Backend.Kind(), \"\", id) before calling
-the typed interface. Empty AgentID is intentional — Handler serves
-only its own agent's sessions; no cross-agent disambiguation needed.
-Test stubs updated to match.
+Atomic interface promotion — green at this commit. Covers Tasks 8 + 9 + 10 + 11.
+
+Interface (Task 8):
+- Backend.RunResume signature changes from (ctx, sessionID,
+  answer string, sink) to (ctx, ref SessionRef, answer, sink).
+- Every implementation (codex / claude / opencode + nilBackend
+  stub) starts with a !ref.HasBackend() guard that returns an
+  actionable error if the caller passes a bridge-only ref.
+- appserver_worker fallback wraps sessionID via NewBackend at
+  the seam (string still in scope from app-server state).
+
+Backend tests (Task 9):
+- Every test that previously called RunResume(ctx, \"literal\", ...)
+  or implemented a fake Backend stub is migrated to the typed-ref
+  construction.
+- Each backend gets a new negative-coverage test
+  (TestExecutor_RunResume_RejectsBridgeOnlyRef) that proves the
+  guard returns the actionable error without launching the CLI.
+
+Slave seam (Task 10):
+- cmd/slave-agent.resumeAdapter is the wrap seam between
+  internal/executor.ResumeBackend (bare string, permanently —
+  the package imports executor for Task/Sink/Result aliases, so
+  the reverse import would cycle) and the typed
+  agentbackend.Backend.RunResume(SessionRef) above. Validates
+  sid != \"\" before wrapping.
+
+Commander seam (Task 11):
+- Both Backend.RunResume call sites in handler.go now validate
+  id != \"\" and wrap into NewBackend(h.Backend.Kind(), \"\", id)
+  before calling the typed interface. Empty AgentID is
+  intentional — Handler serves only its own agent's sessions;
+  no cross-agent disambiguation needed.
+- Test stubs (fakeBackend, resumeOnlyBackend) and any assertion
+  on the captured RunResume id updated to match.
 
 Issue #29.
 
