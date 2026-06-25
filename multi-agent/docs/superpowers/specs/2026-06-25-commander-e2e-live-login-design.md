@@ -78,10 +78,21 @@ Key settings:
 - `baseURL: 'http://127.0.0.1:18091'`
 - `globalSetup: './src/e2e/live-login.ts'` (helper's default export)
 - `use.storageState: STORAGE_STATE_PATH` — a const imported from
-  `./src/e2e/live-login.ts`, resolved against `__dirname` to
-  `<repo>/multi-agent/tests/prod_test/.playwright/observer-session.json`.
+  `./src/e2e/live-login.ts`. The webapp's `package.json` has
+  `"type": "module"`, so `__dirname` is undefined — the const uses
+  the ESM idiom:
+  ```ts
+  import { fileURLToPath } from 'node:url';
+  import { dirname, resolve } from 'node:path';
+  const HERE = dirname(fileURLToPath(import.meta.url));
+  // src/e2e → src → webapp → commanderhub → internal → multi-agent
+  export const STORAGE_STATE_PATH = resolve(
+    HERE, '../../../../../tests/prod_test/.playwright/observer-session.json'
+  );
+  ```
+  Resolves to `<repo>/multi-agent/tests/prod_test/.playwright/observer-session.json`.
   globalSetup writes to that same path. Both config and helper
-  reference the same exported const so they cannot drift.
+  import the const so they cannot drift.
 - `testMatch: 'commander-live.spec.ts'` — pin so the existing
   `commander.spec.ts` mocked suite does NOT get picked up under
   `testDir: './src/e2e'`.
@@ -99,12 +110,10 @@ Key settings:
 Default-export an async function with the Playwright globalSetup
 signature `(config: FullConfig) => Promise<void>`. Behavior:
 
-1. Use the exported `STORAGE_STATE_PATH` constant for both the cache
-   path and the eventual storageState write target. Computed via
-   `path.resolve(__dirname, '../../tests/prod_test/.playwright/observer-session.json')`
-   so both the config and the spec resolve to the SAME on-disk file
-   under `multi-agent/tests/prod_test/.playwright/`. `mkdir -p` the
-   parent dir on the first write.
+1. Use the exported `STORAGE_STATE_PATH` constant (defined as shown
+   in §playwright.live.config.ts above). Both the config and the
+   helper import it, so they always resolve to the same on-disk
+   file. `mkdir -p` the parent dir on the first write.
 2. **TCP probe** `127.0.0.1:18091` and `127.0.0.1:18092` with a
    2-second timeout each. If either is down, throw with a clear
    message telling the user to start observer + driver first. Don't
@@ -220,16 +229,32 @@ Steps:
    backend didn't mint a fresh ID, or backend echoed the
    placeholder.)
 
-6. Wait up to 30 seconds for the daemon-tree to refresh and contain
+6. **Pre-arm the detail-fetch waiter NOW, before any tree
+   assertion.** The frontend's [selected, tree, pendingSession]
+   effect can fire the `GET /api/commander/daemons/<daemonID>/sessions/<realID>`
+   immediately after rebind (before Playwright even gets a chance
+   to inspect the DOM). Attaching the waiter after the tree-row
+   assertion would race:
+
+   ```ts
+   const detailPromise = page.waitForResponse(
+     (resp) =>
+       resp.url().endsWith(`/sessions/${realID}`)
+       && resp.request().method() === 'GET'
+       && resp.status() === 200,
+     { timeout: 30_000 },
+   );
+   ```
+
+7. Wait up to 30 seconds for the daemon-tree to refresh and contain
    a session row whose `data-session-id` exactly equals `realID`.
    This proves the frontend's loadTree() saw the new row AND the
    placeholder row was rebound (not stacked).
 
-7. Assert the chat workspace shows the new session selected, by
-   waiting for a `GET /api/commander/daemons/<daemonID>/sessions/<realID>`
-   detail request that returns 200. This proves `selected` was
-   rebound to the real ID and the detail effect fired against the
-   correct URL.
+8. `await detailPromise`. This proves `selected` was rebound to the
+   real ID and the detail effect fired against the correct URL —
+   the assertion that step 6's pre-armed waiter actually saw a
+   matching request.
 
 If any of these fail, the fresh-id rebind has regressed. Step 5 +
 step 6 together are the load-bearing assertion — pre-pr33, the
@@ -264,31 +289,38 @@ attributes are additive — no existing assertions break.
                               first run                         every other run
                               ────────                          ───────────────
 globalSetup                   probe :18091, :18092              probe :18091, :18092
-                              cookie file missing               cookie file exists
+                              cookie file missing/invalid       cookie file valid
                               launch headed browser             launch headless w/ storageState
                               click 用 agentserver 登录         GET /api/commander/tree → 200
-                              POST /api/commander/login         skip login, save STORAGE_STATE env
+                              POST /api/commander/login
                               read verification_uri_complete
                               PRINT BANNER to stdout
                               wait 10 min for tree visible
                               user opens URL, authorizes
                               webapp poll receives ok, tree
                                 renders
-                              save storageState → cache file
-                              set STORAGE_STATE env
+                              atomic write storageState →       (no write — cookie still valid)
+                                STORAGE_STATE_PATH (.tmp+rename)
                               close browser
+                              poll GET /api/commander/tree      poll GET /api/commander/tree
+                                until codex daemon status: ok     until codex daemon status: ok
 
 spec runs (same in both):
-                              new browser context, storageState already loaded
+                              browser context auto-loads storageState from STORAGE_STATE_PATH
+                                (config.use.storageState resolves to that const at config load)
                               navigate /commander/ → tree visible immediately
                               click + on driver-codex
                               capture placeholder data-session-id
-                              intercept POST .../turn — assert fresh: true
-                              type "say hi", click send
-                              wait for assistant chunk OR turn-state transition
-                              wait for tree to show new row
-                              assert new row's data-session-id is a UUID
-                                AND != placeholder
+                              type "say hi"
+                              attach POST .../turn request+response waiters
+                              click send
+                              resolve POST request → assert body.fresh === true
+                              resolve POST response (SSE) → read done frame
+                                → realID = data.result.session_id
+                              assert realID is UUID && realID !== placeholder
+                              pre-arm GET /sessions/<realID> response waiter
+                              wait for tree to contain row with data-session-id === realID
+                              await detailPromise
                               done
 ```
 
