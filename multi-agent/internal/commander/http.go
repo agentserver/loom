@@ -126,6 +126,19 @@ func requireBearer(token string, next http.Handler) http.Handler {
 	})
 }
 
+// marshalTurnResult serializes the terminal command_result payload.
+//
+// result.session_id holds res.SessionID — the backend-native id minted by
+// the CLI (codex thread / claude session / opencode session). This is
+// well-defined ONLY because commander sits directly in front of a single
+// backend with no agentserver-bridge layer in between; the field name
+// `session_id` here is unambiguous by virtue of that topology, not by
+// design discipline. See issue #29 for the bridge-vs-backend distinction
+// driver-side. If commander is ever placed behind a bridge (e.g.
+// agentserver-proxied commander traffic), this field needs to split into
+// session_id (backend) + bridge_session_id (bridge) the same way driver's
+// wait_task / get_task responses already do. Open a follow-up before
+// landing such a transport change.
 func marshalTurnResult(res executor.Result) []byte {
 	body, _ := json.Marshal(map[string]any{
 		"result": map[string]any{
