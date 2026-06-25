@@ -107,7 +107,7 @@ removing one disables that capability for this slave.
 | `bash` | Run an explicit `script` (with `env`, `timeout_sec`) — native Go exec, no Claude. |
 | `file` | Stateless `read` / `write` / `stat` on slave-local paths — native Go I/O. |
 | `register_mcp` | Register a pre-built stdio MCP server file; tool calls then route via `skill:"mcp"`. Pair with the driver-side `scaffold-mcp-server` and `mcp-acceptance` skills — `register_mcp` only does structural validation. |
-| `claude_permissions` | Read / patch this slave's Claude Code `settings.json` permissions through native code (don't ask `chat` to edit its own permissions). |
+| `permissions` | Read / patch this slave's Claude Code or Codex permissions through native code (don't ask `chat` to edit its own permissions). |
 
 Drop any of these from `discovery.skills` if you don't want this slave to
 accept that workload.

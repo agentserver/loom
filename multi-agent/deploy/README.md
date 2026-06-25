@@ -4,10 +4,10 @@ Production bring-up templates for the agents in `cmd/`. Unlike `examples/`
 (which are end-to-end Go demos), each subdirectory here ships an installer
 script and config templates you point at a real host.
 
-Drivers and slaves can each run under **Claude Code** or **Codex CLI**,
-chosen independently per agent via `--agent claude|codex`. A mixed fleet is
-fully supported: Claude Code drivers alongside Codex slaves, or any other
-combination, all sharing the same observer / workspace.
+Drivers and slaves can each run under **Claude Code**, **Codex CLI**, or
+**opencode**, chosen independently per agent via `--agent claude|codex|opencode`.
+A mixed fleet is fully supported: Claude Code drivers alongside Codex slaves,
+or any other combination, all sharing the same observer / workspace.
 
 ## Quick start — one-liners
 
@@ -96,6 +96,32 @@ bash <(curl -fsSL \
 后跑一次 `codex` 让它把这个目录加入 trust list（否则项目级 `.codex/config.toml`
 不会加载）。然后 `./driver-agent register --config ./config.yaml` 走 device-code。
 
+#### opencode
+
+EN — opencode variant — write `opencode.json` to `~/.config/opencode/`
+(consumed by both opencode CLI and desktop app) and `AGENTS.md`:
+
+```bash
+export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
+bash <(curl -fsSL \
+  https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
+  --name driver-myhost --agent opencode
+```
+
+中文 —— opencode 版本，把 MCP 配置写到 `~/.config/opencode/opencode.json`
+（CLI 和桌面端共用），并附 `AGENTS.md`：
+
+```bash
+export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
+bash <(curl -fsSL \
+  https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
+  --name driver-myhost --agent opencode
+```
+
+启动前：`./driver-agent register --config ./config.yaml` 走 device-code。
+opencode 读取 `~/.config/opencode/opencode.json` 中的 MCP 配置自动拉起
+driver MCP server。
+
 ### Slave
 
 #### Claude Code (default)
@@ -158,7 +184,7 @@ bash <(curl -fsSL \
 | Path | Target |
 |---|---|
 | [`linux/observer`](linux/observer/) | Generic `observer-server` install. SQLite-backed HTTP daemon (default `:8090`); foreground or `--systemd`. amd64 / arm64. Also serves the `mcp-userspace` package registry. |
-| [`linux/driver`](linux/driver/) | Generic `driver-agent` install into a coding-agent project dir (no systemd — the coding agent launches the MCP server on demand). Supports `--agent claude` (default) and `--agent codex`. |
+| [`linux/driver`](linux/driver/) | Generic `driver-agent` install into a coding-agent project dir (no systemd — the coding agent launches the MCP server on demand). Supports `--agent claude` (default), `--agent codex`, and `--agent opencode`. |
 | [`linux/slave`](linux/slave/) | Generic `slave-agent` install on any Linux host. Foreground smoke mode or `--systemd` for a managed service. amd64 / arm64. Supports `--agent claude` / `--agent codex` per slave. |
 | [`linux/compose-test`](linux/compose-test/) | docker-compose end-to-end test wiring all three installers together against a local observer; surfaces the device-code "join workspace" URLs each role prints on first start. |
 | [`bin/`](bin/) | Local cache of release binaries used by `install.sh` when `--bin PATH` isn't supplied. |
@@ -195,10 +221,10 @@ ref and then verifies the archive's top-level skill directories exactly match
 added skill directories are included automatically when they are committed
 before the release tag is created.
 
-For the pre-wired prod-test bundle (`driver-prod`, `slave-jetson-prod`,
-`slave-local-prod` against `agent.cs.ac.cn` / `ws-prod`), see
-[`../tests/prod_test/`](../tests/prod_test/) — that bundle is for the
-project's own staging environment and is gitignored.
+For the pre-wired prod-test bundle (driver + two slave instances against
+`agent.cs.ac.cn`), see
+[`../tests/prod_test/`](../tests/prod_test/) and its `E2E_RUNBOOK.md` — that
+bundle is for the project's own staging environment and is gitignored.
 
 ## Related: clients that talk to a deployed driver
 

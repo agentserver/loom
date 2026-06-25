@@ -4,7 +4,7 @@
 
 **Language**: [简体中文](README.md) · [English](README.en.md)
 
-Loom is a set of custom agents on top of the [agentserver](https://github.com/agentserver/agentserver) platform, sharing one Go module and a common set of internal packages. The core idea: **a user runs a single local driver inside Claude Code or Codex CLI and uses it to command a fleet of self-hosted slaves that live on different machines with different capabilities.** The driver clarifies intent, inspects capabilities, and orchestrates tasks; each slave executes locally on its own node; all telemetry flows to a standalone observer for replay and debugging. **Mixed-fleet deployment is fully supported** — each driver and slave independently picks its backend via `--agent claude|codex`; agents from both backends share one observer / workspace.
+Loom is a set of custom agents on top of the [agentserver](https://github.com/agentserver/agentserver) platform, sharing one Go module and a common set of internal packages. The core idea: **a user runs a single local driver inside Claude Code, Codex CLI, or opencode and uses it to command a fleet of self-hosted slaves that live on different machines with different capabilities.** The driver clarifies intent, inspects capabilities, and orchestrates tasks; each slave executes locally on its own node; all telemetry flows to a standalone observer for replay and debugging. **Mixed-fleet deployment is fully supported** — each driver and slave independently picks its backend via `--agent claude|codex|opencode`; agents from all backends share one observer / workspace.
 
 The most distinctive bit: **the fleet's capabilities are not fixed.** When none of the current slaves can satisfy a task, the driver has a slave author, run, and validate a Python MCP server on the fly, then registers it via `register_mcp`. By the next orchestration round, that new capability is already callable. The cluster therefore starts from a minimal skeleton and grows the tools it actually needs from real user tasks, instead of shipping a giant pre-baked integration catalog. The whole thing reads like weaving: warp and weft are existing capabilities from different slaves, the driver decides how they interlace into the finished task — and when a critical thread does not exist yet, it is spun on the spot on a slave and woven in.
 
@@ -37,6 +37,12 @@ export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_
 bash <(curl -fsSL \
   https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
   --name driver-myhost --agent codex
+
+# driver — opencode variant (writes opencode.json to ~/.config/opencode/ + AGENTS.md)
+export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
+bash <(curl -fsSL \
+  https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
+  --name driver-myhost --agent opencode
 
 # slave — Claude Code variant (executor; drop --systemd on Termux/Android)
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
@@ -71,9 +77,9 @@ backends. Full flag reference and the non-bootstrap install path live at
 ## Topology
 
 ```
-                       ┌──────────────────────┐
-   Claude Code / VS Code│   driver-agent       │  local, single instance (the weaver)
-            ───────────▶│  (stdio MCP server)  │  ── workspace context + orchestration tools
+                        ┌──────────────────────┐
+   Claude Code / Codex  │   driver-agent       │  local, single instance (the weaver)
+        / opencode ────▶│  (stdio MCP server)  │  ── workspace context + orchestration tools
                        └──────────┬───────────┘
                                   │  agentserver workspace
               ┌───────────────────┼───────────────────┐
@@ -91,9 +97,8 @@ backends. Full flag reference and the non-bootstrap install path live at
 ```
 
 - **One driver, many slaves.** The driver sees every slave's advertised capabilities in the workspace. It can dispatch 1→1 to a single slave or build a 1→N DAG fan-out. Slaves have no implicit connection to each other — the driver is in control.
-- **Everything is self-hostable.** driver / master / slave / observer / agentserver are plain Go binaries (or containers). They can all run on one laptop for local development, or you can scatter slaves across data centers and specialized hardware (GPU nodes, capture nodes, compression nodes…) as long as they can register into the same agentserver workspace.
-- **Master as a compatibility path.** The master exposes `route` / `fanout` skills that use claude as the planner / router / reducer. Use it when direct driver-to-slave orchestration is not desired.
-- **Observer is decoupled.** driver / master / slave push best-effort telemetry (task / subtask / artifact events) to the observer; observer failures never fail a task.
+- **Everything is self-hostable.** driver / slave / observer / agentserver are plain Go binaries (or containers). They can all run on one laptop for local development, or you can scatter slaves across data centers and specialized hardware (GPU nodes, capture nodes, compression nodes…) as long as they can register into the same agentserver workspace.
+- **Observer is decoupled.** driver / slave push best-effort telemetry (task / subtask / artifact events) to the observer; observer failures never fail a task.
 
 ## Build capabilities on demand (the dynamic-mcp loop)
 
@@ -108,27 +113,25 @@ Net effect: **the cluster starts from a minimal skeleton (just claude + bash) an
 
 ## Other design highlights
 
-- **Driver-first orchestration.** The user talks to the driver inside Claude Code (CLI or VS Code extension). The driver is both a stdio MCP server and a regular workspace agent, so it can pass the user's local file manifest through to master/slaves.
+- **Driver-first orchestration.** The user talks to the driver inside Claude Code, Codex, or opencode. The driver is both a stdio MCP server and a regular workspace agent, so it can pass the user's local file manifest through to slaves.
 - **Discoverable capabilities.** On startup each slave writes its skills, MCP servers, resources, and runtime info into `journal/CAPABILITIES.md`. The driver consults `inspect_capabilities` to decide routing — this is also what makes "capabilities on demand" loop-closable.
 
-## Five binaries
+## Four binaries
 
 | Binary | Role | Docs |
 |---|---|---|
-| `cmd/driver-agent` | Local driver — Claude Code / Codex stdio MCP server, holds workspace context and orchestration tools | [cmd/driver-agent/README.md](multi-agent/cmd/driver-agent/README.md) |
-| `cmd/master-agent` | Orchestrator — uses claude as planner / router / reducer to delegate work to other workspace agents | [cmd/master-agent/README.md](multi-agent/cmd/master-agent/README.md) |
+| `cmd/driver-agent` | Local driver — Claude Code / Codex / opencode stdio MCP server, holds workspace context and orchestration tools | [cmd/driver-agent/README.md](multi-agent/cmd/driver-agent/README.md) |
 | `cmd/slave-agent` | Worker — accepts tasks and runs them via claude / codex / MCP, maintains a capability journal | [cmd/slave-agent/README.md](multi-agent/cmd/slave-agent/README.md) |
-| `cmd/observer-server` | Standalone HTTP observer — stores driver / master / slave telemetry; also hosts the userspace package registry | [cmd/observer-server/config.example.yaml](multi-agent/cmd/observer-server/config.example.yaml) |
+| `cmd/observer-server` | Standalone HTTP observer — stores driver / slave telemetry; also hosts the userspace package registry | [cmd/observer-server/config.example.yaml](multi-agent/cmd/observer-server/config.example.yaml) |
 | `cmd/mcp-userspace` | CLI for packaging a validated MCP server / skill and pushing it to observer userspace, then `install`-ing on another host | [cmd/mcp-userspace/](multi-agent/cmd/mcp-userspace/) |
 
 ### Core slave skills
 
 - `chat` — natural-language tasks executed by the slave's embedded claude (or codex)
-- `mcp` — JSON `{server, tool, args}` call dispatched to a configured MCP server
-- `register_mcp` — install an MCP server source file that has already been authored and smoke-tested on the slave
-- `unregister_mcp` — deregister a dynamic MCP server (remove from `dynamic_mcp.yaml`, kill the child, refresh CAPABILITIES); source files are kept
 - `bash` — deterministic shell tasks executed by the slave's native Go executor
-- `claude_permissions` — read / patch the slave's Claude Code project permissions via the task channel (a transitional bridge)
+- `file` — stateless `read` / `write` / `stat` on slave-local paths
+- `register_mcp` — install an MCP server source file that has already been authored and smoke-tested on the slave
+- `permissions` — read / patch the slave's Claude Code or Codex permissions via native code
 
 Inside `chat`, the slave-side claude/codex can call the **humanloop**
 tools `ask_user` / `request_permission` to pause mid-turn — the driver
@@ -202,14 +205,12 @@ this to my space".
     ├── go.mod                        module github.com/yourorg/multi-agent
     ├── cmd/
     │   ├── driver-agent/             stdio MCP + workspace agent
-    │   ├── master-agent/             orchestrator agent
     │   ├── slave-agent/              worker agent
     │   ├── observer-server/          telemetry backend + userspace package registry
     │   └── mcp-userspace/            push / pull / install CLI for userspace
     ├── internal/
     │   ├── config, store, webui, tunnel, poller          shared by all
     │   ├── executor, journal, dispatch, capability(doc)  slave-side
-    │   ├── orchestrator, orchestration, planner          master-side
     │   ├── driver, contract, claudeperm, progress        driver-side
     │   ├── humanloop                                     in-chat ask_user / request_permission
     │   ├── userspace, mcpmarket                          personal package registry on observer
@@ -225,7 +226,7 @@ this to my space".
     │   └── image-pipeline/           multi-slave image capture + compression pipeline
     ├── dev/
     │   ├── agent-runtime/            runtime container image (numpy + default Claude Code perms)
-    │   ├── configs/                  example configs for driver/master/slave/observer
+    │   ├── configs/                  example configs for driver/slave/observer
     │   ├── compose.distributed.yaml  docker compose stack
     │   └── tmp/                      workspace helpers and e2e scratch dirs
     ├── testdata/                     fake-claude.sh / fake-planner.sh / fake-mcp-stdio
@@ -254,7 +255,6 @@ Building a single binary:
 
 ```bash
 go build -o cmd/driver-agent/driver-agent       ./cmd/driver-agent
-go build -o cmd/master-agent/master-agent       ./cmd/master-agent
 go build -o cmd/slave-agent/slave-agent         ./cmd/slave-agent
 go build -o bin/observer-server                  ./cmd/observer-server
 go build -o bin/mcp-userspace                    ./cmd/mcp-userspace
@@ -277,11 +277,11 @@ To self-host slaves on separate nodes:
 2. Copy `dev/configs/slave-*.example.yaml` and edit `server.url`, `discovery.display_name`, `discovery.skills`, plus any `resources` / `mcp_servers` you want to expose.
 3. The first start prints a device-flow URL; complete the browser consent and credentials are written back to the yaml. The driver's `inspect_capabilities` will pick up the new slave on its next call.
 
-The driver always runs on the user's local machine (it has to attach to Claude Code). The master and observer can sit next to the driver or live on their own self-hosted nodes.
+The driver always runs on the user's local machine (it has to attach to Claude Code / Codex / opencode). Observer can sit next to the driver or live on its own self-hosted node.
 
 ## Observer
 
-The observer is a standalone HTTP service independent of agentserver. driver / master / slave push telemetry with bearer tokens; delivery failures never fail a task.
+The observer is a standalone HTTP service independent of agentserver. driver / slave push telemetry with bearer tokens; delivery failures never fail a task.
 
 ```bash
 go build -o bin/observer-server ./cmd/observer-server
@@ -305,7 +305,6 @@ observer:
 Views:
 
 - `http://localhost:8090/drivers`
-- `http://localhost:8090/masters`
 - `http://localhost:8090/slaves`
 
 ## Skills and design docs
@@ -332,4 +331,4 @@ Design and plan documents live in `docs/superpowers/`. The most relevant recent 
 - `specs/2026-05-27-loom-python-library-design.md`
 - `plans/2026-05-19-bash-driven-mcp-registration.md`
 
-The earlier slave / master design docs (`2026-04-27`, `2026-04-28`) are still useful, but their directory naming (`slave_agent/...`) predates the rename refactor and is not kept in sync automatically.
+The earlier design docs (`2026-04-27`, `2026-04-28`) are still useful, but their directory naming (`slave_agent/...`) predates the rename refactor and is not kept in sync automatically.

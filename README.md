@@ -4,7 +4,7 @@
 
 **语言**: [简体中文](README.md) · [English](README.en.md)
 
-Loom 是基于 [agentserver](https://github.com/agentserver/agentserver) 平台的一组自定义 agent，共享同一个 Go module 与一套内部包。整套系统的目标是：**用户在 Claude Code 或 Codex CLI 里跑一台本地 driver，用它统一指挥一组分布在不同机器、不同能力的 self-host slave**；driver 负责澄清意图、检视能力、编排任务；slave 在各自节点本地执行；所有遥测汇集到独立部署的 observer 便于回放与调试。支持**混合机队**部署：每个 driver 和 slave 独立选择后端（`--agent claude|codex`），来自不同后端的 agent 共享同一个 observer / workspace。
+Loom 是基于 [agentserver](https://github.com/agentserver/agentserver) 平台的一组自定义 agent，共享同一个 Go module 与一套内部包。整套系统的目标是：**用户在 Claude Code、Codex CLI 或 opencode 里跑一台本地 driver，用它统一指挥一组分布在不同机器、不同能力的 self-host slave**；driver 负责澄清意图、检视能力、编排任务；slave 在各自节点本地执行；所有遥测汇集到独立部署的 observer 便于回放与调试。支持**混合机队**部署：每个 driver 和 slave 独立选择后端（`--agent claude|codex|opencode`），来自不同后端的 agent 共享同一个 observer / workspace。
 
 最与众不同的一点：**集群能力不是固定的**。当现有 slave 都满足不了某个任务时，driver 会让一台 slave 在线写、跑、验证一段 Python MCP server，然后通过 `register_mcp` 把它注册进去；下一轮编排时这套新能力就已可调用。集群因此可以从一个最小骨架开始，按用户实际任务慢慢长出真正用得到的工具，而不是先做一大套预制集成。整件事就像织布：经线、纬线来自不同 slave 的现成能力，driver 决定怎么交织成最终任务；如果某根关键的线还不存在，就当场在 slave 上纺出来再织进去。
 
@@ -35,6 +35,12 @@ export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_
 bash <(curl -fsSL \
   https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
   --name driver-myhost --agent codex
+
+# driver — opencode 版（写 opencode.json 到 ~/.config/opencode/ + AGENTS.md）
+export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
+bash <(curl -fsSL \
+  https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
+  --name driver-myhost --agent opencode
 
 # slave — Claude Code 版（执行器，Termux 上去掉 --systemd 改前台）
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
@@ -68,10 +74,10 @@ codex 是 `docker exec` 按需调起，不是 PID 1）以及 `permissions` skill
 ## 拓扑
 
 ```
-                       ┌──────────────────────┐
-   Claude Code / VS Code│   driver-agent       │  本地、用户侧、单实例（织工）
-            ───────────▶│  (stdio MCP server)  │  ── 工作区上下文 + 编排工具
-                       └──────────┬───────────┘
+                        ┌──────────────────────┐
+   Claude Code / Codex  │   driver-agent       │  本地、用户侧、单实例（织工）
+        / opencode ────▶│  (stdio MCP server)  │  ── 工作区上下文 + 编排工具
+                        └──────────┬───────────┘
                                   │  agentserver workspace
               ┌───────────────────┼───────────────────┐
               ▼                   ▼                   ▼
@@ -88,9 +94,8 @@ codex 是 `docker exec` 按需调起，不是 PID 1）以及 `permissions` skill
 ```
 
 - **一个 driver，多个 slave**：driver 直接看到 workspace 里所有 slave 的能力，可以 1→1 直派，也可以构建 DAG 1→N 扇出；slave 之间没有隐式连接，由 driver 控制。
-- **全员可 self-host**：driver / master / slave / observer / agentserver 都是普通 Go 二进制或容器；可以全部跑在一台机器上做本地开发，也可以把 slave 散布到不同机房、不同硬件（GPU 节点、抓图节点、压缩节点…），只要它们能注册到同一个 agentserver workspace。
-- **Master 作为兼容路径**：master 提供 `route` / `fanout` 两种基于 claude planner 的编排技能，在不便直连 slave 时仍可使用。
-- **Observer 解耦遥测**：driver / master / slave 都以 best-effort 方式向 observer 推送任务、子任务、artifact 事件；observer 单独部署，提供 HTTP 视图。
+- **全员可 self-host**：driver / slave / observer / agentserver 都是普通 Go 二进制或容器；可以全部跑在一台机器上做本地开发，也可以把 slave 散布到不同机房、不同硬件（GPU 节点、抓图节点、压缩节点…），只要它们能注册到同一个 agentserver workspace。
+- **Observer 解耦遥测**：driver / slave 都以 best-effort 方式向 observer 推送任务、子任务、artifact 事件；observer 单独部署，提供 HTTP 视图。
 
 ## 按需建能力（dynamic-mcp 闭环）
 
@@ -105,27 +110,25 @@ codex 是 `docker exec` 按需调起，不是 PID 1）以及 `permissions` skill
 
 ## 其它设计要点
 
-- **Driver-first 编排**：用户在 Claude Code / VS Code 扩展里直接和 driver 对话；driver 既是一个 stdio MCP server，也是 agentserver workspace 里的一个普通 agent，能把用户本地的文件清单透传给 master/slave。
+- **Driver-first 编排**：用户在 Claude Code / Codex / opencode 里直接和 driver 对话；driver 既是一个 stdio MCP server，也是 agentserver workspace 里的一个普通 agent，能把用户本地的文件清单透传给 slave。
 - **能力可发现**：每个 slave 启动时会把自己的 skills、MCP servers、资源、运行时信息写到 `journal/CAPABILITIES.md`；driver 通过 `inspect_capabilities` 决定路由——这也正是"按需建能力"得以闭环的基础。
 
-## 五个二进制
+## 四个二进制
 
 | Binary | 角色 | 文档 |
 |---|---|---|
-| `cmd/driver-agent` | 本地 driver，作为 Claude Code / Codex 的 stdio MCP server，承载工作区上下文与编排工具 | [cmd/driver-agent/README.md](multi-agent/cmd/driver-agent/README.md) |
-| `cmd/master-agent` | 编排器，使用 claude 作为 planner / router / reducer，把任务委派给 workspace 中其它 agent | [cmd/master-agent/README.md](multi-agent/cmd/master-agent/README.md) |
+| `cmd/driver-agent` | 本地 driver，作为 Claude Code / Codex / opencode 的 stdio MCP server，承载工作区上下文与编排工具 | [cmd/driver-agent/README.md](multi-agent/cmd/driver-agent/README.md) |
 | `cmd/slave-agent` | 工作 agent，接受任务并通过 claude / codex / MCP 执行，维护能力清单 | [cmd/slave-agent/README.md](multi-agent/cmd/slave-agent/README.md) |
-| `cmd/observer-server` | 独立 HTTP observer，存储并展示 driver / master / slave 遥测；同时托管 userspace 包仓库 | [cmd/observer-server/config.example.yaml](multi-agent/cmd/observer-server/config.example.yaml) |
+| `cmd/observer-server` | 独立 HTTP observer，存储并展示 driver / slave 遥测；同时托管 userspace 包仓库 | [cmd/observer-server/config.example.yaml](multi-agent/cmd/observer-server/config.example.yaml) |
 | `cmd/mcp-userspace` | 命令行客户端，把验证过的 MCP server / skill 打成包推送到 observer 的 userspace，再在另一台机器上 `install` | [cmd/mcp-userspace/](multi-agent/cmd/mcp-userspace/) |
 
 ### Slave 公开的核心 skills
 
 - `chat` — 自然语言任务，由 slave 内嵌的 claude（或 codex）执行
-- `mcp` — JSON 调用 `{server, tool, args}`，直接打到某个 MCP server
-- `register_mcp` — 注册一段已经在 slave 上写好并通过烟雾测试的 MCP server 源码
-- `unregister_mcp` — 解除注册某个 dynamic MCP server（从 `dynamic_mcp.yaml` 移除、杀掉子进程、刷新 CAPABILITIES）；不删源码文件
 - `bash` — 由 slave 原生 Go executor 执行的确定性 shell 任务
-- `claude_permissions` — 通过任务通道读取 / 修改 slave 上 Claude Code 的 project 权限（过渡方案）
+- `file` — 无状态的 `read` / `write` / `stat`，直接操作 slave 本地文件
+- `register_mcp` — 注册一段已经在 slave 上写好并通过烟雾测试的 MCP server 源码
+- `permissions` — 通过原生代码读取 / 修改 slave 上 Claude Code 或 Codex 的权限配置
 
 `chat` skill 内还提供 **humanloop** 工具：slave 端的 claude/codex 可以调
 `ask_user` / `request_permission` 主动暂停一轮，driver 把问题透传给坐在
@@ -196,14 +199,12 @@ mcp-userspace install --as mcp --workspace ws-work --overwrite wedding_almanac@1
     ├── go.mod                        module github.com/yourorg/multi-agent
     ├── cmd/
     │   ├── driver-agent/             stdio MCP + workspace agent
-    │   ├── master-agent/             编排 agent
     │   ├── slave-agent/              工作 agent
     │   ├── observer-server/          遥测后端 + userspace 包仓库
     │   └── mcp-userspace/            userspace 推 / 拉 / install CLI
     ├── internal/
     │   ├── config, store, webui, tunnel, poller          全员共享
     │   ├── executor, journal, dispatch, capability(doc)  slave 侧
-    │   ├── orchestrator, orchestration, planner          master 侧
     │   ├── driver, contract, claudeperm, progress        driver 侧
     │   ├── humanloop                                     chat 期 ask_user / request_permission
     │   ├── userspace, mcpmarket                          observer 上的个人包仓库
@@ -219,7 +220,7 @@ mcp-userspace install --as mcp --workspace ws-work --overwrite wedding_almanac@1
     │   └── image-pipeline/           多 slave 图像采集 + 压缩流水线
     ├── dev/
     │   ├── agent-runtime/            容器运行时镜像（含 numpy 与 Claude Code 默认权限）
-    │   ├── configs/                  driver/master/slave/observer 示例配置
+    │   ├── configs/                  driver/slave/observer 示例配置
     │   ├── compose.distributed.yaml  docker compose 一键拉起
     │   └── tmp/                      workspace 辅助脚本与 e2e 临时目录
     ├── testdata/                     fake-claude.sh / fake-planner.sh / fake-mcp-stdio
@@ -248,7 +249,6 @@ go test -tags=smoke ./tests/smoke/...        # 手工执行
 
 ```bash
 go build -o cmd/driver-agent/driver-agent       ./cmd/driver-agent
-go build -o cmd/master-agent/master-agent       ./cmd/master-agent
 go build -o cmd/slave-agent/slave-agent         ./cmd/slave-agent
 go build -o bin/observer-server                  ./cmd/observer-server
 go build -o bin/mcp-userspace                    ./cmd/mcp-userspace
@@ -271,11 +271,11 @@ ANTHROPIC_API_KEY=... docker compose -f compose.distributed.yaml up --build
 2. 复制 `dev/configs/slave-*.example.yaml` 改 `server.url`、`discovery.display_name`、`discovery.skills`、需要暴露的 `resources` / `mcp_servers`。
 3. 首次启动会打印 device-flow URL，浏览器走完授权后凭据回写到 yaml；之后 driver 端就能在 `inspect_capabilities` 里看到这台新 slave。
 
-driver 永远只跑在用户本地（要 attach 到 Claude Code）；master / observer 既可以和 driver 在同一台，也可以放到独立的 self-host 节点上。
+driver 永远只跑在用户本地（要 attach 到 Claude Code / Codex / opencode）；observer 既可以和 driver 在同一台，也可以放到独立的 self-host 节点上。
 
 ## Observer
 
-observer 是独立 HTTP 服务，不依赖 agentserver；driver / master / slave 通过 bearer token 推送遥测，失败不会影响任务执行。
+observer 是独立 HTTP 服务，不依赖 agentserver；driver / slave 通过 bearer token 推送遥测，失败不会影响任务执行。
 
 ```bash
 go build -o bin/observer-server ./cmd/observer-server
@@ -299,7 +299,6 @@ observer:
 视图：
 
 - `http://localhost:8090/drivers`
-- `http://localhost:8090/masters`
 - `http://localhost:8090/slaves`
 
 ## Skill 与文档
@@ -325,4 +324,4 @@ observer:
 - `specs/2026-05-27-loom-python-library-design.md`
 - `plans/2026-05-19-bash-driven-mcp-registration.md`
 
-早期的 slave / master 设计文档（`2026-04-27`、`2026-04-28`）仍可参考，但其中的目录命名 (`slave_agent/...`) 早于本次重命名，不再随 refactor 自动同步。
+早期设计文档（`2026-04-27`、`2026-04-28`）仍可参考，但其中的目录命名 (`slave_agent/...`) 早于本次重命名，不再随 refactor 自动同步。

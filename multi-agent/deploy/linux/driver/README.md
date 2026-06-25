@@ -14,6 +14,8 @@ pre-registered), see `../../../tests/prod_test/driver/`.
 | `install.sh` | Renders templates, drops binary + config + MCP registration into a project dir, optionally copies skill bundles |
 | `config.yaml.template` | Driver config with placeholders for name, token dir |
 | `.mcp.json.template` | Tells Claude Code how to launch `driver-agent serve-mcp` |
+| `codex-mcp.toml.template` | Codex MCP server registration for `driver-agent serve-mcp` |
+| `opencode.json.template` | opencode MCP server registration for `driver-agent serve-mcp` |
 
 ## Prereqs
 
@@ -67,7 +69,7 @@ claude
 | `--skill-bundle PATH` | Claude: `../../../tests/prod_test/driver/.claude/skills/multiagent` if present; Codex: repo `skills/` if present | Claude copies under `<project>/.claude/skills/`; Codex copies under `<project>/.agents/skills/`. |
 | `--token-dir PATH` | `~/.loom/<NAME>` | Parent dir for `observer.token`. Must be absolute. |
 | `--bin PATH` | `../bin/driver-agent.linux-<arch>` | Override the binary path (e.g., point at a downloaded release asset). |
-| `--agent CLI` | `claude` | `claude` or `codex`. Codex mode writes `.codex/config.toml` instead of `.mcp.json`, drops `AGENTS.md` + optional `.codex/prompts/`, and renders `agent.kind: codex` in `config.yaml`. |
+| `--agent CLI` | `claude` | `claude`, `codex`, or `opencode`. Codex mode writes `.codex/config.toml` instead of `.mcp.json`, drops `AGENTS.md` + optional `.codex/prompts/`, and renders `agent.kind: codex` in `config.yaml`. opencode mode writes `opencode.json` to `~/.config/opencode/`, drops `AGENTS.md`, and renders `agent.kind: opencode`. |
 
 ## Project layout after install
 
@@ -108,6 +110,17 @@ claude
   on the project-scoped `.codex/config.toml`. The container itself runs
   with `sleep infinity` as PID 1 and you `docker exec ... codex exec ...`
   per task — codex isn't a daemon.
+
+## opencode notes
+
+- opencode reads MCP server config from `~/.config/opencode/opencode.json`
+  (or `$XDG_CONFIG_HOME/opencode/opencode.json`). This file is shared
+  between the opencode CLI and desktop app.
+- `--agent opencode` writes the driver MCP registration into this global
+  config file. If one already exists it is backed up first.
+- opencode also reads project-root `AGENTS.md` (same convention as Codex).
+- The driver-agent itself still does its own observer device-code OAuth
+  via `./driver-agent register`, regardless of the opencode backend.
 
 ## Why no systemd unit?
 
