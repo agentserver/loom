@@ -412,14 +412,6 @@ func TestLoad_ObserverEnabledRequiresAPIKeyAndTokenStatePath(t *testing.T) {
 		wantSub string
 	}{
 		{
-			name: "missing api_key",
-			extra: func() string {
-				parent := t.TempDir()
-				return "  token_state_path: " + filepath.Join(parent, "observer.token") + "\n"
-			}(),
-			wantSub: "observer.api_key",
-		},
-		{
 			name:    "missing token_state_path",
 			extra:   "  api_key: ak\n",
 			wantSub: "observer.token_state_path",

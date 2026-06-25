@@ -224,7 +224,7 @@ func LoadConfig(path string) (*Config, error) {
 	if c.DriverDefaults.WorkDir == "" {
 		c.DriverDefaults.WorkDir = c.Agent.WorkDir
 	}
-	observerLegacyConfigured := c.Observer.APIKey != "" || c.Observer.TokenStatePath != ""
+	observerLegacyConfigured := c.Observer.APIKey != ""
 	observerProxyReady := c.Credentials.ProxyToken != ""
 	if c.Observer.URL != "" {
 		if c.Observer.WorkspaceID == "" && c.Credentials.WorkspaceID != "" {

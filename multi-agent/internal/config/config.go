@@ -225,7 +225,7 @@ func Load(path string) (*Config, error) {
 	if c.Daemon.MaxBackoffMs == 0 {
 		c.Daemon.MaxBackoffMs = 30000
 	}
-	observerLegacyConfigured := c.Observer.APIKey != "" || c.Observer.TokenStatePath != ""
+	observerLegacyConfigured := c.Observer.APIKey != ""
 	observerProxyReady := c.Credentials.ProxyToken != ""
 	if c.Observer.URL != "" {
 		if c.Observer.WorkspaceID == "" && c.Credentials.WorkspaceID != "" {
