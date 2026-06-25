@@ -105,6 +105,14 @@ export function MobileShell({
   }
 
   function handlePreviewRequest() {
+    // Dedupe: if a previous tap's preview entry is still on top (its
+    // fetch hasn't resolved, or the user is replacing one open preview
+    // with another), reuse it instead of pushing another invisible
+    // entry. Without this, rapid taps stack multiple preview entries —
+    // the older ones never show a sheet (FileExplorerPanel's request
+    // bump drops their late responses) but still consume Back presses.
+    const stack = overlay.stackSnapshot();
+    if (stack.length > 0 && stack[stack.length - 1] === 'preview') return;
     overlay.open('preview');
   }
 
