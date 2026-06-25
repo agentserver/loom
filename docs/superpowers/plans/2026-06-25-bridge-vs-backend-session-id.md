@@ -1715,16 +1715,17 @@ If the existing tests have a helper like `newTestExecutor` use it; otherwise ada
 
 Add the symmetric test in `*_test.go` for each backend.
 
-- [ ] **Step 4: Run the package-scoped suites**
+- [ ] **Step 4: Inventory-only checkpoint — DO NOT build or test yet**
 
 ```
 cd multi-agent
-go test ./pkg/agentbackend/... -count=1
-go test ./internal/commanderhub/... -count=1
+git status -s          # verify staged + working-tree files
+git diff --stat HEAD   # eyeball the migration footprint
 ```
-Expected: PASS.
 
-**Do NOT run `go vet ./...` yet** — `internal/commander/handler_test.go` and `cmd/slave-agent/main.go` still don't compile against the new signature. The first all-green `go vet ./...` is at Task 11 Step 3, after Tasks 10 + 11 land their edits.
+**Do NOT run `go vet`, `go build`, or `go test` against any package here.** `pkg/agentbackend/codex/appserver_worker_test.go:19` imports `internal/commander`, and `internal/commanderhub/*.go` (production code) also imports it. Until Task 11 migrates `internal/commander/handler.go`, the entire transitive graph of `pkg/agentbackend/...` tests, `internal/commanderhub/...`, and `cmd/slave-agent/...` fails to type-check against the new signature.
+
+The first build/test gate is at Task 11 Step 3, where `go vet ./...` + the full suite are expected to pass atomically.
 
 - [ ] **Step 5: Stage (do NOT commit yet)**
 
@@ -1789,13 +1790,14 @@ func (a resumeAdapter) RunResume(ctx context.Context, sid, ans string, s executo
 
 Ensure `fmt` is imported at the top of `main.go` (likely already is).
 
-- [ ] **Step 2: Build the binary (do NOT commit yet)**
+- [ ] **Step 2: Inventory-only checkpoint — DO NOT build yet**
 
 ```
 cd multi-agent
-go build ./cmd/slave-agent/
+git status -s
 ```
-Expected: success. (`internal/commander` still red — fixed in Task 11.)
+
+**Do NOT run `go build ./cmd/slave-agent/`** — `cmd/slave-agent/main.go:22` imports `internal/commander`, whose `handler.go` still calls `Backend.RunResume(ctx, id, ...)` with the old bare-string signature. The build will fail. Task 11 migrates `internal/commander`, and the first all-green compile lives at Task 11 Step 3.
 
 - [ ] **Step 3: Stage (no commit)**
 
@@ -1833,7 +1835,26 @@ if id == "" {
 return h.Backend.RunResume(ctx, agentbackend.NewBackend(h.Backend.Kind(), "", id), prompt, sink)
 ```
 
-`agentbackend` likely already imported in this file (the `Backend` field type). `executor` (for `Result`) likely already imported too. Verify by reading the imports block.
+**Imports check (verified against current `handler.go:3-12`):**
+- `agentbackend` — already imported (the `Backend` field type).
+- `executor` — already imported (for `Sink`/`Result`).
+- `fmt` — **NOT currently imported**. Add it to the import block:
+
+```go
+import (
+    "context"
+    "errors"
+    "fmt"      // <-- ADD
+    "sync"
+    "sync/atomic"
+    "time"
+
+    "github.com/yourorg/multi-agent/internal/executor"
+    "github.com/yourorg/multi-agent/pkg/agentbackend"
+)
+```
+
+Without this, the `fmt.Errorf("commander: empty session id; cannot resume")` snippet does not compile.
 
 - [ ] **Step 2: Update handler tests — BOTH stubs**
 
