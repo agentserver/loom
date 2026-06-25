@@ -325,13 +325,54 @@ export function CommanderApp() {
         if (!cancelled) setSessionDetail(detail);
       })
       .catch((err: Error) => {
-        if (!cancelled) setError(err.message);
+        if (cancelled) return;
+        // Submitting-phase 404: the codex backend's GetSession reads the
+        // same sessions file as list_sessions, so if loadTree() didn't
+        // see the row yet, detail 404s too. Don't surface as a page-wide
+        // error — keep the syncing placeholder; the bounded retry effect
+        // below will trigger more loadTree() ticks until the row appears.
+        const submittingPending =
+          pendingSession?.sessionID === selected.sessionID
+          && pendingSession.phase === 'submitting';
+        if (submittingPending && /HTTP 404$/.test(err.message)) {
+          setSessionDetail({
+            session: { ID: selected.sessionID, Title: '新建会话(同步中…)' },
+            messages: [],
+          });
+          return;
+        }
+        setError(err.message);
       });
 
     return () => {
       cancelled = true;
     };
   }, [selected, tree, pendingSession]);
+
+  // Bounded loadTree() retry while a session is in 'submitting' phase but
+  // the real row hasn't appeared in the tree yet. Fixed 500 ms tick, capped
+  // at 5 attempts per submitting cycle. The retry counter resets when the
+  // pendingSession ID changes (new draft, or pending cleared).
+  const submittingRetryRef = useRef<{ sessionID: string; attempt: number }>({ sessionID: '', attempt: 0 });
+  useEffect(() => {
+    if (!pendingSession || pendingSession.phase !== 'submitting') {
+      submittingRetryRef.current = { sessionID: '', attempt: 0 };
+      return;
+    }
+    if (submittingRetryRef.current.sessionID !== pendingSession.sessionID) {
+      submittingRetryRef.current = { sessionID: pendingSession.sessionID, attempt: 0 };
+    }
+    const realRow = tree?.daemons
+      .find((d) => d.daemon_id === pendingSession.daemonID)
+      ?.sessions?.find((s) => s.session_id === pendingSession.sessionID);
+    if (realRow) return; // loadTree's success-path will clear pending.
+    if (submittingRetryRef.current.attempt >= 5) return;
+    submittingRetryRef.current.attempt += 1;
+    const t = window.setTimeout(() => {
+      void loadTree();
+    }, 500);
+    return () => window.clearTimeout(t);
+  }, [pendingSession, tree, loadTree]);
 
   async function sendPrompt(prompt: string) {
     const text = prompt.trim();
@@ -428,9 +469,13 @@ export function CommanderApp() {
 
   function createPendingSession(daemonID: string) {
     const current = pendingSessionRef.current;
-    if (current != null && current.daemonID !== daemonID) return;
-    if (current != null && current.daemonID === daemonID) {
-      // Re-select existing; no fresh UUID.
+    // Only DRAFT phase blocks fresh creation — once the user submits the
+    // first turn the session is on the server, so a 'submitting' placeholder
+    // is opportunistic and may be evicted by a new draft. This avoids the
+    // permanent + lockout if loadTree() never sees the row.
+    if (current?.phase === 'draft' && current.daemonID !== daemonID) return;
+    if (current?.phase === 'draft' && current.daemonID === daemonID) {
+      // Re-select existing draft; no fresh UUID.
       selectSession(current.daemonID, current.sessionID);
       return;
     }

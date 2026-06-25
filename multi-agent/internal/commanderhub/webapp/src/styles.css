@@ -607,6 +607,20 @@ textarea {
   }
 }
 
+.daemon-collapse-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  background: transparent;
+  color: #506074;
+  cursor: pointer;
+  margin-right: 4px;
+}
+.daemon-collapse-btn:hover { background: #e8edf4; border-radius: 4px; }
+
 .daemon-new-session-btn {
   margin-left: auto;
   display: inline-flex;
@@ -677,6 +691,12 @@ textarea {
   /* Widen the pending row's × column to match the 44px discard button. */
   .session-row-line-pending {
     grid-template-columns: 44px minmax(0, 1fr) 44px;
+  }
+  .daemon-collapse-btn {
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+    min-height: 44px;
   }
 }
 
