@@ -826,10 +826,31 @@ Now patch every place that constructs a `delegatedTaskRecord`. There are **ten**
 | `tools.go:665` (`submit_task`)         | `targetShortID`                             |
 | `tools.go:1336` (`resume_task` record) | `resumeChildAgentID` (local from `prev`)    |
 
-For each site, add a `SessionRef:` line using the matching variable. Two concrete examples:
+(`cardShortID(c agentsdk.AgentCard) string` already exists at `tools.go:364`; reuse it.)
 
-`submit_task` (tools.go ~line 665), `targetShortID` already in scope:
+`NewBridgeOnly` panics on empty bridge id. Production agentsdk always returns a non-empty `resp.SessionID`, but the existing test suite is FULL of `DelegateTaskResponse{TaskID: "task-1"}` fakes with an empty `SessionID` (run `git grep -n 'DelegateTaskResponse{' multi-agent/internal/driver/tools_test.go` — ~30 sites). An inline `NewBridgeOnly(...)` at the `delegatedTaskRecord` literal would panic every one of those tests and the Task 4 atomic commit would not be green.
+
+**Use the guarded form at every site, unconditionally:**
+
 ```go
+var sessRef agentbackend.SessionRef
+if resp.SessionID != "" {
+	sessRef = agentbackend.NewBridgeOnly("", <slaveShortIDSource>, resp.SessionID)
+}
+// then in the struct literal:
+//   SessionRef: sessRef,
+```
+
+The block goes immediately before the `if err := t.recordDelegatedTask(delegatedTaskRecord{…}); err != nil {` call, with `<slaveShortIDSource>` substituted per the table above (`targetShortID`, `cardShortID(card)`, or `resumeChildAgentID`).
+
+This is both forward-defensive (a future agentsdk version returning empty would degrade to a zero ref instead of crashing the driver) and back-compat with the existing test fakes (zero `SessionID` → zero `SessionRef`, journal row writes empty `session_id` + empty `bridge_session_id` — same as today's pre-PR behavior when the response was malformed).
+
+Concrete example — `submit_task` (tools.go ~line 665):
+```go
+var sessRef agentbackend.SessionRef
+if resp.SessionID != "" {
+	sessRef = agentbackend.NewBridgeOnly("", targetShortID, resp.SessionID)
+}
 if err := s.t.recordDelegatedTask(delegatedTaskRecord{
 	Tool:              s.Name(),
 	Response:          resp,
@@ -839,12 +860,16 @@ if err := s.t.recordDelegatedTask(delegatedTaskRecord{
 	Skill:             skill,
 	Wait:              false,
 	TimeoutSec:        timeout,
-	SessionRef:        agentbackend.NewBridgeOnly("", targetShortID, resp.SessionID),
+	SessionRef:        sessRef,
 }); err != nil { ... }
 ```
 
-`register_mcp_tool.go:70` — `card` (an `agentsdk.AgentCard`) is in scope, NOT `targetShortID`:
+Concrete example — `register_mcp_tool.go:70` (`card` in scope):
 ```go
+var sessRef agentbackend.SessionRef
+if resp.SessionID != "" {
+	sessRef = agentbackend.NewBridgeOnly("", cardShortID(card), resp.SessionID)
+}
 if err := r.t.recordDelegatedTask(delegatedTaskRecord{
 	Tool:              r.Name(),
 	Response:          resp,
@@ -853,23 +878,11 @@ if err := r.t.recordDelegatedTask(delegatedTaskRecord{
 	Skill:             "register_mcp",
 	Wait:              true,
 	TimeoutSec:        args.TimeoutSec,
-	SessionRef:        agentbackend.NewBridgeOnly("", cardShortID(card), resp.SessionID),
+	SessionRef:        sessRef,
 }); err != nil { ... }
 ```
 
-(`cardShortID(c agentsdk.AgentCard) string` already exists at `tools.go:364`; reuse it.)
-
-`NewBridgeOnly` panics on empty bridge id. The agentsdk happy path always returns a non-empty `resp.SessionID`, but the call site is downstream of a successful `DelegateTask`. If a future agentsdk version starts returning empty bridge ids the panic would crash the driver process — guard once, at the seam, by checking before construction:
-
-```go
-var sessRef agentbackend.SessionRef
-if resp.SessionID != "" {
-	sessRef = agentbackend.NewBridgeOnly("", <slaveShortIDSource>, resp.SessionID)
-}
-// SessionRef: sessRef in the literal
-```
-
-The current contract guarantees `resp.SessionID != ""`, so the guard is defensive. Apply it only where the call site is on a non-error path that mutates the result before reaching `recordDelegatedTask` (none in the current tree); otherwise the inline `NewBridgeOnly(...)` form is fine.
+Apply the same pattern at all 10 sites.
 
 - [ ] **Step 2: Update `recordTerminalChild`**
 
@@ -1013,7 +1026,13 @@ Then replace the inline response struct with the same dual-field shape as 4a, us
 
 **4d. `wait_task` normal/final (`tools.go:940–960` — the trailing `json.Marshal(struct{...})` below `output := unwrappedOutput`)** — add `SessionID` + `BridgeSessionID` next to `Status`, populated from `waitMarkerSessionID` and `info.SessionID`. Same pattern as 4b.
 
-After all four edits, `firstNonEmpty(markerSessionID, info.SessionID)` should no longer appear in `tools.go` (`git grep firstNonEmpty multi-agent/internal/driver/tools.go` returns only the `resume_task` site, fixed in Step 5).
+After all four edits, the marker-vs-bridge fallbacks are gone from `wait_task` / `get_task`. The unrelated `firstNonEmpty(progress.FinalOutput, output)` final-output fallback in the `wait_task` normal branch stays untouched — it's about output, not session ids. Use this scoped audit:
+
+```
+git grep -nE 'firstNonEmpty\([^)]*SessionID|firstNonEmpty\(markerSess' multi-agent/internal/driver/tools.go
+```
+
+Expected: only the `resume_task` site (~line 1290), which is rewritten in Step 5.
 
 - [ ] **Step 5: Rewrite `resume_task` (~line 1290)**
 
