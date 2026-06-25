@@ -212,6 +212,7 @@ export function DaemonSessionTree({
           )}
           <button
             className={rowClass}
+            data-session-id={session.session_id}
             onClick={() => onSelect(session.daemon_id, session.session_id)}
             type="button"
           >
@@ -282,6 +283,7 @@ export function DaemonSessionTree({
                 <button
                   type="button"
                   className={`session-row${selected?.sessionID === pendingSession.sessionID ? ' selected' : ''}`}
+                  data-session-id={pendingSession.sessionID}
                   onClick={() => onSelect(daemon.daemon_id, pendingSession.sessionID)}
                 >
                   <span className="session-title">

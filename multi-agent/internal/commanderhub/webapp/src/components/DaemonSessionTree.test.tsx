@@ -484,3 +484,47 @@ test('renders descendants of a remote agent_task (slave subagent under driver→
   fireEvent.click(screen.getByLabelText(/展开 subagent sessions: task-s/));
   expect(screen.getByText(/subagent · Lovelace/)).toBeInTheDocument();
 });
+
+import { describe } from 'vitest';
+
+describe('DaemonSessionTree data-session-id', () => {
+  test('real session row and pending row both expose data-session-id', () => {
+    const daemons: DaemonTree[] = [
+      {
+        daemon_id: 'd1',
+        display_name: 'driver-codex',
+        kind: 'codex',
+        status: 'ok',
+        sessions: [
+          {
+            daemon_id: 'd1',
+            session_id: 'real-uuid-abc',
+            kind: 'codex',
+            title: 't',
+            working_dir: '/tmp',
+            updated_at: '2026-06-25T00:00:00Z',
+            message_count: 0,
+            preview: '',
+            turn_state: 'idle',
+            active_worker: false,
+            awaiting_approval: false,
+          },
+        ],
+      },
+    ];
+    render(
+      <DaemonSessionTree
+        daemons={daemons}
+        selected={null}
+        pendingSession={{ daemonID: 'd1', sessionID: 'placeholder-uuid-xyz', phase: 'draft' }}
+        onSelect={() => {}}
+        onCreateSession={() => {}}
+        onDiscardSession={() => {}}
+      />,
+    );
+    const real = screen.getByRole('button', { name: /^t/ });
+    expect(real.getAttribute('data-session-id')).toBe('real-uuid-abc');
+    const pending = screen.getByRole('button', { name: /新建会话/ });
+    expect(pending.getAttribute('data-session-id')).toBe('placeholder-uuid-xyz');
+  });
+});
