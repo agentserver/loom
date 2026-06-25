@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
 type runSlaveBashTool struct{ t *Tools }
@@ -163,6 +164,10 @@ func (t *Tools) delegateShellTask(ctx context.Context, card agentsdk.AgentCard, 
 	// DelegateTask succeeded — degrade journal append failure to a log entry
 	// so we still return task_id (wait=false) or wait (wait=true). See
 	// §1.1 #1 of the 2026-06-13 review.
+	var sessRef agentbackend.SessionRef
+	if resp.SessionID != "" {
+		sessRef = agentbackend.NewBridgeOnly("", cardShortID(card), resp.SessionID)
+	}
 	if err := t.recordDelegatedTask(delegatedTaskRecord{
 		Tool:              toolName,
 		Response:          resp,
@@ -171,6 +176,7 @@ func (t *Tools) delegateShellTask(ctx context.Context, card agentsdk.AgentCard, 
 		Skill:             skill,
 		Wait:              wait,
 		TimeoutSec:        args.TimeoutSec,
+		SessionRef:        sessRef,
 	}); err != nil {
 		t.logHelperErr("driver_journal", "record_delegated_task", err)
 	}
@@ -287,6 +293,10 @@ func (t *Tools) delegatePermissionTask(ctx context.Context, toolName, targetAgen
 	// DelegateTask succeeded — degrade journal append failure to a log entry
 	// so we still wait on the permission task. See §1.1 #1 of the
 	// 2026-06-13 review.
+	var permSessRef agentbackend.SessionRef
+	if resp.SessionID != "" {
+		permSessRef = agentbackend.NewBridgeOnly("", cardShortID(card), resp.SessionID)
+	}
 	if err := t.recordDelegatedTask(delegatedTaskRecord{
 		Tool:              toolName,
 		Response:          resp,
@@ -294,6 +304,7 @@ func (t *Tools) delegatePermissionTask(ctx context.Context, toolName, targetAgen
 		TargetDisplayName: card.DisplayName,
 		Skill:             skill,
 		Wait:              true,
+		SessionRef:        permSessRef,
 	}); err != nil {
 		t.logHelperErr("driver_journal", "record_delegated_task", err)
 	}

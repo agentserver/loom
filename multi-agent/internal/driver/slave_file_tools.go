@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
 const defaultInlineMaxBytes = 4096
@@ -134,6 +135,10 @@ func (r *readSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (json
 	// DelegateTask succeeded — degrade journal append failure to a log entry
 	// so we still wait on the slave file read. See §1.1 #1 of the
 	// 2026-06-13 review.
+	var sessRef agentbackend.SessionRef
+	if resp.SessionID != "" {
+		sessRef = agentbackend.NewBridgeOnly("", cardShortID(card), resp.SessionID)
+	}
 	if err := r.t.recordDelegatedTask(delegatedTaskRecord{
 		Tool:              r.Name(),
 		Response:          resp,
@@ -141,6 +146,7 @@ func (r *readSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (json
 		TargetDisplayName: card.DisplayName,
 		Skill:             "file",
 		Wait:              true,
+		SessionRef:        sessRef,
 	}); err != nil {
 		r.t.logHelperErr("driver_journal", "record_delegated_task", err)
 	}
@@ -355,6 +361,10 @@ func (w *writeSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (jso
 	// DelegateTask succeeded — degrade journal append failure to a log entry
 	// so we still wait on the slave file write. See §1.1 #1 of the
 	// 2026-06-13 review.
+	var writeSessRef agentbackend.SessionRef
+	if resp.SessionID != "" {
+		writeSessRef = agentbackend.NewBridgeOnly("", cardShortID(card), resp.SessionID)
+	}
 	if err := w.t.recordDelegatedTask(delegatedTaskRecord{
 		Tool:              w.Name(),
 		Response:          resp,
@@ -362,6 +372,7 @@ func (w *writeSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (jso
 		TargetDisplayName: card.DisplayName,
 		Skill:             "file",
 		Wait:              true,
+		SessionRef:        writeSessRef,
 	}); err != nil {
 		w.t.logHelperErr("driver_journal", "record_delegated_task", err)
 	}
@@ -437,6 +448,10 @@ func (s *statSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (json
 	// DelegateTask succeeded — degrade journal append failure to a log entry
 	// so we still wait on the slave file stat. See §1.1 #1 of the
 	// 2026-06-13 review.
+	var statSessRef agentbackend.SessionRef
+	if resp.SessionID != "" {
+		statSessRef = agentbackend.NewBridgeOnly("", cardShortID(card), resp.SessionID)
+	}
 	if err := s.t.recordDelegatedTask(delegatedTaskRecord{
 		Tool:              s.Name(),
 		Response:          resp,
@@ -444,6 +459,7 @@ func (s *statSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (json
 		TargetDisplayName: card.DisplayName,
 		Skill:             "file",
 		Wait:              true,
+		SessionRef:        statSessRef,
 	}); err != nil {
 		s.t.logHelperErr("driver_journal", "record_delegated_task", err)
 	}

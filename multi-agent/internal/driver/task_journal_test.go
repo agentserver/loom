@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
 func TestTaskJournalAppendsAndReadsNewestFirst(t *testing.T) {
@@ -136,7 +137,7 @@ func TestTerminalRecordDedupKeepsOnlyTerminal(t *testing.T) {
 		TaskID:         "task-A",
 		TargetID:       "slave-2",
 		ChildAgentID:   "slave-2",
-		ChildSessionID: "child-sess",
+		ChildSessionRef: agentbackend.SessionRef{Backend: "child-sess"},
 		Status:         "completed",
 		Terminal:       true,
 	}))
@@ -145,13 +146,13 @@ func TestTerminalRecordDedupKeepsOnlyTerminal(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, records, 1, "only the terminal record should survive dedup")
 	require.True(t, records[0].Terminal)
-	require.Equal(t, "child-sess", records[0].ChildSessionID)
+	require.Equal(t, "child-sess", records[0].ChildSessionRef.Backend)
 	require.Equal(t, "slave-2", records[0].ChildAgentID)
 
 	latest, ok := j.LatestByTaskID("task-A")
 	require.True(t, ok)
 	require.True(t, latest.Terminal)
-	require.Equal(t, "child-sess", latest.ChildSessionID)
+	require.Equal(t, "child-sess", latest.ChildSessionRef.Backend)
 }
 
 // TestNonTerminalMultipleRowsNotDeduped: two non-terminal resume_task rows for
@@ -182,7 +183,7 @@ func TestMixedTerminalAndNonTerminal(t *testing.T) {
 
 	// task-A: delegation + terminal
 	require.NoError(t, j.Append(TaskRecord{Tool: "submit_task", TaskID: "task-A"}))
-	require.NoError(t, j.Append(TaskRecord{Tool: "submit_task", TaskID: "task-A", Terminal: true, ChildSessionID: "sess-A", Status: "completed"}))
+	require.NoError(t, j.Append(TaskRecord{Tool: "submit_task", TaskID: "task-A", Terminal: true, ChildSessionRef: agentbackend.SessionRef{Backend: "sess-A"}, Status: "completed"}))
 	// task-B: two non-terminal rows
 	require.NoError(t, j.Append(TaskRecord{Tool: "submit_task", TaskID: "task-B"}))
 	require.NoError(t, j.Append(TaskRecord{Tool: "resume_task", TaskID: "task-B"}))
@@ -211,7 +212,7 @@ func TestTerminalRecordPreservesStatus(t *testing.T) {
 		Tool:           "submit_task",
 		TaskID:         "task-X",
 		Terminal:       true,
-		ChildSessionID: "sess-fail",
+		ChildSessionRef: agentbackend.SessionRef{Backend: "sess-fail"},
 		Status:         "failed",
 	}))
 
@@ -247,4 +248,150 @@ func TestListDriverTasksSkipsMalformedJournalLinesWithWarning(t *testing.T) {
 	require.Equal(t, "task-1", out.Tasks[1].TaskID)
 	require.Len(t, out.Warnings, 1)
 	require.Contains(t, out.Warnings[0], "skipped malformed task journal line 2")
+}
+
+func TestRecord_MarshalFlattensSessionRefIntoSiblings(t *testing.T) {
+	r := TaskRecord{
+		TS:    "2026-06-25T00:00:00Z",
+		Event: "delegate_task",
+		Tool:  "submit_task",
+		TaskID: "task_1",
+		SessionRef: agentbackend.SessionRef{
+			Backend: "thr-1",
+			Bridge:  "cse_1",
+		},
+		ChildSessionRef: agentbackend.SessionRef{
+			Backend: "thr-child",
+			Bridge:  "cse_child",
+		},
+		ChildAgentID: "ag-child",
+	}
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	// Decode into a generic map so we can verify the JSON is flat (no nested
+	// session_id objects).
+	var got map[string]interface{}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("Unmarshal generic: %v", err)
+	}
+	if v, ok := got["session_id"]; !ok || v != "thr-1" {
+		t.Errorf("session_id flat = %v (ok=%v), want \"thr-1\"", v, ok)
+	}
+	if v, ok := got["bridge_session_id"]; !ok || v != "cse_1" {
+		t.Errorf("bridge_session_id = %v (ok=%v), want \"cse_1\"", v, ok)
+	}
+	if v, ok := got["child_session_id"]; !ok || v != "thr-child" {
+		t.Errorf("child_session_id = %v (ok=%v), want \"thr-child\"", v, ok)
+	}
+	if v, ok := got["child_bridge_session_id"]; !ok || v != "cse_child" {
+		t.Errorf("child_bridge_session_id = %v (ok=%v), want \"cse_child\"", v, ok)
+	}
+	if v, ok := got["child_agent_id"]; !ok || v != "ag-child" {
+		t.Errorf("child_agent_id = %v (ok=%v), want \"ag-child\"", v, ok)
+	}
+	// Ensure session_id is a string, not a nested object.
+	if _, isObj := got["session_id"].(map[string]interface{}); isObj {
+		t.Error("session_id should be a flat string, not nested object")
+	}
+}
+
+func TestRecord_UnmarshalLegacyBridgeSessionID(t *testing.T) {
+	// Pre-refactor row: only session_id, value is a cse_… bridge id.
+	raw := `{"ts":"2026-06-23T08:00:00Z","event":"delegate_task","tool":"submit_task","task_id":"t1","session_id":"cse_legacy"}`
+	var r TaskRecord
+	if err := json.Unmarshal([]byte(raw), &r); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if r.SessionRef.Bridge != "cse_legacy" {
+		t.Errorf("SessionRef.Bridge = %q, want \"cse_legacy\"", r.SessionRef.Bridge)
+	}
+	if r.SessionRef.Backend != "" {
+		t.Errorf("SessionRef.Backend should be empty for legacy bridge row, got %q", r.SessionRef.Backend)
+	}
+}
+
+func TestRecord_UnmarshalLegacyBackendSessionID(t *testing.T) {
+	// Pre-refactor row that already carried a backend id (less common — but
+	// driver did sometimes write backend ids in journal terminal records).
+	raw := `{"ts":"2026-06-23T08:00:00Z","event":"delegate_task","tool":"submit_task","task_id":"t1","session_id":"019ef428-d06b-77b0-bdfe-20118f4cbe7d"}`
+	var r TaskRecord
+	if err := json.Unmarshal([]byte(raw), &r); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if r.SessionRef.Backend != "019ef428-d06b-77b0-bdfe-20118f4cbe7d" {
+		t.Errorf("SessionRef.Backend = %q, want the uuid", r.SessionRef.Backend)
+	}
+	if r.SessionRef.Bridge != "" {
+		t.Errorf("SessionRef.Bridge should be empty for legacy backend row, got %q", r.SessionRef.Bridge)
+	}
+}
+
+func TestRecord_UnmarshalLegacyChildSessionID(t *testing.T) {
+	// child_session_id classifier — same rules.
+	raw := `{"ts":"2026-06-23T08:00:00Z","event":"delegate_task","tool":"submit_task","task_id":"t1","child_session_id":"cse_child_legacy","child_agent_id":"ag-1"}`
+	var r TaskRecord
+	if err := json.Unmarshal([]byte(raw), &r); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if r.ChildSessionRef.Bridge != "cse_child_legacy" {
+		t.Errorf("ChildSessionRef.Bridge = %q, want \"cse_child_legacy\"", r.ChildSessionRef.Bridge)
+	}
+	if r.ChildAgentID != "ag-1" {
+		t.Errorf("ChildAgentID = %q, want \"ag-1\"", r.ChildAgentID)
+	}
+}
+
+func TestRecord_RoundTripModernRow(t *testing.T) {
+	// Modern (post-refactor) row: explicit bridge_session_id sibling means
+	// classifier is bypassed; both fields land in their explicit targets.
+	orig := TaskRecord{
+		TS:    "2026-06-25T00:00:00Z",
+		Event: "delegate_task",
+		Tool:  "submit_task",
+		TaskID: "task_2",
+		SessionRef: agentbackend.SessionRef{
+			Backend: "thr-modern",
+			Bridge:  "cse_modern",
+		},
+		ChildSessionRef: agentbackend.SessionRef{
+			Backend: "thr-child-modern",
+			Bridge:  "cse_child_modern",
+		},
+		ChildAgentID: "ag-child",
+	}
+	b, err := json.Marshal(orig)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var got TaskRecord
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	// Backend, Bridge, AgentID survive round-trip. Kind is empty on both sides
+	// (driver-side refs never have a Kind source).
+	if got.SessionRef.Backend != orig.SessionRef.Backend {
+		t.Errorf("SessionRef.Backend = %q, want %q", got.SessionRef.Backend, orig.SessionRef.Backend)
+	}
+	if got.SessionRef.Bridge != orig.SessionRef.Bridge {
+		t.Errorf("SessionRef.Bridge = %q, want %q", got.SessionRef.Bridge, orig.SessionRef.Bridge)
+	}
+	if got.SessionRef.Kind != "" {
+		t.Errorf("SessionRef.Kind should be empty, got %q", got.SessionRef.Kind)
+	}
+	if got.ChildSessionRef.Backend != orig.ChildSessionRef.Backend {
+		t.Errorf("ChildSessionRef.Backend = %q, want %q", got.ChildSessionRef.Backend, orig.ChildSessionRef.Backend)
+	}
+	if got.ChildSessionRef.Bridge != orig.ChildSessionRef.Bridge {
+		t.Errorf("ChildSessionRef.Bridge = %q, want %q", got.ChildSessionRef.Bridge, orig.ChildSessionRef.Bridge)
+	}
+	if got.ChildSessionRef.AgentID != "ag-child" {
+		// ChildAgentID flows back into ChildSessionRef.AgentID during unmarshal
+		// because the journal carries it as a separate field.
+		t.Errorf("ChildSessionRef.AgentID = %q, want \"ag-child\"", got.ChildSessionRef.AgentID)
+	}
+	if got.ChildAgentID != orig.ChildAgentID {
+		t.Errorf("ChildAgentID = %q, want %q", got.ChildAgentID, orig.ChildAgentID)
+	}
 }

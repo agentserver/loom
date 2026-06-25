@@ -168,6 +168,10 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 
 	// --- DelegateTask succeeded — from here helper failures degrade to
 	// warnings (existing contract; do not change). ---
+	var sessRef agentbackend.SessionRef
+	if resp.SessionID != "" {
+		sessRef = agentbackend.NewBridgeOnly("", targetShortID, resp.SessionID)
+	}
 	if err := s.t.recordDelegatedTask(delegatedTaskRecord{
 		Tool:              s.Name(),
 		Response:          resp,
@@ -177,6 +181,7 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 		Skill:             skill,
 		Wait:              false,
 		TimeoutSec:        timeout,
+		SessionRef:        sessRef,
 	}); err != nil {
 		warnings = append(warnings, "record delegated task: "+err.Error())
 		s.t.logHelperErr("driver_journal", "record_delegated_task", err)
