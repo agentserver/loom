@@ -724,16 +724,9 @@ import (
 
 (`strings` and `agentbackend` are the additions; the others already exist.)
 
-- [ ] **Step 4: Run journal tests**
+- [ ] **Step 4: Migrate pre-existing `task_journal_test.go` fixtures to the new field names**
 
-```
-go test ./internal/driver/ -run TestRecord_ -count=1
-```
-Expected: PASS for all 5 tests.
-
-- [ ] **Step 4b: Migrate pre-existing `task_journal_test.go` fixtures to the new field names**
-
-`task_journal_test.go` already has several `TaskRecord{... ChildSessionID: "..."}` literals and `record.ChildSessionID` reads from the pre-PR codebase. Edit them in this same task so the file compiles after the rename. Concrete sites (current `task_journal_test.go`):
+`task_journal_test.go` already has several `TaskRecord{... ChildSessionID: "..."}` literals and `record.ChildSessionID` reads from the pre-PR codebase. After Step 3's struct rename, those lines no longer compile, so `go test` (which compiles the whole package before filtering by `-run`) would fail with `undefined: ChildSessionID`. Do this BEFORE running any test command. Concrete sites (current `task_journal_test.go`):
 
 | Line | Change |
 | ---- | ------ |
@@ -744,6 +737,13 @@ Expected: PASS for all 5 tests.
 | 214  | `ChildSessionID: "sess-fail",` → `ChildSessionRef: agentbackend.SessionRef{Backend: "sess-fail"},` |
 
 Run `git grep -n 'ChildSessionID\|SessionID:' multi-agent/internal/driver/task_journal_test.go` after the edits to confirm zero matches (apart from the new flatten/round-trip tests added in Step 1, which use `SessionRef:` / `ChildSessionRef:`).
+
+- [ ] **Step 4b: Run journal tests**
+
+```
+go test ./internal/driver/ -run TestRecord_ -count=1
+```
+Expected: PASS for all 5 tests added in Step 1, AND all pre-existing journal tests (the ones whose fixtures Step 4 just migrated).
 
 - [ ] **Step 5: Survey expected compile breakage (no commit yet)**
 
@@ -896,6 +896,37 @@ if err := r.t.recordDelegatedTask(delegatedTaskRecord{
 ```
 
 Apply the same pattern at all 10 sites.
+
+**Imports check (verified against current heads):** four of the six files touched by Step 1 do NOT import `agentbackend` today. Add it before saving the file or `go build` will fail with `undefined: agentbackend`.
+
+| File                              | Has `agentbackend` import today? | Action            |
+| --------------------------------- | -------------------------------- | ----------------- |
+| `internal/driver/tools.go`        | yes                              | leave             |
+| `internal/driver/contract_tools.go` | yes                            | leave             |
+| `internal/driver/register_mcp_tool.go` | NO                          | **add**           |
+| `internal/driver/unregister_mcp_tool.go` | NO                        | **add**           |
+| `internal/driver/slave_tools.go`  | NO                               | **add**           |
+| `internal/driver/slave_file_tools.go` | NO                           | **add**           |
+
+For each "add" file, insert the import in the existing import block (alphabetical ordering inside the `multi-agent` group):
+
+```go
+import (
+    // ...existing imports above...
+    "github.com/yourorg/multi-agent/pkg/agentbackend"
+    // ...existing imports below (e.g. agentsdk)...
+)
+```
+
+Verify after edits:
+```
+git grep -L '"github.com/yourorg/multi-agent/pkg/agentbackend"' \
+    multi-agent/internal/driver/register_mcp_tool.go \
+    multi-agent/internal/driver/unregister_mcp_tool.go \
+    multi-agent/internal/driver/slave_tools.go \
+    multi-agent/internal/driver/slave_file_tools.go
+```
+Expected: zero lines (all four files now match the import).
 
 - [ ] **Step 2: Update `recordTerminalChild`**
 
