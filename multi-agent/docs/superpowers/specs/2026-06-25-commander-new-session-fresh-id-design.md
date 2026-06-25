@@ -68,17 +68,31 @@ Frontend sets `fresh: true` when posting the FIRST turn on a `pendingSession`
 (i.e. when `pendingSession.phase === 'draft'` for the session being submitted).
 Subsequent turns leave it unset.
 
-A new SSE event type, `session_id`, carries the backend's real session ID
-when it differs from the client's:
+The backend's real session ID rides in the existing terminal `done`
+SSE payload — a new `session_id` field on the JSON `result` object:
 
 ```
-event: session_id
-data: {"session_id":"<codex-minted-id>"}
+event: done
+data: {"session_id":"<codex-minted-id>", "result":{...}}
 ```
 
-Emitted at most once per turn. The frontend listens for it inside `postTurn`
-and surfaces it to `CommanderApp` via a new callback so pending state can
-rebind to the real ID.
+(If `done` already had a `result` object, the new field nests inside it.
+If the existing payload shape doesn't reserve a slot, add `session_id`
+as a top-level field of the done JSON. Either way, the implementation
+sticks to ONE shape and the frontend reads from that one path.)
+
+Rationale: the existing SSE sink layer (`internal/commander/sink.go` +
+`sseSink.Write`) only carries text payloads — the daemon-link envelope's
+`EventPayload.Text` field is what propagates through hub. A new
+`session_id` SSE event would either need a whole new structured event
+type or get stringified through `{"text": ...}`. Reusing `done`
+sidesteps both — `done` is already terminal AND already carries a JSON
+result that can be extended without touching the sink layer.
+
+It also fixes the ordering problem: the hub's stream loop exits on
+terminal frames (`command_result` → `done`), so any post-`done` event
+is dropped. Putting the ID INTO `done` means the hub sees it before
+loop exit and can perform the turn-state rekey atomically.
 
 ### Slave handler change
 
@@ -101,14 +115,17 @@ rebind to the real ID.
    the `<codex_home>/sessions/current` marker, which is a CODEX_HOME-level
    last-active pointer that concurrent `Run`/`RunResume` calls would
    race-overwrite).
-4. Emit `event: session_id\ndata: {"session_id":"<res.SessionID>"}` to
-   the sink so the frontend can rebind. If `err == nil && res.SessionID
-   == ""`, treat as a bug — emit `event: error\ndata: {"code":"backend_unavailable",
-   "message":"fresh turn returned without a session ID"}` and return.
-5. `Run`'s normal result events (`status`, `chunk`, `done`) flow through
-   unchanged. The `session_id` event is emitted AFTER `done` (or together
-   with `done`'s detail), so the frontend can rebind in the same
-   onEvent step.
+4. Compose the terminal `done` envelope so its `result` JSON object
+   includes `session_id: res.SessionID`. The slave's existing done-emit
+   path (whatever assembles the `command_result` envelope from `res`) is
+   the single point of change — it learns to copy `res.SessionID` into
+   the JSON when present. If `err == nil && res.SessionID == ""` on a
+   fresh turn, treat as a bug — surface as `error` envelope with code
+   `backend_unavailable` and message `"fresh turn returned without a
+   session ID"`.
+5. `Run`'s normal intermediate events (`status`, `chunk`) flow through
+   unchanged. The `session_id` lands as a field inside the terminal
+   `done` payload — single frame, no ordering issue, no new event type.
 
 When `fresh=false`: existing flow unchanged.
 
@@ -146,40 +163,47 @@ same step.
   `SessionTurnArgs` JSON gains the field automatically since the protocol
   type is updated).
 
-### Hub turn-state rekey
+### Hub turn-state rekey (atomic on terminal `done`)
 
 The hub tracks per-turn state (`turnKey{owner, daemonID, sessionID}` →
 turn-state, in-flight gate) keyed on the URL's `<sid>`. For a fresh
 turn, the URL `<sid>` is the client-minted placeholder UUID; the real
-codex-minted ID arrives in the `session_id` SSE mid-stream.
+codex-minted ID is in the terminal `done` payload's `session_id` field.
 
-If the hub leaves state keyed under the placeholder ID, the subsequent
-queries from the frontend (which has rebound to the real ID) will look
-up turn-state at a key that no longer has the most recent terminal
-frame. Specifically:
-- `done` / `awaiting_approval` / `error` arrive at the placeholder key.
-- The next page-render reads turn-state for the real ID → finds none →
-  defaults to `idle`.
-- If the slave was actually `awaiting_approval`, composer becomes
-  re-enabled (BAD — user can submit a turn that codex can't accept).
+If the hub leaves state keyed under the placeholder ID, the next turn
+on the real ID:
+- Finds NO state at the real key → defaults to `idle` (BAD if the slave
+  was actually `awaiting_approval` — composer re-enables and the user
+  submits a turn codex can't accept).
+- Or, finds stale `InFlight=true/queued` at the placeholder key that
+  never clears → next real-ID turn gets HTTP 409.
 
-Hub change:
-- In the SSE stream path that proxies `session_id` events from the
-  daemon-link WS to the HTTP client, ALSO update the hub-internal turn
-  state key: move any existing entry from
-  `turnKey{owner, daemonID, placeholderSID}` to
-  `turnKey{owner, daemonID, realSID}`.
-- Implement via a small `rekey(oldKey, newKey)` helper on the
-  `turnStateStore`. Idempotent — if newKey already has state (shouldn't
-  for a fresh session), prefer the newer entry.
-- Do NOT migrate the in-flight HTTP request itself — the existing POST
-  is still responding under the placeholder URL; the rekey only affects
-  the NEXT turn's lookup. Subsequent turns under the real ID will go
-  through `Backend.RunResume` (fresh=false, ID=real), find their state
-  cleanly, and run normally.
+The rekey must happen at the SAME MOMENT the terminal frame writes
+state, so the final `done`/`awaiting_approval`/`error` lands at the
+REAL key, not the placeholder. Concretely:
 
-The `session_id` SSE event is otherwise opaque to the hub and is
-forwarded to the HTTP response unchanged.
+1. The hub's stream loop receives the `command_result` envelope from
+   the daemon-link WS. Today this calls `updateTurnStateFromEnvelope`
+   with the placeholder `key`.
+2. Spec change: BEFORE calling `updateTurnStateFromEnvelope`, inspect
+   the envelope payload. If it contains `session_id` (terminal-frame
+   field added in §Protocol) AND it differs from `key.sessionID`, build
+   a new `realKey = turnKey{owner, daemonID, session_id}` and use
+   `realKey` for ALL subsequent state writes in this iteration
+   (terminal write + invalidateDaemonSessions).
+3. Also call a small `rekey(placeholderKey, realKey)` helper on the
+   turn-state store to migrate any prior in-flight entry (queued,
+   starting, answering state already written under the placeholder).
+   Idempotent — if `realKey` already has state from another concurrent
+   path, prefer the newer terminal write.
+4. The HTTP response stream continues writing SSE frames to the client
+   under the placeholder URL until the loop exits — the client doesn't
+   need a separate event, it reads the new ID from the `done` payload
+   and rebinds its own `selected` + `pendingSession`.
+
+After this iteration: subsequent turns under the real ID find their
+state cleanly at `realKey`, run normally through `Backend.RunResume`
+(fresh=false, ID=real).
 
 ## Files
 
@@ -190,6 +214,7 @@ forwarded to the HTTP response unchanged.
 | `pkg/agentbackend/backend.go` (or equivalent) | `Task` struct gets an `Origin` field (or equivalent flag) so backends can branch sidecar/origin behavior between user-fresh and agent-task. If a clean field doesn't exist today, add one. |
 | `pkg/agentbackend/codex/executor.go` | sidecar writer respects `Task.Origin`: writes `origin: user` when the task is a user-fresh new session; preserves existing `origin: agent_task` for the agent-task path. |
 | `internal/commander/wsclient.go` | unmarshal `Fresh` from incoming session_turn; pass through to Handler.SessionTurn. |
+| `internal/commander/http.go` | the local daemon HTTP `/turn` handler also calls `h.SessionTurn(...)` directly — must be updated for the new signature, AND parse `fresh` from its own POST body so direct-daemon `/turn` calls also work end-to-end (otherwise the daemon's compile fails when only commanderhub is updated, and direct-daemon users hit the same original bug). |
 | `internal/commanderhub/http.go` (`turn` handler) | parse `fresh` from POST body ONLY (not query param — single source of truth). |
 | `internal/commanderhub/hub.go` (or wherever turn-state lives) | new `rekey(oldKey, newKey)` helper; invoked from the SSE proxy path when a `session_id` event arrives, before forwarding to HTTP client. |
 | `internal/commanderhub/webapp/src/api/client.ts` | `postTurn` accepts `opts.fresh`; body JSON includes `fresh`. |
