@@ -732,12 +732,26 @@ go test ./internal/driver/ -run TestRecord_ -count=1
 ```
 Expected: PASS for all 5 tests.
 
+- [ ] **Step 4b: Migrate pre-existing `task_journal_test.go` fixtures to the new field names**
+
+`task_journal_test.go` already has several `TaskRecord{... ChildSessionID: "..."}` literals and `record.ChildSessionID` reads from the pre-PR codebase. Edit them in this same task so the file compiles after the rename. Concrete sites (current `task_journal_test.go`):
+
+| Line | Change |
+| ---- | ------ |
+| 139  | `ChildSessionID: "child-sess",` → `ChildSessionRef: agentbackend.SessionRef{Backend: "child-sess"},` |
+| 148  | `require.Equal(t, "child-sess", records[0].ChildSessionID)` → `require.Equal(t, "child-sess", records[0].ChildSessionRef.Backend)` |
+| 154  | `require.Equal(t, "child-sess", latest.ChildSessionID)` → `require.Equal(t, "child-sess", latest.ChildSessionRef.Backend)` |
+| 185  | `... ChildSessionID: "sess-A", Status: "completed"}))` → `... ChildSessionRef: agentbackend.SessionRef{Backend: "sess-A"}, Status: "completed"}))` |
+| 214  | `ChildSessionID: "sess-fail",` → `ChildSessionRef: agentbackend.SessionRef{Backend: "sess-fail"},` |
+
+Run `git grep -n 'ChildSessionID\|SessionID:' multi-agent/internal/driver/task_journal_test.go` after the edits to confirm zero matches (apart from the new flatten/round-trip tests added in Step 1, which use `SessionRef:` / `ChildSessionRef:`).
+
 - [ ] **Step 5: Survey expected compile breakage (no commit yet)**
 
 ```
 go build ./internal/driver/... 2>&1 | head -80
 ```
-Expected: COMPILE ERRORS in `tools.go` and `tools_test.go` referencing the removed `SessionID` / `ChildSessionID` field names. **Record each `file:line` —** Task 3 fixes the production sites; Task 4 fixes the test sites. Tasks 2, 3 and 4 land as one atomic commit at the end of Task 4 so the tree never compiles red.
+Expected: COMPILE ERRORS in `tools.go` and `tools_test.go` referencing the removed `SessionID` / `ChildSessionID` field names. `task_journal.go` and `task_journal_test.go` should be GREEN — Step 3 added the new fields and Step 4b migrated the existing test sites. **Record each `file:line` of remaining errors —** Task 3 fixes the `tools.go` production sites; Task 4 fixes the `tools_test.go` sites. Tasks 2, 3 and 4 land as one atomic commit at the end of Task 4 so the tree never compiles red.
 
 - [ ] **Step 6: Stage (do NOT commit yet)**
 
@@ -1590,35 +1604,31 @@ return e.RunResume(ctx, agentbackend.NewBackend(e.kind, "", sessionID), answer, 
 
 Repeat for `claude/` and `opencode/` (no `appserver_worker.go` equivalent for those — only `executor.go` + `backend.go`).
 
-- [ ] **Step 4: Build + ensure package compiles in isolation**
+- [ ] **Step 4: Build (production-only) — confirm interface ripple is complete**
 
 ```
 cd multi-agent
 go vet ./pkg/agentbackend/...
 go build ./pkg/agentbackend/...
 ```
-Expected: PASS. (Test files within `pkg/agentbackend/*/*_test.go` may still error — Task 9 fixes them; the build verifies production code is consistent.)
+Expected: PASS. Test files within `pkg/agentbackend/*/*_test.go` and `internal/commanderhub/proxy_test.go` will still error — they ship as part of the **atomic P2 commit at Task 9 Step 5** so the tree never compiles red. Mirror of P1's Task 2/3/4 atomic pattern.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Stage (do NOT commit yet)**
 
 ```
-git add multi-agent/pkg/agentbackend/backend.go multi-agent/pkg/agentbackend/backend_test.go multi-agent/pkg/agentbackend/codex/executor.go multi-agent/pkg/agentbackend/codex/backend.go multi-agent/pkg/agentbackend/codex/appserver_worker.go multi-agent/pkg/agentbackend/claude/executor.go multi-agent/pkg/agentbackend/claude/backend.go multi-agent/pkg/agentbackend/opencode/executor.go multi-agent/pkg/agentbackend/opencode/backend.go
-git commit -m "feat(agentbackend): Backend.RunResume takes SessionRef (#29 P2.1)
-
-Promotes the typed reference into the interface so every backend
-implementation gets the bridge-vs-backend distinction enforced by
-the compiler. Every implementation now starts with a HasBackend()
-guard that returns an actionable error if the caller passes a
-bridge-only ref. nilBackend test stub signature updated to match.
-
-Test files still error against this signature change — fixed in
-the next commit (Task 9).
-
-Issue #29.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-"
+git add multi-agent/pkg/agentbackend/backend.go \
+        multi-agent/pkg/agentbackend/backend_test.go \
+        multi-agent/pkg/agentbackend/codex/executor.go \
+        multi-agent/pkg/agentbackend/codex/backend.go \
+        multi-agent/pkg/agentbackend/codex/appserver_worker.go \
+        multi-agent/pkg/agentbackend/claude/executor.go \
+        multi-agent/pkg/agentbackend/claude/backend.go \
+        multi-agent/pkg/agentbackend/opencode/executor.go \
+        multi-agent/pkg/agentbackend/opencode/backend.go
+git status -s
 ```
+
+Do NOT commit. The atomic P2 commit (interface + test stub migration + negative-guard tests) ships at Task 9 Step 5. Subsequent tasks (10–12) cover the slave/commander wrap seams and the P2 wrap-up in their own commits.
 
 ---
 
@@ -1719,17 +1729,42 @@ go test ./internal/commanderhub/... -count=1
 ```
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Atomic P2 commit (covers Tasks 8 + 9)**
+
+This is the first green commit of the P2 branch — interface signature change + every test stub migration + negative-guard coverage land together. Same pattern as the P1 Task 4 Step 5 atomic commit.
 
 ```
-git add multi-agent/pkg/agentbackend/codex/executor_test.go multi-agent/pkg/agentbackend/codex/backend_resume_test.go multi-agent/pkg/agentbackend/codex/appserver_worker_test.go multi-agent/pkg/agentbackend/claude/executor_test.go multi-agent/pkg/agentbackend/claude/backend_resume_test.go multi-agent/pkg/agentbackend/opencode/executor_test.go multi-agent/pkg/agentbackend/opencode/backend_resume_test.go multi-agent/internal/commanderhub/proxy_test.go
-git commit -m "test(agentbackend): migrate RunResume call sites to SessionRef (#29 P2.2)
+git add multi-agent/pkg/agentbackend/codex/executor_test.go \
+        multi-agent/pkg/agentbackend/codex/backend_resume_test.go \
+        multi-agent/pkg/agentbackend/codex/appserver_worker_test.go \
+        multi-agent/pkg/agentbackend/claude/executor_test.go \
+        multi-agent/pkg/agentbackend/claude/backend_resume_test.go \
+        multi-agent/pkg/agentbackend/opencode/executor_test.go \
+        multi-agent/pkg/agentbackend/opencode/backend_resume_test.go \
+        multi-agent/internal/commanderhub/proxy_test.go
+# Production files from Task 8 are already staged.
+git commit -m "feat(agentbackend): Backend.RunResume takes SessionRef (#29 P2.1)
 
-Updates every test that constructs SessionRef literals or implements
-the Backend interface stub. Each backend gets a new negative-coverage
-test (TestExecutor_RunResume_RejectsBridgeOnlyRef) that proves the
-!ref.HasBackend() guard returns an actionable error without launching
-the CLI.
+Atomic interface promotion — green at this commit.
+
+Interface:
+- Backend.RunResume signature changes from (ctx, sessionID,
+  answer string, sink) to (ctx, ref SessionRef, answer, sink).
+- Every implementation (codex / claude / opencode + nilBackend
+  stub) starts with a !ref.HasBackend() guard that returns an
+  actionable error if the caller passes a bridge-only ref.
+- appserver_worker fallback wraps sessionID via NewBackend at
+  the seam (string still in scope from app-server state).
+
+Tests:
+- Every existing RunResume call site at the test layer
+  (executor_test.go, backend_resume_test.go,
+  appserver_worker_test.go, commanderhub/proxy_test.go) gets
+  the typed-ref construction.
+- Each backend gets a new negative-coverage test
+  (TestExecutor_RunResume_RejectsBridgeOnlyRef) that proves
+  the guard returns the actionable error without launching the
+  CLI.
 
 Issue #29.
 
