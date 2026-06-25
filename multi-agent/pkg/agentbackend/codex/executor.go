@@ -90,7 +90,7 @@ func (e *executor) Run(ctx context.Context, t agentbackend.Task, sink agentbacke
 		agentID:     t.ParentAgentID,
 		displayName: t.ParentDisplayName,
 	}
-	return e.runWithArgv(ctx, args, prompt, sink, true, parent)
+	return e.runWithArgv(ctx, args, prompt, sink, true, parent, t.Origin)
 }
 
 // RunResume re-invokes the codex backend with `exec resume <sessionID>` so the
@@ -110,13 +110,13 @@ func (e *executor) RunResume(ctx context.Context, sessionID, answer string, sink
 		"--skip-git-repo-check",
 	}, e.cfg.ExtraArgs...)
 	prompt := "User answered: " + answer
-	return e.runWithArgv(ctx, args, prompt, sink, false, parentLink{})
+	return e.runWithArgv(ctx, args, prompt, sink, false, parentLink{}, "")
 }
 
 // runWithArgv is the shared pipeline: spawn codex with the given argv head
 // (mcp injection + trailing `-` are appended here), feed `prompt` via stdin,
 // parse stream-json, and handle pause-via-IPC with grace shutdown.
-func (e *executor) runWithArgv(ctx context.Context, argvHead []string, prompt string, sink agentbackend.Sink, newSession bool, parent parentLink) (agentbackend.Result, error) {
+func (e *executor) runWithArgv(ctx context.Context, argvHead []string, prompt string, sink agentbackend.Sink, newSession bool, parent parentLink, origin string) (agentbackend.Result, error) {
 	sockDir, err := os.MkdirTemp("", "humanloop-")
 	if err != nil {
 		return agentbackend.Result{}, err
@@ -205,7 +205,12 @@ func (e *executor) runWithArgv(ctx context.Context, argvHead []string, prompt st
 			// current-session marker: written on BOTH Run and RunResume so
 			// serve-mcp can learn the parent session during any turn. Best-effort.
 			_ = writeCurrentSession(EffectiveCodexHome(e.cfg, e.env), sessionID)
-			if newSession {
+			// Skip sidecar write for user-initiated fresh sessions
+			// (commander "+" path). sessions.go defaults Origin to
+			// SessionOriginUser when no sidecar exists — that's exactly
+			// what we want here. The applyLoomMeta gate only UPGRADES to
+			// agent_task, never downgrades.
+			if newSession && origin != string(agentbackend.SessionOriginUser) {
 				createdAt := ev.Timestamp
 				if createdAt == "" {
 					createdAt = timeNow().UTC().Format(time.RFC3339Nano)
