@@ -230,3 +230,50 @@ func TestPublishCard_IncludesPlatformAndCommandInterfaces(t *testing.T) {
 		"default": true,
 	}, interfaces[0])
 }
+
+// TestReady_OpenOnConstructionClosedOnConnect proves the Ready() gate:
+// (a) the channel exists immediately after New, (b) it is open (not
+// closed) before any Connect call, (c) it closes exactly once the first
+// OnConnect callback fires inside Run, (d) a subsequent OnConnect call
+// (simulating a reconnect) does NOT panic from double-close. This is the
+// contract the slave-agent commander-daemon goroutine relies on to
+// avoid the historical slave-daemon-startup-race.
+func TestReady_OpenOnConstructionClosedOnConnect(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{}
+	// Bypass Run/Connect entirely — we exercise the readyOnce semantics
+	// directly via the same close path OnConnect would take. This keeps
+	// the test hermetic (no httptest server) while still pinning the
+	// public Ready() contract.
+	tn := New(cfg, "", nil)
+
+	// (a) + (b) — Ready returns a channel and it is open before connect.
+	r := tn.Ready()
+	require.NotNil(t, r)
+	select {
+	case <-r:
+		t.Fatal("Ready() channel should be open before any connect")
+	default:
+	}
+
+	// (c) — first close fires; channel observed as closed.
+	tn.readyOnce.Do(func() { close(tn.ready) })
+	select {
+	case <-tn.Ready():
+	default:
+		t.Fatal("Ready() channel should be closed after first OnConnect")
+	}
+
+	// (d) — second close call (simulating reconnect) is a no-op via Once.
+	require.NotPanics(t, func() {
+		tn.readyOnce.Do(func() { close(tn.ready) })
+	})
+
+	// Ready() must keep returning the same closed channel.
+	r2 := tn.Ready()
+	select {
+	case <-r2:
+	default:
+		t.Fatal("Ready() should remain closed after reconnect")
+	}
+}

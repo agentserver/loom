@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"runtime"
+	"sync"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/yourorg/multi-agent/internal/capability"
@@ -31,6 +32,16 @@ type Tunnel struct {
 	mcpTools          []capability.MCPToolDescriptor
 	platform          commandiface.Platform
 	commandInterfaces []commandiface.CommandInterface
+
+	// ready is closed exactly once, the first time the yamux tunnel reports
+	// OnConnect to agentserver. Reconnects do NOT re-close it. Callers
+	// (notably the slave-agent commander-daemon goroutine) wait on Ready()
+	// before dialing observer; observer validates every WS handshake via
+	// agentserver's /api/agent/whoami, and whoami returns 401/403 until the
+	// tunnel has put the sandbox into the running state. Without this gate,
+	// the daemon races the tunnel and reliably gets bounced on first launch.
+	readyOnce sync.Once
+	ready     chan struct{}
 }
 
 func New(cfg *config.Config, cfgPath string, h http.Handler) *Tunnel {
@@ -50,7 +61,20 @@ func NewWithDeps(cfg *config.Config, cfgPath string, h http.Handler, deps Deps) 
 		deps:     deps,
 		tools:    []string{},
 		mcpTools: []capability.MCPToolDescriptor{},
+		ready:    make(chan struct{}),
 	}
+}
+
+// Ready returns a channel that is closed the first time the tunnel
+// successfully connects to agentserver (the OnConnect callback fires).
+// Callers gate observer-bound work on this signal so the agentserver-side
+// sandbox state has transitioned to running before observer's whoami probe
+// runs — without the gate the daemon races the tunnel and gets bounced
+// with 401 on cold start. The channel is never re-opened: reconnects do
+// NOT re-close it. Always returns the same channel; safe for many
+// concurrent select waiters.
+func (t *Tunnel) Ready() <-chan struct{} {
+	return t.ready
 }
 
 // SetTools sets the flattened MCP tool name list to include in the next
@@ -181,8 +205,11 @@ func (t *Tunnel) Run(ctx context.Context) error {
 		})
 	}
 	return t.sdk.Connect(ctx, agentsdk.Handlers{
-		HTTP:         t.http,
-		OnConnect:    func() {},
+		HTTP: t.http,
+		// OnConnect fires every time the yamux tunnel attaches (cold start
+		// AND every reconnect). Close ready exactly once so a single waiter
+		// pattern stays correct across reconnects.
+		OnConnect:    func() { t.readyOnce.Do(func() { close(t.ready) }) },
 		OnDisconnect: func(error) {},
 		// Task: nil — our internal/poller handles task polling.
 	})
