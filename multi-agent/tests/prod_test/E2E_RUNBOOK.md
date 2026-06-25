@@ -1,8 +1,8 @@
 # Prod E2E Runbook (host mode)
 
-Step-by-step for running the two-slave + driver-daemon + driver-mcp + observer e2e against the real `agent.cs.ac.cn` agentserver.
+How to set up, run, and tear down the prod e2e environment against the real `agent.cs.ac.cn` agentserver. This document covers **infrastructure only** — specific test targets live in the test scripts themselves (`driver_mcp_e2e.py`, `commander-live.spec.ts`, etc.).
 
-The `tests/prod_test/` tree (except this file and `README.md`) is `.gitignore`-d: it holds OAuth credentials, sqlite state, and locally-rebuilt binaries. **The actual configs live in this directory in the canonical repo checkout (`/root/multi-agent/multi-agent/tests/prod_test/` in the dev environment) and are NOT visible from worktrees.**
+The `tests/prod_test/` tree (except whitelisted files) is `.gitignore`-d: it holds OAuth credentials, sqlite state, and locally-rebuilt binaries. **The actual configs live in this directory in the canonical repo checkout (`/root/multi-agent/multi-agent/tests/prod_test/` in the dev environment) and are NOT visible from worktrees.**
 
 > **After each successful or failed run, update this file in-place** with whatever drifted: short_ids, port numbers, model/provider settings, config paths, new gotchas. The file is meant to stay current with the actual setup state.
 
@@ -50,7 +50,35 @@ All four agents MUST share the same `workspace_id` (currently `96bd3120-…` / "
 - A local modelserver proxy reachable from this host — see "Model provider" below.
 - Linux/amd64 host. `bin/*.linux-amd64` rebuilt from current branch HEAD.
 
-## Step 0 — Rebuild binaries from branch HEAD
+## Automated runner (`run_e2e.sh`)
+
+The recommended way to run e2e tests. Automates Steps 0–5 below and invokes the test scripts:
+
+```bash
+# Full run (rebuild binaries + all registered test scripts):
+./tests/prod_test/run_e2e.sh
+
+# Skip binary rebuild (when binaries are already current):
+./tests/prod_test/run_e2e.sh --no-rebuild
+
+# Selective:
+./tests/prod_test/run_e2e.sh --skip-playwright   # skip Playwright tests
+./tests/prod_test/run_e2e.sh --skip-mcp           # skip driver MCP test
+```
+
+Set `WORKTREE_ROOT` if running from a worktree (defaults to `../../` relative to the script).
+
+The script uses `trap cleanup EXIT` to guarantee teardown even on failure. Pre-flight token checks treat HTTP 403 as a warning (sandbox may recover after tunnel reconnects), but HTTP 401 is fatal.
+
+Test scripts invoked by the runner:
+- **`driver_mcp_e2e.py`** — Python 3 stdio client for driver MCP (define assertions there)
+- **Playwright live config** — `internal/commanderhub/webapp/playwright.live.config.ts` (specs under `src/e2e/`)
+
+To add a new test target, add it as a phase in `run_e2e.sh` and put assertions in the test script itself.
+
+## Manual steps (when not using `run_e2e.sh`)
+
+### Step 0 — Rebuild binaries from branch HEAD
 
 ```bash
 cd <multi-agent module root>           # e.g. .claude/worktrees/<branch>/multi-agent
@@ -67,7 +95,7 @@ CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
 
 If `Text file busy` — a previous instance is still holding the binary; kill its PID first.
 
-## Step 1 — Pre-flight checks
+### Step 1 — Pre-flight checks
 
 From `/root/multi-agent/multi-agent/tests/prod_test/`:
 
@@ -92,7 +120,7 @@ Expected: all three return `HTTP 200`.
 - **HTTP 403 = sandbox `forbidden`** — agentserver flipped the sandbox out of `running` state. See the re-register section.
 - **HTTP 401 = token invalid** — credentials were revoked or wiped. Re-register.
 
-## Step 2 — Start services (order matters)
+### Step 2 — Start services (order matters)
 
 ```bash
 cd /root/multi-agent/multi-agent/tests/prod_test
@@ -144,11 +172,11 @@ slave-agent: commander daemon ready http=http://127.0.0.1:1809x
 
 If `observer unauthorized: status 401` appears, the slave-daemon-startup race is back; the gate in `cmd/slave-agent/main.go::run()` is missing or broken.
 
-## Step 3 — Trigger driver MCP
+### Step 3 — Run tests
 
-Two ways:
+Run your test scripts against the running environment. Two common approaches:
 
-### 3a. Via `codex exec` (interactive-ish, exercises the real codex thread)
+**Via `codex exec` (exercises the real codex thread):**
 
 ```bash
 cd driver-codex-local
@@ -157,36 +185,14 @@ CODEX_HOME=$PWD/.codex codex exec --cd $PWD "<your prompt>"
 
 The codex CLI forks `driver-agent serve-mcp` per the `[mcp_servers.driver]` block in `.codex/config.toml`. `driver-agent serve-mcp --config` MUST point at the SAME yaml the daemon reads (`driver-codex-local/config.yaml`) so `short_id` matches on both legs — without this, `loom_origin` parent links break.
 
-### 3b. Direct stdio client (faster, deterministic, no codex token spend)
+**Via direct stdio client (faster, deterministic, no codex token spend):**
 
-`/tmp/driver_mcp_e2e.py` (one-off helper, regenerate from this snippet):
-
+Use `driver_mcp_e2e.py` or write a custom client:
 - spawn `driver-agent serve-mcp --config .../driver-codex-local/config.yaml`
 - wire format: **newline-delimited JSON-RPC** (NOT LSP Content-Length); write `json + "\n"`, split stdout on `\n`
-- `initialize` → `tools/list` → `bind_thread{thread_id: <uuid>}` → `submit_task{target_display_name: "slave-codex-local", skill: "chat", prompt: "..."}` → `wait_task{task_id}`
+- Note: `submit_task` only accepts `target_display_name`. Passing `target_short_id` silently falls back to `driver_defaults.target_display_name` (= slave A) — verified via the tool's inputSchema.
 
-Note `submit_task` only accepts `target_display_name`. Passing `target_short_id` silently falls back to `driver_defaults.target_display_name` (= slave A) — verified via the tool's inputSchema.
-
-## Step 4 — Verify success
-
-A successful `wait_task` response on a chat task:
-
-```json
-{
-  "status": "completed",
-  "session_id": "<UUID, the backend-native id from kind marker>",
-  "bridge_session_id": "<cse_…, if agentserver minted one>",
-  "output": "<slave's reply>",
-  "final_output": "...",
-  "is_final": true
-}
-```
-
-Key invariant from #29: `session_id` is a backend-native UUID, **not** an agentserver bridge `cse_*`. If you see `cse_…` as `session_id`, the bridge/backend split regressed.
-
-Both branches of `wait_task` / `get_task` (awaiting_user AND final/completed) MUST emit `session_id` + `bridge_session_id` (omitempty). Same goes for the awaiting_user branch returned through `waitDelegatedTask` (used by `resume_task` / `register_mcp` / `slave_file_tools`).
-
-## Step 5 — Tear down
+### Step 4 — Tear down
 
 ```bash
 ps -ef | grep -E 'slave-agent|driver-agent|observer-server' | grep -v grep
@@ -194,13 +200,16 @@ kill <pids>
 # locks are best-effort cleaned up on next start
 ```
 
-## Re-registering a slave (OAuth device flow)
+## Re-registering agents (OAuth device flow)
 
-When `whoami` returns 403/401 for a slave, agentserver lost the sandbox and the token can't be revived. Re-register:
+When `whoami` returns 403/401, the sandbox token can't be revived. Re-register:
+
+**Important:** Start observer FIRST, then register agents and keep them all running. Killing a registered agent immediately makes its sandbox go `forbidden` — tokens cannot be reused after that.
+
+**For slaves:**
 
 ```bash
 cd slave-codex-local       # or slave-codex-local-b
-# Save the old creds first, then clear them so EnsureRegistered takes the device-flow path
 cp config.yaml config.yaml.bak-pre-reregister-$(date +%s)
 python3 -c "
 import yaml
@@ -211,21 +220,28 @@ with open('config.yaml','w') as f: yaml.dump(c, f, default_flow_style=False, sor
 rm -f slave-agent.lock
 nohup ../bin/slave-agent.linux-amd64 ./config.yaml > logs/slave-agent.log 2>&1 &
 disown
-# tail the log for the device-flow URL:
 sleep 4
 grep -A1 'Open this URL' logs/slave-agent.log
 ```
 
+**For the driver:** (uses a separate `register` subcommand)
+
+```bash
+cd driver-codex-local
+# clear creds same as above, then:
+../bin/driver-agent.linux-amd64 register --config ./config.yaml
+# After approval, start the daemon separately:
+nohup ../bin/driver-agent.linux-amd64 serve-daemon --config ./config.yaml --listen 127.0.0.1:18092 > logs/driver-daemon.log 2>&1 &
+```
+
 Open the printed URL in a browser, complete the consent prompt.
 
-**Browser workspace pitfall:** the OAuth consent screen defaults to whatever workspace your account has open. Confirm the workspace is `96bd3120-…` ("嘿嘿") — NOT `6f55e9fe-…` ("prod-test/slave"). A wrong-workspace slave registers fine but is invisible to the driver. After approval, double-check:
+**Browser workspace pitfall:** the OAuth consent screen defaults to whatever workspace your account has open. Confirm the workspace is `96bd3120-…` ("嘿嘿") — NOT a different workspace. A wrong-workspace agent registers fine but is invisible to the driver. After approval, double-check:
 
 ```bash
 grep workspace_id config.yaml
 # must match driver-codex-local/config.yaml's workspace_id
 ```
-
-If it doesn't match, kill the slave, clear creds again, and re-approve in the right workspace.
 
 ## Model provider
 
@@ -249,6 +265,14 @@ wire_api = "responses"
 
 All three per-agent `.codex/config.toml` files (`driver-codex-local/.codex/`, `slave-codex-local/.codex/`, `slave-codex-local-b/.codex/`) need the same provider block — drift here causes one agent to work and the next to fail mysteriously.
 
+## Current agent state (2026-06-25)
+
+| Agent | short_id | workspace_id |
+| --- | --- | --- |
+| driver | `q6u3f1qr` | `96bd3120-a725-44d9-a047-a75ed89af3ed` |
+| slave-A | `pwqo9ro8` | `96bd3120-a725-44d9-a047-a75ed89af3ed` |
+| slave-B | `53et0rx4` | `96bd3120-a725-44d9-a047-a75ed89af3ed` |
+
 ## Common failure modes
 
 | Symptom | Likely cause | Fix |
@@ -258,55 +282,17 @@ All three per-agent `.codex/config.toml` files (`driver-codex-local/.codex/`, `s
 | `wait_task` reports `failed` with `codex exit: exit status 1` and no output | Per-agent `.codex/config.toml` points at a model the proxy can't route | Align to working model + provider (see above) |
 | `submit_task` succeeds but always lands on slave-A regardless of `target_short_id` | Used `target_short_id` arg (doesn't exist in inputSchema); driver silently falls back to `driver_defaults.target_display_name` | Use `target_display_name` |
 | `whoami` returns 403 | sandbox state went `offline` or `forbidden` on agentserver | Re-register (no other fix; this is the issue #290 / sandbox-token-forbidden behavior) |
+| Killing a slave makes its sandbox immediately `forbidden` | agentserver detects tunnel disconnect and flips sandbox state | Don't kill agents between registration and test completion; re-register if needed |
 | Driver MCP `tools/call` reports `user cancelled MCP tool call` | Upstream model request was 429 / capacity / network-cancelled mid-tool-call; codex relabels it as user-cancel | Retry; if persistent, swap models per the provider section |
 | `list_agents` only returns one slave even though both daemons are healthy | Second slave's PublishCard hasn't propagated yet (race with first invocation) or the second slave's last reconnect cycle re-published stale card | Wait 30-60s and retry; if persistent, restart the missing slave to trigger a fresh PublishCard |
-
-## Automated runner (`run_e2e.sh`)
-
-A unified script that automates Steps 0–5 plus the Playwright live e2e:
-
-```bash
-# Full run (rebuild binaries + driver MCP test + Playwright live e2e):
-./tests/prod_test/run_e2e.sh
-
-# Skip binary rebuild (when binaries are already current):
-./tests/prod_test/run_e2e.sh --no-rebuild
-
-# Run only driver MCP test:
-./tests/prod_test/run_e2e.sh --skip-playwright
-
-# Run only Playwright live e2e:
-./tests/prod_test/run_e2e.sh --skip-mcp
-```
-
-Set `WORKTREE_ROOT` if running from a worktree (defaults to `../../` relative to the script).
-
-The script uses `trap cleanup EXIT` to guarantee teardown even on failure. Pre-flight token checks treat HTTP 403 as a warning (sandbox may recover after tunnel reconnects), but HTTP 401 is fatal.
-
-**`driver_mcp_e2e.py`** — Python 3 stdio client exercising `initialize → tools/list → bind_thread → submit_task → wait_task → exit`. Asserts the #29 invariant: `session_id` is a backend-native UUID, NOT `cse_*`.
-
-### 2026-06-25 run results
-
-| Test | Result | Key observations |
-| --- | --- | --- |
-| Driver MCP (submit_task + wait_task) | PASS | 23 tools, session_id=`019efef2-dcef-7790-...` (UUID v7), output=`E2E_OK` |
-| Playwright fresh-id rebind | PASS | 5.0s test time, OAuth cookie cached for reuse |
-
-**Short IDs after re-registration:**
-- driver: `q6u3f1qr`
-- slave-A: `pwqo9ro8`
-- slave-B: `53et0rx4`
-
-**Gotcha discovered:** Killing a slave process makes its sandbox go `forbidden` on agentserver immediately. Tokens cannot be reused after that — must re-register. When doing manual registration of multiple agents, start observer first and keep all agents running; don't kill one to register the next.
 
 ## When you finish a run
 
 **Edit this file** to capture what you learned:
 
-- Did short_ids, sandbox UUIDs, or workspace_ids change? Update the relevant rows above (they drift across re-registrations).
+- Did short_ids, sandbox UUIDs, or workspace_ids change? Update the "Current agent state" table.
 - Did you hit a NEW failure mode? Add it to the table.
 - Did a fix in the codebase remove an old gotcha? Cross it off — don't leave stale warnings.
 - Did the model provider change? Update the "Model provider" section.
-- Did the driver MCP tool schema change (new tool, renamed argument)? Update Step 3b.
 
 The file is one of the few persistent artifacts that survives session/context loss. Memory entries `[[prod-e2e-setup]]` and `[[slave-daemon-startup-race]]` summarize from this file, not the other way around.
