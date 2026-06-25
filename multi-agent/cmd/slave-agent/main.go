@@ -360,6 +360,20 @@ func run(cfgPath string) error {
 			log.Printf("commander daemon disabled: %v", dErr)
 		} else {
 			g.Go(func() error {
+				// Wait for the yamux tunnel to actually attach to
+				// agentserver before dialing observer. Observer
+				// validates every WS handshake via agentserver's
+				// /api/agent/whoami; whoami returns 401/403 until the
+				// tunnel has put the sandbox into the running state.
+				// Without this gate the daemon races tn.Run and reliably
+				// gets bounced on cold start — the historical
+				// "slave-daemon-startup-race" symptom that left
+				// freshly-registered slaves invisible to commander UI.
+				select {
+				case <-tn.Ready():
+				case <-gctx.Done():
+					return nil
+				}
 				if rErr := daemon.Run(gctx); rErr != nil && rErr != context.Canceled {
 					return fmt.Errorf("commander daemon: %w", rErr)
 				}
