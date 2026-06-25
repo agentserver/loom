@@ -86,25 +86,39 @@ rebind to the real ID.
 `Handler.SessionTurn(ctx, id, prompt, fresh, sink)`. When `fresh=true`:
 
 1. Skip `trySessionWorker` entirely (it depends on existing rollout).
-2. Call `h.Backend.Run(ctx, agentbackend.Task{Prompt: prompt}, sink)` — the
-   executor-mode "new session" path that uses `codex exec` and lets codex
-   auto-mint the thread ID.
-3. The codex executor already writes a sidecar with the minted thread ID
-   (`pkg/agentbackend/codex/executor.go:205` — "current-session marker:
-   written on BOTH Run and RunResume"). After `Run` returns, parse the
-   sidecar to obtain the minted ID.
-4. Emit `event: session_id\ndata: {"session_id":"<minted-id>"}` to the sink
-   so the frontend can rebind.
+2. Call `res, err := h.Backend.Run(ctx, agentbackend.Task{Prompt: prompt,
+   Origin: agentbackend.OriginUser}, sink)`. The `Origin: OriginUser` (a
+   new field on `Task`, or an equivalent existing flag — verify the
+   field name when implementing) tells the codex executor that this is a
+   user-initiated session, NOT an agent_task subagent. Codex executor's
+   loom-meta sidecar writer currently hard-codes `origin: agent_task`
+   (see `pkg/agentbackend/codex/executor.go` sidecar branch); the
+   `fresh+user` path must either set `origin: user` in the sidecar or
+   suppress sidecar writing entirely so the new session shows up as a
+   user row in `list_sessions`, not as a misclassified `agent task`.
+3. Read the codex-minted thread ID from `res.SessionID` (the existing
+   `executor.Result.SessionID` field already carries it — do NOT scan
+   the `<codex_home>/sessions/current` marker, which is a CODEX_HOME-level
+   last-active pointer that concurrent `Run`/`RunResume` calls would
+   race-overwrite).
+4. Emit `event: session_id\ndata: {"session_id":"<res.SessionID>"}` to
+   the sink so the frontend can rebind. If `err == nil && res.SessionID
+   == ""`, treat as a bug — emit `event: error\ndata: {"code":"backend_unavailable",
+   "message":"fresh turn returned without a session ID"}` and return.
 5. `Run`'s normal result events (`status`, `chunk`, `done`) flow through
-   unchanged.
+   unchanged. The `session_id` event is emitted AFTER `done` (or together
+   with `done`'s detail), so the frontend can rebind in the same
+   onEvent step.
 
 When `fresh=false`: existing flow unchanged.
 
 ### Frontend change
 
 `postTurn(daemonID, sessionID, prompt, onEvent, opts?)` gains:
-- `opts.fresh?: boolean` — sent as `?fresh=1` query param OR as `{fresh:true}`
-  in the JSON body (HTTP handler reads from body; query param is simpler).
+- `opts.fresh?: boolean` — sent as `{fresh: true}` in the JSON request
+  body (NOT a query param; the HTTP handler reads ONLY from the body to
+  avoid the two-channel mismatch that would silently drop fresh and
+  re-trigger the original bug).
 - `onEvent` already receives all SSE events; the new `session_id` event
   threads through it.
 
@@ -132,20 +146,57 @@ same step.
   `SessionTurnArgs` JSON gains the field automatically since the protocol
   type is updated).
 
-The `session_id` SSE event is opaque to the hub — it streams whatever the
-slave writes to the sink.
+### Hub turn-state rekey
+
+The hub tracks per-turn state (`turnKey{owner, daemonID, sessionID}` →
+turn-state, in-flight gate) keyed on the URL's `<sid>`. For a fresh
+turn, the URL `<sid>` is the client-minted placeholder UUID; the real
+codex-minted ID arrives in the `session_id` SSE mid-stream.
+
+If the hub leaves state keyed under the placeholder ID, the subsequent
+queries from the frontend (which has rebound to the real ID) will look
+up turn-state at a key that no longer has the most recent terminal
+frame. Specifically:
+- `done` / `awaiting_approval` / `error` arrive at the placeholder key.
+- The next page-render reads turn-state for the real ID → finds none →
+  defaults to `idle`.
+- If the slave was actually `awaiting_approval`, composer becomes
+  re-enabled (BAD — user can submit a turn that codex can't accept).
+
+Hub change:
+- In the SSE stream path that proxies `session_id` events from the
+  daemon-link WS to the HTTP client, ALSO update the hub-internal turn
+  state key: move any existing entry from
+  `turnKey{owner, daemonID, placeholderSID}` to
+  `turnKey{owner, daemonID, realSID}`.
+- Implement via a small `rekey(oldKey, newKey)` helper on the
+  `turnStateStore`. Idempotent — if newKey already has state (shouldn't
+  for a fresh session), prefer the newer entry.
+- Do NOT migrate the in-flight HTTP request itself — the existing POST
+  is still responding under the placeholder URL; the rekey only affects
+  the NEXT turn's lookup. Subsequent turns under the real ID will go
+  through `Backend.RunResume` (fresh=false, ID=real), find their state
+  cleanly, and run normally.
+
+The `session_id` SSE event is otherwise opaque to the hub and is
+forwarded to the HTTP response unchanged.
 
 ## Files
 
 | File | Change |
 |---|---|
 | `internal/commander/protocol.go` | `SessionTurnArgs` adds `Fresh bool` field. |
-| `internal/commander/handler.go` | `SessionTurn` accepts new `fresh` arg; routes to `Backend.Run` + sidecar-read when true; emits `session_id` SSE event. |
+| `internal/commander/handler.go` | `SessionTurn` accepts new `fresh` arg; routes to `Backend.Run` (with `OriginUser` task field — see "agent_task misclassification" risk) when true; reads `res.SessionID`; emits `session_id` SSE event from that value. NOT the `<codex_home>/sessions/current` marker. |
+| `pkg/agentbackend/backend.go` (or equivalent) | `Task` struct gets an `Origin` field (or equivalent flag) so backends can branch sidecar/origin behavior between user-fresh and agent-task. If a clean field doesn't exist today, add one. |
+| `pkg/agentbackend/codex/executor.go` | sidecar writer respects `Task.Origin`: writes `origin: user` when the task is a user-fresh new session; preserves existing `origin: agent_task` for the agent-task path. |
 | `internal/commander/wsclient.go` | unmarshal `Fresh` from incoming session_turn; pass through to Handler.SessionTurn. |
-| `internal/commanderhub/http.go` (`turn` handler) | parse `fresh` from POST body; pass to `commander.SessionTurnArgs.Fresh`. |
+| `internal/commanderhub/http.go` (`turn` handler) | parse `fresh` from POST body ONLY (not query param — single source of truth). |
+| `internal/commanderhub/hub.go` (or wherever turn-state lives) | new `rekey(oldKey, newKey)` helper; invoked from the SSE proxy path when a `session_id` event arrives, before forwarding to HTTP client. |
 | `internal/commanderhub/webapp/src/api/client.ts` | `postTurn` accepts `opts.fresh`; body JSON includes `fresh`. |
 | `internal/commanderhub/webapp/src/CommanderApp.tsx` | `sendPrompt` sets `fresh: true` for draft pending; handles `session_id` event; rebinds selected + pending to real ID. |
-| `internal/commander/handler_test.go` | New case: fresh=true routes to Backend.Run, not RunResume; sidecar ID is emitted on the sink. |
+| `internal/commander/handler_test.go` | New case: fresh=true routes to Backend.Run with OriginUser, NOT RunResume; `res.SessionID` is emitted on the sink. |
+| `pkg/agentbackend/codex/executor_test.go` (or backend_test.go) | New case: `OriginUser` task writes sidecar with `origin: user`, not `agent_task`. |
+| `internal/commanderhub/hub_test.go` (or equivalent) | New case: turn-state rekey on `session_id` event preserves terminal state under the new ID. |
 | Frontend unit tests | `postTurn` body shape for fresh=true; CommanderApp handles `session_id` event and rebinds. |
 
 ## Test Strategy
