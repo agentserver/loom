@@ -40,4 +40,6 @@ testdata/fake-mcp-stdio/fake-mcp-stdio
 /tests/prod_test/*
 !/tests/prod_test/README.md
 !/tests/prod_test/E2E_RUNBOOK.md
+!/tests/prod_test/run_e2e.sh
+!/tests/prod_test/driver_mcp_e2e.py
 tests/claude_driver/.mcp.json

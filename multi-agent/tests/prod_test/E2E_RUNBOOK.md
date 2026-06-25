@@ -261,6 +261,44 @@ All three per-agent `.codex/config.toml` files (`driver-codex-local/.codex/`, `s
 | Driver MCP `tools/call` reports `user cancelled MCP tool call` | Upstream model request was 429 / capacity / network-cancelled mid-tool-call; codex relabels it as user-cancel | Retry; if persistent, swap models per the provider section |
 | `list_agents` only returns one slave even though both daemons are healthy | Second slave's PublishCard hasn't propagated yet (race with first invocation) or the second slave's last reconnect cycle re-published stale card | Wait 30-60s and retry; if persistent, restart the missing slave to trigger a fresh PublishCard |
 
+## Automated runner (`run_e2e.sh`)
+
+A unified script that automates Steps 0–5 plus the Playwright live e2e:
+
+```bash
+# Full run (rebuild binaries + driver MCP test + Playwright live e2e):
+./tests/prod_test/run_e2e.sh
+
+# Skip binary rebuild (when binaries are already current):
+./tests/prod_test/run_e2e.sh --no-rebuild
+
+# Run only driver MCP test:
+./tests/prod_test/run_e2e.sh --skip-playwright
+
+# Run only Playwright live e2e:
+./tests/prod_test/run_e2e.sh --skip-mcp
+```
+
+Set `WORKTREE_ROOT` if running from a worktree (defaults to `../../` relative to the script).
+
+The script uses `trap cleanup EXIT` to guarantee teardown even on failure. Pre-flight token checks treat HTTP 403 as a warning (sandbox may recover after tunnel reconnects), but HTTP 401 is fatal.
+
+**`driver_mcp_e2e.py`** — Python 3 stdio client exercising `initialize → tools/list → bind_thread → submit_task → wait_task → exit`. Asserts the #29 invariant: `session_id` is a backend-native UUID, NOT `cse_*`.
+
+### 2026-06-25 run results
+
+| Test | Result | Key observations |
+| --- | --- | --- |
+| Driver MCP (submit_task + wait_task) | PASS | 23 tools, session_id=`019efef2-dcef-7790-...` (UUID v7), output=`E2E_OK` |
+| Playwright fresh-id rebind | PASS | 5.0s test time, OAuth cookie cached for reuse |
+
+**Short IDs after re-registration:**
+- driver: `q6u3f1qr`
+- slave-A: `pwqo9ro8`
+- slave-B: `53et0rx4`
+
+**Gotcha discovered:** Killing a slave process makes its sandbox go `forbidden` on agentserver immediately. Tokens cannot be reused after that — must re-register. When doing manual registration of multiple agents, start observer first and keep all agents running; don't kill one to register the next.
+
 ## When you finish a run
 
 **Edit this file** to capture what you learned:
