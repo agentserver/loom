@@ -3275,3 +3275,61 @@ func TestWaitTask_BridgeAndBackendBothInResponse(t *testing.T) {
 	require.Equal(t, bridgeID, decoded.BridgeSessionID,
 		"bridge_session_id should be the agentsdk bridge id")
 }
+
+// TestResumeTask_AwaitingUserResponseSplitsSessionFields covers the PR #32
+// review finding: resume_task returns through waitDelegatedTask, whose
+// marshalDelegatedAwaitingUser used to emit session_id = info.SessionID
+// (the agentserver bridge id) and no bridge_session_id. A chat resumed via
+// resume_task that pauses again would expose cse_... as session_id,
+// reintroducing the bridge/backend confusion #29 was meant to remove.
+// Post-fix: session_id is the slave's backend marker id (T-2 in the chain),
+// bridge_session_id is the bridge id. Same contract as wait_task / get_task.
+func TestResumeTask_AwaitingUserResponseSplitsSessionFields(t *testing.T) {
+	const (
+		bridgeID  = "cse_bridge_resume"
+		backendID = "019ef111-resume-aaaa-bbbb-cccccccccccc"
+	)
+	sdk := &fakeSDK{
+		getTaskFunc: func(id string, includeOutput bool) (*agentsdk.TaskInfo, error) {
+			switch id {
+			case "T-1":
+				// First-leg paused task — has a backend marker session id.
+				return &agentsdk.TaskInfo{
+					TaskID: "T-1", Status: "completed", SessionID: bridgeID, TargetID: "ag-X",
+					Result: json.RawMessage(`{"kind":"awaiting_user","session_id":"` + backendID + `","question":{"kind":"ask_user","question":"q?"}}`),
+				}, nil
+			case "T-2":
+				// Resumed task pauses AGAIN with a fresh awaiting_user marker
+				// carrying the same backend id. The bridge id here is the new
+				// agentserver task id for the resume leg.
+				return &agentsdk.TaskInfo{
+					TaskID: "T-2", Status: "completed", SessionID: bridgeID, TargetID: "ag-X",
+					Output: `{"kind":"awaiting_user","session_id":"` + backendID + `","question":{"kind":"ask_user","question":"q2?"}}`,
+				}, nil
+			}
+			return nil, fmt.Errorf("unknown task: %s", id)
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			return &agentsdk.DelegateTaskResponse{TaskID: "T-2", SessionID: bridgeID}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	_, err := tools.BindThread(context.Background(), "thr-resume-awaiting")
+	require.NoError(t, err)
+
+	raw, err := toolByName(t, tools, "resume_task").Call(context.Background(),
+		json.RawMessage(`{"last_task_id":"T-1","answer":"y","timeout_sec":2}`))
+	require.NoError(t, err)
+
+	var decoded struct {
+		Status          string `json:"status"`
+		SessionID       string `json:"session_id"`
+		BridgeSessionID string `json:"bridge_session_id"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &decoded), "decode resume_task response: %s", raw)
+	require.Equal(t, "awaiting_user", decoded.Status)
+	require.Equal(t, backendID, decoded.SessionID,
+		"session_id should be the backend marker id, not the agentserver bridge")
+	require.Equal(t, bridgeID, decoded.BridgeSessionID,
+		"bridge_session_id should be the agentserver bridge id")
+}

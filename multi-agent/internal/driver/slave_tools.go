@@ -393,22 +393,30 @@ func (t *Tools) waitDelegatedTask(ctx context.Context, taskID string, timeoutSec
 }
 
 func marshalDelegatedAwaitingUser(taskID string, info *agentsdk.TaskInfo, question json.RawMessage) (json.RawMessage, error) {
+	// session_id is the backend-native id from the slave's kind marker (may be
+	// empty when no marker was emitted). bridge_session_id is the agentserver
+	// task-bridge id. Matches the wait_task / get_task response contract from
+	// tools.go so resume_task → waitDelegatedTask cannot reintroduce the
+	// bridge/backend confusion #29 removed.
+	markerSessionID := sessionIDFromMarker(info.Output, string(info.Result))
 	return json.Marshal(struct {
-		TaskID        string          `json:"task_id"`
-		Status        string          `json:"status"`
-		IsFinal       bool            `json:"is_final"`
-		SessionID     string          `json:"session_id"`
-		CurrentTaskID string          `json:"current_task_id"`
-		TargetID      string          `json:"target_id"`
-		Question      json.RawMessage `json:"question"`
+		TaskID          string          `json:"task_id"`
+		Status          string          `json:"status"`
+		IsFinal         bool            `json:"is_final"`
+		SessionID       string          `json:"session_id,omitempty"`
+		BridgeSessionID string          `json:"bridge_session_id,omitempty"`
+		CurrentTaskID   string          `json:"current_task_id"`
+		TargetID        string          `json:"target_id"`
+		Question        json.RawMessage `json:"question"`
 	}{
-		TaskID:        firstNonEmpty(info.TaskID, taskID),
-		Status:        "awaiting_user",
-		IsFinal:       false,
-		SessionID:     info.SessionID,
-		CurrentTaskID: firstNonEmpty(info.TaskID, taskID),
-		TargetID:      info.TargetID,
-		Question:      question,
+		TaskID:          firstNonEmpty(info.TaskID, taskID),
+		Status:          "awaiting_user",
+		IsFinal:         false,
+		SessionID:       markerSessionID,
+		BridgeSessionID: info.SessionID,
+		CurrentTaskID:   firstNonEmpty(info.TaskID, taskID),
+		TargetID:        info.TargetID,
+		Question:        question,
 	})
 }
 
