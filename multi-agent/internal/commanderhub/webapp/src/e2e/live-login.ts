@@ -43,17 +43,14 @@ async function cookieStillValid(): Promise<boolean> {
 }
 
 function printLoginBanner(verifyURL: string): void {
-  const line = '═'.repeat(64);
+  const header = '  OPEN THIS URL TO AUTHORIZE COMMANDER:';
+  const footer = '  Waiting up to 10 minutes...';
+  const urlLine = `  ${verifyURL}`;
+  const w = Math.max(header.length, footer.length, urlLine.length) + 2;
+  const pad = (s: string) => `║${s.padEnd(w)}║`;
+  const line = '═'.repeat(w);
   // eslint-disable-next-line no-console
-  console.log(`
-╔${line}╗
-║  OPEN THIS URL TO AUTHORIZE COMMANDER:                          ║
-║                                                                  ║
-║  ${verifyURL.padEnd(62)}║
-║                                                                  ║
-║  Waiting up to 10 minutes...                                    ║
-╚${line}╝
-`);
+  console.log(`\n╔${line}╗\n${pad(header)}\n${pad('')}\n${pad(urlLine)}\n${pad('')}\n${pad(footer)}\n╚${line}╝\n`);
 }
 
 async function runLiveLogin(): Promise<void> {
