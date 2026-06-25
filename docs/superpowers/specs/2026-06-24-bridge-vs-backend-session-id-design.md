@@ -131,31 +131,29 @@ type Record struct {
     Event               string `json:"event"`
     Tool                string `json:"tool"`
     // … other unchanged fields …
-    ChildAgentID        string             `json:"child_agent_id,omitempty"`     // already present today
-    ChildKind           agentbackend.Kind  `json:"child_kind,omitempty"`         // NEW in P1 — backend kind of the slave (codex/claude/opencode)
-    SessionRef          SessionRef         `json:"-"`                            // Go field; NOT directly serialized
-    ChildSessionRef     SessionRef         `json:"-"`                            // Go field; NOT directly serialized
+    ChildAgentID        string     `json:"child_agent_id,omitempty"`  // already present today
+    SessionRef          SessionRef `json:"-"`                         // Go field; NOT directly serialized
+    ChildSessionRef     SessionRef `json:"-"`                         // Go field; NOT directly serialized
 }
 
-// MarshalJSON flattens SessionRef.Backend + SessionRef.Bridge as siblings,
-// AND continues to write ChildAgentID + ChildKind as top-level fields the
-// way they exist today (ChildAgentID) / are added (ChildKind).
+// MarshalJSON flattens SessionRef.Backend + SessionRef.Bridge as siblings
+// and continues to write ChildAgentID as a top-level field the way it
+// exists today. No new ChildKind field — see "Driver-side SessionRef has
+// empty Kind" above.
 func (r Record) MarshalJSON() ([]byte, error) {
     type rawRecord struct {
-        TS                       string             `json:"ts"`
-        Event                    string             `json:"event"`
+        TS                       string `json:"ts"`
+        Event                    string `json:"event"`
         // … other unchanged fields …
-        ChildAgentID             string             `json:"child_agent_id,omitempty"`
-        ChildKind                agentbackend.Kind  `json:"child_kind,omitempty"`
-        SessionID                string             `json:"session_id,omitempty"`
-        BridgeSessionID          string             `json:"bridge_session_id,omitempty"`
-        ChildSessionID           string             `json:"child_session_id,omitempty"`
-        ChildBridgeSessionID     string             `json:"child_bridge_session_id,omitempty"`
+        ChildAgentID             string `json:"child_agent_id,omitempty"`
+        SessionID                string `json:"session_id,omitempty"`
+        BridgeSessionID          string `json:"bridge_session_id,omitempty"`
+        ChildSessionID           string `json:"child_session_id,omitempty"`
+        ChildBridgeSessionID     string `json:"child_bridge_session_id,omitempty"`
     }
     return json.Marshal(rawRecord{
         TS: r.TS, Event: r.Event, /* ... */,
         ChildAgentID:         r.ChildAgentID,
-        ChildKind:            r.ChildKind,
         SessionID:            r.SessionRef.Backend,
         BridgeSessionID:      r.SessionRef.Bridge,
         ChildSessionID:       r.ChildSessionRef.Backend,
@@ -168,9 +166,9 @@ func (r Record) MarshalJSON() ([]byte, error) {
 func (r *Record) UnmarshalJSON(data []byte) error { /* mirror */ }
 ```
 
-**Journal Kind persistence (P1).** A new `child_kind` field (typed `agentbackend.Kind`) is added to `TaskRecord`, populated at delegation time from `targetCard.Kind()` (tools.go:670 already has `targetCard` in scope). This lets `resume_task` reconstruct `ref.Kind` from the journal without re-doing a `DiscoverAgents` RPC. Older rows without `child_kind` fall back to the discover-based path described in "resume_task identity resolution" above. The other SessionRef fields (`AgentID`, `Bridge`, `Backend`) are reconstructed from `ChildAgentID` (existing field), the bridge-id classifier on `session_id` (legacy rows), or directly from explicit fields (new rows). This gives `UnmarshalJSON` enough information to populate the full `SessionRef` struct, not just `Backend`+`Bridge`.
+**Journal stays unchanged in wire-shape.** The journal continues to carry exactly the same set of fields it does today — no new `child_kind`. On `UnmarshalJSON`, `SessionRef.Kind` is left empty (driver-side refs never had a Kind source). `SessionRef.AgentID` is reconstructed from the existing `child_agent_id` field for child refs; for the parent's own SessionRef there is no AgentID source in the journal either, and it stays empty too. This is consistent with the round-5 finding that driver-side SessionRef instances legitimately have empty Kind.
 
-Round-trip test `TestRecord_RoundTripModernRow` MUST assert all four `SessionRef` fields equal across the marshal-unmarshal boundary, not just `Backend` / `Bridge`.
+Round-trip test `TestRecord_RoundTripModernRow` asserts `Backend`, `Bridge`, and `AgentID` (for child ref) equal across the boundary. `Kind` is asserted empty (matches what the driver actually populates).
 
 **Legacy journal data — bridge id classifier.** Today's `internal/driver/tools.go:159` writes `delegatedTaskRecord.Response.SessionID` into `TaskRecord.SessionID`, and `Response.SessionID` is always the agentserver bridge id (`cse_…`). So pre-refactor journal rows have **`cse_…` strings stored under `session_id`**. The unmarshal path MUST NOT shove these into `Backend` (would violate the bridge/backend invariant). Decision: legacy rows whose `session_id` matches `^cse_` (case-sensitive prefix used by agentserver SDK) are classified as bridge and routed to `Bridge`; rows whose `session_id` does NOT start with `cse_` are routed to `Backend`. Same rule for `child_session_id` → `ChildSessionRef`. Modern (post-refactor) rows carry both `session_id` and `bridge_session_id`, and the classifier is bypassed — fields go to their respective targets.
 
@@ -215,44 +213,47 @@ func NewBridgeOnly(kind Kind, agentID, bridgeID string) SessionRef
 func (r SessionRef) WithBackend(backendID string) SessionRef
 ```
 
-**resume_task identity resolution.** Today's `resumeTaskTool.Call`:
-- Calls `info, _ := s.t.sdk.GetTask(ctx, args.LastTaskID, true)` — `info.TargetID` is the slave's sandbox uuid (not its short_id, not its kind).
-- Calls `prev, _ := r.t.taskJournal.LatestByTaskID(args.LastTaskID)` — `prev.ChildAgentID` is the slave's short_id (persisted at delegation time).
-- Does NOT have a Kind value. The journal does NOT currently persist kind, and `info` from agentsdk has no kind field.
+**Driver-side `SessionRef` has empty `Kind`.** Verified by reading the code: `agentsdk.AgentCard` has no `Kind` field; driver-side `parsedAgentCard.HasCommandKind(...)` matches command interface kind (`bash`/`powershell`), not backend kind; published discovery card body carries no backend-kind field. The driver does NOT have a generally-available source for slave's backend kind.
 
-Two options for filling Kind:
+Critically, the driver also does NOT call `agentbackend.Backend.RunResume` directly. `resumeTaskTool.Call` calls `r.t.sdk.DelegateTask(... Skill: "chat_resume", ...)`; the agentsdk JSON crosses the wire to the slave; the slave-side `ChatResumeExecutor` calls `resumeAdapter.RunResume(sid string, ...)`. The seam where `Kind` actually matters is **slave-side**, where `cfg.Agent.Kind` is locally known.
 
-1. **Persist `child_kind` in `TaskRecord`** at delegation time (`tools.go:670` already has `targetCard` in scope). Cheap, no extra RPC. Spec adopts this — add `ChildKind agentbackend.Kind` field to `TaskRecord`; populate from `targetCard.Kind()` at `submit_task` / `submit_contract_task` delegation. JSON tag `child_kind`, `omitempty` — backward-compat read (older rows have empty kind, which is fine because P1's `resume_task` will fall back to option 2 if `prev.ChildKind == ""`).
-2. **Fall back to `s.t.sdk.DiscoverAgents(ctx)` + match by `card.AgentID == info.TargetID`** when the journal lacks kind. One extra RPC but tolerates missing journal entries (rotated journal, brand-new daemon installed against existing tasks).
+So driver-side `SessionRef` instances **leave `Kind` empty**:
+
+- `NewBridgeOnly(...)` at `submitTaskTool.Call` agentsdk seam (P1): pass empty kind (or omit `kind` param entirely — see constructor revision below).
+- `NewBackend(...)` at `resumeTaskTool.Call` (P1): pass empty kind.
+
+The slave-side `resumeAdapter.RunResume` wraps with `NewBackend(a.b.Kind(), "", sid)` because the slave's `agentbackend.Backend` interface DOES expose `Kind() Kind` (verified in `pkg/agentbackend/backend.go:36`).
+
+`Kind` is a "best-effort tag" on driver-side refs — informational. The bridge/backend distinction (the bug-prevention goal) is unaffected by empty `Kind`. Tests that pass a driver-side ref to a backend interface for unit-testing purposes can rely on `RunResume` being called only at the slave seam, where `Kind` IS populated.
+
+**Constructor revision (no `kind != ""` precondition).** Because driver-side legitimately constructs refs with empty kind, the round-4 "kind != \"\" panic" precondition is **rolled back**. Constructors accept empty Kind; only `Backend` (for `NewBackend`) and `Bridge` (for `NewBridgeOnly`) remain required. Test mandate at `sessionref_test.go` updated: empty-kind constructors do NOT panic; only empty backendID / empty bridgeID do.
 
 resumeTaskTool.Call pseudo-code:
 
 ```go
-slaveShortID, kind := "", agentbackend.Kind("")
+slaveShortID := ""
 if prev, ok := r.t.taskJournal.LatestByTaskID(args.LastTaskID); ok {
     slaveShortID = prev.ChildAgentID
-    kind = prev.ChildKind
-}
-if kind == "" {
-    // Fallback: journal rotated / brand-new installation. Discover and match.
-    cards, err := r.t.sdk.DiscoverAgents(ctx)
-    if err != nil { return nil, &MCPToolError{Message: "resume failed: discover for kind resolution: " + err.Error()} }
-    for _, c := range cards {
-        if c.AgentID == info.TargetID {
-            kind = agentbackend.Kind(c.Kind) // AgentCard.Kind is a string today
-            if slaveShortID == "" { slaveShortID = cardShortID(c) }
-            break
-        }
-    }
-}
-if kind == "" {
-    return nil, &MCPToolError{Message: "resume failed: cannot resolve agent kind for target " + info.TargetID}
 }
 if kw.SessionID == "" {
     return nil, &MCPToolError{Message: "resume failed: slave never reported a backend session id; bridge id alone cannot resume a codex/claude conversation"}
 }
-ref := agentbackend.NewBackend(kind, slaveShortID, kw.SessionID)
+// Kind left empty — driver does not have a backend-kind source; it's informational only.
+// agentsdk JSON body carries kw.SessionID as a string (wire format unchanged).
+ref := agentbackend.NewBackend("", slaveShortID, kw.SessionID)
+body, _ := json.Marshal(map[string]string{
+    "session_id": ref.Backend,  // stays a bare string in wire JSON
+    "answer":     args.Answer,
+    "kind":       kw.Question.Kind,
+})
+resp, err := r.t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
+    TargetID: info.TargetID, Skill: "chat_resume", Prompt: string(body), ...,
+})
 ```
+
+The `ref` is used here for **type-discipline at the construction site** — code that grabbed `kw.SessionID` cannot mistake it for a bridge id, because `NewBackend` only takes the backend slot. The actual wire JSON (sent to agentsdk) is unchanged: a string in `session_id`.
+
+**ChildKind in TaskRecord is rolled back too.** The round-4 `ChildKind agentbackend.Kind` field added to TaskRecord is removed — there is no source to populate it at delegation time. The journal continues to carry only `ChildAgentID` (which is sufficient to reconstruct `SessionRef.AgentID`). On unmarshal, `SessionRef.Kind` stays empty for driver-side refs. The "Journal Kind persistence" subsection below is rewritten accordingly.
 
 **`agentID` source at each P2 wrap site:**
 
@@ -293,11 +294,11 @@ This guard is mandatory for all 3 backend executor implementations and their thi
 
 **`Kind` validity in constructors.** `Kind` is the `agentbackend.Kind` named type (`type Kind string`); its zero value is `""`. Constructor preconditions:
 
-- `NewBackend(kind, agentID, backendID)`: panics if `kind == ""` OR `backendID == ""`. Empty agentID OK (see "agentID source"). Empty kind is always a caller bug — code constructing a SessionRef always knows which backend it's talking about.
-- `NewBridgeOnly(kind, agentID, bridgeID)`: same `kind != ""` requirement.
-- `WithBackend(backendID)`: inherits `r.Kind` unchanged; no separate kind validation (the bridge-only base already had a valid kind from `NewBridgeOnly`).
+- `NewBackend(kind, agentID, backendID)`: panics if `backendID == ""`. Empty `kind` and `agentID` are ALLOWED (see "Driver-side SessionRef has empty Kind"). Driver-side construction has no kind source and constructs refs with `kind=""` legitimately.
+- `NewBridgeOnly(kind, agentID, bridgeID)`: panics if `bridgeID == ""`. Empty `kind` and `agentID` allowed for the same reason.
+- `WithBackend(backendID)`: inherits `r.Kind` unchanged; no separate kind validation.
 
-This adds one assertion site to `sessionref_test.go` per constructor: `NewBackend("", "ag", "thr-1")` and `NewBridgeOnly("", "ag", "cse-1")` must panic.
+This adds these assertion sites to `sessionref_test.go`: `NewBackend("", "ag", "")` panics (empty backendID); `NewBridgeOnly("", "ag", "")` panics (empty bridgeID); both with kind="" and kind="codex" pass when the required id is non-empty (proves kind is NOT validated).
 
 There is intentionally **no** `NewBoth` constructor that takes both at once — pairing happens via `WithBackend` on an existing bridge-only ref, so the code path that does the pairing is also the one that has to look up the backend id.
 
@@ -306,7 +307,7 @@ There is intentionally **no** `NewBoth` constructor that takes both at once — 
 Changes:
 
 1. **`pkg/agentbackend/sessionref.go`** — new file: the type, constructors (`NewBackend`, `NewBridgeOnly`, `WithBackend`), and predicates (`IsZero`, `HasBackend`, `String`). **No JSON methods on SessionRef.** JSON ownership lives on containing structs (`TaskJournal.Record`, response builders) per the rationale above.
-2. **`pkg/agentbackend/sessionref_test.go`** — new file: table-driven tests for `IsZero`, `HasBackend`, `String`, and the constructors. **No marshal/unmarshal tests on SessionRef** (no JSON methods to test). Constructor panic-preconditions covered here: `NewBackend("", agentID, "")` panics; `NewBridgeOnly(kind, agentID, "")` panics; `WithBackend("")` panics; `WithBackend(...)` on a ref with `Backend != ""` panics; `WithBackend(...)` on a ref with `Bridge == ""` panics.
+2. **`pkg/agentbackend/sessionref_test.go`** — new file: table-driven tests for `IsZero`, `HasBackend`, `String`, and the constructors. **No marshal/unmarshal tests on SessionRef** (no JSON methods to test). Constructor panic-preconditions covered here: `NewBackend(<any kind>, <any agentID>, "")` panics on empty backendID; `NewBridgeOnly(<any kind>, <any agentID>, "")` panics on empty bridgeID; `WithBackend("")` panics; `WithBackend(...)` on a ref with `Backend != ""` panics; `WithBackend(...)` on a ref with `Bridge == ""` panics. Positive coverage: empty `kind` and empty `agentID` are explicitly accepted (driver-side legitimate construction).
 3. **`internal/driver/tools.go`** — every line touching `SessionID` / `session_id` / `ChildSessionID` migrates to `SessionRef`. Concretely:
    - `delegatedTaskRecord.Response` was used for `Response.SessionID` (bridge); wrap into `NewBridgeOnly(kind, agentShortID, resp.SessionID)` at the agentsdk seam, stash as `SessionRef` on the record.
    - The two response-builder paths in `wait_task` / `get_task` that today do `firstNonEmpty(sessionIDFromMarker(...), info.SessionID)`: split — extract `markerBackendID = sessionIDFromMarker(...)` and `bridgeID = info.SessionID` separately, build a `SessionRef{Backend: markerBackendID, Bridge: bridgeID, ...}`, then emit both as sibling JSON fields. **Wire change**: `session_id` becomes empty (rather than fall back to bridge) when the marker was absent; `bridge_session_id` is the new explicit sibling. The "Wire format additive-only" constraint above documents this exception and the migration path for consumers.
@@ -380,7 +381,7 @@ What does NOT change in P1:
 | `pkg/agentbackend/claude/executor_test.go` | `ex.RunResume(ctx, "sess-1", ...)` | wrap as SessionRef |
 | `pkg/agentbackend/opencode/backend_resume_test.go` | 2 sites calling `b.RunResume(ctx, id, ...)` | wrap as SessionRef |
 | `pkg/agentbackend/opencode/executor_test.go` | `b.RunResume(ctx, "sess-abc", ...)` | wrap as SessionRef |
-| `internal/driver/tools.go::resumeTaskTool.Call` | the driver caller | stops unwrapping `ref.Backend` to string; passes `ref` directly. |
+| `internal/driver/tools.go::resumeTaskTool.Call` | NOT a `Backend.RunResume` caller (it uses `agentsdk.DelegateTask` with `Skill: "chat_resume"`) | **Nothing changes in P2.** Driver-side code path is established by P1 (constructs a SessionRef with empty Kind, writes `ref.Backend` as a string into agentsdk JSON body). The cross-wire body remains a bare string `session_id`. This row exists in the table only to record that the inventory was checked and the driver intentionally does not move in P2. |
 
 Total: **23 unique files** in the P2 inventory (verified by counting rows in the table above and de-duplicating). This includes 12 production files + 11 test files. `internal/driver/tools.go` appears once though it has only one P2 site (resumeTaskTool.Call already changed in P1; in P2 it stops unwrapping `ref.Backend` to string). The expansion from the round-1 spec catches (a) the import-cycle constraint and (b) the test-stub surface that must change in lockstep with the interface signature. Without all of these, `go test ./...` does not compile.
 
@@ -421,7 +422,7 @@ All other paths (kind marker / loom_origin marker / loom-meta sidecar / `Backend
 
 | Layer | Tests added/changed |
 |---|---|
-| `pkg/agentbackend/sessionref_test.go` (new) | IsZero, HasBackend, String formatting, constructors (`NewBackend`/`NewBridgeOnly`/`WithBackend`) set fields correctly, panic preconditions on all three constructors. **No JSON tests** — SessionRef has no JSON methods; JSON shape lives on Record + response builders. |
+| `pkg/agentbackend/sessionref_test.go` (new) | IsZero, HasBackend, String formatting; constructors (`NewBackend`/`NewBridgeOnly`/`WithBackend`) set fields correctly; constructor panic preconditions on the **id** parameters (Backend / Bridge / pairing) — empty Kind / AgentID explicitly do NOT panic. **No JSON tests** — SessionRef has no JSON methods; JSON shape lives on Record + response builders. |
 | `internal/driver/tools_test.go` | Existing TaskInfo-construction fixtures updated; new `TestResumeTask_RefusesBridgeOnlyFallback`; new `TestWaitTask_BridgeAndBackendBothInResponse` that asserts the new `bridge_session_id` field appears alongside the existing `session_id` field. |
 | `internal/driver/task_journal_test.go` | New `TestRecord_MarshalFlattensSessionRefIntoSiblings` (proves flat output, not nested), `TestRecord_UnmarshalLegacyBridgeSessionID` (cse_ prefix → Bridge), `TestRecord_UnmarshalLegacyBackendSessionID` (uuid shape → Backend), `TestRecord_RoundTripModernRow` (both fields populated). All flatten/unmarshal/classifier logic lives on `Record`, not on `SessionRef`. |
 | `pkg/agentbackend/backend_test.go` (P2) | `nilBackend.RunResume` signature update. |
@@ -481,8 +482,24 @@ One P1 + two P2 + two P3 against commit `976bc1e`. All real; verified each by re
 - **P3 (NewBackend kind validity):** added explicit constructor preconditions for `Kind`: `NewBackend("", agentID, backendID)` panics; same for `NewBridgeOnly`. Added unit test mandate.
 - **P3 (commander pseudo-code wrong result type):** changed `result.Result{}` → `executor.Result{}` and added clarifying parenthetical.
 
+### Codex round 5 (2026-06-25)
+
+Two P1 + one P2 + two P3 against commit `a7054ee`. Both P1 verified real and material:
+
+- **P1 (`child_kind` has no source):** confirmed by reading `agentsdk.AgentCard` (no `Kind` field) and `internal/driver/agent_card.go` (`parsedAgentCard.HasCommandKind` matches command-interface kind, not backend kind). The discovery card body carries no backend kind. So the round-4 plan to persist `ChildKind` at delegation time was unimplementable. **Resolution: rolled back** the `ChildKind` field and the constructor `kind != ""` precondition. Driver-side SessionRef instances are explicitly allowed to have empty `Kind`. The bug-prevention goal (`Backend ≠ Bridge`) is unaffected. Slave-side wraps still populate `Kind` from `a.b.Kind()` because the slave's `Backend` interface DOES expose it.
+- **P1 (driver does NOT call Backend.RunResume directly):** confirmed by reading `tools.go:1313` — `resumeTaskTool.Call` issues `r.t.sdk.DelegateTask(... Skill: "chat_resume", ...)` over agentsdk JSON. There is no direct driver→backend RunResume call. P2 inventory's claim that "`resumeTaskTool.Call` stops unwrapping ref.Backend to string; passes ref directly" was incoherent. **Resolution:** the inventory row now explicitly states "nothing changes in P2 for the driver path"; the wire JSON body keeps `session_id` as a bare string carrying `ref.Backend`. SessionRef type-discipline at the construction site is still the value driver gets; it just doesn't propagate over the wire.
+
+**P2 + P3 deferred to plan/implementation phase** (per operator decision):
+
+- **P2 (RunResume bridge-only guard lacks negative test coverage):** the spec mandates the `!ref.HasBackend()` guard exists; adding the specific negative test cases (one per backend impl + wrapper, 6 total sites) is implementation detail to write into the plan, not a spec-level decision.
+- **P3 (constructor panic test wording was stale):** addressed inline (rolled back as part of P1 above — `kind != ""` precondition removed entirely).
+- **P3 (journal round-trip wording permits losing Kind/AgentID):** spec now says journal round-trip asserts `Backend` + `Bridge` + `AgentID` and that `Kind` stays empty (matches driver-side reality after the P1#1 rollback). Plan will define the exact test cases.
+
+Net result: the spec correctly characterizes driver-side and slave-side roles for `SessionRef.Kind`; the `agentbackend.Kind` discovery card field (which would be needed to populate driver-side `Kind`) is **explicitly out of scope** for this refactor — adding it is a separate spec / agentsdk concern.
+
 ## Out of scope (deliberately tracked here so the next refactor doesn't re-litigate)
 
 - **Renaming wire-format fields** to e.g. `backend_session_id` for clarity. Considered and rejected because it would force a coordinated migration with all deployed slaves' loom-meta sidecars and with agentserver SDK consumers. The new typed Go layer is sufficient to enforce the discipline going forward.
 - **Pushing `SessionRef` into `agentsdk`.** Requires an agentsdk SDK version bump, which couples agentserver and multi-agent release cycles. We wrap SDK return values at the driver boundary instead.
 - **A `SessionResolver` service layer** that hides RunResume entirely. Heavier; not justified by the bug we're fixing.
+- **Adding a `backend_kind` field to the published discovery card** (`internal/driver/agent_card.go::parsedAgentCard`, `agentsdk.AgentCard`, and the slave-side card publish at registration). Would let driver-side `SessionRef` populate `Kind` for completeness. Considered and rejected for this PR: agentsdk SDK surface change couples release cycles; the `Kind` field on driver-side refs is informational only (bug-prevention goal is `Backend ≠ Bridge`, achieved without it). If a future refactor needs driver-side `Kind` for routing or display, file that as its own spec.
