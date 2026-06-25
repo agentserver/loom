@@ -69,17 +69,21 @@ Frontend sets `fresh: true` when posting the FIRST turn on a `pendingSession`
 Subsequent turns leave it unset.
 
 The backend's real session ID rides in the existing terminal `done`
-SSE payload — a new `session_id` field on the JSON `result` object:
+SSE payload at **exactly one path**: `data.result.session_id`. The
+existing `marshalTurnResult` already shapes the payload as
+`{"result": {...}}`, so `session_id` is a new sibling of whatever
+`result` already carries:
 
 ```
 event: done
-data: {"session_id":"<codex-minted-id>", "result":{...}}
+data: {"result": {"session_id":"<codex-minted-id>", ...existing fields...}}
 ```
 
-(If `done` already had a `result` object, the new field nests inside it.
-If the existing payload shape doesn't reserve a slot, add `session_id`
-as a top-level field of the done JSON. Either way, the implementation
-sticks to ONE shape and the frontend reads from that one path.)
+The frontend reads `data.result.session_id`. The hub rekey reads
+`data.result.session_id`. Slave handler writes
+`data.result.session_id`. No alternative path is acceptable — a shape
+mismatch silently fails rebind + rekey, reintroducing the original
+bug.
 
 Rationale: the existing SSE sink layer (`internal/commander/sink.go` +
 `sseSink.Write`) only carries text payloads — the daemon-link envelope's
@@ -136,24 +140,33 @@ When `fresh=false`: existing flow unchanged.
   body (NOT a query param; the HTTP handler reads ONLY from the body to
   avoid the two-channel mismatch that would silently drop fresh and
   re-trigger the original bug).
-- `onEvent` already receives all SSE events; the new `session_id` event
-  threads through it.
+- The frontend reads the real backend ID off the existing terminal
+  `done` event's payload — `data.result.session_id` (per §Protocol).
+  No new event type, no new onEvent branch.
 
 `sendPrompt` in `CommanderApp.tsx`:
 - Before posting, check `pendingSessionRef.current?.phase === 'draft' &&
   pendingSessionRef.current.sessionID === submitted.sessionID`. If so, set
   `fresh: true` in the postTurn call.
-- Inside the onEvent callback, when `event === 'session_id'`, capture the
-  real backend ID. After the turn `done` event, rebind:
-  - `selectedRef.current = { daemonID, sessionID: realBackendID }`
-  - `setSelected(...)`
-  - `setPendingSession(prev => prev ? { ...prev, sessionID: realBackendID, phase: 'submitting' } : null)`
-  - `pendingSessionRef.current = { ...same }`
+- Inside the existing `event === 'done'` branch, read the new field
+  `data.result.session_id` (when present). If set AND it differs from
+  `submitted.sessionID` AND `selectedRef.current?.sessionID === submitted.sessionID`,
+  rebind:
+  - `const realID = data.result.session_id`
+  - `selectedRef.current = { daemonID: submitted.daemonID, sessionID: realID }`
+  - `setSelected({ daemonID: submitted.daemonID, sessionID: realID })`
+  - `setPendingSession(prev => prev ? { ...prev, sessionID: realID, phase: 'submitting' } : null)`
+  - `pendingSessionRef.current = { ...pendingSessionRef.current, sessionID: realID, phase: 'submitting' }` (if non-null)
   - Then `void loadTree()` — when the tree returns and the real row appears,
     pending clears as before.
+- The selectedRef-match guard avoids race: if the user clicked another
+  session between `+` and the `done` event, the rebind no-ops (the
+  existing pending stays as-is; the just-committed session still
+  surfaces in the next `loadTree`).
 
 The existing pending → submitting flip stays; the ID rebind happens in the
-same step.
+same step. No separate event listener — read the new field off the
+existing `done` event.
 
 ### HTTP layer
 
@@ -210,26 +223,27 @@ state cleanly at `realKey`, run normally through `Backend.RunResume`
 | File | Change |
 |---|---|
 | `internal/commander/protocol.go` | `SessionTurnArgs` adds `Fresh bool` field. |
-| `internal/commander/handler.go` | `SessionTurn` accepts new `fresh` arg; routes to `Backend.Run` (with `OriginUser` task field — see "agent_task misclassification" risk) when true; reads `res.SessionID`; emits `session_id` SSE event from that value. NOT the `<codex_home>/sessions/current` marker. |
+| `internal/commander/handler.go` | `SessionTurn` accepts new `fresh` arg; routes to `Backend.Run` (with `OriginUser` task field — see "agent_task misclassification" risk) when true; reads `res.SessionID` (the existing `executor.Result.SessionID` field, NOT the `<codex_home>/sessions/current` marker); writes `result.session_id` into the terminal `done` envelope's payload before it is forwarded by the hub. |
 | `pkg/agentbackend/backend.go` (or equivalent) | `Task` struct gets an `Origin` field (or equivalent flag) so backends can branch sidecar/origin behavior between user-fresh and agent-task. If a clean field doesn't exist today, add one. |
 | `pkg/agentbackend/codex/executor.go` | sidecar writer respects `Task.Origin`: writes `origin: user` when the task is a user-fresh new session; preserves existing `origin: agent_task` for the agent-task path. |
 | `internal/commander/wsclient.go` | unmarshal `Fresh` from incoming session_turn; pass through to Handler.SessionTurn. |
 | `internal/commander/http.go` | the local daemon HTTP `/turn` handler also calls `h.SessionTurn(...)` directly — must be updated for the new signature, AND parse `fresh` from its own POST body so direct-daemon `/turn` calls also work end-to-end (otherwise the daemon's compile fails when only commanderhub is updated, and direct-daemon users hit the same original bug). |
 | `internal/commanderhub/http.go` (`turn` handler) | parse `fresh` from POST body ONLY (not query param — single source of truth). |
-| `internal/commanderhub/hub.go` (or wherever turn-state lives) | new `rekey(oldKey, newKey)` helper; invoked from the SSE proxy path when a `session_id` event arrives, before forwarding to HTTP client. |
+| `internal/commanderhub/hub.go` (or wherever turn-state lives) | new `rekey(oldKey, newKey)` helper; invoked from the stream-loop terminal-frame branch when the `command_result` payload contains `result.session_id` and that value differs from `key.sessionID`. The terminal write (state + invalidateDaemonSessions) uses the rekeyed `realKey` for THIS iteration. |
 | `internal/commanderhub/webapp/src/api/client.ts` | `postTurn` accepts `opts.fresh`; body JSON includes `fresh`. |
-| `internal/commanderhub/webapp/src/CommanderApp.tsx` | `sendPrompt` sets `fresh: true` for draft pending; handles `session_id` event; rebinds selected + pending to real ID. |
-| `internal/commander/handler_test.go` | New case: fresh=true routes to Backend.Run with OriginUser, NOT RunResume; `res.SessionID` is emitted on the sink. |
+| `internal/commanderhub/webapp/src/CommanderApp.tsx` | `sendPrompt` sets `fresh: true` for draft pending; reads `data.result.session_id` off the existing `done` event; rebinds selected + pending to real ID via the same guard pattern as the existing pendingNow check. |
+| `internal/commander/handler_test.go` | New case: fresh=true routes to Backend.Run with OriginUser, NOT RunResume; the terminal `done` envelope on the sink carries `result.session_id == res.SessionID`. |
 | `pkg/agentbackend/codex/executor_test.go` (or backend_test.go) | New case: `OriginUser` task writes sidecar with `origin: user`, not `agent_task`. |
-| `internal/commanderhub/hub_test.go` (or equivalent) | New case: turn-state rekey on `session_id` event preserves terminal state under the new ID. |
-| Frontend unit tests | `postTurn` body shape for fresh=true; CommanderApp handles `session_id` event and rebinds. |
+| `internal/commanderhub/hub_test.go` (or equivalent) | New case: turn-state rekey on terminal `done` frame whose payload carries `result.session_id` preserves terminal state under the new key. |
+| Frontend unit tests | `postTurn` body shape for fresh=true; CommanderApp reads `result.session_id` from the `done` event and rebinds selected + pending. |
 
 ## Test Strategy
 
 ### Go unit
 - `handler_test.go`: fresh=true with a fake backend whose `Run` returns a
-  session ID via sidecar — assert the handler emits a `session_id` event on
-  the sink and does NOT call `trySessionWorker`.
+  real `executor.Result.SessionID` — assert the terminal `done` envelope
+  written to the sink has `result.session_id == <returned>` AND the
+  handler does NOT call `trySessionWorker`.
 - `handler_test.go`: fresh=false continues to use the existing trySessionWorker
   path (existing tests stay green).
 
@@ -237,8 +251,10 @@ state cleanly at `realKey`, run normally through `Backend.RunResume`
 - `client.test.ts` (or extend existing): `postTurn(..., { fresh: true })`
   sends `fresh: true` in the JSON body.
 - `CommanderApp.mobile.test.tsx`: `+` flow → first prompt → assert the
-  POST body has `fresh: true`. Then mock the SSE stream to emit `session_id`
-  + `done`; assert `pendingSession.sessionID` was rebound to the backend ID.
+  POST body has `fresh: true`. Then mock the SSE stream to emit a single
+  `done` event whose payload includes `result.session_id`; assert
+  `pendingSession.sessionID` and `selected.sessionID` were both rebound
+  to that backend ID.
 
 ### Manual prod_test
 - Click `+` on driver in the live commander UI; type any prompt; send.
@@ -259,9 +275,9 @@ state cleanly at `realKey`, run normally through `Backend.RunResume`
   `executor.go:205` comment "written on BOTH Run and RunResume so" — the
   write is mid-Run, not post-Run).
 - **Frontend rebind race**: if the user clicks a different session between
-  `+` and `session_id` arrival, the rebind targets the OLD `selected`.
-  Mitigate by reading `selectedRef.current` at rebind time and only
-  rebinding if it still matches the submitted (placeholder) ID.
+  `+` and the `done` event, the rebind targets the OLD `selected`.
+  Mitigate by reading `selectedRef.current` inside the `done` branch and
+  only rebinding if it still matches the submitted (placeholder) ID.
 - **Other backends (claude, opencode)**: if their `Run` paths are not
   symmetric to codex's, `fresh=true` on those backends might mis-route.
   Out of scope here — codex is the only shipped backend hitting this.
