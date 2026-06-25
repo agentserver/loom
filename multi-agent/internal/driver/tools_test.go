@@ -3228,3 +3228,50 @@ func TestResumeTask_RefusesEmptyMarker(t *testing.T) {
 			"resume_task must not delegate chat_resume when only the bridge id is known")
 	}
 }
+
+// TestWaitTask_BridgeAndBackendBothInResponse asserts that wait_task emits
+// both session_id (backend, from the kind marker) and bridge_session_id
+// (from agentserver's TaskInfo) as sibling fields. Pre-PR the response
+// carried only session_id with firstNonEmpty(marker, bridge) semantics —
+// consumers couldn't distinguish which they got. This test pins the new
+// explicit two-field shape on the kind:"final" terminal branch (Task 3 §4d).
+func TestWaitTask_BridgeAndBackendBothInResponse(t *testing.T) {
+	const (
+		taskID    = "task_test_wait"
+		bridgeID  = "cse_bridge_for_wait"
+		backendID = "019ef000-0000-0000-0000-000000000abc"
+	)
+	sdk := &fakeSDK{
+		getTaskFunc: func(id string, includeOutput bool) (*agentsdk.TaskInfo, error) {
+			if id != taskID {
+				return nil, fmt.Errorf("unexpected GetTask id %q", id)
+			}
+			return &agentsdk.TaskInfo{
+				TaskID:    taskID,
+				Status:    "completed",
+				SessionID: bridgeID,
+				// Kind:"final" terminal marker carrying the backend session id;
+				// this exercises Task 3 §4d (the normal/final branch update).
+				Output: `{"kind":"final","session_id":"` + backendID + `","summary":"done"}`,
+			}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	_, err := tools.BindThread(context.Background(), "019ef000-0000-0000-0000-000000000abc")
+	require.NoError(t, err)
+
+	resp, err := toolByName(t, tools, "wait_task").Call(context.Background(),
+		json.RawMessage(`{"task_id":"task_test_wait","timeout_sec":1}`))
+	require.NoError(t, err, "wait_task")
+
+	var decoded struct {
+		SessionID       string `json:"session_id"`
+		BridgeSessionID string `json:"bridge_session_id"`
+		Status          string `json:"status"`
+	}
+	require.NoError(t, json.Unmarshal(resp, &decoded), "decode response: %s", resp)
+	require.Equal(t, backendID, decoded.SessionID,
+		"session_id should be the backend id from the kind marker")
+	require.Equal(t, bridgeID, decoded.BridgeSessionID,
+		"bridge_session_id should be the agentsdk bridge id")
+}
