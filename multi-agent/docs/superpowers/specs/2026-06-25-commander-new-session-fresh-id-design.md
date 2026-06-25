@@ -80,10 +80,16 @@ data: {"result": {"session_id":"<codex-minted-id>", ...existing fields...}}
 ```
 
 The frontend reads `data.result.session_id`. The hub rekey reads
-`data.result.session_id`. Slave handler writes
-`data.result.session_id`. No alternative path is acceptable — a shape
-mismatch silently fails rebind + rekey, reintroducing the original
-bug.
+`data.result.session_id`. The path is produced by the existing
+`marshalTurnResult` helper (in `internal/commander/http.go`), which
+ALREADY serializes `executor.Result.SessionID` into `result.session_id`
+of the JSON payload that `wsclient` and the local HTTP handler attach
+to the terminal `command_result` / `done` envelope. The slave-side
+change is to ensure `Result.SessionID` is POPULATED when `fresh=true`
+(by routing to `Backend.Run` and propagating its returned ID); no
+marshaler change is needed. No alternative path is acceptable — a
+shape mismatch silently fails rebind + rekey, reintroducing the
+original bug.
 
 Rationale: the existing SSE sink layer (`internal/commander/sink.go` +
 `sseSink.Write`) only carries text payloads — the daemon-link envelope's
@@ -223,7 +229,7 @@ state cleanly at `realKey`, run normally through `Backend.RunResume`
 | File | Change |
 |---|---|
 | `internal/commander/protocol.go` | `SessionTurnArgs` adds `Fresh bool` field. |
-| `internal/commander/handler.go` | `SessionTurn` accepts new `fresh` arg; routes to `Backend.Run` (with `OriginUser` task field — see "agent_task misclassification" risk) when true; reads `res.SessionID` (the existing `executor.Result.SessionID` field, NOT the `<codex_home>/sessions/current` marker); writes `result.session_id` into the terminal `done` envelope's payload before it is forwarded by the hub. |
+| `internal/commander/handler.go` | `SessionTurn` accepts new `fresh` arg; routes to `Backend.Run` (with `OriginUser` task field — see "agent_task misclassification" risk) when true; returns the resulting `executor.Result` with `SessionID` populated from the codex backend (the existing `Result.SessionID` field, NOT the `<codex_home>/sessions/current` marker). The handler does NOT emit `done` itself — callers (`wsclient.go`, `http.go`) already serialize the result via `marshalTurnResult` which already includes `session_id` in `result.session_id`. No marshaler change needed; just ensure the field is populated. |
 | `pkg/agentbackend/backend.go` (or equivalent) | `Task` struct gets an `Origin` field (or equivalent flag) so backends can branch sidecar/origin behavior between user-fresh and agent-task. If a clean field doesn't exist today, add one. |
 | `pkg/agentbackend/codex/executor.go` | sidecar writer respects `Task.Origin`: writes `origin: user` when the task is a user-fresh new session; preserves existing `origin: agent_task` for the agent-task path. |
 | `internal/commander/wsclient.go` | unmarshal `Fresh` from incoming session_turn; pass through to Handler.SessionTurn. |
@@ -232,7 +238,8 @@ state cleanly at `realKey`, run normally through `Backend.RunResume`
 | `internal/commanderhub/hub.go` (or wherever turn-state lives) | new `rekey(oldKey, newKey)` helper; invoked from the stream-loop terminal-frame branch when the `command_result` payload contains `result.session_id` and that value differs from `key.sessionID`. The terminal write (state + invalidateDaemonSessions) uses the rekeyed `realKey` for THIS iteration. |
 | `internal/commanderhub/webapp/src/api/client.ts` | `postTurn` accepts `opts.fresh`; body JSON includes `fresh`. |
 | `internal/commanderhub/webapp/src/CommanderApp.tsx` | `sendPrompt` sets `fresh: true` for draft pending; reads `data.result.session_id` off the existing `done` event; rebinds selected + pending to real ID via the same guard pattern as the existing pendingNow check. |
-| `internal/commander/handler_test.go` | New case: fresh=true routes to Backend.Run with OriginUser, NOT RunResume; the terminal `done` envelope on the sink carries `result.session_id == res.SessionID`. |
+| `internal/commander/handler_test.go` | New case: fresh=true routes to Backend.Run with OriginUser, NOT RunResume; returned `executor.Result.SessionID` equals what the fake backend produced. (Do NOT assert about envelope/SSE shape — that lives at the caller layer.) |
+| `internal/commander/http_test.go` and/or `wsclient_test.go` | If not already covered: assert `marshalTurnResult` serializes `Result.SessionID` into `result.session_id` of the JSON payload (existing format — add only if currently untested). |
 | `pkg/agentbackend/codex/executor_test.go` (or backend_test.go) | New case: `OriginUser` task writes sidecar with `origin: user`, not `agent_task`. |
 | `internal/commanderhub/hub_test.go` (or equivalent) | New case: turn-state rekey on terminal `done` frame whose payload carries `result.session_id` preserves terminal state under the new key. |
 | Frontend unit tests | `postTurn` body shape for fresh=true; CommanderApp reads `result.session_id` from the `done` event and rebinds selected + pending. |
@@ -241,9 +248,12 @@ state cleanly at `realKey`, run normally through `Backend.RunResume`
 
 ### Go unit
 - `handler_test.go`: fresh=true with a fake backend whose `Run` returns a
-  real `executor.Result.SessionID` — assert the terminal `done` envelope
-  written to the sink has `result.session_id == <returned>` AND the
-  handler does NOT call `trySessionWorker`.
+  real `executor.Result.SessionID` — assert the handler returns that
+  same Result (with SessionID set), routes via Backend.Run (not
+  trySessionWorker/RunResume), and the fake backend received an
+  `OriginUser` task. The wire-format check (that the SessionID lands at
+  `result.session_id`) belongs at the caller layer where
+  `marshalTurnResult` runs.
 - `handler_test.go`: fresh=false continues to use the existing trySessionWorker
   path (existing tests stay green).
 
