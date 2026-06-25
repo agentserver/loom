@@ -57,7 +57,8 @@ function printLoginBanner(verifyURL: string): void {
 }
 
 async function runLiveLogin(): Promise<void> {
-  const browser = await chromium.launch({ headless: false });
+  const headless = !process.env.DISPLAY;
+  const browser = await chromium.launch({ headless });
   try {
     const ctx = await browser.newContext({ baseURL: OBSERVER_BASE });
     const page = await ctx.newPage();
