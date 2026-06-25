@@ -1600,6 +1600,25 @@ git grep -n "func (.*Backend.*) RunResume" multi-agent/pkg/agentbackend/codex/
 
 Repeat the executor + backend pattern for `claude/` and `opencode/` (only those two files per backend — no third file).
 
+**Imports check (verified against current `backend.go` heads):**
+
+The three backend wrapper files do NOT import `fmt` today:
+- `pkg/agentbackend/codex/backend.go:3` — imports `context`, `os`, `strings`, `sessioncache`, `agentbackend`.
+- `pkg/agentbackend/claude/backend.go:3` — imports `context`, `sessioncache`, `agentbackend`.
+- `pkg/agentbackend/opencode/backend.go:3` — imports `context`, `agentbackend`.
+
+Add `"fmt"` to each wrapper's import block before saving the file. The three executor files (`executor.go` per backend) already import `fmt` — leave them.
+
+If `fmt` is added but not used in a wrapper (the snippet always uses it, but cover the edge case if you cargo-cult elsewhere), Go's unused-import error will fire. Test compile each backend in isolation:
+
+```
+go build ./pkg/agentbackend/codex/
+go build ./pkg/agentbackend/claude/
+go build ./pkg/agentbackend/opencode/
+```
+
+Each should pass before moving on.
+
 - [ ] **Step 4: Build (production-only) — confirm interface ripple is complete**
 
 ```
@@ -1677,6 +1696,46 @@ if id, answer := <call args>; id != "thr-1" { ... }
 // After (the parameter slot is now ref):
 if ref, answer := <call args>; ref.Backend != "thr-1" { ... }
 ```
+
+**`appServerWorkerCommanderBackend` fake stub migration (`appserver_worker_test.go:2317`):**
+
+This file defines a fake `agentbackend.Backend` named `appServerWorkerCommanderBackend` with a `resumeFn` callback whose signature mirrors `RunResume`. Once the interface flips, the stub must too. Three concrete edits:
+
+1. **Field type (`appserver_worker_test.go:2319`):**
+   ```go
+   // Before:
+   resumeFn func(context.Context, string, string, agentbackend.Sink) (agentbackend.Result, error)
+   // After:
+   resumeFn func(context.Context, agentbackend.SessionRef, string, agentbackend.Sink) (agentbackend.Result, error)
+   ```
+
+2. **Method (`appserver_worker_test.go:2330`):**
+   ```go
+   // Before:
+   func (b *appServerWorkerCommanderBackend) RunResume(ctx context.Context, id, answer string, sink agentbackend.Sink) (agentbackend.Result, error) {
+       if b.resumeFn == nil { ... }
+       return b.resumeFn(ctx, id, answer, sink)
+   }
+   // After:
+   func (b *appServerWorkerCommanderBackend) RunResume(ctx context.Context, ref agentbackend.SessionRef, answer string, sink agentbackend.Sink) (agentbackend.Result, error) {
+       if b.resumeFn == nil { ... }
+       return b.resumeFn(ctx, ref, answer, sink)
+   }
+   ```
+
+3. **Three closure constructors (`appserver_worker_test.go:880`, `:1719`, `:1763`)** — each currently builds a `resumeFn` closure with the old `(_, id, answer string, sink)` signature:
+   ```go
+   // Before (line 882, etc.):
+   resumeFn: func(_ context.Context, id, answer string, sink agentbackend.Sink) (agentbackend.Result, error) {
+       // body inspects id
+   },
+   // After:
+   resumeFn: func(_ context.Context, ref agentbackend.SessionRef, answer string, sink agentbackend.Sink) (agentbackend.Result, error) {
+       id := ref.Backend
+       // rest of body unchanged
+   },
+   ```
+   Line 1721 uses unnamed positional types `func(context.Context, string, string, agentbackend.Sink)`; change the second `string` to `agentbackend.SessionRef`.
 
 For test stubs that implement `Backend` (fake/mock types in `internal/commanderhub/proxy_test.go`):
 ```go
