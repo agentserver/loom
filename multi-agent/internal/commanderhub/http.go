@@ -217,6 +217,7 @@ func (ch *commanderHandlers) turn(w http.ResponseWriter, r *http.Request, daemon
 	}
 	var body struct {
 		Prompt string `json:"prompt"`
+		Fresh  bool   `json:"fresh,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad body", http.StatusBadRequest)
@@ -231,7 +232,7 @@ func (ch *commanderHandlers) turn(w http.ResponseWriter, r *http.Request, daemon
 		http.Error(w, "turn already in flight", http.StatusConflict)
 		return
 	}
-	args, _ := json.Marshal(commander.SessionTurnArgs{ID: sid, Prompt: body.Prompt})
+	args, _ := json.Marshal(commander.SessionTurnArgs{ID: sid, Prompt: body.Prompt, Fresh: body.Fresh})
 	turnCtx, cancel := context.WithTimeout(context.Background(), ch.hub.TurnTimeout)
 	defer cancel()
 
@@ -263,6 +264,20 @@ func (ch *commanderHandlers) turn(w http.ResponseWriter, r *http.Request, daemon
 		case env, ok := <-chunkCh:
 			if !ok {
 				goto streamClosed
+			}
+			// Fresh-session protocol: when the terminal command_result
+			// carries a real backend session ID in result.session_id and
+			// it differs from the placeholder we minted client-side,
+			// rekey turn-state BEFORE any terminal write so finish/
+			// invalidate land under the real key. The placeholder
+			// entry is dropped — the daemon-sessions invalidation
+			// then propagates the real session into the tree.
+			if env.Type == "command_result" {
+				if realID := payloadSessionID(env.Payload); realID != "" && realID != key.sessionID {
+					realKey := turnKey{owner: key.owner, daemonID: key.daemonID, sessionID: realID}
+					ch.hub.turns.rekey(key, realKey)
+					key = realKey
+				}
 			}
 			ch.updateTurnStateFromEnvelope(key, env)
 			if writeSSE {
@@ -364,4 +379,17 @@ func payloadAwaitingUser(payload []byte) bool {
 	}
 	_ = json.Unmarshal(payload, &body)
 	return body.Result.AwaitingUser != nil
+}
+
+// payloadSessionID extracts the real backend session ID from a
+// terminal command_result payload (marshalTurnResult writes it as
+// result.session_id). Returns empty when absent or unparseable.
+func payloadSessionID(payload []byte) string {
+	var body struct {
+		Result struct {
+			SessionID string `json:"session_id"`
+		} `json:"result"`
+	}
+	_ = json.Unmarshal(payload, &body)
+	return body.Result.SessionID
 }

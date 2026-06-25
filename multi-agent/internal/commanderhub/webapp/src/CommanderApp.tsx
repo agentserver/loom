@@ -394,6 +394,18 @@ export function CommanderApp() {
 
     setCurrentTurnState('queued');
     let turnError: Error | null = null;
+    // Fresh-session protocol: when the user is sending the FIRST prompt
+    // of a draft pending session, the client-minted ID is a placeholder
+    // — the slave handler routes to Backend.Run, codex mints a real
+    // thread ID, and it lands here in the terminal `done` event's
+    // payload at `data.result.session_id`. We rebind selected +
+    // pendingSession to that real ID after the stream completes.
+    const pendingAtStart = pendingSessionRef.current;
+    const isFreshDraft = pendingAtStart != null
+      && pendingAtStart.phase === 'draft'
+      && pendingAtStart.daemonID === submitted.daemonID
+      && pendingAtStart.sessionID === submitted.sessionID;
+    let realSessionID = '';
     try {
       await postTurn(submitted.daemonID, submitted.sessionID, text, (event, data) => {
         if (!isCurrentTurn()) return;
@@ -412,11 +424,14 @@ export function CommanderApp() {
           setCurrentTurnState('answering');
         } else if (event === 'done') {
           setCurrentTurnState(doneTurnState(data));
+          if (isRecord(data) && isRecord(data.result) && typeof data.result.session_id === 'string') {
+            realSessionID = data.result.session_id;
+          }
         } else if (event === 'error') {
           setCurrentTurnState('error');
           turnError = new Error(errorMessage(data));
         }
-      });
+      }, isFreshDraft ? { fresh: true } : undefined);
       if (turnError) throw turnError;
       // pending phase flip + loadTree MUST run independent of isCurrentTurn():
       // the server-side session was created regardless of whether the user has
@@ -429,9 +444,22 @@ export function CommanderApp() {
         && pendingNow.sessionID === submitted.sessionID
         && pendingNow.phase === 'draft'
       ) {
-        const flipped: PendingSession = { ...pendingNow, phase: 'submitting' };
+        // If the backend returned a real session ID and the user has
+        // NOT navigated away from the placeholder, rebind selected +
+        // pendingSession to the real ID atomically. If they navigated
+        // away, leave both alone — the just-committed session still
+        // surfaces in the next loadTree.
+        const realID = realSessionID && realSessionID !== pendingNow.sessionID ? realSessionID : pendingNow.sessionID;
+        const stillOnPlaceholder = selectedRef.current?.daemonID === submitted.daemonID
+          && selectedRef.current?.sessionID === submitted.sessionID;
+        const flipped: PendingSession = { ...pendingNow, sessionID: realID, phase: 'submitting' };
         pendingSessionRef.current = flipped;
         setPendingSession(flipped);
+        if (stillOnPlaceholder && realID !== submitted.sessionID) {
+          const rebound = { daemonID: submitted.daemonID, sessionID: realID };
+          selectedRef.current = rebound;
+          setSelected(rebound);
+        }
         void loadTree();
         // Detail fetch is handled by the [selected, tree, pendingSession]
         // effect when it re-runs on the phase change. We don't issue one here.

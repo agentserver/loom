@@ -83,6 +83,7 @@ func handleTurn(h *Handler, w http.ResponseWriter, r *http.Request, id string) {
 	}
 	var body struct {
 		Prompt string `json:"prompt"`
+		Fresh  bool   `json:"fresh,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad body: "+err.Error(), http.StatusBadRequest)
@@ -95,7 +96,7 @@ func handleTurn(h *Handler, w http.ResponseWriter, r *http.Request, id string) {
 	w.Header().Set("X-Accel-Buffering", "no")
 
 	agentbackend.WriteStatus(sink, agentbackend.StatusQueued, "accepted by daemon")
-	res, err := h.SessionTurn(r.Context(), id, body.Prompt, sink)
+	res, err := h.SessionTurn(r.Context(), id, body.Prompt, body.Fresh, sink)
 	if errors.Is(err, agentbackend.ErrSessionNotFound) {
 		sink.EmitError(ErrCodeSessionNotFound, "session not found")
 		return

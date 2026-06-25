@@ -55,12 +55,15 @@ export async function postTurn(
   sessionID: string,
   prompt: string,
   onEvent: (event: string, data: unknown) => void,
+  opts?: { fresh?: boolean },
 ): Promise<void> {
+  const body: Record<string, unknown> = { prompt };
+  if (opts?.fresh) body.fresh = true;
   const res = await fetch(`${sessionPath(daemonID, sessionID)}/turn`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt }),
+    body: JSON.stringify(body),
   });
   if (res.status === 409) throw new TurnInFlightError();
   if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);

@@ -89,6 +89,29 @@ func (s *turnStateStore) fail(key turnKey, msg string) {
 	s.pruneLocked()
 }
 
+// rekey migrates an in-flight entry from oldKey to newKey, used when the
+// fresh-session protocol returns the real backend session ID in the
+// terminal command_result payload. Idempotent: when oldKey has no entry,
+// this is a no-op; when newKey already exists, the existing entry is
+// preserved (the caller's subsequent finish/fail then writes the
+// terminal state under newKey).
+func (s *turnStateStore) rekey(oldKey, newKey turnKey) {
+	if oldKey == newKey {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.m[oldKey]
+	if !ok {
+		return
+	}
+	delete(s.m, oldKey)
+	if _, exists := s.m[newKey]; !exists {
+		cur.updatedAt = time.Now()
+		s.m[newKey] = cur
+	}
+}
+
 func (s *turnStateStore) get(key turnKey) turnSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
