@@ -1735,7 +1735,7 @@ This file defines a fake `agentbackend.Backend` named `appServerWorkerCommanderB
        // rest of body unchanged
    },
    ```
-   Line 1721 uses unnamed positional types `func(context.Context, string, string, agentbackend.Sink)`; change the second `string` to `agentbackend.SessionRef`.
+   Line 1721 uses unnamed positional types `func(context.Context, string, string, agentbackend.Sink)`. Change the **FIRST** `string` (the session-id slot, position 2) to `agentbackend.SessionRef`; the **second** `string` is the `answer` parameter and stays `string`. Final shape: `func(context.Context, agentbackend.SessionRef, string, agentbackend.Sink) (agentbackend.Result, error)` — matches the migrated `resumeFn` field type exactly.
 
 For test stubs that implement `Backend` (fake/mock types in `internal/commanderhub/proxy_test.go`):
 ```go
