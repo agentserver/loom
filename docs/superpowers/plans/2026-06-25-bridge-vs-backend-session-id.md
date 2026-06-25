@@ -46,7 +46,6 @@
 - `multi-agent/pkg/agentbackend/backend_test.go` — `nilBackend.RunResume` signature update.
 - `multi-agent/pkg/agentbackend/codex/executor.go` `*Executor.RunResume` — signature + `!ref.HasBackend()` guard.
 - `multi-agent/pkg/agentbackend/codex/backend.go` `*Backend.RunResume` — signature pass-through.
-- `multi-agent/pkg/agentbackend/codex/appserver_worker.go` — fallback caller wraps as `SessionRef`.
 - `multi-agent/pkg/agentbackend/claude/executor.go` `*Executor.RunResume` — signature + guard.
 - `multi-agent/pkg/agentbackend/claude/backend.go` `*Backend.RunResume` — signature pass-through.
 - `multi-agent/pkg/agentbackend/opencode/executor.go` `*Executor.RunResume` — signature + guard.
@@ -1515,9 +1514,11 @@ P1 is operationally complete after this PR merges. P2 (Tasks 8–13) is a follow
 **Files:**
 - Modify: `multi-agent/pkg/agentbackend/backend.go` (the `Backend` interface)
 - Modify: `multi-agent/pkg/agentbackend/backend_test.go` (`nilBackend` test stub)
-- Modify: `multi-agent/pkg/agentbackend/codex/executor.go`, `backend.go`, `appserver_worker.go` (signature + guard)
+- Modify: `multi-agent/pkg/agentbackend/codex/executor.go`, `backend.go` (signature + guard)
 - Modify: `multi-agent/pkg/agentbackend/claude/executor.go`, `backend.go` (signature + guard)
 - Modify: `multi-agent/pkg/agentbackend/opencode/executor.go`, `backend.go` (signature + guard)
+
+`codex/appserver_worker.go` does NOT call `RunResume` and stays untouched in this task — verify with `git grep -n RunResume multi-agent/pkg/agentbackend/codex/appserver_worker.go` (zero hits). Its companion test (`appserver_worker_test.go`) DOES contain a fake stub that implements the `Backend` interface, so it's migrated under Task 9.
 
 **Interfaces:**
 - Consumes: `SessionRef`, `SessionRef.HasBackend()`, `SessionRef.Backend`.
@@ -1590,28 +1591,24 @@ func (b *Backend) RunResume(ctx context.Context, ref agentbackend.SessionRef, an
 }
 ```
 
-`multi-agent/pkg/agentbackend/codex/appserver_worker.go` — fallback caller wraps to `SessionRef`. Find the call to `RunResume`:
+Note: codex's executor type is `*executor` (lowercase — verified at `pkg/agentbackend/codex/executor.go:103`); the snippet's `*Executor` is for illustration. Use whatever the actual receiver name is at each site. Verify the codex types with:
 
-```go
-// Before:
-return e.RunResume(ctx, sessionID, answer, sink)
-// After (sessionID at this call site IS the backend id already — it came from
-// app-server's own state):
-return e.RunResume(ctx, agentbackend.NewBackend(e.kind, "", sessionID), answer, sink)
+```
+git grep -n "func (.*executor.*) RunResume" multi-agent/pkg/agentbackend/codex/
+git grep -n "func (.*Backend.*) RunResume" multi-agent/pkg/agentbackend/codex/
 ```
 
-(Use `e.kind` if the executor has it; otherwise use the package constant `agentbackend.KindCodex`.)
-
-Repeat for `claude/` and `opencode/` (no `appserver_worker.go` equivalent for those — only `executor.go` + `backend.go`).
+Repeat the executor + backend pattern for `claude/` and `opencode/` (only those two files per backend — no third file).
 
 - [ ] **Step 4: Build (production-only) — confirm interface ripple is complete**
 
 ```
 cd multi-agent
-go vet ./pkg/agentbackend/...
 go build ./pkg/agentbackend/...
 ```
-Expected: PASS. Test files within `pkg/agentbackend/*/*_test.go` and `internal/commanderhub/proxy_test.go`, plus the production callers in `cmd/slave-agent/main.go` and `internal/commander/handler.go` (with their tests), will still error against the new signature. They all ship together as the **atomic P2 commit at Task 11 Step 4** so the tree never compiles red. Mirror of P1's Task 2/3/4 atomic pattern, scaled to cover every site touched by the interface signature change.
+Expected: PASS (production code only — `go build` does not compile `_test.go`).
+
+**Do NOT run `go vet ./pkg/agentbackend/...` yet** — `go vet` type-checks test files, and at this point every backend's `*_test.go` still calls `RunResume(ctx, "literal", ...)` against the new signature. Test files within `pkg/agentbackend/*/*_test.go` and `internal/commanderhub/proxy_test.go`, plus the production callers in `cmd/slave-agent/main.go` and `internal/commander/handler.go` (with their tests), will all error against the new signature until Tasks 9 + 10 + 11 land. They ship together as the **atomic P2 commit at Task 11 Step 4** so the first green `go vet ./...` is at Task 11 Step 3. Mirror of P1's Task 2/3/4 atomic pattern, scaled to cover every site touched by the interface signature change.
 
 - [ ] **Step 5: Stage (do NOT commit yet)**
 
@@ -1620,7 +1617,6 @@ git add multi-agent/pkg/agentbackend/backend.go \
         multi-agent/pkg/agentbackend/backend_test.go \
         multi-agent/pkg/agentbackend/codex/executor.go \
         multi-agent/pkg/agentbackend/codex/backend.go \
-        multi-agent/pkg/agentbackend/codex/appserver_worker.go \
         multi-agent/pkg/agentbackend/claude/executor.go \
         multi-agent/pkg/agentbackend/claude/backend.go \
         multi-agent/pkg/agentbackend/opencode/executor.go \
@@ -1719,15 +1715,16 @@ If the existing tests have a helper like `newTestExecutor` use it; otherwise ada
 
 Add the symmetric test in `*_test.go` for each backend.
 
-- [ ] **Step 4: Run the suites**
+- [ ] **Step 4: Run the package-scoped suites**
 
 ```
 cd multi-agent
-go vet ./...
 go test ./pkg/agentbackend/... -count=1
 go test ./internal/commanderhub/... -count=1
 ```
 Expected: PASS.
+
+**Do NOT run `go vet ./...` yet** — `internal/commander/handler_test.go` and `cmd/slave-agent/main.go` still don't compile against the new signature. The first all-green `go vet ./...` is at Task 11 Step 3, after Tasks 10 + 11 land their edits.
 
 - [ ] **Step 5: Stage (do NOT commit yet)**
 
@@ -1838,17 +1835,42 @@ return h.Backend.RunResume(ctx, agentbackend.NewBackend(h.Backend.Kind(), "", id
 
 `agentbackend` likely already imported in this file (the `Backend` field type). `executor` (for `Result`) likely already imported too. Verify by reading the imports block.
 
-- [ ] **Step 2: Update handler tests**
+- [ ] **Step 2: Update handler tests — BOTH stubs**
 
-In `handler_test.go`, find any test that asserts `mockBackend.RunResume(ctx, "id", ...)` was called with a specific session id. Change to:
+`handler_test.go` has TWO backend stubs that must be migrated:
+
+1. **`fakeBackend.RunResume`** (`handler_test.go:27`):
+   ```go
+   // Before:
+   func (f *fakeBackend) RunResume(ctx context.Context, id, answer string, sink executor.Sink) (executor.Result, error) {
+       // body uses id
+   }
+   // After:
+   func (f *fakeBackend) RunResume(ctx context.Context, ref agentbackend.SessionRef, answer string, sink executor.Sink) (executor.Result, error) {
+       id := ref.Backend
+       // rest of body unchanged
+   }
+   ```
+
+2. **`resumeOnlyBackend.RunResume`** (`handler_test.go:76`): same signature swap pattern.
+
+Both stub bodies typically capture `id` into a closure variable (e.g. `lastResumeID`) for later assertion. Read `ref.Backend` into the same local so the assertions further down the file (`handler_test.go:248`, `:500`, `:615`) continue to work without further changes.
+
+Add `agentbackend` to imports if missing:
+```go
+import (
+    // existing
+    "github.com/yourorg/multi-agent/pkg/agentbackend"
+)
+```
+
+If any test asserts directly on the captured ref instead of the projected `id`, update it explicitly:
 ```go
 // Before:
 if gotID != "expected-id" { ... }
 // After:
 if gotRef.Backend != "expected-id" { ... }
 ```
-
-And update any `fakeBackend.RunResume` stub signature to take `SessionRef`.
 
 - [ ] **Step 3: Run the affected suites (all should now be green together)**
 
@@ -1868,7 +1890,7 @@ Stage the commander files alongside the already-staged backend + slave files, th
 
 ```
 git add multi-agent/internal/commander/handler.go multi-agent/internal/commander/handler_test.go
-git status -s  # should list: backend.go, backend_test.go, codex/{executor,backend,appserver_worker,executor_test,backend_resume_test,appserver_worker_test}.go, claude/{executor,backend,executor_test,backend_resume_test}.go, opencode/{executor,backend,executor_test,backend_resume_test}.go, internal/commanderhub/proxy_test.go, cmd/slave-agent/main.go, internal/commander/handler.go, internal/commander/handler_test.go
+git status -s  # should list: backend.go, backend_test.go, codex/{executor,backend,executor_test,backend_resume_test,appserver_worker_test}.go, claude/{executor,backend,executor_test,backend_resume_test}.go, opencode/{executor,backend,executor_test,backend_resume_test}.go, internal/commanderhub/proxy_test.go, cmd/slave-agent/main.go, internal/commander/handler.go, internal/commander/handler_test.go
 git commit -m "feat(agentbackend): Backend.RunResume takes SessionRef (#29 P2.1)
 
 Atomic interface promotion — green at this commit. Covers Tasks 8 + 9 + 10 + 11.
@@ -1879,8 +1901,9 @@ Interface (Task 8):
 - Every implementation (codex / claude / opencode + nilBackend
   stub) starts with a !ref.HasBackend() guard that returns an
   actionable error if the caller passes a bridge-only ref.
-- appserver_worker fallback wraps sessionID via NewBackend at
-  the seam (string still in scope from app-server state).
+- appserver_worker.go has no RunResume callsite of its own;
+  Backend.RunResume pass-through in backend.go gains the guard
+  and forwards the typed ref to executor.RunResume.
 
 Backend tests (Task 9):
 - Every test that previously called RunResume(ctx, \"literal\", ...)
