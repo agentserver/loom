@@ -109,7 +109,11 @@ func (e *executor) Run(ctx context.Context, t agentbackend.Task, sink agentbacke
 // a natural user turn responding to its prior request. Like Run(),
 // humanloop MCP is injected so the model can pause AGAIN (multi-round
 // Q&A is supported).
-func (e *executor) RunResume(ctx context.Context, sessionID, answer string, sink agentbackend.Sink) (agentbackend.Result, error) {
+func (e *executor) RunResume(ctx context.Context, ref agentbackend.SessionRef, answer string, sink agentbackend.Sink) (agentbackend.Result, error) {
+	if !ref.HasBackend() {
+		return agentbackend.Result{}, fmt.Errorf("opencode.RunResume: SessionRef has no backend id (Bridge=%q); cannot resume backend session", ref.Bridge)
+	}
+	sessionID := ref.Backend
 	args := append([]string{
 		"run",
 		"--session", sessionID,

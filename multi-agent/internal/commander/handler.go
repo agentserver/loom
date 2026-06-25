@@ -3,6 +3,7 @@ package commander
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -71,11 +72,17 @@ func (h *Handler) SessionTurn(ctx context.Context, id, prompt string, fresh bool
 			if !errors.Is(err, agentbackend.ErrSessionWorkerUnavailable) {
 				agentbackend.WriteStatus(sink, agentbackend.StatusStarting, "hot worker unavailable; falling back to resume")
 			}
-			return h.Backend.RunResume(ctx, id, prompt, sink)
+			if id == "" {
+				return executor.Result{}, fmt.Errorf("commander: empty session id; cannot resume")
+			}
+			return h.Backend.RunResume(ctx, agentbackend.NewBackend(h.Backend.Kind(), "", id), prompt, sink)
 		}
 		return res, err
 	}
-	return h.Backend.RunResume(ctx, id, prompt, sink)
+	if id == "" {
+		return executor.Result{}, fmt.Errorf("commander: empty session id; cannot resume")
+	}
+	return h.Backend.RunResume(ctx, agentbackend.NewBackend(h.Backend.Kind(), "", id), prompt, sink)
 }
 
 // Close releases daemon-owned hot workers. Daemon.Run calls it during shutdown;

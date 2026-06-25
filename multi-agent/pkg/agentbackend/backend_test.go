@@ -35,7 +35,7 @@ type nilBackend struct{}
 
 func (nilBackend) Kind() Kind                                            { return KindClaude }
 func (nilBackend) Run(_ context.Context, _ Task, _ Sink) (Result, error) { return Result{}, nil }
-func (nilBackend) RunResume(_ context.Context, _, _ string, _ Sink) (Result, error) {
+func (nilBackend) RunResume(_ context.Context, _ SessionRef, _ string, _ Sink) (Result, error) {
 	return Result{}, nil
 }
 func (nilBackend) LLM() LLMRunner                                    { return nilLLM{} }

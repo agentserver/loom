@@ -879,7 +879,8 @@ func TestAppServerWorkerTurnStartMethodNotFoundFallsBackThroughCommander(t *test
 	var fallbackCalls int
 	backend := &appServerWorkerCommanderBackend{
 		worker: worker,
-		resumeFn: func(_ context.Context, id, answer string, sink agentbackend.Sink) (agentbackend.Result, error) {
+		resumeFn: func(_ context.Context, ref agentbackend.SessionRef, answer string, sink agentbackend.Sink) (agentbackend.Result, error) {
+			id := ref.Backend
 			fallbackCalls++
 			if id != "thr-1" || answer != "continue" {
 				t.Fatalf("RunResume id=%q answer=%q, want thr-1/continue", id, answer)
@@ -1718,7 +1719,7 @@ func TestCodexSessionWorkerSubmittedUnavailableDoesNotFallbackThroughCommander(t
 	var fallbackCalls int
 	backend := &appServerWorkerCommanderBackend{
 		worker: worker,
-		resumeFn: func(context.Context, string, string, agentbackend.Sink) (agentbackend.Result, error) {
+		resumeFn: func(context.Context, agentbackend.SessionRef, string, agentbackend.Sink) (agentbackend.Result, error) {
 			fallbackCalls++
 			return agentbackend.Result{Summary: "fallback"}, nil
 		},
@@ -1760,7 +1761,8 @@ func TestCodexSessionWorkerUnsubmittedUnavailableFallsBackThroughCommander(t *te
 	var fallbackCalls int
 	backend := &appServerWorkerCommanderBackend{
 		worker: worker,
-		resumeFn: func(_ context.Context, id, answer string, sink agentbackend.Sink) (agentbackend.Result, error) {
+		resumeFn: func(_ context.Context, ref agentbackend.SessionRef, answer string, sink agentbackend.Sink) (agentbackend.Result, error) {
+			id := ref.Backend
 			fallbackCalls++
 			if id != "thr-1" || answer != "prompt" {
 				t.Fatalf("RunResume id=%q answer=%q, want thr-1/prompt", id, answer)
@@ -2316,7 +2318,7 @@ func equalStringSlices(a, b []string) bool {
 
 type appServerWorkerCommanderBackend struct {
 	worker   agentbackend.SessionWorker
-	resumeFn func(context.Context, string, string, agentbackend.Sink) (agentbackend.Result, error)
+	resumeFn func(context.Context, agentbackend.SessionRef, string, agentbackend.Sink) (agentbackend.Result, error)
 }
 
 func (b *appServerWorkerCommanderBackend) Kind() agentbackend.Kind {
@@ -2327,11 +2329,11 @@ func (b *appServerWorkerCommanderBackend) Run(context.Context, agentbackend.Task
 	return agentbackend.Result{}, nil
 }
 
-func (b *appServerWorkerCommanderBackend) RunResume(ctx context.Context, id, answer string, sink agentbackend.Sink) (agentbackend.Result, error) {
+func (b *appServerWorkerCommanderBackend) RunResume(ctx context.Context, ref agentbackend.SessionRef, answer string, sink agentbackend.Sink) (agentbackend.Result, error) {
 	if b.resumeFn == nil {
 		return agentbackend.Result{}, nil
 	}
-	return b.resumeFn(ctx, id, answer, sink)
+	return b.resumeFn(ctx, ref, answer, sink)
 }
 
 func (b *appServerWorkerCommanderBackend) LLM() agentbackend.LLMRunner {

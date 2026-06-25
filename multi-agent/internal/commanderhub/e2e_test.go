@@ -114,7 +114,7 @@ func TestE2e_TurnSSEBearer(t *testing.T) {
 		URL: wsURL, ProxyToken: "tok-AW",
 		Register:       commander.RegisterPayload{SchemaVersion: commander.SchemaVersion, Kind: "claude", DisplayName: "alice-W"},
 		Handler: &commander.Handler{Backend: &tbBackend{
-			resumeFn: func(_ context.Context, _, _ string, sink executor.Sink) (executor.Result, error) {
+			resumeFn: func(_ context.Context, _ agentbackend.SessionRef, _ string, sink executor.Sink) (executor.Result, error) {
 				sink.Write("chunk", "hi from daemon")
 				sink.Close()
 				return executor.Result{Summary: "done"}, nil

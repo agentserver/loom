@@ -57,7 +57,7 @@ func main() {
 `, cwdPath, argvPath), "opencode")
 
 	b := New(agentbackend.Config{Bin: fakeBin, WorkDir: configDir}, nil)
-	if _, err := b.RunResume(context.Background(), "ses-cwd", "continue", &captureSink{}); err != nil {
+	if _, err := b.RunResume(context.Background(), agentbackend.NewBackend(agentbackend.KindOpencode, "", "ses-cwd"), "continue", &captureSink{}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(cwdPath)
@@ -114,7 +114,7 @@ func main() {
 `, cwdPath), "opencode")
 
 	b := New(agentbackend.Config{Bin: fakeBin, WorkDir: configDir}, nil)
-	if _, err := b.RunResume(context.Background(), "ses-meta-only", "continue", &captureSink{}); err != nil {
+	if _, err := b.RunResume(context.Background(), agentbackend.NewBackend(agentbackend.KindOpencode, "", "ses-meta-only"), "continue", &captureSink{}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(cwdPath)

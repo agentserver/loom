@@ -423,7 +423,8 @@ func TestWSClient_TurnCommandStreamsEventsAndResult(t *testing.T) {
 		ProxyToken: "t",
 		Register:   RegisterPayload{SchemaVersion: SchemaVersion, Kind: "claude"},
 		Handler: &Handler{Backend: &fakeBackend{
-			resumeFn: func(_ context.Context, id, prompt string, sink executor.Sink) (executor.Result, error) {
+			resumeFn: func(_ context.Context, ref agentbackend.SessionRef, prompt string, sink executor.Sink) (executor.Result, error) {
+				id := ref.Backend
 				if id != "s1" || prompt != "do" {
 					t.Errorf("id=%q prompt=%q", id, prompt)
 				}
@@ -493,7 +494,7 @@ func TestWSClient_CancelsTurnWhenConnectionDrops(t *testing.T) {
 		ProxyToken: "t",
 		Register:   RegisterPayload{SchemaVersion: SchemaVersion, Kind: "claude"},
 		Handler: &Handler{Backend: &fakeBackend{
-			resumeFn: func(ctx context.Context, _, _ string, _ executor.Sink) (executor.Result, error) {
+			resumeFn: func(ctx context.Context, _ agentbackend.SessionRef, _ string, _ executor.Sink) (executor.Result, error) {
 				close(turnStarted)
 				<-ctx.Done()
 				close(turnCanceled)
@@ -557,7 +558,8 @@ func TestWSClient_SessionTurnSameSessionSerialized(t *testing.T) {
 		ProxyToken: "t",
 		Register:   RegisterPayload{SchemaVersion: SchemaVersion, Kind: "claude"},
 		Handler: &Handler{Backend: &fakeBackend{
-			resumeFn: func(_ context.Context, id, _ string, _ executor.Sink) (executor.Result, error) {
+			resumeFn: func(_ context.Context, ref agentbackend.SessionRef, _ string, _ executor.Sink) (executor.Result, error) {
+				id := ref.Backend
 				if id != "same-session" {
 					t.Errorf("id=%q", id)
 				}
