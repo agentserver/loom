@@ -14,8 +14,7 @@ or any other combination, all sharing the same observer / workspace.
 All three roles deploy via release-hosted bootstrap scripts — **no repo
 clone required**, on any Linux (amd64 / arm64) or Termux/Android (aarch64).
 Default backend is **Codex CLI**; pass `--agent claude` or `--agent opencode`
-to switch. Replace `OBSERVER_HOST` / `WS_ID` / `YOUR_API_KEY` / agent names
-with your own values.
+to switch.
 
 **Prerequisites**: `codex` CLI (`npm i -g @openai/codex`, Node ≥ 22) +
 `codex login` or `export OPENAI_API_KEY=...`. Codex can target any
@@ -33,12 +32,12 @@ bash <(curl -fsSL \
 
 Installs observer-server into `~/.loom/<NAME>/`, seeds one workspace with a
 bootstrap api-key (random if `LOOM_API_KEY` is unset; printed once on
-stdout — copy it, slaves/drivers need it). `--systemd` optional.
+stdout). `--systemd` optional.
 
 ### Slave
 
 ```bash
-export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
+export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090
 bash <(curl -fsSL \
   https://github.com/agentserver/loom/releases/latest/download/bootstrap-slave.sh) \
   --name slave-myhost --systemd          # drop --systemd on Termux/Android
@@ -46,15 +45,16 @@ bash <(curl -fsSL \
 
 Installs slave-agent into `~/.loom/<NAME>/` (binary + `config.yaml`,
 CPU / memory / arch auto-detected). First start prints a device-code URL
-on stderr — approve it in a browser; credentials auto-write back to
-`config.yaml` and the slave registers with observer.
+on stderr — approve it in a browser; agentserver issues a proxy token
+that the slave uses to authenticate with observer directly.
+No `LOOM_API_KEY` needed.
 
 Foreground mode: `~/.loom/<NAME>/slave-agent ~/.loom/<NAME>/config.yaml`.
 
 ### Driver
 
 ```bash
-export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
+export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090
 bash <(curl -fsSL \
   https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
   --name driver-myhost

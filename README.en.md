@@ -31,26 +31,26 @@ bash <(curl -fsSL \
   --name obs-prod --systemd
 ```
 
-If `LOOM_API_KEY` is unset, a random key is generated and printed once —
-copy it, slaves and drivers need it at registration time.
+If `LOOM_API_KEY` is unset, a random key is generated and printed once
+(observer's own bootstrap key).
 
 ### 2. Slave (executor)
 
 ```bash
-export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
+export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090
 bash <(curl -fsSL \
   https://github.com/agentserver/loom/releases/latest/download/bootstrap-slave.sh) \
   --name slave-myhost --systemd          # drop --systemd on Termux/Android
 ```
 
 On first start the slave prints a device-code URL on stderr. Approve it
-in a browser — credentials are written back into `config.yaml` and the
-slave registers with observer.
+in a browser — the agentserver issues a proxy token that the slave uses
+to authenticate with observer directly. **No `LOOM_API_KEY` needed.**
 
 ### 3. Driver (orchestrator)
 
 ```bash
-export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
+export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090
 bash <(curl -fsSL \
   https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
   --name driver-myhost

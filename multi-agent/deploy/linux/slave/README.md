@@ -29,8 +29,9 @@ For the pre-registered prod-test variants (Jetson host-native, local docker) see
 2. **`codex` CLI** installed and on the service user's `PATH`
    (`npm i -g @openai/codex`, Node ≥ 22). Or `claude` if using
    `--agent claude`.
-3. **Shared ws-prod observer api-key** — pasted via `--api-key` or hand-edited
-   into `~/.loom/<name>/config.yaml` after install.
+3. **Observer URL** — the slave authenticates with observer via the proxy
+   token issued during device-code OAuth. `--api-key` is accepted for
+   legacy setups but not required.
 4. **`OPENAI_API_KEY`** (for codex) or **`ANTHROPIC_API_KEY`** (for claude)
    — passed via `--anthropic-key` to land in `~/.loom/<name>/slave.env`,
    or set in the unit's env some other way.
@@ -89,7 +90,7 @@ mcp__driver__list_agents
 | `--systemd` | off | Install `/etc/systemd/system/slave-agent-<NAME>.service` (sudo). Without this, you start the binary yourself. |
 | `--desc TEXT` | `Linux slave-agent (<NAME>)` | `discovery.description`. |
 | `--tag TAG` | `linux` | Repeatable. Becomes `resources.tags`. |
-| `--api-key KEY` | (none) | Writes `observer.api_key`. Without this, edit the rendered config manually. |
+| `--api-key KEY` | (none) | Optional. Writes `observer.api_key` for legacy observer auth. With device-code OAuth, the proxy token handles observer auth — this flag is not required. |
 | `--anthropic-key KEY` | (none) | Writes `ANTHROPIC_API_KEY=...` to `slave.env` (mode 0600). |
 | `--bin PATH` | `../bin/slave-agent.linux-<arch>` | Override the binary path (e.g., point at a downloaded release asset). |
 | `--agent CLI` | `codex` | `codex` (default) or `claude`. One slave process = one backend. Under codex the `chat` skill spawns `codex exec --json`; under claude it spawns `claude --print --output-format=stream-json`. Mixed fleets share the same observer / workspace. For codex slaves, `codex login` or export `OPENAI_API_KEY` (and optionally drop a `~/.codex/config.toml` with `[model_providers.<name>]` to point at a self-hosted OpenAI-compatible endpoint — see [`../../agent-backends.md`](../../agent-backends.md)). |

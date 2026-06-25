@@ -34,8 +34,9 @@ pre-registered), see `../../../tests/prod_test/driver/`.
 2. **Codex CLI** installed locally — `codex` on `PATH`
    (`npm i -g @openai/codex`, Node ≥ 22). Or `claude` / `opencode` if
    using `--agent claude` / `--agent opencode`.
-3. **Shared ws-prod observer api-key** — pass via `--api-key` or hand-edit
-   `config.yaml` post-install.
+3. **Observer URL** — the driver authenticates with observer via the proxy
+   token issued during device-code OAuth. `--api-key` is accepted for
+   legacy setups but not required.
 4. A target **project directory** where you'll run `codex` (or `claude`).
 
 ## Quick start
@@ -68,7 +69,7 @@ codex                            # first run prompts to trust the project dir
 | `--observer-url URL` | (required) | `observer.url`, e.g. `http://observer.example.com:8090`. |
 | `--workspace ID` | `ws-default` | `observer.workspace_id`. Must match a workspace defined on the observer. |
 | `--desc TEXT` | `Linux driver-agent (<NAME>)` | `discovery.description`. |
-| `--api-key KEY` | (none) | Writes `observer.api_key`. Without this, edit `config.yaml` by hand. |
+| `--api-key KEY` | (none) | Optional. Writes `observer.api_key` for legacy observer auth. With device-code OAuth, the proxy token handles observer auth — this flag is not required. |
 | `--skill-bundle PATH` | Claude: `../../../tests/prod_test/driver/.claude/skills/multiagent` if present; Codex: repo `skills/` if present | Claude copies under `<project>/.claude/skills/`; Codex copies under `<project>/.agents/skills/`. |
 | `--token-dir PATH` | `~/.loom/<NAME>` | Parent dir for `observer.token`. Must be absolute. |
 | `--bin PATH` | `../bin/driver-agent.linux-<arch>` | Override the binary path (e.g., point at a downloaded release asset). |

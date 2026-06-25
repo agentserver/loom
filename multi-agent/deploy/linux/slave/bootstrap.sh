@@ -3,9 +3,7 @@
 # Termux/Android (aarch64). No repo clone required.
 #
 # Run:
-#   export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 \
-#          LOOM_WORKSPACE_ID=WS_ID \
-#          LOOM_API_KEY='YOUR_API_KEY'
+#   export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090
 #   bash <(curl -fsSL \
 #     https://github.com/agentserver/loom/releases/latest/download/bootstrap-slave.sh) \
 #     --name slave-myhost            # foreground / Termux
@@ -36,8 +34,10 @@
 # Required release asset at $RELEASE_BASE:
 #   slave-agent.linux-{arm64,amd64}
 #
-# All of --observer-url / --workspace / --api-key can come from env vars
-# LOOM_OBSERVER_URL / LOOM_WORKSPACE_ID / LOOM_API_KEY.
+# --observer-url can also come from env var LOOM_OBSERVER_URL.
+# --workspace / --api-key are optional (proxy token from device-code
+# OAuth handles observer auth); env vars LOOM_WORKSPACE_ID / LOOM_API_KEY
+# are still accepted for legacy / manual setups.
 
 set -euo pipefail
 
@@ -86,7 +86,6 @@ done
 
 [[ -n "$NAME" ]]         || { echo "ERROR: --name is required" >&2; exit 2; }
 [[ -n "$OBSERVER_URL" ]] || { echo "ERROR: --observer-url is required (or LOOM_OBSERVER_URL)" >&2; exit 2; }
-[[ -n "$API_KEY" ]]      || { echo "ERROR: --api-key is required (or LOOM_API_KEY)" >&2; exit 2; }
 case "$AGENT" in claude|codex) ;; *) echo "ERROR: --agent must be claude or codex" >&2; exit 2 ;; esac
 DESC="${DESC:-loom slave-agent ($NAME)}"
 

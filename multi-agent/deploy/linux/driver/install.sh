@@ -26,7 +26,8 @@
 #   --observer-url URL    observer.url, e.g. http://observer.example.com:8090 (REQUIRED)
 #   --workspace ID        observer.workspace_id (default: ws-default)
 #   --desc TEXT           discovery.description
-#   --api-key KEY         observer.api_key (skip manual edit; or hand-edit after)
+#   --api-key KEY         observer.api_key (optional — proxy token from device-code
+#                         OAuth handles observer auth; legacy fallback only)
 #   --agent KIND          agent CLI to pair with: codex (default), claude, or opencode
 #   --skill-bundle PATH   claude: directory of skills to copy into .claude/skills/
 #                         codex: directory of skills to copy into .agents/skills/
@@ -230,7 +231,7 @@ case "$AGENT" in
 ==> project ready at $PROJECT_ABS
     Files:
       driver-agent             # binary ($CPU_ARCH)
-      config.yaml              # 0600 — paste observer.api_key if you didn't pass --api-key
+      config.yaml              # 0600
       .mcp.json                # tells Claude Code how to launch the MCP server
       .claude/skills/...       # multiagent skill bundle (if found)
       logs/                    # audit logs land here
@@ -241,11 +242,6 @@ case "$AGENT" in
     config.yaml.
 
 EOF
-
-    if [[ -z "$API_KEY" ]]; then
-      echo "==> WARN: observer.api_key is empty in config.yaml — fill it in before launching Claude Code."
-      echo
-    fi
 
     cat <<EOF
 ==> launch:
@@ -262,7 +258,7 @@ EOF
 ==> project ready at $PROJECT_ABS
     Files:
       driver-agent             # binary ($CPU_ARCH)
-      config.yaml              # 0600 — paste observer.api_key if you didn't pass --api-key
+      config.yaml              # 0600
       .codex/config.toml       # Codex CLI MCP registration
       AGENTS.md                # Codex project notes (auto-read by codex)
       .agents/skills/...       # Codex skills used by AGENTS.md
@@ -274,11 +270,6 @@ EOF
     config.yaml.
 
 EOF
-
-    if [[ -z "$API_KEY" ]]; then
-      echo "==> WARN: observer.api_key is empty in config.yaml — fill it in before launching Codex."
-      echo
-    fi
 
     cat <<EOF
 ==> launch (Codex):
@@ -297,7 +288,7 @@ EOF
 ==> project ready at $PROJECT_ABS
     Files:
       driver-agent             # binary ($CPU_ARCH)
-      config.yaml              # 0600 — paste observer.api_key if you didn't pass --api-key
+      config.yaml              # 0600
       AGENTS.md                # opencode project notes (auto-read by opencode)
       .agents/skills/...       # opencode skills used by AGENTS.md
       logs/                    # audit logs land here
@@ -311,11 +302,6 @@ EOF
     config.yaml.
 
 EOF
-
-    if [[ -z "$API_KEY" ]]; then
-      echo "==> WARN: observer.api_key is empty in config.yaml — fill it in before launching opencode."
-      echo
-    fi
 
     cat <<EOF
 ==> launch (opencode):

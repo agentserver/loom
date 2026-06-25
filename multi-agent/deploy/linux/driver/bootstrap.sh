@@ -4,15 +4,15 @@
 #
 # Run inside the directory you want to use as the Claude Code / Codex project:
 #
-#   export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 \
-#          LOOM_WORKSPACE_ID=WS_ID \
-#          LOOM_API_KEY='YOUR_API_KEY'
+#   export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090
 #   bash <(curl -fsSL \
 #     https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
 #     --name driver-myhost
 #
-# All three of --observer-url / --workspace / --api-key can also come from
-# env vars LOOM_OBSERVER_URL / LOOM_WORKSPACE_ID / LOOM_API_KEY.
+# --observer-url can also come from env var LOOM_OBSERVER_URL.
+# --workspace / --api-key are optional (proxy token from device-code
+# OAuth handles observer auth); env vars LOOM_WORKSPACE_ID / LOOM_API_KEY
+# are still accepted for legacy / manual setups.
 #
 # Release pinning: this script downloads from the latest release by default.
 # Pin with `--release v0.0.2` or `export LOOM_RELEASE_TAG=v0.0.2` to roll
@@ -79,7 +79,6 @@ done
 
 [[ -n "$NAME" ]]         || { echo "ERROR: --name is required" >&2; exit 2; }
 [[ -n "$OBSERVER_URL" ]] || { echo "ERROR: --observer-url is required (or set LOOM_OBSERVER_URL)" >&2; exit 2; }
-[[ -n "$API_KEY" ]]      || { echo "ERROR: --api-key is required (or set LOOM_API_KEY)" >&2; exit 2; }
 case "$AGENT" in claude|codex) ;; *) echo "ERROR: --agent must be claude or codex" >&2; exit 2 ;; esac
 DESC="${DESC:-driver-agent ($NAME)}"
 

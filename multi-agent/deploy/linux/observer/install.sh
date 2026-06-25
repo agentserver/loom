@@ -159,7 +159,8 @@ if (( GENERATED_KEY )); then
       WORKSPACE: $WORKSPACE_ID
       API_KEY:   $API_KEY
 
-    Paste this api-key into each slave / driver's config.yaml as observer.api_key.
+    Slaves and drivers authenticate via proxy token (device-code OAuth),
+    so this key is NOT required in their config. It is kept for legacy setups.
 EOF
 fi
 

@@ -13,8 +13,8 @@
 # On first start the slave will:
 #   * Print a device-code verification URL on stderr (tail slave.log) — open
 #     in a browser; agentserver creds get written back into config.yaml.
-#   * POST /api/agents/register with observer.api_key, persist the returned
-#     per-agent token at observer.token_state_path.
+#   * Authenticate with observer using the proxy token from device-code OAuth
+#     (falls back to observer.api_key registration if proxy token is absent).
 #
 # Usage:
 #   ./install.sh --name slave-foo                            # foreground-mode install
@@ -30,7 +30,7 @@
 #   --loom-home PATH      install dir (default: <service user's $HOME>/.loom/<NAME>)
 #   --desc TEXT           discovery description (default: "Linux slave-agent (<NAME>)")
 #   --tag TAG             extra discovery tag (repeatable)
-#   --api-key KEY         observer.api_key (skips manual edit; otherwise you must paste it)
+#   --api-key KEY         observer.api_key (optional — proxy token handles auth; legacy fallback)
 #   --anthropic-key KEY   write ANTHROPIC_API_KEY into slave.env
 #
 # Prereqs:
@@ -175,7 +175,7 @@ if [[ -n "$ANTHROPIC_KEY" ]]; then
 fi
 
 if [[ -z "$API_KEY" ]]; then
-  echo "==> WARN: observer.api_key is empty in $LOOM_HOME/config.yaml — fill it in before starting."
+  echo "==> NOTE: observer.api_key is empty — proxy token from device-code OAuth handles observer auth."
 fi
 
 if (( USE_SYSTEMD )); then

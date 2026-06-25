@@ -29,24 +29,25 @@ bash <(curl -fsSL \
   --name obs-prod --systemd
 ```
 
-`LOOM_API_KEY` 不传则自动生成并打印一次——slave / driver 注册时要用。
+`LOOM_API_KEY` 不传则自动生成并打印一次（observer 自身的 bootstrap key）。
 
 ### 2. Slave（执行器）
 
 ```bash
-export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
+export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090
 bash <(curl -fsSL \
   https://github.com/agentserver/loom/releases/latest/download/bootstrap-slave.sh) \
   --name slave-myhost --systemd          # Termux/Android 上去掉 --systemd
 ```
 
-首启动 stderr 会打印 device-code URL，浏览器批准后凭证自动回写 `config.yaml`
-并向 observer 注册。
+首启动 stderr 会打印 device-code URL，浏览器批准后 agentserver 下发
+proxy token，slave 凭此 token 直接向 observer 认证——**不需要**手动传
+`LOOM_API_KEY`。
 
 ### 3. Driver（编排器）
 
 ```bash
-export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
+export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090
 bash <(curl -fsSL \
   https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
   --name driver-myhost

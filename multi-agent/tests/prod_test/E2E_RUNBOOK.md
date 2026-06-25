@@ -265,12 +265,12 @@ wire_api = "responses"
 
 All three per-agent `.codex/config.toml` files (`driver-codex-local/.codex/`, `slave-codex-local/.codex/`, `slave-codex-local-b/.codex/`) need the same provider block — drift here causes one agent to work and the next to fail mysteriously.
 
-## Current agent state (2026-06-25)
+## Current agent state (2026-06-26)
 
 | Agent | short_id | workspace_id |
 | --- | --- | --- |
-| driver | `q6u3f1qr` | `96bd3120-a725-44d9-a047-a75ed89af3ed` |
-| slave-A | `pwqo9ro8` | `96bd3120-a725-44d9-a047-a75ed89af3ed` |
+| driver | `9ve6sfzf` | `96bd3120-a725-44d9-a047-a75ed89af3ed` |
+| slave-A | `82arwg4f` | `96bd3120-a725-44d9-a047-a75ed89af3ed` |
 | slave-B | `53et0rx4` | `96bd3120-a725-44d9-a047-a75ed89af3ed` |
 
 ## Common failure modes
