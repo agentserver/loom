@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import { afterEach, expect, test, vi } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { DaemonTree, SessionRow } from '../api/types';
 import { DaemonSessionTree } from './DaemonSessionTree';
 
@@ -484,8 +484,6 @@ test('renders descendants of a remote agent_task (slave subagent under driver→
   fireEvent.click(screen.getByLabelText(/展开 subagent sessions: task-s/));
   expect(screen.getByText(/subagent · Lovelace/)).toBeInTheDocument();
 });
-
-import { describe } from 'vitest';
 
 describe('DaemonSessionTree data-session-id', () => {
   test('real session row and pending row both expose data-session-id', () => {
