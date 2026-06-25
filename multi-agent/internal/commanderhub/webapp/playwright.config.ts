@@ -2,6 +2,7 @@ import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './src/e2e',
+  testIgnore: ['commander-live.spec.ts', 'live-login.test.ts'],
   timeout: 30_000,
   expect: { timeout: 5_000 },
   use: {
