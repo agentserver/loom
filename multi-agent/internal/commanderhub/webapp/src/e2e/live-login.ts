@@ -18,10 +18,11 @@ const DAEMON_READY_TIMEOUT_MS = 30 * 1000;
 
 function tcpProbe(host: string, port: number, timeoutMs = 2000): Promise<void> {
   return new Promise((res, rej) => {
+    let done = false;
     const sock = createConnection({ host, port });
-    const fail = (err: Error) => { sock.destroy(); rej(err); };
+    const fail = (err: Error) => { if (done) return; done = true; sock.destroy(); rej(err); };
     const timer = setTimeout(() => fail(new Error(`timeout ${host}:${port}`)), timeoutMs);
-    sock.once('connect', () => { clearTimeout(timer); sock.end(); res(); });
+    sock.once('connect', () => { if (done) return; done = true; clearTimeout(timer); sock.end(); res(); });
     sock.once('error', (err: Error) => { clearTimeout(timer); fail(err); });
   });
 }
