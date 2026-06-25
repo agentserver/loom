@@ -109,6 +109,13 @@ export function MobileShell({
   }
 
   function handlePreview(payload: FilePreviewPayload) {
+    // Drop late fetch responses whose 'preview' entry was already
+    // popped (user pressed Back while the content request was
+    // in-flight). Opening the sheet now would leave it visible with
+    // no matching back-stack entry — the next Back would close the
+    // Files drawer behind it while the preview stayed up.
+    const stack = overlay.stackSnapshot();
+    if (stack.length === 0 || stack[stack.length - 1] !== 'preview') return;
     setPreviewPayload(payload);
   }
 
