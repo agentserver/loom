@@ -46,8 +46,8 @@ is fully headless and fast.
 
 ## Architecture
 
-Three new files + one config entry + one `.gitignore` entry. No
-changes to existing tests or production code.
+Three new files + one config entry. No changes to existing tests or
+production code.
 
 ```
 multi-agent/internal/commanderhub/webapp/
@@ -57,8 +57,7 @@ multi-agent/internal/commanderhub/webapp/
     commander-live.spec.ts            (new — fresh-id flow assertion)
   package.json                       (add npm script test:e2e:live)
 multi-agent/tests/prod_test/
-  .playwright/                       (new — gitignored cache dir)
-.gitignore                           (add tests/prod_test/.playwright/)
+  .playwright/                       (cache dir, already covered by /tests/prod_test/* gitignore)
 ```
 
 ### `playwright.live.config.ts`
@@ -383,4 +382,4 @@ spec runs (same in both):
 | `multi-agent/internal/commanderhub/webapp/src/e2e/commander-live.spec.ts` | new — single test exercising the fresh-id rebind |
 | `multi-agent/internal/commanderhub/webapp/src/CommanderApp.tsx` or `DaemonSessionTree.tsx` | add `data-testid="daemon-tree"` to the tree root; `data-session-id={session.session_id}` to each row |
 | `multi-agent/internal/commanderhub/webapp/package.json` | add `"test:e2e:live": "playwright test --config=playwright.live.config.ts"` |
-| `.gitignore` | add `multi-agent/tests/prod_test/.playwright/` |
+| `.gitignore` | no change needed — existing `/tests/prod_test/*` pattern already covers `.playwright/` |

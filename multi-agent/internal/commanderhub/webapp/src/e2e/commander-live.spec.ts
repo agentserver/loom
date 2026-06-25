@@ -7,11 +7,10 @@ test('fresh + button creates session and rebinds to real codex thread ID', async
   await page.goto('/commander/');
   await expect(page.getByTestId('daemon-tree')).toBeVisible();
 
-  // 2. Find the codex daemon group + click its + button.
-  // The daemon-new-session-btn lives inside the daemon-group whose
-  // header text contains the daemon's display name. We grab the first
-  // codex daemon by querying for the codex kind label.
-  const codexDaemonGroup = page.locator('.daemon-group', { has: page.locator('text=/codex/i') }).first();
+  // 2. Find a specific codex daemon group by display_name and click its + button.
+  // Multiple codex daemons may be connected (driver + slaves), so match by
+  // display_name to make selection deterministic across runs.
+  const codexDaemonGroup = page.locator('.daemon-group', { has: page.locator('text=slave-codex-local') }).first();
   await expect(codexDaemonGroup).toBeVisible();
   await codexDaemonGroup.locator('.daemon-new-session-btn').click();
 
