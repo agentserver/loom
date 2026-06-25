@@ -26,12 +26,14 @@ For the pre-registered prod-test variants (Jetson host-native, local docker) see
      -o deploy/linux/bin/slave-agent.linux-amd64 ./cmd/slave-agent
    # or GOARCH=arm64 for aarch64 hosts
    ```
-2. **`claude` CLI** installed and on the service user's `PATH` (or edit
-   `claude.bin` in the rendered `config.yaml` to its absolute path).
+2. **`codex` CLI** installed and on the service user's `PATH`
+   (`npm i -g @openai/codex`, Node ≥ 22). Or `claude` if using
+   `--agent claude`.
 3. **Shared ws-prod observer api-key** — pasted via `--api-key` or hand-edited
    into `~/.loom/<name>/config.yaml` after install.
-4. **`ANTHROPIC_API_KEY`** — passed via `--anthropic-key` to land in
-   `~/.loom/<name>/slave.env`, or set in the unit's env some other way.
+4. **`OPENAI_API_KEY`** (for codex) or **`ANTHROPIC_API_KEY`** (for claude)
+   — passed via `--anthropic-key` to land in `~/.loom/<name>/slave.env`,
+   or set in the unit's env some other way.
 
 ## Quick start
 
@@ -90,7 +92,7 @@ mcp__driver__list_agents
 | `--api-key KEY` | (none) | Writes `observer.api_key`. Without this, edit the rendered config manually. |
 | `--anthropic-key KEY` | (none) | Writes `ANTHROPIC_API_KEY=...` to `slave.env` (mode 0600). |
 | `--bin PATH` | `../bin/slave-agent.linux-<arch>` | Override the binary path (e.g., point at a downloaded release asset). |
-| `--agent CLI` | `claude` | `claude` or `codex`. One slave process = one backend. Under `--agent codex` the `chat` skill spawns `codex exec --json` instead of `claude --print --output-format=stream-json`. Mixed fleets (some slaves claude, others codex) share the same observer / workspace. For codex slaves, export `OPENAI_API_KEY` (and optionally drop a `~/.codex/config.toml` with `[model_providers.<name>]` to point at a self-hosted OpenAI-compatible endpoint — see [`../../agent-backends.md`](../../agent-backends.md)). |
+| `--agent CLI` | `codex` | `codex` (default) or `claude`. One slave process = one backend. Under codex the `chat` skill spawns `codex exec --json`; under claude it spawns `claude --print --output-format=stream-json`. Mixed fleets share the same observer / workspace. For codex slaves, `codex login` or export `OPENAI_API_KEY` (and optionally drop a `~/.codex/config.toml` with `[model_providers.<name>]` to point at a self-hosted OpenAI-compatible endpoint — see [`../../agent-backends.md`](../../agent-backends.md)). |
 
 Host CPU cores (`nproc`), arch (`uname -m`), and total memory (`/proc/meminfo`)
 are auto-detected and written into the config's `resources` block.

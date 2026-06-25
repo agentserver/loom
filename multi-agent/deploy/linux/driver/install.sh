@@ -27,7 +27,7 @@
 #   --workspace ID        observer.workspace_id (default: ws-default)
 #   --desc TEXT           discovery.description
 #   --api-key KEY         observer.api_key (skip manual edit; or hand-edit after)
-#   --agent KIND          agent CLI to pair with: claude (default) or codex
+#   --agent KIND          agent CLI to pair with: codex (default), claude, or opencode
 #   --skill-bundle PATH   claude: directory of skills to copy into .claude/skills/
 #                         codex: directory of skills to copy into .agents/skills/
 #                         (default: auto-detected from local tree if present)
@@ -54,7 +54,7 @@ TOKEN_DIR=""
 BIN_OVERRIDE=""
 OBSERVER_URL=""
 WORKSPACE_ID="ws-default"
-AGENT="${LOOM_AGENT_KIND:-claude}"
+AGENT="${LOOM_AGENT_KIND:-codex}"
 
 while (( $# )); do
   case "$1" in

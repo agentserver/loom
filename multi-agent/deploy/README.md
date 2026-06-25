@@ -9,20 +9,20 @@ Drivers and slaves can each run under **Claude Code**, **Codex CLI**, or
 A mixed fleet is fully supported: Claude Code drivers alongside Codex slaves,
 or any other combination, all sharing the same observer / workspace.
 
-## Quick start — one-liners
+## Quick start
 
-All three roles bring up with a single `bash <(curl -fsSL ...)` call
-against a release-hosted bootstrap script — **no repo clone required**, on
-any Linux host (amd64 / arm64) or Termux/Android (aarch64). Replace the
-placeholders (`OBSERVER_HOST`, `WS_ID`, `YOUR_API_KEY`, agent names) with
-your own values. Append `--systemd` to slave/observer for a managed unit
-(needs sudo; not available on Termux).
+All three roles deploy via release-hosted bootstrap scripts — **no repo
+clone required**, on any Linux (amd64 / arm64) or Termux/Android (aarch64).
+Default backend is **Codex CLI**; pass `--agent claude` or `--agent opencode`
+to switch. Replace `OBSERVER_HOST` / `WS_ID` / `YOUR_API_KEY` / agent names
+with your own values.
+
+**Prerequisites**: `codex` CLI (`npm i -g @openai/codex`, Node ≥ 22) +
+`codex login` or `export OPENAI_API_KEY=...`. Codex can target any
+OpenAI-compatible endpoint via `[model_providers.<name>]` in
+`~/.codex/config.toml`.
 
 ### Observer
-
-EN — install observer-server into `~/.loom/<NAME>/`, seed one workspace
-with a bootstrap api-key (random if `LOOM_API_KEY` is unset; printed once
-on stdout — copy it, slaves/drivers need it):
 
 ```bash
 export LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'   # both optional
@@ -31,104 +31,11 @@ bash <(curl -fsSL \
   --name obs-prod --systemd
 ```
 
-中文 — 把 observer-server 装到 `~/.loom/<NAME>/`，初始化一个工作区和
-bootstrap api-key（不传 `LOOM_API_KEY` 就随机生成并打印一次，slave / driver
-注册时要用）。`--systemd` 可选，默认前台：
-
-```bash
-export LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'   # 两个都可省
-bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/latest/download/bootstrap-observer.sh) \
-  --name obs-prod --systemd
-```
-
-### Driver
-
-#### Claude Code (default)
-
-EN — drop a coding-agent driver project into the current directory (binary,
-`config.yaml`, `.mcp.json`, skills bundle); next `claude` run auto-loads
-the driver MCP and skills:
-
-```bash
-export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
-bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
-  --name driver-myhost
-```
-
-中文 — 在当前目录铺一个 coding-agent driver 工程（二进制 + `config.yaml` +
-`.mcp.json` + skills 包）；下次 `claude` 启动时 MCP 与 skills 自动加载：
-
-```bash
-export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
-bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
-  --name driver-myhost
-```
-
-启动前别忘了：`./driver-agent register --config ./config.yaml` 走一次
-device-code，再 `claude login`（或 `export ANTHROPIC_API_KEY=...`）。
-Driver 不是常驻进程（Claude Code 按 `.mcp.json` 拉起来），所以没有 `--systemd`。
-
-#### Codex
-
-EN — Codex variant — drop the same driver project but write `.codex/config.toml`
-instead of `.mcp.json`, and lay an `AGENTS.md` Codex can read on first launch:
-
-```bash
-export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
-bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
-  --name driver-myhost --agent codex
-```
-
-中文 —— Codex 版本，写入 `.codex/config.toml` 并附 `AGENTS.md`：
-
-```bash
-export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
-bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
-  --name driver-myhost --agent codex
-```
-
-启动前：`codex login`（订阅）或 `export OPENAI_API_KEY=...`；首次 `cd` 进项目
-后跑一次 `codex` 让它把这个目录加入 trust list（否则项目级 `.codex/config.toml`
-不会加载）。然后 `./driver-agent register --config ./config.yaml` 走 device-code。
-
-#### opencode
-
-EN — opencode variant — write `opencode.json` to `~/.config/opencode/`
-(consumed by both opencode CLI and desktop app) and `AGENTS.md`:
-
-```bash
-export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
-bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
-  --name driver-myhost --agent opencode
-```
-
-中文 —— opencode 版本，把 MCP 配置写到 `~/.config/opencode/opencode.json`
-（CLI 和桌面端共用），并附 `AGENTS.md`：
-
-```bash
-export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
-bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
-  --name driver-myhost --agent opencode
-```
-
-启动前：`./driver-agent register --config ./config.yaml` 走 device-code。
-opencode 读取 `~/.config/opencode/opencode.json` 中的 MCP 配置自动拉起
-driver MCP server。
+Installs observer-server into `~/.loom/<NAME>/`, seeds one workspace with a
+bootstrap api-key (random if `LOOM_API_KEY` is unset; printed once on
+stdout — copy it, slaves/drivers need it). `--systemd` optional.
 
 ### Slave
-
-#### Claude Code (default)
-
-EN — install slave-agent into `~/.loom/<NAME>/` (binary + `config.yaml`,
-auto-detected CPU/memory/arch). Add `--systemd` to register a systemd
-unit (Linux only, sudo); omit it for foreground / Termux:
 
 ```bash
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
@@ -137,46 +44,47 @@ bash <(curl -fsSL \
   --name slave-myhost --systemd          # drop --systemd on Termux/Android
 ```
 
-中文 — 把 slave-agent 装到 `~/.loom/<NAME>/`（二进制 + `config.yaml`，
-CPU / 内存 / 架构自动探测）。加 `--systemd` 走 systemd 托管（仅 Linux，需 sudo），
-不加就前台 / Termux 跑：
+Installs slave-agent into `~/.loom/<NAME>/` (binary + `config.yaml`,
+CPU / memory / arch auto-detected). First start prints a device-code URL
+on stderr — approve it in a browser; credentials auto-write back to
+`config.yaml` and the slave registers with observer.
+
+Foreground mode: `~/.loom/<NAME>/slave-agent ~/.loom/<NAME>/config.yaml`.
+
+### Driver
 
 ```bash
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
 bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/latest/download/bootstrap-slave.sh) \
-  --name slave-myhost --systemd          # Termux/Android 上去掉 --systemd
+  https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
+  --name driver-myhost
 ```
 
-前台模式：`~/.loom/<NAME>/slave-agent ~/.loom/<NAME>/config.yaml`。
-首启动 stderr 会打印 device-code 验证 URL —— 浏览器批准一次，凭证自动
-回写 `config.yaml` 并注册到 observer。
-
-#### Codex
-
-EN — Codex variant — same install layout, but the `chat` skill spawns
-`codex exec --json` instead of `claude --print --output-format=stream-json`.
-One slave process = one backend; the choice is per-slave:
+Drops a coding-agent driver project into the current directory (binary +
+`config.yaml` + `.codex/config.toml` + `AGENTS.md`). After bootstrap:
 
 ```bash
-export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
-bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/latest/download/bootstrap-slave.sh) \
-  --name slave-myhost --agent codex --systemd   # drop --systemd on Termux
+./driver-agent register --config ./config.yaml   # one-time device-code OAuth
+cd <project-dir> && codex                         # first run prompts to trust the dir
 ```
 
-中文 —— Codex 版本，`chat` skill 改用 `codex exec --json` 驱动，每个 slave
-进程绑定一个后端，混合机队时按需选择：
+Codex reads `[mcp_servers.driver]` from `.codex/config.toml` and
+auto-launches `driver-agent serve-mcp`. Driver is NOT a long-running
+daemon — Codex starts it on session open, talks via stdio, and tears it
+down on exit. No `--systemd`.
 
-```bash
-export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
-bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/latest/download/bootstrap-slave.sh) \
-  --name slave-myhost --agent codex --systemd   # Termux 上去掉 --systemd
-```
+### Switching backends
 
-启动前：`codex login`（订阅）或 `export OPENAI_API_KEY=...`；首次启动 stderr
-会打印 device-code URL，浏览器批准后凭证自动回写 `config.yaml`。
+Pass `--agent claude` or `--agent opencode` to any bootstrap script:
+
+| `--agent` | Driver writes | Slave chat skill | Notes |
+|---|---|---|---|
+| `codex` (default) | `.codex/config.toml` + `AGENTS.md` | `codex exec --json` | Needs `codex login` or `OPENAI_API_KEY`; first `codex` run prompts to trust the project dir |
+| `claude` | `.mcp.json` + `.claude/skills/` | `claude --print --output-format=stream-json` | Needs `claude login` or `ANTHROPIC_API_KEY` |
+| `opencode` | `~/.config/opencode/opencode.json` + `AGENTS.md` | — (driver only) | opencode CLI + desktop share one MCP config |
+
+Mixed fleets (codex drivers + claude slaves, etc.) are fully supported —
+all agents share the same observer / workspace.
 
 详细参数请见下表中各子目录的 README；如果手头已经 clone 了仓库，也可以
 跳过 bootstrap，直接用各目录的 `install.sh`（功能等价、可读 `--bin PATH`）。
@@ -184,17 +92,17 @@ bash <(curl -fsSL \
 | Path | Target |
 |---|---|
 | [`linux/observer`](linux/observer/) | Generic `observer-server` install. SQLite-backed HTTP daemon (default `:8090`); foreground or `--systemd`. amd64 / arm64. Also serves the `mcp-userspace` package registry. |
-| [`linux/driver`](linux/driver/) | Generic `driver-agent` install into a coding-agent project dir (no systemd — the coding agent launches the MCP server on demand). Supports `--agent claude` (default), `--agent codex`, and `--agent opencode`. |
-| [`linux/slave`](linux/slave/) | Generic `slave-agent` install on any Linux host. Foreground smoke mode or `--systemd` for a managed service. amd64 / arm64. Supports `--agent claude` / `--agent codex` per slave. |
+| [`linux/driver`](linux/driver/) | Generic `driver-agent` install into a coding-agent project dir (no systemd — the coding agent launches the MCP server on demand). Supports `--agent codex` (default), `--agent claude`, and `--agent opencode`. |
+| [`linux/slave`](linux/slave/) | Generic `slave-agent` install on any Linux host. Foreground smoke mode or `--systemd` for a managed service. amd64 / arm64. Supports `--agent codex` (default) / `--agent claude` per slave. |
 | [`linux/compose-test`](linux/compose-test/) | docker-compose end-to-end test wiring all three installers together against a local observer; surfaces the device-code "join workspace" URLs each role prints on first start. |
 | [`bin/`](bin/) | Local cache of release binaries used by `install.sh` when `--bin PATH` isn't supplied. |
 
-`agent-backends.md` covers the per-backend config differences (Claude
-Code vs Codex): example `[model_providers.<name>]` block for pointing
-Codex CLI at any OpenAI-compatible endpoint, the container caveat that
-project-level `.codex/config.toml` needs an interactive trust prompt
-(mount the global config in containers instead), and `permissions`-skill
-JSON examples for both backends.
+`agent-backends.md` covers the per-backend config differences: example
+`[model_providers.<name>]` block for pointing Codex CLI at any
+OpenAI-compatible endpoint, the container caveat that project-level
+`.codex/config.toml` needs an interactive trust prompt (mount the global
+config in containers instead), and `permissions`-skill JSON examples for
+all backends.
 
 Pre-built binaries for each release are published at
 <https://github.com/agentserver/loom/releases>. Each `install.sh` accepts

@@ -22,14 +22,14 @@
 #   driver-agent             # amd64/arm64 binary (downloaded from release)
 #   config.yaml              # rendered, 0600
 #
-# claude mode (default):
-#   .mcp.json                # Claude Code MCP server registration
-#   .claude/skills/...       # multiagent / mcp-acceptance / scaffold-mcp-server
-#
-# codex mode (--agent codex):
+# codex mode (default):
 #   .codex/config.toml       # Codex CLI MCP server registration
 #   AGENTS.md                # Codex project notes (from driver-codex-prompts.tar.gz)
 #   .agents/skills/...       # Codex skills used by AGENTS.md
+#
+# claude mode (--agent claude):
+#   .mcp.json                # Claude Code MCP server registration
+#   .claude/skills/...       # multiagent / mcp-acceptance / scaffold-mcp-server
 #
 #   logs/
 #
@@ -60,7 +60,7 @@ NAME=""
 OBSERVER_URL="${LOOM_OBSERVER_URL:-}"
 WORKSPACE_ID="${LOOM_WORKSPACE_ID:-ws-default}"
 API_KEY="${LOOM_API_KEY:-}"
-AGENT="${LOOM_AGENT_KIND:-claude}"
+AGENT="${LOOM_AGENT_KIND:-codex}"
 DESC=""
 
 while (( $# )); do

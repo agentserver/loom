@@ -10,68 +10,70 @@ The most distinctive bit: **the fleet's capabilities are not fixed.** When none 
 
 > Naming note: the project was originally called `multi-agent` and is now **Loom**. The Go module path and the on-disk `multi-agent/` directory are kept as-is for now; the rename will be applied in a single later pass.
 
-## One-line deploy
+## Quick start
 
-All three roles bring up with a single `bash <(curl -fsSL ...)` against a
-release-hosted bootstrap script — **no repo clone required**, on any Linux
-host (amd64 / arm64) or Termux/Android (aarch64). Replace
-`OBSERVER_HOST` / `WS_ID` / `YOUR_API_KEY` / agent names with your own
-values. Append `--systemd` on slave/observer for a managed unit (needs
-sudo; drop on Termux).
+All three roles (observer → slave → driver) deploy via release-hosted
+bootstrap scripts — **no repo clone required**, on any Linux host
+(amd64 / arm64) or Termux/Android (aarch64). The default backend is
+**Codex CLI**; pass `--agent claude` or `--agent opencode` to switch.
+
+**Prerequisites**: `codex` CLI (`npm i -g @openai/codex`, Node ≥ 22) +
+`codex login` or `export OPENAI_API_KEY=...`. Codex CLI can target any
+OpenAI-compatible endpoint via `[model_providers.<name>]` in
+`~/.codex/config.toml` — it does not require api.openai.com.
+
+### 1. Observer (control plane)
 
 ```bash
-# observer (control plane) — random api-key is generated and printed if LOOM_API_KEY is unset
-export LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
+export LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'   # both optional
 bash <(curl -fsSL \
   https://github.com/agentserver/loom/releases/latest/download/bootstrap-observer.sh) \
   --name obs-prod --systemd
+```
 
-# driver — Claude Code variant (default)
+If `LOOM_API_KEY` is unset, a random key is generated and printed once —
+copy it, slaves and drivers need it at registration time.
+
+### 2. Slave (executor)
+
+```bash
+export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
+bash <(curl -fsSL \
+  https://github.com/agentserver/loom/releases/latest/download/bootstrap-slave.sh) \
+  --name slave-myhost --systemd          # drop --systemd on Termux/Android
+```
+
+On first start the slave prints a device-code URL on stderr. Approve it
+in a browser — credentials are written back into `config.yaml` and the
+slave registers with observer.
+
+### 3. Driver (orchestrator)
+
+```bash
 export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
 bash <(curl -fsSL \
   https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
   --name driver-myhost
-
-# driver — Codex variant (writes .codex/config.toml + AGENTS.md instead of .mcp.json)
-export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
-bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
-  --name driver-myhost --agent codex
-
-# driver — opencode variant (writes opencode.json to ~/.config/opencode/ + AGENTS.md)
-export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
-bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/latest/download/bootstrap-driver.sh) \
-  --name driver-myhost --agent opencode
-
-# slave — Claude Code variant (executor; drop --systemd on Termux/Android)
-export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
-bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/latest/download/bootstrap-slave.sh) \
-  --name slave-myhost --systemd
-
-# slave — Codex variant (chat skill drives codex exec --json; mix freely with Claude Code slaves)
-export LOOM_OBSERVER_URL=http://OBSERVER_HOST:8090 LOOM_WORKSPACE_ID=WS_ID LOOM_API_KEY='YOUR_API_KEY'
-bash <(curl -fsSL \
-  https://github.com/agentserver/loom/releases/latest/download/bootstrap-slave.sh) \
-  --name slave-myhost --agent codex --systemd
 ```
 
-After bootstrap, run the one-time `./driver-agent register --config ./config.yaml`
-device-code OAuth on the driver host. For a Codex driver, also run `codex login`
-(or `export OPENAI_API_KEY=...`) and invoke `codex` once in the project dir to
-add it to the trust list. On the slave, the first start prints a device-code URL
-on stderr — approve it in a browser and the slave writes the issued sandbox /
-tunnel credentials back into `config.yaml`, then registers with observer.
+After bootstrap:
 
-Codex CLI accepts any OpenAI-compatible endpoint via `[model_providers.<name>]`
-in `~/.codex/config.toml` (symmetric to pointing Claude Code at
-`ANTHROPIC_BASE_URL=...`) — useful for self-hosted gateways. See
+```bash
+./driver-agent register --config ./config.yaml   # one-time device-code OAuth
+cd <project-dir> && codex                         # first run prompts to trust the dir
+```
+
+Codex reads `[mcp_servers.driver]` from `.codex/config.toml` and
+auto-launches `driver-agent serve-mcp`. The user can then call
+`list_agents`, `submit_task`, etc. to orchestrate slaves.
+
+### Switching backends
+
+Pass `--agent claude` or `--agent opencode` to any bootstrap script.
+Claude Code mode writes `.mcp.json` + `.claude/skills/`; opencode mode
+writes `~/.config/opencode/opencode.json` + `AGENTS.md`. See
 [`multi-agent/deploy/agent-backends.md`](multi-agent/deploy/agent-backends.md)
-for the example block, container-deployment caveats (project-scoped
-`.codex/config.toml` needs a trust prompt that can't fire in containers; mount
-the global config instead), and `permissions`-skill JSON examples for both
-backends. Full flag reference and the non-bootstrap install path live at
+for the full comparison. Complete flag reference at
 [`multi-agent/deploy/README.md`](multi-agent/deploy/README.md).
 
 ## Topology

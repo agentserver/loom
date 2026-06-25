@@ -55,7 +55,7 @@ DESC=""
 TAGS=()
 API_KEY=""
 ANTHROPIC_KEY=""
-AGENT="${LOOM_AGENT_KIND:-claude}"
+AGENT="${LOOM_AGENT_KIND:-codex}"
 OBSERVER_URL=""
 WORKSPACE_ID="ws-default"
 

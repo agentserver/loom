@@ -2,7 +2,7 @@
 
 This project hosts a pluggable coding-agent layer at `pkg/agentbackend/`.
 Driver and slave processes pick a backend via `agent.kind` in their
-`config.yaml` (default `claude`). All backends implement the same three
+`config.yaml` (default `codex`). All backends implement the same three
 interfaces: `Run` (chat skill), `LLMRunner` (planner), `PermissionsStore`
 (permissions skill).
 
@@ -147,7 +147,7 @@ all read-only, then `docker exec` the codex CLI in as a sidecar.
 ## 中文摘要
 
 本项目通过 `pkg/agentbackend/` 抽象支持三种 coding agent 后端：Claude Code（默认）、Codex CLI 与 opencode。
-在 slave / driver 的 `config.yaml` 里通过 `agent.kind: claude | codex | opencode` 切换。一个进程对应一个后端；
+在 slave / driver 的 `config.yaml` 里通过 `agent.kind: codex | claude | opencode` 切换（默认 codex）。一个进程对应一个后端；
 同一 observer/workspace 可混部多种 agent。
 
 **关键差异**：

@@ -1,8 +1,9 @@
 # linux-driver
 
 Generic `driver-agent` bring-up for any Linux host. The driver is a
-Claude-Code-launched MCP server, **not** a long-running daemon — there's
-no systemd unit, just a project directory you point `claude` at.
+Codex/Claude/opencode-launched MCP server, **not** a long-running daemon —
+there's no systemd unit, just a project directory you point `codex` (or
+`claude` / `opencode`) at.
 
 For the prod-test driver shipped with this repo (`driver-prod`,
 pre-registered), see `../../../tests/prod_test/driver/`.
@@ -30,10 +31,12 @@ pre-registered), see `../../../tests/prod_test/driver/`.
    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' \
      -o deploy/linux/bin/driver-agent.linux-amd64 ./cmd/driver-agent
    ```
-2. **Claude Code** installed locally — `claude` on `PATH`.
+2. **Codex CLI** installed locally — `codex` on `PATH`
+   (`npm i -g @openai/codex`, Node ≥ 22). Or `claude` / `opencode` if
+   using `--agent claude` / `--agent opencode`.
 3. **Shared ws-prod observer api-key** — pass via `--api-key` or hand-edit
    `config.yaml` post-install.
-4. A target **project directory** where you'll run `claude`.
+4. A target **project directory** where you'll run `codex` (or `claude`).
 
 ## Quick start
 
@@ -50,8 +53,8 @@ pre-registered), see `../../../tests/prod_test/driver/`.
 # → open the printed verification URL; creds get written back into config.yaml
 
 cd ~/code/my-driver
-claude
-# In the Claude prompt:
+codex                            # first run prompts to trust the project dir
+# In the Codex prompt:
 #   mcp__driver__list_agents
 # expect your slaves to appear (after they've registered too)
 ```
@@ -69,7 +72,7 @@ claude
 | `--skill-bundle PATH` | Claude: `../../../tests/prod_test/driver/.claude/skills/multiagent` if present; Codex: repo `skills/` if present | Claude copies under `<project>/.claude/skills/`; Codex copies under `<project>/.agents/skills/`. |
 | `--token-dir PATH` | `~/.loom/<NAME>` | Parent dir for `observer.token`. Must be absolute. |
 | `--bin PATH` | `../bin/driver-agent.linux-<arch>` | Override the binary path (e.g., point at a downloaded release asset). |
-| `--agent CLI` | `claude` | `claude`, `codex`, or `opencode`. Codex mode writes `.codex/config.toml` instead of `.mcp.json`, drops `AGENTS.md` + optional `.codex/prompts/`, and renders `agent.kind: codex` in `config.yaml`. opencode mode writes `opencode.json` to `~/.config/opencode/`, drops `AGENTS.md`, and renders `agent.kind: opencode`. |
+| `--agent CLI` | `codex` | `codex` (default), `claude`, or `opencode`. Codex mode writes `.codex/config.toml` + `AGENTS.md`. Claude mode writes `.mcp.json` + `.claude/skills/`. opencode mode writes `opencode.json` to `~/.config/opencode/` + `AGENTS.md`. |
 
 ## Project layout after install
 
@@ -124,10 +127,12 @@ claude
 
 ## Why no systemd unit?
 
-The driver process is owned by Claude Code via the project's `.mcp.json`.
-Claude starts it on session open, talks to it over stdio, and tears it down
-on exit. Running it under systemd would create a second copy that fights
-for the same observer agent_id.
+The driver process is owned by the coding agent (Codex / Claude Code /
+opencode) via the project's MCP config (`.codex/config.toml`,
+`.mcp.json`, or `opencode.json`). The coding agent starts it on session
+open, talks to it over stdio, and tears it down on exit. Running it under
+systemd would create a second copy that fights for the same observer
+agent_id.
 
 If you need the driver MCP server up independent of any Claude session
 (e.g., for testing), launch it manually:
