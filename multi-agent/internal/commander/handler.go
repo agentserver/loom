@@ -48,9 +48,22 @@ func (h *Handler) GetSession(ctx context.Context, id string) (agentbackend.Sessi
 }
 
 // SessionTurn runs one user turn against an existing session.
-func (h *Handler) SessionTurn(ctx context.Context, id, prompt string, sink executor.Sink) (executor.Result, error) {
+//
+// When fresh=true, id is a client-minted placeholder (no rollout
+// exists yet for it). The handler skips trySessionWorker (which
+// depends on existing session state) and routes the turn to
+// Backend.Run with Origin=user, so the backend mints its own session
+// ID. That real ID is returned in Result.SessionID; marshalTurnResult
+// already serializes it as `result.session_id` in the terminal frame.
+func (h *Handler) SessionTurn(ctx context.Context, id, prompt string, fresh bool, sink executor.Sink) (executor.Result, error) {
 	unlock := h.lockTurn(id)
 	defer unlock()
+	if fresh {
+		return h.Backend.Run(ctx, executor.Task{
+			Prompt: prompt,
+			Origin: string(agentbackend.SessionOriginUser),
+		}, sink)
+	}
 	if res, ok, canFallback, err := h.trySessionWorker(ctx, id, prompt, sink); ok {
 		if err == nil {
 			return res, nil

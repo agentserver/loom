@@ -207,7 +207,7 @@ func run(cfgPath string) error {
 	}
 
 	// Resolve CodexHome now that cfg.Credentials.ShortID is populated by EnsureRegistered.
-	cfg.Agent.CodexHome = agentbackend.ResolveCodexHome(cfg.Agent.CodexHome, cfg.Agent.LoomHome, cfg.Credentials.ShortID)
+	cfg.Agent.CodexHome = agentbackend.ResolveCodexHome(cfg.Agent.CodexHome, cfg.Agent.LoomHome, cfg.Credentials.ShortID, cfg.Agent.WorkDir)
 	backend, err := agentbackend.New(agentbackend.Config{
 		Kind:       agentbackend.Kind(cfg.Agent.Kind),
 		Bin:        cfg.Agent.Bin,
@@ -578,7 +578,7 @@ func runServeDaemon(args []string) {
 		cfg.Daemon.Listen = opts.Listen
 	}
 
-	cfg.Agent.CodexHome = agentbackend.ResolveCodexHome(cfg.Agent.CodexHome, cfg.Agent.LoomHome, cfg.Credentials.ShortID)
+	cfg.Agent.CodexHome = agentbackend.ResolveCodexHome(cfg.Agent.CodexHome, cfg.Agent.LoomHome, cfg.Credentials.ShortID, cfg.Agent.WorkDir)
 	backend, err := agentbackend.New(agentbackend.Config{
 		Kind:       agentbackend.Kind(cfg.Agent.Kind),
 		Bin:        cfg.Agent.Bin,

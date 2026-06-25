@@ -35,11 +35,11 @@ type DirectoryNode = {
   loading?: boolean;
 };
 
-function isAbsolutePath(path: string) {
+export function isAbsolutePath(path: string) {
   return path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path) || path.startsWith('\\\\');
 }
 
-function fullPath(root: string, path: string) {
+export function fullPath(root: string, path: string) {
   if (!root || path === '.' || isAbsolutePath(path)) return path;
   const separator = root.includes('\\') ? '\\' : '/';
   const cleanRoot = root.replace(/[\\/]+$/, '');
@@ -47,7 +47,30 @@ function fullPath(root: string, path: string) {
   return `${cleanRoot}${separator}${cleanPath}`;
 }
 
-export function FileExplorerPanel({ daemonID, sessionID }: { daemonID: string; sessionID: string }) {
+export function FileExplorerPanel({
+  daemonID,
+  sessionID,
+  renderMode = 'inline',
+  onPreview,
+  onPreviewRequest,
+  onPreviewDismiss,
+}: {
+  daemonID: string;
+  sessionID: string;
+  renderMode?: 'inline' | 'sheet';
+  onPreview?: (payload: {
+    preview: FileReadResult;
+    fullPath: string;
+    displayPath: string;
+  }) => void;
+  /** Called synchronously at click time (before the async fetch) when renderMode='sheet'. */
+  onPreviewRequest?: () => void;
+  /** Called when the fetch following an onPreviewRequest fails AND it is
+   * still the latest request — so the parent can pop the matching back-stack
+   * entry it pushed in onPreviewRequest. Not called for superseded requests
+   * (those are owned by the newer click's lifecycle). */
+  onPreviewDismiss?: () => void;
+}) {
   const [root, setRoot] = useState('');
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [directories, setDirectories] = useState<Record<string, DirectoryNode>>({});
@@ -55,6 +78,15 @@ export function FileExplorerPanel({ daemonID, sessionID }: { daemonID: string; s
   const [error, setError] = useState('');
   const previewRequestRef = useRef(0);
   const listingRequestRef = useRef(0);
+
+  // Invalidate any in-flight openFile fetch when the component unmounts.
+  // Without this, a pending fetch can still call onPreview after the parent
+  // has been replaced (e.g. mobile→desktop resize), restoring preview state.
+  useEffect(() => {
+    return () => {
+      previewRequestRef.current += 1;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -89,14 +121,27 @@ export function FileExplorerPanel({ daemonID, sessionID }: { daemonID: string; s
     if (entry.kind !== 'file' || !daemonID || !sessionID) return;
     const requestID = previewRequestRef.current + 1;
     previewRequestRef.current = requestID;
-    setPreview(null);
+    if (renderMode === 'inline') setPreview(null);
     setError('');
+    // Notify the parent synchronously at click time so that history push
+    // (overlay.open('preview')) happens before the async fetch resolves.
+    if (renderMode === 'sheet') onPreviewRequest?.();
     try {
       const result = await apiGet<FileReadResult>(fileContentPath(daemonID, sessionID, entry.path));
-      if (previewRequestRef.current === requestID) setPreview(result);
+      if (previewRequestRef.current !== requestID) return;
+      if (renderMode === 'sheet') {
+        onPreview?.({
+          preview: result,
+          fullPath: fullPath(root, entry.path),
+          displayPath: entry.path,
+        });
+        return;
+      }
+      setPreview(result);
     } catch (err) {
       if (previewRequestRef.current === requestID) {
         setError(err instanceof Error ? err.message : String(err));
+        if (renderMode === 'sheet') onPreviewDismiss?.();
       }
     }
   }
@@ -189,7 +234,7 @@ export function FileExplorerPanel({ daemonID, sessionID }: { daemonID: string; s
     <aside className="file-panel" data-testid="file-panel">
       <div className="file-list">{renderEntries(entries)}</div>
       {error ? <div className="file-error">{error}</div> : null}
-      <FilePreview preview={preview} />
+      {renderMode === 'inline' ? <FilePreview preview={preview} /> : null}
     </aside>
   );
 }

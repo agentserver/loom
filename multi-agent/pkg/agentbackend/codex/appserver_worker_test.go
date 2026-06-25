@@ -894,7 +894,7 @@ func TestAppServerWorkerTurnStartMethodNotFoundFallsBackThroughCommander(t *test
 	defer h.Close()
 
 	sink := &appServerWorkerTestSink{}
-	res, err := h.SessionTurn(context.Background(), "thr-1", "continue", sink)
+	res, err := h.SessionTurn(context.Background(), "thr-1", "continue", false, sink)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1728,7 +1728,7 @@ func TestCodexSessionWorkerSubmittedUnavailableDoesNotFallbackThroughCommander(t
 	defer h.Close()
 
 	sink := &appServerWorkerTestSink{}
-	res, err := h.SessionTurn(context.Background(), "thr-1", "prompt", sink)
+	res, err := h.SessionTurn(context.Background(), "thr-1", "prompt", false, sink)
 	if err == nil {
 		t.Fatal("SessionTurn error = nil, want submitted worker error")
 	}
@@ -1776,7 +1776,7 @@ func TestCodexSessionWorkerUnsubmittedUnavailableFallsBackThroughCommander(t *te
 	defer h.Close()
 
 	sink := &appServerWorkerTestSink{}
-	res, err := h.SessionTurn(context.Background(), "thr-1", "prompt", sink)
+	res, err := h.SessionTurn(context.Background(), "thr-1", "prompt", false, sink)
 	if err != nil {
 		t.Fatal(err)
 	}

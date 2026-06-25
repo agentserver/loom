@@ -12,6 +12,15 @@ type Task struct {
 	ParentSessionID   string
 	ParentAgentID     string
 	ParentDisplayName string
+
+	// Origin classifies whether the task was initiated directly by the user
+	// (e.g. commander "+" new session) or by an agent (e.g. agent_task tool
+	// spawning a subagent). Empty string means "let the backend decide"
+	// (current behavior — codex executor defaults to agent_task in its
+	// sidecar). Values mirror agentbackend.SessionOrigin string values
+	// ("user", "agent_task", "subagent"). Kept as a plain string to avoid
+	// an agentbackend → executor import cycle.
+	Origin string
 }
 
 type Result struct {

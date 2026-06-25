@@ -209,7 +209,7 @@ func TestHandler_SessionTurnStreamsAndReturns(t *testing.T) {
 		},
 	}}
 	sink := &captureSink{}
-	res, err := h.SessionTurn(context.Background(), "s1", "do thing", sink)
+	res, err := h.SessionTurn(context.Background(), "s1", "do thing", false, sink)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +238,7 @@ func TestHandler_OffModeBackendDoesNotFetchSessionBeforeResume(t *testing.T) {
 		},
 	}}
 
-	_, err := h.SessionTurn(context.Background(), "s1", "prompt", &captureSink{})
+	_, err := h.SessionTurn(context.Background(), "s1", "prompt", false, &captureSink{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +266,7 @@ func TestHandler_SessionTurnRespectsContextCancel(t *testing.T) {
 	}}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := h.SessionTurn(ctx, "s1", "p", &captureSink{})
+	_, err := h.SessionTurn(ctx, "s1", "p", false, &captureSink{})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err=%v", err)
 	}
@@ -295,7 +295,7 @@ func TestHandler_SessionTurnReusesHotWorkerAndReportsActive(t *testing.T) {
 	defer h.Close()
 
 	for _, prompt := range []string{"first", "second"} {
-		if _, err := h.SessionTurn(context.Background(), "s1", prompt, &captureSink{}); err != nil {
+		if _, err := h.SessionTurn(context.Background(), "s1", prompt, false, &captureSink{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -347,7 +347,7 @@ func TestHandler_SessionTurnEvictsLeastRecentlyUsedWorker(t *testing.T) {
 	defer h.Close()
 
 	for _, id := range []string{"s1", "s2", "s1", "s3"} {
-		if _, err := h.SessionTurn(context.Background(), id, "go", &captureSink{}); err != nil {
+		if _, err := h.SessionTurn(context.Background(), id, "go", false, &captureSink{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -395,11 +395,11 @@ func TestHandler_SessionTurnEvictsIdleWorker(t *testing.T) {
 	}
 	defer h.Close()
 
-	if _, err := h.SessionTurn(context.Background(), "s1", "go", &captureSink{}); err != nil {
+	if _, err := h.SessionTurn(context.Background(), "s1", "go", false, &captureSink{}); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(time.Millisecond)
-	if _, err := h.SessionTurn(context.Background(), "s2", "go", &captureSink{}); err != nil {
+	if _, err := h.SessionTurn(context.Background(), "s2", "go", false, &captureSink{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -424,7 +424,7 @@ func TestHandler_SessionTurnFallsBackWhenWorkerUnavailable(t *testing.T) {
 	}}
 	defer h.Close()
 
-	res, err := h.SessionTurn(context.Background(), "s1", "go", &captureSink{})
+	res, err := h.SessionTurn(context.Background(), "s1", "go", false, &captureSink{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -450,13 +450,13 @@ func TestHandler_SessionTurnFallsBackWhenCachedWorkerUnhealthy(t *testing.T) {
 	}}
 	defer h.Close()
 
-	if _, err := h.SessionTurn(context.Background(), "s1", "warm", &captureSink{}); err != nil {
+	if _, err := h.SessionTurn(context.Background(), "s1", "warm", false, &captureSink{}); err != nil {
 		t.Fatal(err)
 	}
 	worker.mu.Lock()
 	worker.healthy = false
 	worker.mu.Unlock()
-	res, err := h.SessionTurn(context.Background(), "s1", "again", &captureSink{})
+	res, err := h.SessionTurn(context.Background(), "s1", "again", false, &captureSink{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -507,11 +507,11 @@ func TestHandler_SessionTurnFallsBackWhenHotWorkerRunUnavailable(t *testing.T) {
 	}}
 	defer h.Close()
 
-	if _, err := h.SessionTurn(context.Background(), "s1", "warm", &captureSink{}); err != nil {
+	if _, err := h.SessionTurn(context.Background(), "s1", "warm", false, &captureSink{}); err != nil {
 		t.Fatal(err)
 	}
 	sink := &captureSink{}
-	res, err := h.SessionTurn(context.Background(), "s1", "again", sink)
+	res, err := h.SessionTurn(context.Background(), "s1", "again", false, sink)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -558,7 +558,7 @@ func TestHandler_SessionTurnDoesNotFallbackAfterWorkerRunError(t *testing.T) {
 	defer h.Close()
 
 	sink := &captureSink{}
-	_, err := h.SessionTurn(context.Background(), "s1", "go", sink)
+	_, err := h.SessionTurn(context.Background(), "s1", "go", false, sink)
 	if !errors.Is(err, runErr) {
 		t.Fatalf("err=%v want %v", err, runErr)
 	}
@@ -606,7 +606,7 @@ func TestHandler_SessionTurnDoesNotFallbackAfterWorkerRunUnavailableDetail(t *te
 	defer h.Close()
 
 	sink := &captureSink{}
-	res, err := h.SessionTurn(context.Background(), "s1", "go", sink)
+	res, err := h.SessionTurn(context.Background(), "s1", "go", false, sink)
 	if !errors.Is(err, runErr) {
 		t.Fatalf("err=%v want %v", err, runErr)
 	}
@@ -641,7 +641,7 @@ func TestHandler_CloseWaitsForInFlightWorkerRun(t *testing.T) {
 
 	turnDone := make(chan error, 1)
 	go func() {
-		_, err := h.SessionTurn(context.Background(), "s1", "go", &captureSink{})
+		_, err := h.SessionTurn(context.Background(), "s1", "go", false, &captureSink{})
 		turnDone <- err
 	}()
 	select {
@@ -711,7 +711,7 @@ func TestHandler_CloseClosesBackendBeforeWaitingForActiveWorker(t *testing.T) {
 
 	turnDone := make(chan error, 1)
 	go func() {
-		_, err := h.SessionTurn(context.Background(), "s1", "go", &captureSink{})
+		_, err := h.SessionTurn(context.Background(), "s1", "go", false, &captureSink{})
 		turnDone <- err
 	}()
 	select {
@@ -763,7 +763,7 @@ func TestHandler_WorkerCacheLazyInitNoRace(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			_, _ = h.SessionTurn(context.Background(), "s1", "go", &captureSink{})
+			_, _ = h.SessionTurn(context.Background(), "s1", "go", false, &captureSink{})
 		}()
 		go func() {
 			defer wg.Done()
@@ -792,7 +792,7 @@ func TestHandler_CloseBeforeFirstTurnDisablesWorkerCache(t *testing.T) {
 	if err := h.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.SessionTurn(context.Background(), "s1", "go", &captureSink{}); err != nil {
+	if _, err := h.SessionTurn(context.Background(), "s1", "go", false, &captureSink{}); err != nil {
 		t.Fatal(err)
 	}
 	if fallback.Load() != 1 {
@@ -843,7 +843,7 @@ func TestHandler_WorkerMaxNegativeDisablesWorkerCache(t *testing.T) {
 		WorkerMax: -1,
 	}
 
-	if _, err := h.SessionTurn(context.Background(), "s1", "go", &captureSink{}); err != nil {
+	if _, err := h.SessionTurn(context.Background(), "s1", "go", false, &captureSink{}); err != nil {
 		t.Fatal(err)
 	}
 	if fallback.Load() != 1 {
@@ -884,7 +884,7 @@ func TestHandler_SessionTurnSerializesSameSession(t *testing.T) {
 
 	errCh := make(chan error, 2)
 	go func() {
-		_, err := h.SessionTurn(context.Background(), "s1", "first", &captureSink{})
+		_, err := h.SessionTurn(context.Background(), "s1", "first", false, &captureSink{})
 		errCh <- err
 	}()
 	select {
@@ -893,7 +893,7 @@ func TestHandler_SessionTurnSerializesSameSession(t *testing.T) {
 		t.Fatal("first turn did not start")
 	}
 	go func() {
-		_, err := h.SessionTurn(context.Background(), "s1", "second", &captureSink{})
+		_, err := h.SessionTurn(context.Background(), "s1", "second", false, &captureSink{})
 		errCh <- err
 	}()
 	select {

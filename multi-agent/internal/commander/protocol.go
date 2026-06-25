@@ -58,9 +58,14 @@ type GetSessionArgs struct {
 }
 
 // SessionTurnArgs is the payload for command="session_turn".
+// When Fresh=true, the slave handler treats ID as a client-minted
+// placeholder and routes the turn to Backend.Run instead of
+// RunResume, returning the real backend session ID via Result.SessionID
+// (which marshalTurnResult serializes as `result.session_id`).
 type SessionTurnArgs struct {
 	ID     string `json:"id"`
 	Prompt string `json:"prompt"`
+	Fresh  bool   `json:"fresh,omitempty"`
 }
 
 // FileListArgs is the payload for command="list_files".
