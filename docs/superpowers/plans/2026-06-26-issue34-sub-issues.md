@@ -14,6 +14,25 @@
 - **Soft deps:** improves the work if landed first but not blocking.
 - **Estimated PRs:** rough split count; milestone-sized items list checkpoints.
 - **Labels:** apply at issue-creation time from the label set below.
+- **Path prefix:** every `internal/...`, `cmd/...`, `pkg/...`, `tests/...`, `scripts/...`, `examples/...` reference is relative to `multi-agent/` (the Go module root). Paths under `docs/`, `skills/`, `tests/prod_test/` (top-level), and `.github/` are repo-root relative.
+
+## Prerequisites Before Filing Sub-issues
+
+- **Create the required GitHub labels first.** The label set below does not exist on the repo yet (`gh label list` shows only the stock set: `bug`, `documentation`, `enhancement`, `good first issue`, …). Running `gh issue create --label roadmap` today would fail or silently drop the label. One-time bootstrap (replace colors as desired):
+
+  ```sh
+  gh label create roadmap --color BFD4F2
+  gh label create architecture --color 5319E7
+  gh label create capability-routing --color 0E8A16
+  gh label create codex-entry --color FBCA04
+  gh label create control-plane --color 1D76DB
+  gh label create security --color B60205
+  gh label create prod-test --color C5DEF5
+  gh label create docs --color 0075CA
+  gh label create good-first-subissue --color 7057FF
+  ```
+
+- **CI scope note.** `.github/workflows/multi-agent.yml` only triggers on `multi-agent/**`, `skills/**`, and the workflow files themselves. Pure-docs PRs (this plan, item 09, item 21, etc.) will land with `gh pr checks` reporting *no checks*. That is expected — do not block on missing CI for documentation-only items. If you want docs lint to gate, add a separate lightweight workflow rather than widening the Go test trigger.
 
 ## Current Baseline From Code Audit
 
@@ -60,20 +79,18 @@
 
 ```text
 01 → 02 → 03
-03 → 04 → 05 → 06 → {07, 08}
+03 → 04 → 05 → 06 → {07, 08, 14}
 07 → 15
-06 → 14
-09 (can start anytime; soft-precedes 10)
+09 → {10, 12}
 10 → 11
-12 (depends on 09; coordinates with 11)
-13 depends on 03
-16, 17, 18 independent (can start anytime after 01)
-19 depends on 09 (soft: 10, 17 improve scope)
-20 depends on 10 hard; gated by 18 for marketplace publish
-21 docs-only, independent
+10 → 20
+13 ← 03
+16, 17, 18, 21 — independent (no hard deps)
+19 ← 09
+22 ← 11 (claude/opencode SessionWorkerBackend, see Track C)
 ```
 
-Soft edges are noted per-item under **Soft deps**. The previously declared edge `11 → 12` was a cycle (item 11 also listed 12 as preferred) and has been re-modeled: 11 and 12 are siblings whose order is operator-chosen.
+Soft edges are noted per-item under **Soft deps**. The earlier draft had two contradictions, both fixed: (1) `11 → 12` was a cycle since item 11 also listed 12 as preferred — 12 now depends on 09, and 11 and 12 are siblings whose order is operator-chosen; (2) `09 → 10` was tagged "soft-precedes" in the graph while item 10 listed 09 as Hard — now a hard edge consistent with item 10. Items 17, 18, 21 are explicitly independent (no hard deps).
 
 ## Phase Tracks
 
@@ -81,7 +98,7 @@ Items run on three parallel **tracks**, not sequential phases. Track labels repl
 
 - **Track A — Topology cleanup:** 01, 02, 03
 - **Track B — Capability model & routing:** 04, 05, 06, 07, 08, 14, 15
-- **Track C — Codex entry & backend parity:** 09, 10, 11, 12
+- **Track C — Codex entry & backend parity:** 09, 10, 11, 12, 22
 - **Track D — Control plane backchannel:** 13
 - **Track E — Durability & security hardening:** 16, 17, 18
 - **Track F — Prod test & docs:** 19, 21
@@ -421,6 +438,34 @@ Items run on three parallel **tracks**, not sequential phases. Track labels repl
 **Hard deps:** 09.
 **Soft deps:** 12 (cleaner status constants make tests simpler).
 
+### 22. SessionWorkerBackend implementations for claude and opencode
+
+**Status:** NEW / TODO
+**Labels:** `codex-entry`, `architecture`
+**Estimated PRs:** **2** — 22a claude hot worker; 22b opencode hot worker.
+
+**Problem:** The `SessionWorkerBackend` interface (`pkg/agentbackend/backend.go:171-173`) is implemented only by codex (`pkg/agentbackend/codex/appserver_manager.go:23`). claude and opencode workers re-spawn the CLI per turn, so they don't benefit from the hot-worker turn-state machine that codex uses. Burying this under item 12 as "lower priority" violated #34's "independently trackable sub-issues" intent — hot-worker parity is a real backend-equivalence story, not a CI line item.
+
+**Scope (22a — claude):**
+
+- Implement `NewSessionWorker` for `pkg/agentbackend/claude` by attaching to a persistent claude-code (or sdk) process per session.
+- Map turn lifecycle to `agentbackend.Status*` events with the same semantics codex uses.
+- Honour cancel and humanloop routing parity with item 11's contract.
+
+**Scope (22b — opencode):**
+
+- Same as 22a, against the opencode runtime.
+
+**Acceptance:**
+
+- `pkg/agentbackend/claude` and `pkg/agentbackend/opencode` each declare `_ agentbackend.SessionWorkerBackend = (*workerBackend)(nil)`.
+- The matrix from 12b covers `worker_mode: app_server` for all three backends, not just codex.
+- Hot-worker reuse is observable in logs/metrics (turn N+1 reuses the same worker PID as turn N for the same session).
+- Documented opt-out env exists for rollback.
+
+**Hard deps:** 11 (the unsafe-env gate must be removed first; the same humanloop routing contract applies).
+**Soft deps:** 12 (status constants stable).
+
 ### 12. Backend-neutral turn-state and CI matrix
 
 **Status:** PARTIAL
@@ -437,7 +482,7 @@ Items run on three parallel **tracks**, not sequential phases. Track labels repl
 **Scope (12b):**
 
 - Runtime matrix for submit, wait, resume, cancel placeholder, register_mcp, artifact passing, and capability matching across claude/codex/opencode.
-- Track opencode/claude hot-worker parity separately as lower priority.
+- Hot-worker parity (claude/opencode `SessionWorkerBackend`) is **out of scope** here — it gets its own item (22). 12b only asserts cold-path parity.
 
 **Acceptance:**
 
@@ -569,20 +614,21 @@ Items run on three parallel **tracks**, not sequential phases. Track labels repl
 **Labels:** `prod-test`
 **Estimated PRs:** 1
 
-**Problem:** Prod-test runbook exists, but health and codex smoke scripts are missing. The existing dynamic MCP YAML uses a small typed schema (`cmd/slave-agent/main.go:533-550`) — adding tool descriptors with `json.RawMessage` schemas later will need a custom YAML marshaler so schemas serialize as YAML objects rather than byte arrays.
+**Problem:** Prod-test runbook exists, but health and codex smoke scripts are missing. Also, **a current bug**: `internal/executor/dynamicmcp.go:20` already persists `Tools []capability.MCPToolDescriptor`, whose `InputSchema` field is `json.RawMessage` (`internal/capability/types.go:9`). Default `gopkg.in/yaml.v3` marshalling of `[]byte` (which is what `json.RawMessage` is) emits a **YAML sequence of integers**, not a readable schema object. Anyone who registers an MCP whose tool descriptors include `InputSchema` today writes garbage into `dynamic_mcp.yaml` and round-trip via the existing `UnmarshalYAML` will fail to reconstruct the schema. This is not a "future" hardening — it is a current correctness bug.
 
 **Scope:**
 
 - Add `tests/prod_test/health.sh`.
 - Add `tests/prod_test/codex-smoke.sh`.
 - Keep `driver_mcp_e2e.py` as the lower-level stdio JSON-RPC test.
-- Land a `yaml.Marshaler` for any new MCP tool descriptor field holding `json.RawMessage`, with a round-trip test, so the next person who adds dynamic schemas does not silently produce byte-array YAML.
+- Implement `MarshalYAML`/`UnmarshalYAML` on `capability.MCPToolDescriptor` (or wrap `InputSchema` in a type with the methods) so the schema serializes as a YAML mapping and round-trips losslessly. Adjust `DynamicEntry.UnmarshalYAML` accordingly.
+- Add a regression test in `internal/executor/dynamicmcp_test.go` that registers an MCP tool with a non-trivial JSON schema, marshals to YAML, parses back, and asserts equality.
 
 **Acceptance:**
 
 - One command (`tests/prod_test/health.sh`) validates driver token, observer reachability, tunnel readiness, and absolute audit log paths.
 - One command (`tests/prod_test/codex-smoke.sh`) runs minimal codex CLI → driver MCP → slave task → artifact retrieval.
-- Round-trip test asserts `dynamic_mcp.yaml` stores readable structured schemas for any future MCP tool descriptor field.
+- A test in `internal/executor/dynamicmcp_test.go` registers an MCP tool with `InputSchema={"type":"object","properties":{"x":{"type":"string"}}}`, writes `dynamic_mcp.yaml`, re-reads, and asserts the decoded schema equals the original (currently fails, will pass after the fix).
 
 **Hard deps:** 09 (codex path clarity).
 **Soft deps:** 10 (tool surface stable), 17 (humanloop lock cleanup verified in prod test).
@@ -658,15 +704,16 @@ This order respects hard deps and frontloads work that informs later scope.
 9. **08a / 08b** — Data setup, then `find_data`.
 10. **10** — Driver tool surface.
 11. **11** — App-server unsafe gate removal.
-12. **12a / 12b** — Status migration, then CI matrix.
-13. **13a / 13b / 13c** — Cancel, nudge, concurrency warning.
-14. **14** — Approval wiring.
-15. **15a / 15b** — `map_reduce` node, then reduce + retry policy.
-16. **16a / 16b** — Two-phase commit, then `seq` migration.
-17. **17, 18** — In parallel: SQLite/lock GC and marketplace signing.
-18. **19** — Prod-test health + codex smoke + YAML marshaler.
-19. **21** — `write_paths` docs (good-first-subissue, can start anytime).
-20. **20** — Capability crystallization spike → local prototype.
+12. **22a / 22b** — claude / opencode `SessionWorkerBackend` implementations.
+13. **12a / 12b** — Status migration, then CI matrix.
+14. **13a / 13b / 13c** — Cancel, nudge, concurrency warning.
+15. **14** — Approval wiring.
+16. **15a / 15b** — `map_reduce` node, then reduce + retry policy.
+17. **16a / 16b** — Two-phase commit, then `seq` migration.
+18. **17, 18** — In parallel: SQLite/lock GC and marketplace signing.
+19. **19** — Prod-test health + codex smoke + YAML marshaler.
+20. **21** — `write_paths` docs (good-first-subissue, can start anytime).
+21. **20** — Capability crystallization spike → local prototype.
 
 ## Template For Copying Into GitHub
 
