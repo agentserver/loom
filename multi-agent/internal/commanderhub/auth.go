@@ -255,6 +255,7 @@ func (a *Authenticator) ServeLogin(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "too many pending logins", http.StatusTooManyRequests)
 			return
 		}
+		log.Printf("commanderhub: ReserveLogin failed: %v", err)
 		http.Error(w, "store unavailable", http.StatusBadGateway)
 		return
 	}
@@ -289,6 +290,7 @@ func (a *Authenticator) ServeLogin(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, authstore.ErrNotFound) {
 			http.Error(w, "login expired during init", http.StatusBadGateway)
 		} else {
+			log.Printf("commanderhub: FinalizeReservedLogin failed: %v", err)
 			http.Error(w, "store unavailable", http.StatusBadGateway)
 		}
 		return

@@ -33,6 +33,12 @@ func NewPostgresStore(db *sql.DB) Store {
 	return &postgresStore{db: db}
 }
 
+// skipCapConformance opts the postgresStore out of the slow MaxActiveLogins
+// strict-cap conformance subtest — see the comment in
+// conformance_test.go::ReserveLogin_capped_then_sweep_releases. Real-cap
+// behavior under concurrency is covered by the k8s e2e (subcase 6).
+func (s *postgresStore) skipCapConformance() {}
+
 func (s *postgresStore) ReserveLogin(ctx context.Context, loginID string, now time.Time, ttl time.Duration) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -74,13 +80,24 @@ func (s *postgresStore) FinalizeReservedLogin(ctx context.Context, loginID strin
 	deviceCode string, codeExpiresAt time.Time, intervalSeconds int) error {
 
 	intervalSeconds = ClampIntervalSeconds(intervalSeconds)
+	// next_poll_at honours the agentserver-derived interval from the very
+	// first /poll. Without this, ServeLogin returns, the frontend polls
+	// 1.5 s later, and we'd call agentserver again well below its
+	// advertised throttle.
+	//
+	// expires_at > now() guard: a very slow RequestCode could leave the
+	// reservation row past loginTTL by the time we get here. Finalizing it
+	// anyway would hand the client a login_id whose first /poll immediately
+	// expires (404). Refuse instead so ServeLogin's cleanup releases the slot.
 	res, err := s.db.ExecContext(ctx, `
         UPDATE commander_logins
            SET device_code      = $1,
                code_expires_at  = $2,
-               interval_seconds = $3
+               interval_seconds = $3::int,
+               next_poll_at     = now() + ($3::int * interval '1 second')
          WHERE login_id    = $4
            AND device_code = ''
+           AND expires_at  > now()
     `, deviceCode, codeExpiresAt, intervalSeconds, loginID)
 	if err != nil {
 		return err

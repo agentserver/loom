@@ -107,6 +107,7 @@ func (s *inmemoryStore) ReserveLogin(_ context.Context, loginID string, now time
 func (s *inmemoryStore) FinalizeReservedLogin(_ context.Context, loginID string,
 	deviceCode string, codeExpiresAt time.Time, intervalSeconds int) error {
 
+	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r, ok := s.logins[loginID]
@@ -117,9 +118,17 @@ func (s *inmemoryStore) FinalizeReservedLogin(_ context.Context, loginID string,
 	if r.deviceCode != "" {
 		return ErrNotFound
 	}
+	// Mirror postgres expiry guard: a slow RequestCode could leave the
+	// reservation past loginTTL by the time we get here.
+	if !r.expiresAt.After(now) {
+		return ErrNotFound
+	}
 	r.deviceCode = deviceCode
 	r.codeExpiresAt = codeExpiresAt
 	r.intervalSeconds = ClampIntervalSeconds(intervalSeconds)
+	// next_poll_at honours the agentserver-advertised interval from the
+	// first /poll. Without this the throttle test fires immediately.
+	r.nextPollAt = now.Add(time.Duration(r.intervalSeconds) * time.Second)
 	return nil
 }
 

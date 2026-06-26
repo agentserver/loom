@@ -226,14 +226,22 @@ func main() {
 		},
 	}
 
-	authStore, err := buildCommanderAuthStore(cfg, st.DB())
-	if err != nil {
-		log.Fatal(err)
+	// Only build the auth store + apply commander DDL when commander is
+	// actually being mounted. observerweb.NewWithResolverOptions guards the
+	// MountAll call by AgentserverURL != "" (see internal/observerweb/server.go),
+	// so a non-commander Postgres deployment has no use for commander_logins /
+	// commander_sessions and shouldn't pay the migration cost or be coupled to
+	// new DDL during rollouts.
+	opts := observerWebOptions(cfg, objects)
+	if opts.AgentserverURL != "" {
+		authStore, err := buildCommanderAuthStore(cfg, st.DB())
+		if err != nil {
+			log.Fatal(err)
+		}
+		opts.AuthStore = authStore
 	}
 
 	log.Printf("observer-server listening on %s", cfg.ListenAddr)
-	opts := observerWebOptions(cfg, objects)
-	opts.AuthStore = authStore
 	app := observerweb.NewWithResolverOptions(st, usHandler, resolver, opts)
 	srv := newHTTPServer(cfg.ListenAddr, withHealth(app, func(ctx context.Context) error {
 		return st.DB().PingContext(ctx)
@@ -251,7 +259,9 @@ func runMigrationsOnly(cfg *Config) error {
 	if err := userspace.MigrateForDriver(st.DB(), cfg.Store.Driver); err != nil {
 		return fmt.Errorf("userspace migrate: %w", err)
 	}
-	if cfg.Store.Driver == "postgres" {
+	// Mirror the runtime gate above: only apply commander DDL when this
+	// deployment will actually mount the commander surface.
+	if cfg.Store.Driver == "postgres" && strings.TrimSpace(cfg.Identity.Agentserver.URL) != "" {
 		if err := authstore.MigratePostgres(st.DB()); err != nil {
 			return fmt.Errorf("commanderhub authstore migrate: %w", err)
 		}
@@ -264,6 +274,10 @@ func runMigrationsOnly(cfg *Config) error {
 // every observer-server pod can serve any commander request. sqlite / empty
 // → fall back to in-memory: still single-pod, but explicit about it via a
 // startup log line. Any other driver value is a config error.
+//
+// Caller MUST guard on commander being enabled (AgentserverURL != "")
+// before invoking this — otherwise a non-commander Postgres deployment will
+// pay the migration cost and couple to commander DDL versions for no reason.
 func buildCommanderAuthStore(cfg *Config, db *sql.DB) (authstore.Store, error) {
 	switch cfg.Store.Driver {
 	case "postgres":
