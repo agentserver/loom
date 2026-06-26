@@ -2,10 +2,13 @@ package commanderhub
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -47,11 +50,14 @@ type loginToken struct {
 	IDToken     string
 }
 
+var errAuthPending = errors.New("authorization pending")
+
 // deviceFlow is the seam between Authenticator and the OAuth grant. Production
 // uses agentsdkDeviceFlow; tests inject a fake.
 type deviceFlow interface {
 	RequestCode(ctx context.Context) (DeviceCode, error)
 	PollToken(ctx context.Context, code DeviceCode) (loginToken, error)
+	CheckToken(ctx context.Context, code DeviceCode) (loginToken, error)
 }
 
 // agentsdkDeviceFlow wraps the real agentserver device-code endpoints.
@@ -148,6 +154,147 @@ func (f agentsdkDeviceFlow) PollToken(ctx context.Context, code DeviceCode) (log
 	}
 }
 
+func (f agentsdkDeviceFlow) CheckToken(ctx context.Context, code DeviceCode) (loginToken, error) {
+	tokenURL := strings.TrimRight(f.serverURL, "/") + "/api/oauth2/token"
+	form := url.Values{
+		"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
+		"client_id":   {deviceClientID},
+		"device_code": {code.Code},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return loginToken{}, fmt.Errorf("create token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return loginToken{}, errAuthPending
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		var tokenResp struct {
+			AccessToken string `json:"access_token"`
+			IDToken     string `json:"id_token"`
+		}
+		if err := json.Unmarshal(body, &tokenResp); err != nil {
+			return loginToken{}, fmt.Errorf("decode token response: %w", err)
+		}
+		return loginToken{AccessToken: tokenResp.AccessToken, IDToken: tokenResp.IDToken}, nil
+	}
+	var errResp struct {
+		Error string `json:"error"`
+	}
+	_ = json.Unmarshal(body, &errResp)
+	switch errResp.Error {
+	case "authorization_pending", "slow_down":
+		return loginToken{}, errAuthPending
+	case "access_denied":
+		return loginToken{}, fmt.Errorf("authorization denied by user")
+	case "expired_token":
+		return loginToken{}, fmt.Errorf("authorization expired, please try again")
+	default:
+		return loginToken{}, fmt.Errorf("token error: %s", errResp.Error)
+	}
+}
+
+// pollTokenPayload is the self-contained login state encoded in the login_id.
+// It enables cross-pod poll handling without shared in-memory state.
+type pollTokenPayload struct {
+	DeviceCode string `json:"c"`
+	ExpiresAt  int64  `json:"e"`
+	Interval   int    `json:"i"`
+	ID         string `json:"id"`
+}
+
+func encodePollToken(dc DeviceCode, id string) string {
+	tok := pollTokenPayload{
+		DeviceCode: dc.Code,
+		ExpiresAt:  time.Now().Add(dc.ExpiresIn).Unix(),
+		Interval:   int(dc.Interval / time.Second),
+		ID:         id,
+	}
+	data, _ := json.Marshal(tok)
+	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+func decodePollToken(s string) (pollTokenPayload, error) {
+	data, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return pollTokenPayload{}, err
+	}
+	var tok pollTokenPayload
+	if err := json.Unmarshal(data, &tok); err != nil {
+		return pollTokenPayload{}, err
+	}
+	if tok.DeviceCode == "" {
+		return pollTokenPayload{}, fmt.Errorf("missing device code")
+	}
+	return tok, nil
+}
+
+// --- HMAC-signed session cookie ---
+
+func deriveSessionKey(agentserverURL string) []byte {
+	h := sha256.Sum256([]byte("commander-session:" + agentserverURL))
+	return h[:]
+}
+
+type sessionClaims struct {
+	UserID      string `json:"u"`
+	WorkspaceID string `json:"w"`
+	Role        string `json:"r"`
+	ExpiresAt   int64  `json:"e"`
+}
+
+func signSessionCookie(key []byte, ident identity.Identity, ttl time.Duration) string {
+	claims := sessionClaims{
+		UserID:      ident.UserID,
+		WorkspaceID: ident.WorkspaceID,
+		Role:        ident.Role,
+		ExpiresAt:   time.Now().Add(ttl).Unix(),
+	}
+	payload, _ := json.Marshal(claims)
+	payloadB64 := base64.RawURLEncoding.EncodeToString(payload)
+	mac := hmac.New(sha256.New, key)
+	mac.Write(payload)
+	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return payloadB64 + "." + sig
+}
+
+func verifySessionCookie(key []byte, cookie string) (identity.Identity, bool) {
+	parts := strings.SplitN(cookie, ".", 2)
+	if len(parts) != 2 {
+		return identity.Identity{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return identity.Identity{}, false
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return identity.Identity{}, false
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write(payload)
+	if !hmac.Equal(sig, mac.Sum(nil)) {
+		return identity.Identity{}, false
+	}
+	var claims sessionClaims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return identity.Identity{}, false
+	}
+	if time.Now().After(time.Unix(claims.ExpiresAt, 0)) {
+		return identity.Identity{}, false
+	}
+	return identity.Identity{
+		UserID:      claims.UserID,
+		WorkspaceID: claims.WorkspaceID,
+		Role:        claims.Role,
+		Source:      identity.SourceAgentserver,
+	}, true
+}
+
 type session struct {
 	token     string
 	identity  identity.Identity
@@ -166,8 +313,9 @@ type loginState struct {
 // Authenticator drives the web login (device flow) and owns the cookie→token
 // session store. CommanderIdentity is the auth check used by /api/commander/*.
 type Authenticator struct {
-	resolver identity.Resolver
-	flow     deviceFlow
+	resolver  identity.Resolver
+	flow      deviceFlow
+	cookieKey []byte // HMAC key for signed session cookies (cross-pod)
 
 	sessMu   sync.Mutex
 	sessions map[string]*session
@@ -179,23 +327,28 @@ type Authenticator struct {
 // NewAuthenticator builds an Authenticator backed by the real agentserver
 // device flow at agentserverURL. Used by observerweb wiring (Task 8).
 func NewAuthenticator(resolver identity.Resolver, agentserverURL string) *Authenticator {
-	return newAuthenticatorWithFlow(resolver, agentsdkDeviceFlow{serverURL: agentserverURL})
+	return newAuthenticatorWithFlow(resolver, agentsdkDeviceFlow{serverURL: agentserverURL}, agentserverURL)
 }
 
 // newAuthenticatorWithFlow lets tests inject a fake deviceFlow.
-func newAuthenticatorWithFlow(resolver identity.Resolver, flow deviceFlow) *Authenticator {
+func newAuthenticatorWithFlow(resolver identity.Resolver, flow deviceFlow, agentserverURL string) *Authenticator {
 	return &Authenticator{
-		resolver: resolver,
-		flow:     flow,
-		sessions: make(map[string]*session),
-		logins:   make(map[string]*loginState),
+		resolver:  resolver,
+		flow:      flow,
+		cookieKey: deriveSessionKey(agentserverURL),
+		sessions:  make(map[string]*session),
+		logins:    make(map[string]*loginState),
 	}
 }
 
-// CommanderIdentity authenticates a /api/commander/* request: cookie session
-// first (cached identity), then Authorization: Bearer (resolve), else false.
+// CommanderIdentity authenticates a /api/commander/* request: HMAC-signed
+// cookie first (cross-pod), then in-memory session (same-pod), then
+// Authorization: Bearer (resolve), else false.
 func (a *Authenticator) CommanderIdentity(r *http.Request) (identity.Identity, bool) {
 	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
+		if ident, ok := verifySessionCookie(a.cookieKey, c.Value); ok {
+			return ident, true
+		}
 		a.sessMu.Lock()
 		s := a.sessions[c.Value]
 		a.sessMu.Unlock()
@@ -284,8 +437,9 @@ func (a *Authenticator) ServeLogin(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, map[string]any{
 		"verification_uri_complete": dc.VerificationURIComplete,
-		"login_id":                  lid,
+		"login_id":                  encodePollToken(dc, lid),
 		"expires_in":                int(dc.ExpiresIn / time.Second),
+		"interval":                  int(dc.Interval / time.Second),
 	})
 }
 
@@ -314,27 +468,35 @@ func (a *Authenticator) pollLogin(lid string, dc DeviceCode) {
 		a.loginMu.Unlock()
 		return
 	}
-	sid := a.putSession(tok.AccessToken, ident)
+	cookieVal := signSessionCookie(a.cookieKey, ident, sessionTTL)
 	a.loginMu.Lock()
-	st.sessionID = sid
+	st.sessionID = cookieVal
 	st.done = true
 	a.loginMu.Unlock()
 }
 
 // ServeLoginPoll: GET /api/commander/login/poll?id=<login_id>.
 //
-// Each login is one-shot: a terminal result (failed or done) is returned at
-// most once — the entry is deleted on the poll that observes it, so a replay
-// poll gets 404. Abandoned or never-completing entries are reaped lazily once
-// they exceed loginTTL (best-effort; no background sweeper).
+// The login_id is a base64url-encoded poll token containing the device code.
+// The handler first tries the same-pod in-memory fast path (keyed by the
+// embedded random ID), then falls back to a synchronous CheckToken call so
+// that any pod can service the poll — solving the Istio round-robin problem.
 func (a *Authenticator) ServeLoginPoll(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	lid := r.URL.Query().Get("id")
-	// Snapshot the entry's state under the lock; pollLogin writes these fields
-	// from its own goroutine, so reading them unlocked would race.
+	rawID := r.URL.Query().Get("id")
+
+	// Decode poll token to get the embedded random ID and device code.
+	ptok, decErr := decodePollToken(rawID)
+
+	// Same-pod fast path: look up in-memory by the embedded random ID.
+	lid := rawID // fallback: use raw id for legacy clients
+	if decErr == nil {
+		lid = ptok.ID
+	}
+
 	a.loginMu.Lock()
 	st := a.logins[lid]
 	var (
@@ -351,41 +513,72 @@ func (a *Authenticator) ServeLoginPoll(w http.ResponseWriter, r *http.Request) {
 		sessionID = st.sessionID
 		expired = time.Since(st.createdAt) > loginTTL
 	}
-	// One-shot: consume terminal/expired entries on the poll that observes them.
 	if st != nil && (failed || done || expired) {
 		delete(a.logins, lid)
 	}
 	a.loginMu.Unlock()
 
-	if st == nil || expired {
+	// Same-pod: entry found — use existing behavior.
+	if st != nil && !expired {
+		if failed {
+			if failure == "" {
+				failure = "login failed"
+			}
+			writeJSONStatus(w, http.StatusUnauthorized, map[string]any{"status": "error", "error": failure})
+			return
+		}
+		if !done {
+			writeJSON(w, map[string]any{"status": "pending"})
+			return
+		}
+		a.setSessionCookie(w, r, sessionID)
+		writeJSON(w, map[string]any{"status": "ok"})
+		return
+	}
+
+	// Cross-pod fallback: decode the poll token and call CheckToken.
+	if decErr != nil {
 		http.Error(w, "unknown login", http.StatusNotFound)
 		return
 	}
-	if failed {
-		// Consumed: one-shot. A replay poll will get 404.
-		if failure == "" {
-			failure = "login failed"
-		}
-		writeJSONStatus(w, http.StatusUnauthorized, map[string]any{"status": "error", "error": failure})
+	if time.Now().After(time.Unix(ptok.ExpiresAt, 0)) {
+		writeJSONStatus(w, http.StatusGone, map[string]any{"status": "error", "error": "login expired"})
 		return
 	}
-	if !done {
+
+	dc := DeviceCode{Code: ptok.DeviceCode}
+	tok, err := a.flow.CheckToken(r.Context(), dc)
+	if errors.Is(err, errAuthPending) {
 		writeJSON(w, map[string]any{"status": "pending"})
 		return
 	}
-	// done: set cookie (entry already consumed above — one-shot). A replay poll gets 404.
+	if err != nil {
+		writeJSONStatus(w, http.StatusUnauthorized, map[string]any{"status": "error", "error": err.Error()})
+		return
+	}
+
+	// Token obtained — create signed session cookie (stateless, works cross-pod).
+	ident, err := identityFromIDToken(tok.IDToken, time.Now())
+	if err != nil {
+		writeJSONStatus(w, http.StatusUnauthorized, map[string]any{"status": "error", "error": err.Error()})
+		return
+	}
+
+	cookieVal := signSessionCookie(a.cookieKey, ident, sessionTTL)
+	a.setSessionCookie(w, r, cookieVal)
+	writeJSON(w, map[string]any{"status": "ok"})
+}
+
+func (a *Authenticator) setSessionCookie(w http.ResponseWriter, r *http.Request, value string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
-		Value:    sessionID,
+		Value:    value,
 		Path:     "/",
 		HttpOnly: true,
-		// Secure only over real TLS (direct or via forwarding proxy) so the
-		// cookie is accepted on loopback HTTP (http://127.0.0.1) during dev.
 		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(sessionTTL / time.Second),
 	})
-	writeJSON(w, map[string]any{"status": "ok"})
 }
 
 // ServeLogout: POST /api/commander/logout.

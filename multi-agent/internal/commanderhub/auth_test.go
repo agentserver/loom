@@ -49,11 +49,20 @@ func (f *fakeDeviceFlow) PollToken(ctx context.Context, _ DeviceCode) (loginToke
 		return loginToken{}, ctx.Err()
 	}
 }
+func (f *fakeDeviceFlow) CheckToken(_ context.Context, _ DeviceCode) (loginToken, error) {
+	select {
+	case <-f.approved:
+		return f.token, nil
+	default:
+		return loginToken{}, errAuthPending
+	}
+}
+
 func (f *fakeDeviceFlow) approve() { close(f.approved) }
 
 func newAuth(t *testing.T, resolver identity.Resolver, flow deviceFlow) *Authenticator {
 	t.Helper()
-	return newAuthenticatorWithFlow(resolver, flow)
+	return newAuthenticatorWithFlow(resolver, flow, "https://test-agentserver")
 }
 
 // TestAuth_LoginPollPendingThenApproved: login returns verify URL + login_id;
@@ -106,11 +115,13 @@ func TestAuth_LoginPollPendingThenApproved(t *testing.T) {
 	require.False(t, doneCookie.Secure, "loopback/http browser flows must accept the login cookie")
 	require.Equal(t, http.SameSiteLaxMode, doneCookie.SameSite)
 
-	// replay poll → entry consumed (deleted) → 404, no cookie
+	// replay poll → in-memory entry consumed, but cross-pod fallback still
+	// works (poll token decodes, CheckToken returns approved) — this is
+	// correct: the signed cookie is idempotent.
 	rec4 := httptest.NewRecorder()
 	a.ServeLoginPoll(rec4, httptest.NewRequest(http.MethodGet, "/api/commander/login/poll?id="+lr.LoginID, nil))
-	require.Equal(t, http.StatusNotFound, rec4.Code)
-	require.Empty(t, rec4.Result().Cookies())
+	require.Equal(t, http.StatusOK, rec4.Code)
+	require.Contains(t, rec4.Body.String(), `"ok"`)
 }
 
 func TestAuth_LoginUsesOAuthIDTokenIdentityNotProxyWhoami(t *testing.T) {
@@ -308,6 +319,10 @@ func (f *countingDeviceFlow) PollToken(ctx context.Context, _ DeviceCode) (login
 	return loginToken{}, ctx.Err()
 }
 
+func (f *countingDeviceFlow) CheckToken(_ context.Context, _ DeviceCode) (loginToken, error) {
+	return loginToken{}, errAuthPending
+}
+
 // TestAuth_LoginCapsPendingLogins: hammering the unauthenticated POST /login
 // without ever polling must (a) call RequestCode at most maxPendingLogins times
 // — i.e. the cap GATES the agentserver call, not just the local map — (b) never
@@ -384,4 +399,104 @@ func encodeJWTPart(v any) string {
 		panic(err)
 	}
 	return strings.TrimRight(base64.URLEncoding.EncodeToString(b), "=")
+}
+
+// TestAuth_CrossPodPoll: simulates the Istio round-robin scenario where
+// POST /login hits pod A and GET /login/poll hits pod B (no in-memory state).
+// Pod B should decode the poll token and call CheckToken directly.
+func TestAuth_CrossPodPoll(t *testing.T) {
+	token := loginToken{
+		AccessToken: "tok-cross",
+		IDToken:     makeIDToken("bob", "W2", "admin"),
+	}
+	flow := newFakeDeviceFlowToken(token)
+
+	// Pod A: creates the login
+	podA := newAuth(t, &fakeResolver{mu: map[string]identity.Identity{}}, flow)
+	rec := httptest.NewRecorder()
+	podA.ServeLogin(rec, httptest.NewRequest(http.MethodPost, "/api/commander/login", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var lr struct {
+		LoginID  string `json:"login_id"`
+		Interval int    `json:"interval"`
+	}
+	require.NoError(t, jsonUnmarshal(rec.Body.Bytes(), &lr))
+	require.NotEmpty(t, lr.LoginID)
+
+	// Pod B: different Authenticator (no shared in-memory state)
+	podB := newAuth(t, &fakeResolver{mu: map[string]identity.Identity{}}, flow)
+
+	// Before approval: should get pending (not 404)
+	rec2 := httptest.NewRecorder()
+	podB.ServeLoginPoll(rec2, httptest.NewRequest(http.MethodGet, "/api/commander/login/poll?id="+lr.LoginID, nil))
+	require.Equal(t, http.StatusOK, rec2.Code)
+	require.Contains(t, rec2.Body.String(), `"pending"`)
+
+	// Approve and poll again
+	flow.approve()
+	rec3 := httptest.NewRecorder()
+	podB.ServeLoginPoll(rec3, httptest.NewRequest(http.MethodGet, "/api/commander/login/poll?id="+lr.LoginID, nil))
+	require.Equal(t, http.StatusOK, rec3.Code)
+	require.Contains(t, rec3.Body.String(), `"ok"`)
+	cookies := rec3.Result().Cookies()
+	require.Len(t, cookies, 1)
+
+	// The cookie from cross-pod poll should work on any pod (signed, not in-memory)
+	req := httptest.NewRequest(http.MethodGet, "/api/commander/daemons", nil)
+	req.AddCookie(cookies[0])
+	ident, ok := podB.CommanderIdentity(req)
+	require.True(t, ok)
+	require.Equal(t, "bob", ident.UserID)
+	require.Equal(t, "W2", ident.WorkspaceID)
+
+	// Also works on pod A
+	identA, okA := podA.CommanderIdentity(req)
+	require.True(t, okA)
+	require.Equal(t, "bob", identA.UserID)
+}
+
+// TestAuth_SignedCookieIdentity verifies that the HMAC-signed cookie can be
+// created and verified across different Authenticator instances (cross-pod).
+func TestAuth_SignedCookieIdentity(t *testing.T) {
+	key := deriveSessionKey("https://test-agentserver")
+	ident := identity.Identity{UserID: "alice", WorkspaceID: "W1", Role: "admin", Source: identity.SourceAgentserver}
+	cookie := signSessionCookie(key, ident, time.Hour)
+
+	got, ok := verifySessionCookie(key, cookie)
+	require.True(t, ok)
+	require.Equal(t, "alice", got.UserID)
+	require.Equal(t, "W1", got.WorkspaceID)
+	require.Equal(t, "admin", got.Role)
+	require.Equal(t, identity.SourceAgentserver, got.Source)
+
+	// Wrong key rejects
+	wrongKey := deriveSessionKey("https://other-server")
+	_, ok = verifySessionCookie(wrongKey, cookie)
+	require.False(t, ok)
+
+	// Expired cookie rejects
+	expired := signSessionCookie(key, ident, -time.Hour)
+	_, ok = verifySessionCookie(key, expired)
+	require.False(t, ok)
+
+	// Tampered cookie rejects
+	_, ok = verifySessionCookie(key, cookie+"x")
+	require.False(t, ok)
+}
+
+// TestAuth_PollTokenEncodeDecode verifies the poll token round-trips correctly.
+func TestAuth_PollTokenEncodeDecode(t *testing.T) {
+	dc := DeviceCode{
+		Code:      "device-code-123",
+		ExpiresIn: 10 * time.Minute,
+		Interval:  5 * time.Second,
+	}
+	id := "random-hex-id"
+	encoded := encodePollToken(dc, id)
+	decoded, err := decodePollToken(encoded)
+	require.NoError(t, err)
+	require.Equal(t, "device-code-123", decoded.DeviceCode)
+	require.Equal(t, 5, decoded.Interval)
+	require.Equal(t, "random-hex-id", decoded.ID)
+	require.True(t, time.Unix(decoded.ExpiresAt, 0).After(time.Now()))
 }

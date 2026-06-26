@@ -117,8 +117,10 @@ done
 
 Expected: all three return `HTTP 200`.
 
-- **HTTP 403 = sandbox `forbidden`** — agentserver flipped the sandbox out of `running` state. See the re-register section.
-- **HTTP 401 = token invalid** — credentials were revoked or wiped. Re-register.
+- **HTTP 403 = sandbox not running** — the agent process is down, so the tunnel is disconnected and agentserver flipped the sandbox out of `running` state. **This does NOT mean the token is revoked.** Simply starting the agent process (Step 2) will reconnect the tunnel, the sandbox will return to `running`, and the token will work again. No re-registration needed.
+- **HTTP 401 = token invalid** — credentials were actually revoked or wiped. Re-register.
+
+> **Key insight:** 403 on `whoami` is the *normal* state when agents are stopped. The pre-flight token check is only useful to distinguish "agents stopped" (403, will self-heal on start) from "credentials invalid" (401, must re-register). If all agents show 403, proceed to Step 2 — the tokens will recover once the tunnels reconnect.
 
 ### Step 2 — Start services (order matters)
 
@@ -202,9 +204,9 @@ kill <pids>
 
 ## Re-registering agents (OAuth device flow)
 
-When `whoami` returns 403/401, the sandbox token can't be revived. Re-register:
+Re-registration is only needed when `whoami` returns **HTTP 401** (token actually invalid/wiped). **HTTP 403 does NOT require re-registration** — it just means the agent process is down and the tunnel is disconnected. Starting the agent process reconnects the tunnel and the token recovers automatically.
 
-**Important:** Start observer FIRST, then register agents and keep them all running. Killing a registered agent immediately makes its sandbox go `forbidden` — tokens cannot be reused after that.
+**Important:** Start observer FIRST, then register agents and keep them all running.
 
 **For slaves:**
 
@@ -269,9 +271,9 @@ All three per-agent `.codex/config.toml` files (`driver-codex-local/.codex/`, `s
 
 | Agent | short_id | workspace_id |
 | --- | --- | --- |
-| driver | `9ve6sfzf` | `96bd3120-a725-44d9-a047-a75ed89af3ed` |
-| slave-A | `82arwg4f` | `96bd3120-a725-44d9-a047-a75ed89af3ed` |
-| slave-B | `53et0rx4` | `96bd3120-a725-44d9-a047-a75ed89af3ed` |
+| driver | `f7etz3du` | `96bd3120-a725-44d9-a047-a75ed89af3ed` |
+| slave-A | `xzd7jj4a` | `96bd3120-a725-44d9-a047-a75ed89af3ed` |
+| slave-B | `esgi0dx4` | `96bd3120-a725-44d9-a047-a75ed89af3ed` |
 
 ## Common failure modes
 
@@ -281,8 +283,8 @@ All three per-agent `.codex/config.toml` files (`driver-codex-local/.codex/`, `s
 | Slave runs but commander UI doesn't show it | `daemon.auto_start: false` in slave's config.yaml | Flip to `true`, restart |
 | `wait_task` reports `failed` with `codex exit: exit status 1` and no output | Per-agent `.codex/config.toml` points at a model the proxy can't route | Align to working model + provider (see above) |
 | `submit_task` succeeds but always lands on slave-A regardless of `target_short_id` | Used `target_short_id` arg (doesn't exist in inputSchema); driver silently falls back to `driver_defaults.target_display_name` | Use `target_display_name` |
-| `whoami` returns 403 | sandbox state went `offline` or `forbidden` on agentserver | Re-register (no other fix; this is the issue #290 / sandbox-token-forbidden behavior) |
-| Killing a slave makes its sandbox immediately `forbidden` | agentserver detects tunnel disconnect and flips sandbox state | Don't kill agents between registration and test completion; re-register if needed |
+| `whoami` returns 403 | sandbox state went `offline` or `forbidden` because the agent process is down (tunnel disconnected) | Just start the agent process — the tunnel reconnects and the sandbox returns to `running`. No re-registration needed. |
+| `whoami` returns 401 | credentials were actually revoked or wiped | Re-register |
 | Driver MCP `tools/call` reports `user cancelled MCP tool call` | Upstream model request was 429 / capacity / network-cancelled mid-tool-call; codex relabels it as user-cancel | Retry; if persistent, swap models per the provider section |
 | `list_agents` only returns one slave even though both daemons are healthy | Second slave's PublishCard hasn't propagated yet (race with first invocation) or the second slave's last reconnect cycle re-published stale card | Wait 30-60s and retry; if persistent, restart the missing slave to trigger a fresh PublishCard |
 

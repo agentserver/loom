@@ -62,11 +62,13 @@ type LoginState = {
   loginID?: string;
   verifyURL?: string;
   error?: string;
+  interval?: number;
 };
 
 type LoginResponse = {
   login_id: string;
   verification_uri_complete: string;
+  interval?: number;
 };
 
 type LoginPollResponse = {
@@ -249,7 +251,7 @@ export function CommanderApp() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const body = (await res.json()) as LoginPollResponse;
         if (body.status === 'pending') {
-          if (!cancelled) timer = window.setTimeout(poll, 1500);
+          if (!cancelled) timer = window.setTimeout(poll, (login.interval ?? 5) * 1000);
           return;
         }
         if (body.status === 'ok') {
@@ -276,7 +278,7 @@ export function CommanderApp() {
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [loadTree, login.loginID, login.phase, login.verifyURL]);
+  }, [loadTree, login.loginID, login.phase, login.verifyURL, login.interval]);
 
   async function startLogin() {
     setLogin({ phase: 'starting' });
@@ -288,6 +290,7 @@ export function CommanderApp() {
         phase: 'pending',
         loginID: body.login_id,
         verifyURL: body.verification_uri_complete,
+        interval: body.interval,
       });
     } catch (err) {
       setLogin({ phase: 'error', error: err instanceof Error ? err.message : String(err) });
