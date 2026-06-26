@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/yourorg/multi-agent/internal/commanderhub"
+	"github.com/yourorg/multi-agent/internal/commanderhub/authstore"
 	"github.com/yourorg/multi-agent/internal/identity"
 	"github.com/yourorg/multi-agent/internal/identity/static"
 	"github.com/yourorg/multi-agent/internal/objectstore"
@@ -50,6 +51,12 @@ type Options struct {
 	MaxObjectProxyBytes int64
 	RegisterDisabled    bool
 	AgentserverURL      string // PR-3: enables /commander surface (empty = disabled)
+
+	// AuthStore is the commander login/session persistence layer. REQUIRED
+	// when AgentserverURL != "". NewWithResolverOptions panics if
+	// AgentserverURL is set and AuthStore is nil — silent in-memory fallback
+	// would re-introduce the multi-pod login bug this package was built to fix.
+	AuthStore authstore.Store
 }
 
 // New constructs the observerweb HTTP handler. If usHandler is non-nil,
@@ -98,7 +105,10 @@ func NewWithResolverOptions(s Store, usHandler *userspace.Handler, resolver iden
 	mux := http.NewServeMux()
 	mountRoutes(mux, h, usHandler)
 	if opts.AgentserverURL != "" {
-		commanderhub.MountAll(mux, resolver, opts.AgentserverURL)
+		if opts.AuthStore == nil {
+			panic("observerweb: AuthStore is required when AgentserverURL is set (see internal/commanderhub/authstore)")
+		}
+		commanderhub.MountAll(mux, resolver, opts.AgentserverURL, opts.AuthStore)
 	}
 	return mux
 }

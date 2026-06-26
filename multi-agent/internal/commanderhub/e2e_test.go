@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/yourorg/multi-agent/internal/commander"
+	"github.com/yourorg/multi-agent/internal/commanderhub/authstore"
 	"github.com/yourorg/multi-agent/internal/executor"
 	"github.com/yourorg/multi-agent/internal/identity"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
@@ -27,7 +28,7 @@ func TestE2E_SubjectAndWorkspaceIsolation(t *testing.T) {
 		"tok-BW2": {UserID: "bob", WorkspaceID: "W2"},
 	}}
 	hub := NewHub(resolver)
-	auth := NewAuthenticator(resolver, "https://unused/") // bearer path; device flow not exercised
+	auth := NewAuthenticator(resolver, "https://unused/", authstore.NewInMemoryStore()) // bearer path; device flow not exercised
 	mux := http.NewServeMux()
 	Mount(mux, hub, auth)
 	mux.Handle("/api/daemon-link", hub)
@@ -102,7 +103,7 @@ func TestE2e_TurnSSEBearer(t *testing.T) {
 		"tok-AW": {UserID: "alice", WorkspaceID: "W"},
 	}}
 	hub := NewHub(resolver)
-	auth := NewAuthenticator(resolver, "https://unused/")
+	auth := NewAuthenticator(resolver, "https://unused/", authstore.NewInMemoryStore())
 	mux := http.NewServeMux()
 	Mount(mux, hub, auth)
 	mux.Handle("/api/daemon-link", hub)

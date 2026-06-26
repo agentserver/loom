@@ -16,6 +16,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/yourorg/multi-agent/internal/commanderhub/authstore"
 	"github.com/yourorg/multi-agent/internal/identity"
 	agentidentity "github.com/yourorg/multi-agent/internal/identity/agentserver"
 	"github.com/yourorg/multi-agent/internal/identity/static"
@@ -225,8 +226,15 @@ func main() {
 		},
 	}
 
+	authStore, err := buildCommanderAuthStore(cfg, st.DB())
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	log.Printf("observer-server listening on %s", cfg.ListenAddr)
-	app := observerweb.NewWithResolverOptions(st, usHandler, resolver, observerWebOptions(cfg, objects))
+	opts := observerWebOptions(cfg, objects)
+	opts.AuthStore = authStore
+	app := observerweb.NewWithResolverOptions(st, usHandler, resolver, opts)
 	srv := newHTTPServer(cfg.ListenAddr, withHealth(app, func(ctx context.Context) error {
 		return st.DB().PingContext(ctx)
 	}))
@@ -243,7 +251,32 @@ func runMigrationsOnly(cfg *Config) error {
 	if err := userspace.MigrateForDriver(st.DB(), cfg.Store.Driver); err != nil {
 		return fmt.Errorf("userspace migrate: %w", err)
 	}
+	if cfg.Store.Driver == "postgres" {
+		if err := authstore.MigratePostgres(st.DB()); err != nil {
+			return fmt.Errorf("commanderhub authstore migrate: %w", err)
+		}
+	}
 	return nil
+}
+
+// buildCommanderAuthStore picks the authstore.Store implementation for the
+// configured driver. postgres → run MigratePostgres + NewPostgresStore so
+// every observer-server pod can serve any commander request. sqlite / empty
+// → fall back to in-memory: still single-pod, but explicit about it via a
+// startup log line. Any other driver value is a config error.
+func buildCommanderAuthStore(cfg *Config, db *sql.DB) (authstore.Store, error) {
+	switch cfg.Store.Driver {
+	case "postgres":
+		if err := authstore.MigratePostgres(db); err != nil {
+			return nil, fmt.Errorf("commanderhub authstore migrate: %w", err)
+		}
+		return authstore.NewPostgresStore(db), nil
+	case "sqlite", "":
+		log.Printf("commanderhub: using in-memory store (driver=%q is single-pod only)", cfg.Store.Driver)
+		return authstore.NewInMemoryStore(), nil
+	default:
+		return nil, fmt.Errorf("commanderhub: unsupported store.driver %q", cfg.Store.Driver)
+	}
 }
 
 func shouldMigrateUserspaceOnStartup(driver string) bool {

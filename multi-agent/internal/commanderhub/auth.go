@@ -6,16 +6,18 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 
+	"github.com/yourorg/multi-agent/internal/commanderhub/authstore"
 	"github.com/yourorg/multi-agent/internal/identity"
 )
 
@@ -24,17 +26,22 @@ const (
 	sessionTTL        = 12 * time.Hour
 	loginTTL          = 10 * time.Minute
 	deviceClientID    = "agentserver-agent-cli"
-	// maxPendingLogins bounds the in-flight login map. POST /login is
-	// unauthenticated (it's the auth entry); an attacker spamming it without
-	// ever polling would otherwise grow the map without bound. pollLogin
-	// goroutines self-terminate after dc.ExpiresIn, so this cap plus the lazy
-	// TTL sweep below bounds both the map and the goroutine count — no
-	// background sweeper is needed.
-	maxPendingLogins = 64
+
+	// pollOnceTimeout is the per-call upper bound on agentserver
+	// /api/oauth2/token round-trips. agentserver is LAN-local; p99 is far
+	// below this.
+	pollOnceTimeout = 5 * time.Second
+
+	// storeWriteTimeout bounds every DB write that must survive client
+	// disconnect. See Authenticator.writeCtx — paired with WithoutCancel so
+	// a client cancellation does not abort the unkillable write but also
+	// cannot leak a goroutine if Postgres or the pool stalls.
+	storeWriteTimeout = 5 * time.Second
 )
 
-// DeviceCode is the observer-internal view of an agentserver device-authorization
-// response. Code is the server-side secret handed to PollToken.
+// DeviceCode is the observer-internal view of an agentserver
+// device-authorization response. Code is the server-side secret handed to
+// PollOnce.
 type DeviceCode struct {
 	Code                    string
 	VerificationURIComplete string
@@ -47,11 +54,27 @@ type loginToken struct {
 	IDToken     string
 }
 
-// deviceFlow is the seam between Authenticator and the OAuth grant. Production
-// uses agentsdkDeviceFlow; tests inject a fake.
+// deviceFlow is the seam between Authenticator and the OAuth grant.
+// Production uses agentsdkDeviceFlow; tests inject a fake.
+//
+// PollOnce semantics:
+//
+//	tokenReady=true                          → token in `tok`, no more polls needed
+//	tokenReady=false, retryable=true         → keep polling on the next /poll tick
+//	    slowDown=true                        → the throttle should add 5 s
+//	tokenReady=false, retryable=false, err!=nil
+//	                                         → terminal upstream failure; err is a
+//	                                            sentinel (authstore.ErrAuthorization*)
+//	                                            or a generic err mapped to
+//	                                            FailureDeviceFlow by SanitizeFailure.
+//
+// PollOnce MUST NOT echo raw HTTP response bodies in any return value (5xx
+// bodies and even some 4xx OAuth bodies may carry token-shaped junk).
 type deviceFlow interface {
 	RequestCode(ctx context.Context) (DeviceCode, error)
-	PollToken(ctx context.Context, code DeviceCode) (loginToken, error)
+	PollOnce(ctx context.Context, code DeviceCode) (
+		tok loginToken, tokenReady, retryable, slowDown bool, err error,
+	)
 }
 
 // agentsdkDeviceFlow wraps the real agentserver device-code endpoints.
@@ -59,10 +82,8 @@ type deviceFlow interface {
 // agentsdk shapes (confirmed via go doc on agentserver v0.48.1):
 //
 //	RequestDeviceCode(ctx, serverURL) (*agentsdk.DeviceAuthResponse, error)
-//	PollForToken(ctx, serverURL, *agentsdk.DeviceAuthResponse) (*agentsdk.TokenResponse, error)
-//
-// DeviceAuthResponse{ DeviceCode, UserCode, VerificationURI,
-// VerificationURIComplete, ExpiresIn int (seconds), Interval }.
+//	DeviceAuthResponse{ DeviceCode, UserCode, VerificationURI,
+//	  VerificationURIComplete, ExpiresIn int (seconds), Interval }.
 type agentsdkDeviceFlow struct{ serverURL string }
 
 func (f agentsdkDeviceFlow) RequestCode(ctx context.Context) (DeviceCode, error) {
@@ -78,129 +99,128 @@ func (f agentsdkDeviceFlow) RequestCode(ctx context.Context) (DeviceCode, error)
 	}, nil
 }
 
-func (f agentsdkDeviceFlow) PollToken(ctx context.Context, code DeviceCode) (loginToken, error) {
+// PollOnce executes a single agentserver /api/oauth2/token round-trip and
+// classifies the outcome. NEVER echoes the upstream response body in err.
+func (f agentsdkDeviceFlow) PollOnce(ctx context.Context, code DeviceCode) (
+	loginToken, bool, bool, bool, error,
+) {
 	tokenURL := strings.TrimRight(f.serverURL, "/") + "/api/oauth2/token"
-	interval := code.Interval
-	if interval < 5*time.Second {
-		interval = 5 * time.Second
+
+	form := url.Values{
+		"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
+		"client_id":   {deviceClientID},
+		"device_code": {code.Code},
 	}
-	deadline := time.Now().Add(code.ExpiresIn)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		// Local construction failed; treat as terminal (no upstream body).
+		return loginToken{}, false, false, false, errors.New("device flow: bad request")
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	for {
-		if time.Now().After(deadline) {
-			return loginToken{}, fmt.Errorf("authorization expired, please try again")
-		}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		// Network error (dial/timeout/EOF). Don't surface raw err to keep
+		// callers' sanitization simple; signal retryable.
+		return loginToken{}, false, true, false, nil
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
 
-		select {
-		case <-ctx.Done():
-			return loginToken{}, ctx.Err()
-		case <-time.After(interval):
+	if resp.StatusCode == http.StatusOK {
+		var tokenResp struct {
+			AccessToken string `json:"access_token"`
+			IDToken     string `json:"id_token"`
 		}
+		if err := json.Unmarshal(body, &tokenResp); err != nil {
+			// 200 with malformed body: terminal, no body interpolation.
+			return loginToken{}, false, false, false, errors.New("device flow: bad token response")
+		}
+		return loginToken{AccessToken: tokenResp.AccessToken, IDToken: tokenResp.IDToken},
+			true, false, false, nil
+	}
 
-		form := url.Values{
-			"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
-			"client_id":   {deviceClientID},
-			"device_code": {code.Code},
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
-		if err != nil {
-			return loginToken{}, fmt.Errorf("create token request: %w", err)
-		}
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if resp.StatusCode >= 500 {
+		// Transient upstream error; do NOT include body (may contain
+		// token-shaped junk per security analysis).
+		return loginToken{}, false, true, false, nil
+	}
 
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			continue
-		}
+	// 4xx: only the OAuth-defined error codes are well known. Parse just
+	// the `error` field — never the full body.
+	var errResp struct {
+		Error string `json:"error"`
+	}
+	_ = json.Unmarshal(body, &errResp)
 
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-
-		if resp.StatusCode == http.StatusOK {
-			var tokenResp struct {
-				AccessToken string `json:"access_token"`
-				IDToken     string `json:"id_token"`
-			}
-			if err := json.Unmarshal(body, &tokenResp); err != nil {
-				return loginToken{}, fmt.Errorf("decode token response: %w", err)
-			}
-			return loginToken{AccessToken: tokenResp.AccessToken, IDToken: tokenResp.IDToken}, nil
-		}
-
-		var errResp struct {
-			Error string `json:"error"`
-		}
-		_ = json.Unmarshal(body, &errResp)
-
-		switch errResp.Error {
-		case "authorization_pending":
-			continue
-		case "slow_down":
-			interval += 5 * time.Second
-			continue
-		case "access_denied":
-			return loginToken{}, fmt.Errorf("authorization denied by user")
-		case "expired_token":
-			return loginToken{}, fmt.Errorf("authorization expired, please try again")
-		default:
-			return loginToken{}, fmt.Errorf("token error: %s", errResp.Error)
-		}
+	switch errResp.Error {
+	case "authorization_pending":
+		return loginToken{}, false, true, false, nil
+	case "slow_down":
+		return loginToken{}, false, true, true, nil
+	case "access_denied":
+		return loginToken{}, false, false, false, authstore.ErrAuthorizationDenied
+	case "expired_token":
+		return loginToken{}, false, false, false, authstore.ErrAuthorizationExpired
+	default:
+		// Unknown 4xx (including bad request, slow_down typo, etc.):
+		// terminal but no body interpolation.
+		return loginToken{}, false, false, false, errors.New("device flow: unknown error")
 	}
 }
 
-type session struct {
-	token     string
-	identity  identity.Identity
-	expiresAt time.Time
-}
-
-type loginState struct {
-	code      DeviceCode
-	sessionID string // set when PollToken succeeds
-	failed    bool
-	failure   string
-	done      bool
-	createdAt time.Time // set when the entry is created; drives loginTTL reaping
-}
-
-// Authenticator drives the web login (device flow) and owns the cookie→token
-// session store. CommanderIdentity is the auth check used by /api/commander/*.
+// Authenticator drives the web login (device flow) and owns CommanderIdentity
+// for the /api/commander/* surface. All login + session state lives in
+// authstore.Store; this struct holds zero cross-pod state.
 type Authenticator struct {
 	resolver identity.Resolver
 	flow     deviceFlow
-
-	sessMu   sync.Mutex
-	sessions map[string]*session
-
-	loginMu sync.Mutex
-	logins  map[string]*loginState
+	store    authstore.Store
 }
 
 // NewAuthenticator builds an Authenticator backed by the real agentserver
-// device flow at agentserverURL. Used by observerweb wiring (Task 8).
-func NewAuthenticator(resolver identity.Resolver, agentserverURL string) *Authenticator {
-	return newAuthenticatorWithFlow(resolver, agentsdkDeviceFlow{serverURL: agentserverURL})
+// device flow at agentserverURL.
+func NewAuthenticator(resolver identity.Resolver, agentserverURL string, store authstore.Store) *Authenticator {
+	return newAuthenticatorWithFlow(resolver, agentsdkDeviceFlow{serverURL: agentserverURL}, store)
 }
 
-// newAuthenticatorWithFlow lets tests inject a fake deviceFlow.
-func newAuthenticatorWithFlow(resolver identity.Resolver, flow deviceFlow) *Authenticator {
+// newAuthenticatorWithFlow lets tests inject a fake deviceFlow + Store.
+func newAuthenticatorWithFlow(resolver identity.Resolver, flow deviceFlow, store authstore.Store) *Authenticator {
 	return &Authenticator{
 		resolver: resolver,
 		flow:     flow,
-		sessions: make(map[string]*session),
-		logins:   make(map[string]*loginState),
+		store:    store,
 	}
 }
 
-// CommanderIdentity authenticates a /api/commander/* request: cookie session
-// first (cached identity), then Authorization: Bearer (resolve), else false.
+// writeCtx is the canonical wrapper for any store call that must survive
+// client disconnect. WithoutCancel preserves request-scoped values (trace
+// IDs etc.) while dropping cancel + deadline; the 5 s timeout caps how long
+// a Postgres or pool stall can keep a goroutine alive.
+//
+// Acceptable parent values:
+//   - r.Context()           — request-scoped, may already be done; writeCtx
+//                             still gives the write a fresh 5 s budget
+//   - context.Background()  — explicit when the request ctx is irrelevant
+func (a *Authenticator) writeCtx(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), storeWriteTimeout)
+}
+
+// CommanderIdentity authenticates a /api/commander/* request.
+//   - cookie hits store.GetSession; on non-ErrNotFound store error → fail
+//     closed (do NOT widen the attack surface via Bearer)
+//   - ErrNotFound or no cookie → fall through to Bearer
 func (a *Authenticator) CommanderIdentity(r *http.Request) (identity.Identity, bool) {
 	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
-		a.sessMu.Lock()
-		s := a.sessions[c.Value]
-		a.sessMu.Unlock()
-		if s != nil && time.Now().Before(s.expiresAt) {
-			return s.identity, true
+		sess, err := a.store.GetSession(r.Context(), c.Value)
+		switch {
+		case err == nil:
+			return sess.Identity, true
+		case errors.Is(err, authstore.ErrNotFound):
+			// fall through to Bearer fallback below
+		default:
+			log.Printf("commanderhub: GetSession error: %v", err)
+			return identity.Identity{}, false
 		}
 	}
 	if tok, ok := bearerToken(r.Header.Get("Authorization")); ok {
@@ -212,23 +232,15 @@ func (a *Authenticator) CommanderIdentity(r *http.Request) (identity.Identity, b
 	return identity.Identity{}, false
 }
 
-// putSession is a test helper that seeds a session and returns its id.
-func (a *Authenticator) putSession(token string, ident identity.Identity) string {
-	sid := randomID()
-	a.sessMu.Lock()
-	a.sessions[sid] = &session{token: token, identity: ident, expiresAt: time.Now().Add(sessionTTL)}
-	a.sessMu.Unlock()
-	return sid
-}
-
 // ServeLogin: POST /api/commander/login → starts device flow, returns verify URL.
 //
-// The pending slot is RESERVED under the lock BEFORE the agentserver RequestCode
-// call: an unauthenticated POST /login is the auth entry point, so it must not
-// amplify upstream. Reserving the placeholder first (lazy sweep + cap + insert)
-// means concurrent requests serialize on the cap before any HTTP call — overflow
-// requests are 429'd without ever hitting agentserver. On RequestCode failure the
-// reserved slot is released.
+// Flow (see design § 6):
+//  1. lid := randomID()
+//  2. ReserveLogin (advisory-lock-serialized cap check + insert reservation)
+//  3. RequestCode using r.Context() (so client cancel really cancels upstream)
+//  4. FinalizeReservedLogin using writeCtx(r.Context()) — unkillable write
+//  5. If anything past step 2 fails or client cancelled, DeleteLogin with
+//     writeCtx(context.Background()) so cleanup uses a fresh budget
 func (a *Authenticator) ServeLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -237,49 +249,49 @@ func (a *Authenticator) ServeLogin(w http.ResponseWriter, r *http.Request) {
 
 	lid := randomID()
 	now := time.Now()
-	a.loginMu.Lock()
-	// Lazy reaping of orphan entries (created but never polled to a terminal /
-	// expired state): drop anything older than loginTTL before deciding whether
-	// there's room for a new entry. No background sweeper goroutine — this is
-	// the only place orphans are reaped, and it runs on every /login.
-	for k, st := range a.logins {
-		if now.Sub(st.createdAt) > loginTTL {
-			delete(a.logins, k)
+
+	if err := a.store.ReserveLogin(r.Context(), lid, now, loginTTL); err != nil {
+		if errors.Is(err, authstore.ErrCapped) {
+			http.Error(w, "too many pending logins", http.StatusTooManyRequests)
+			return
+		}
+		http.Error(w, "store unavailable", http.StatusBadGateway)
+		return
+	}
+
+	// Reservation owned; any failure past this point requires cleanup.
+	cleanup := func() {
+		ctx, cancel := a.writeCtx(context.Background())
+		defer cancel()
+		if err := a.store.DeleteLogin(ctx, lid); err != nil {
+			log.Printf("commanderhub: post-reserve DeleteLogin(%s) failed: %v", lid, err)
 		}
 	}
-	if len(a.logins) >= maxPendingLogins {
-		a.loginMu.Unlock()
-		http.Error(w, "too many pending logins", http.StatusTooManyRequests)
-		return
-	}
-	// RESERVE the slot: insert a placeholder (no code yet) so the cap holds
-	// atomically before the upstream call. Concurrent requests serialize here.
-	a.logins[lid] = &loginState{createdAt: now}
-	a.loginMu.Unlock()
 
-	// Now the agentserver call, gated by the reserved slot. Do NOT hold the
-	// lock during this HTTP call.
 	dc, err := a.flow.RequestCode(r.Context())
 	if err != nil {
-		a.loginMu.Lock()
-		delete(a.logins, lid) // release the reserved slot
-		a.loginMu.Unlock()
-		http.Error(w, "device flow: "+err.Error(), http.StatusBadGateway)
+		cleanup()
+		http.Error(w, "device flow: "+string(authstore.SanitizeFailure(err)), http.StatusBadGateway)
+		return
+	}
+	if r.Context().Err() != nil {
+		// Client gave up between ReserveLogin and now; abandon.
+		cleanup()
 		return
 	}
 
-	// Fill in the reserved entry. It was created moments ago (createdAt=now),
-	// so it cannot have been TTL-swept in the sub-millisecond window; if it
-	// were somehow nil, skip the poller — defensive, effectively unreachable.
-	a.loginMu.Lock()
-	st := a.logins[lid]
-	if st != nil {
-		st.code = dc
-	}
-	a.loginMu.Unlock()
-
-	if st != nil {
-		go a.pollLogin(lid, dc)
+	wctx, cancel := a.writeCtx(r.Context())
+	defer cancel()
+	if err := a.store.FinalizeReservedLogin(wctx, lid,
+		dc.Code, time.Now().Add(dc.ExpiresIn),
+		int(dc.Interval/time.Second)); err != nil {
+		cleanup()
+		if errors.Is(err, authstore.ErrNotFound) {
+			http.Error(w, "login expired during init", http.StatusBadGateway)
+		} else {
+			http.Error(w, "store unavailable", http.StatusBadGateway)
+		}
+		return
 	}
 
 	writeJSON(w, map[string]any{
@@ -289,103 +301,174 @@ func (a *Authenticator) ServeLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (a *Authenticator) pollLogin(lid string, dc DeviceCode) {
-	ctx, cancel := context.WithTimeout(context.Background(), dc.ExpiresIn)
-	defer cancel()
-	tok, err := a.flow.PollToken(ctx, dc)
-	a.loginMu.Lock()
-	st := a.logins[lid]
-	a.loginMu.Unlock()
-	if st == nil {
-		return
-	}
-	if err != nil {
-		a.loginMu.Lock()
-		st.failed = true
-		st.failure = err.Error()
-		a.loginMu.Unlock()
-		return
-	}
-	ident, err := identityFromIDToken(tok.IDToken, time.Now())
-	if err != nil {
-		a.loginMu.Lock()
-		st.failed = true
-		st.failure = err.Error()
-		a.loginMu.Unlock()
-		return
-	}
-	sid := a.putSession(tok.AccessToken, ident)
-	a.loginMu.Lock()
-	st.sessionID = sid
-	st.done = true
-	a.loginMu.Unlock()
-}
-
 // ServeLoginPoll: GET /api/commander/login/poll?id=<login_id>.
 //
-// Each login is one-shot: a terminal result (failed or done) is returned at
-// most once — the entry is deleted on the poll that observes it, so a replay
-// poll gets 404. Abandoned or never-completing entries are reaped lazily once
-// they exceed loginTTL (best-effort; no background sweeper).
+// New design (see § 6): [C1] success Set-Cookie + 200 ok inline. [B] only
+// services rare "another pod wrote terminal" cases and degrades to 401
+// "authorization expired". Plaintext sid never crosses pods.
 func (a *Authenticator) ServeLoginPoll(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	lid := r.URL.Query().Get("id")
-	// Snapshot the entry's state under the lock; pollLogin writes these fields
-	// from its own goroutine, so reading them unlocked would race.
-	a.loginMu.Lock()
-	st := a.logins[lid]
-	var (
-		failed    bool
-		failure   string
-		done      bool
-		sessionID string
-		expired   bool
-	)
-	if st != nil {
-		failed = st.failed
-		failure = st.failure
-		done = st.done
-		sessionID = st.sessionID
-		expired = time.Since(st.createdAt) > loginTTL
+	if lid == "" {
+		http.Error(w, "missing id", http.StatusBadRequest)
+		return
 	}
-	// One-shot: consume terminal/expired entries on the poll that observes them.
-	if st != nil && (failed || done || expired) {
-		delete(a.logins, lid)
-	}
-	a.loginMu.Unlock()
 
-	if st == nil || expired {
+	rec, err := a.store.GetLogin(r.Context(), lid)
+	if errors.Is(err, authstore.ErrNotFound) {
 		http.Error(w, "unknown login", http.StatusNotFound)
 		return
 	}
-	if failed {
-		// Consumed: one-shot. A replay poll will get 404.
-		if failure == "" {
-			failure = "login failed"
-		}
-		writeJSONStatus(w, http.StatusUnauthorized, map[string]any{"status": "error", "error": failure})
+	if err != nil {
+		http.Error(w, "store unavailable", http.StatusBadGateway)
 		return
 	}
-	if !done {
+
+	now := time.Now()
+	if !rec.ExpiresAt.After(now) {
+		// [A3] expired — best-effort consume so the row goes away even if
+		// the sweeper hasn't run yet.
+		cctx, cancel := a.writeCtx(r.Context())
+		_, _ = a.store.ConsumeLogin(cctx, lid)
+		cancel()
+		http.Error(w, "unknown login", http.StatusNotFound)
+		return
+	}
+
+	// [B] terminal: consume one-shot and respond.
+	if rec.SessionIDHash != "" || rec.Failure != "" {
+		cctx, cancel := a.writeCtx(r.Context())
+		consumed, cerr := a.store.ConsumeLogin(cctx, lid)
+		cancel()
+		if errors.Is(cerr, authstore.ErrNotFound) {
+			http.Error(w, "unknown login", http.StatusNotFound)
+			return
+		}
+		if cerr != nil {
+			http.Error(w, "store unavailable", http.StatusBadGateway)
+			return
+		}
+		if consumed.Failure != "" {
+			writeJSONStatus(w, http.StatusUnauthorized, map[string]any{
+				"status": "error", "error": string(consumed.Failure),
+			})
+			return
+		}
+		// Done on another pod / lost-response replay — we don't have the
+		// plaintext sid, so the user must reinitiate.
+		writeJSONStatus(w, http.StatusUnauthorized, map[string]any{
+			"status": "error", "error": string(authstore.FailureAuthorizationExpired),
+		})
+		return
+	}
+
+	// [A4] reserved (RequestCode hasn't returned yet from the pod that
+	// owns the POST /login) — keep frontend polling.
+	if rec.DeviceCode == "" {
 		writeJSON(w, map[string]any{"status": "pending"})
 		return
 	}
-	// done: set cookie (entry already consumed above — one-shot). A replay poll gets 404.
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    sessionID,
-		Path:     "/",
-		HttpOnly: true,
-		// Secure only over real TLS (direct or via forwarding proxy) so the
-		// cookie is accepted on loopback HTTP (http://127.0.0.1) during dev.
-		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   int(sessionTTL / time.Second),
-	})
-	writeJSON(w, map[string]any{"status": "ok"})
+
+	// [C-throttle] honor agentserver-derived next_poll_at.
+	if rec.NextPollAt.After(now) {
+		writeJSON(w, map[string]any{"status": "pending"})
+		return
+	}
+
+	// [C] do a single PollOnce.
+	pollCtx, pollCancel := context.WithTimeout(r.Context(), pollOnceTimeout)
+	defer pollCancel()
+	dc := DeviceCode{
+		Code:      rec.DeviceCode,
+		ExpiresIn: time.Until(rec.CodeExpiresAt),
+		Interval:  time.Duration(rec.IntervalSeconds) * time.Second,
+	}
+	tok, ready, retryable, slowDown, perr := a.flow.PollOnce(pollCtx, dc)
+
+	switch {
+	case ready:
+		// [C1] success: parse id_token, persist, set cookie.
+		ident, idErr := identityFromIDToken(tok.IDToken, time.Now())
+		if idErr != nil {
+			wctx, wcancel := a.writeCtx(r.Context())
+			if err := a.store.MarkLoginFailed(wctx, lid,
+				authstore.SanitizeFailure(authstore.ErrIDTokenInvalid)); err != nil &&
+				!errors.Is(err, authstore.ErrNotFound) {
+				log.Printf("commanderhub: MarkLoginFailed(%s) failed: %v", lid, err)
+			}
+			wcancel()
+			writeJSONStatus(w, http.StatusUnauthorized, map[string]any{
+				"status": "error", "error": string(authstore.FailureIDTokenInvalid),
+			})
+			return
+		}
+		sid := randomID()
+		wctx, wcancel := a.writeCtx(r.Context())
+		mderr := a.store.MarkLoginDone(wctx, lid, authstore.SessionRecord{
+			PlaintextSessionID: sid,
+			Identity:           ident,
+			ExpiresAt:          time.Now().Add(sessionTTL),
+		})
+		wcancel()
+		if errors.Is(mderr, authstore.ErrNotFound) {
+			// Another pod already finalized this login. Our sid was never
+			// committed; nothing to clean up. Tell the user to retry.
+			writeJSONStatus(w, http.StatusUnauthorized, map[string]any{
+				"status": "error", "error": string(authstore.FailureAuthorizationExpired),
+			})
+			return
+		}
+		if mderr != nil {
+			http.Error(w, "store unavailable", http.StatusBadGateway)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     sessionCookieName,
+			Value:    sid,
+			Path:     "/",
+			HttpOnly: true,
+			Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
+			SameSite: http.SameSiteLaxMode,
+			MaxAge:   int(sessionTTL / time.Second),
+		})
+		writeJSON(w, map[string]any{"status": "ok"})
+		return
+
+	case retryable:
+		// [C2] pending or slow_down — update throttle.
+		nextInterval := rec.IntervalSeconds
+		if slowDown {
+			nextInterval += 5
+		}
+		if nextInterval < authstore.MinIntervalSeconds {
+			nextInterval = authstore.MinIntervalSeconds
+		}
+		wctx, wcancel := a.writeCtx(r.Context())
+		if err := a.store.SetPollThrottle(wctx, lid, nextInterval,
+			time.Now().Add(time.Duration(nextInterval)*time.Second)); err != nil {
+			log.Printf("commanderhub: SetPollThrottle(%s) failed: %v", lid, err)
+		}
+		wcancel()
+		writeJSON(w, map[string]any{"status": "pending"})
+		return
+
+	default:
+		// [C3] terminal upstream failure.
+		fail := authstore.SanitizeFailure(perr)
+		wctx, wcancel := a.writeCtx(r.Context())
+		if err := a.store.MarkLoginFailed(wctx, lid, fail); err != nil &&
+			!errors.Is(err, authstore.ErrNotFound) {
+			log.Printf("commanderhub: MarkLoginFailed(%s) failed: %v", lid, err)
+		}
+		wcancel()
+		writeJSONStatus(w, http.StatusUnauthorized, map[string]any{
+			"status": "error", "error": string(fail),
+		})
+		return
+	}
 }
 
 // ServeLogout: POST /api/commander/logout.
@@ -394,13 +477,65 @@ func (a *Authenticator) ServeLogout(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if c, err := r.Cookie(sessionCookieName); err == nil {
-		a.sessMu.Lock()
-		delete(a.sessions, c.Value)
-		a.sessMu.Unlock()
+	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
+		ctx, cancel := a.writeCtx(r.Context())
+		if err := a.store.DeleteSession(ctx, c.Value); err != nil {
+			log.Printf("commanderhub: DeleteSession failed: %v", err)
+		}
+		cancel()
 	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1})
 	writeJSON(w, map[string]any{"status": "ok"})
+}
+
+// putSession is a test helper kept for compatibility with cross-file tests
+// (http_test.go uses it to bypass the device flow when only the cookie path
+// matters). It exercises the same store.MarkLoginDone path the production
+// flow uses, so the test surface is real.
+//
+// Returns the plaintext sid (what the cookie carries). _token is unused —
+// commander no longer persists access_token; the parameter is kept so test
+// call sites do not need to change.
+func (a *Authenticator) putSession(_token string, ident identity.Identity) string {
+	ctx := context.Background()
+	lid := "test-seed-" + randomID()
+	if err := a.store.ReserveLogin(ctx, lid, time.Now(), loginTTL); err != nil {
+		panic(err)
+	}
+	if err := a.store.FinalizeReservedLogin(ctx, lid, "dc",
+		time.Now().Add(5*time.Minute), 5); err != nil {
+		panic(err)
+	}
+	sid := randomID()
+	if err := a.store.MarkLoginDone(ctx, lid, authstore.SessionRecord{
+		PlaintextSessionID: sid,
+		Identity:           ident,
+		ExpiresAt:          time.Now().Add(sessionTTL),
+	}); err != nil {
+		panic(err)
+	}
+	return sid
+}
+
+// runSweep is the per-pod sweep loop. Launched as a goroutine from MountAll.
+// Tied to the process lifetime; observer-server has no graceful shutdown
+// path that this would benefit from.
+func (a *Authenticator) runSweep(interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for range t.C {
+		sweepCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		loginsDel, sessionsDel, err := a.store.SweepExpired(sweepCtx)
+		cancel()
+		if err != nil {
+			log.Printf("commanderhub: sweep error: %v", err)
+			continue
+		}
+		if loginsDel > 0 || sessionsDel > 0 {
+			log.Printf("commanderhub: sweep removed %d logins, %d sessions",
+				loginsDel, sessionsDel)
+		}
+	}
 }
 
 // --- shared helpers (writeJSON also used by http.go in Phase 3) ---
@@ -428,11 +563,11 @@ func identityFromIDToken(raw string, now time.Time) (identity.Identity, error) {
 	// owner key comes from the device-flow id_token claims.
 	parts := strings.Split(raw, ".")
 	if len(parts) != 3 {
-		return identity.Identity{}, fmt.Errorf("%w: OAuth token response missing id_token claims", identity.ErrInvalid)
+		return identity.Identity{}, fmt.Errorf("%w: OAuth token response missing id_token claims", authstore.ErrIDTokenInvalid)
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return identity.Identity{}, fmt.Errorf("%w: decode id_token claims: %v", identity.ErrInvalid, err)
+		return identity.Identity{}, fmt.Errorf("%w: decode id_token claims: %v", authstore.ErrIDTokenInvalid, err)
 	}
 	var claims struct {
 		Subject       string `json:"sub"`
@@ -441,16 +576,16 @@ func identityFromIDToken(raw string, now time.Time) (identity.Identity, error) {
 		ExpiresAt     int64  `json:"exp"`
 	}
 	if err := json.Unmarshal(payload, &claims); err != nil {
-		return identity.Identity{}, fmt.Errorf("%w: decode id_token claims: %v", identity.ErrInvalid, err)
+		return identity.Identity{}, fmt.Errorf("%w: decode id_token claims: %v", authstore.ErrIDTokenInvalid, err)
 	}
 	if claims.Subject == "" {
-		return identity.Identity{}, fmt.Errorf("%w: id_token missing sub", identity.ErrInvalid)
+		return identity.Identity{}, fmt.Errorf("%w: id_token missing sub", authstore.ErrIDTokenInvalid)
 	}
 	if claims.WorkspaceID == "" {
-		return identity.Identity{}, fmt.Errorf("%w: id_token missing workspace_id", identity.ErrInvalid)
+		return identity.Identity{}, fmt.Errorf("%w: id_token missing workspace_id", authstore.ErrIDTokenInvalid)
 	}
 	if claims.ExpiresAt > 0 && !now.Before(time.Unix(claims.ExpiresAt, 0)) {
-		return identity.Identity{}, fmt.Errorf("%w: id_token expired", identity.ErrInvalid)
+		return identity.Identity{}, fmt.Errorf("%w: id_token expired", authstore.ErrIDTokenInvalid)
 	}
 	return identity.Identity{
 		UserID:      claims.Subject,

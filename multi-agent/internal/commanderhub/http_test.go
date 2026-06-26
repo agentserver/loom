@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/yourorg/multi-agent/internal/commander"
+	"github.com/yourorg/multi-agent/internal/commanderhub/authstore"
 	"github.com/yourorg/multi-agent/internal/executor"
 	"github.com/yourorg/multi-agent/internal/identity"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
@@ -29,7 +30,7 @@ import (
 func commanderSetup(t *testing.T, resolver *fakeResolver, token string, backend agentbackend.Backend) (*httptest.Server, *Hub, *Authenticator, owner, *http.Cookie, func()) {
 	t.Helper()
 	hub := NewHub(resolver)
-	auth := newAuthenticatorWithFlow(resolver, newFakeDeviceFlow(token))
+	auth := newAuthenticatorWithFlow(resolver, newFakeDeviceFlow(token, "W1"), authstore.NewInMemoryStore())
 	mux := http.NewServeMux()
 	mux.Handle("/api/daemon-link", hub) // hub.ServeHTTP upgrades the daemon WS
 	Mount(mux, hub, auth)
@@ -646,7 +647,7 @@ func TestHTTP_TurnAwaitingUserLeavesStoreAwaitingApproval(t *testing.T) {
 func TestHTTP_TurnPreStreamDaemonGoneLeavesStoreDisconnected(t *testing.T) {
 	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
 	hub := NewHub(resolver)
-	auth := newAuthenticatorWithFlow(resolver, newFakeDeviceFlow("tok-alice"))
+	auth := newAuthenticatorWithFlow(resolver, newFakeDeviceFlow("alice", "W1"), authstore.NewInMemoryStore())
 	mux := http.NewServeMux()
 	Mount(mux, hub, auth)
 	srv := httptest.NewServer(mux)
@@ -673,7 +674,7 @@ func TestHTTP_TurnPreStreamDaemonGoneLeavesStoreDisconnected(t *testing.T) {
 func TestHTTP_TurnMissingDaemonDoesNotCreateTurnState(t *testing.T) {
 	resolver := &fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}}
 	hub := NewHub(resolver)
-	auth := newAuthenticatorWithFlow(resolver, newFakeDeviceFlow("tok-alice"))
+	auth := newAuthenticatorWithFlow(resolver, newFakeDeviceFlow("alice", "W1"), authstore.NewInMemoryStore())
 	mux := http.NewServeMux()
 	Mount(mux, hub, auth)
 	srv := httptest.NewServer(mux)
