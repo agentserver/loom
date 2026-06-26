@@ -5,6 +5,14 @@ the production-shaped topology in a local minikube cluster and asserts the
 cross-pod contracts that the unit + integration tests in
 `internal/commanderhub/` cover at the Go level.
 
+> **Sibling test suite:** `tests/prod_test/` runs against the real
+> `agent.cs.ac.cn` agentserver and exercises driver/slave/tunnel/MCP
+> behavior, but it spins up a **single** observer process so it cannot
+> reproduce any multi-pod failure mode. See
+> `tests/prod_test/E2E_RUNBOOK.md` § "Commander multi-pod e2e (k8s)"
+> for the split — short version: use prod_test for driver/slave/codex,
+> use this suite for commander state crossing pods.
+
 ## Topology
 
 ```
