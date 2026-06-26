@@ -364,7 +364,10 @@ type deviceFlow interface {
     //                                       slowDown=true → 调用方应增加下次 next_poll_at 步长
     //   tokenReady=false retryable=false → terminal failure (access_denied / expired_token …)
     //
-    // err 已 sanitize(authstore.SanitizeFailure 已应用),可直接 MarkLoginFailed 入库。
+    // err 是 sentinel(authstore.ErrAuthorizationDenied / ErrAuthorizationExpired /
+    // ErrIDTokenInvalid)或 generic 错误,**永远不含上游响应体**。
+    // Authenticator 在 [C1] / [C3] 入口处统一调 authstore.SanitizeFailure(err)
+    // 转成 Failure 枚举后再 MarkLoginFailed。
     PollOnce(ctx context.Context, code DeviceCode) (tok loginToken, tokenReady, retryable, slowDown bool, err error)
 }
 ```
@@ -382,7 +385,9 @@ POST /api/commander/login
 
 3. // 一旦 reserve 成功,后续清理必须 unkillable —— 否则 client cancel
    //  会留下占位行直到 loginTTL,unauth 客户端可循环填满 cap。
-   bgCtx := context.WithoutCancel(ctx)
+   //  所有写路径使用 Authenticator.writeCtx(...) helper(§5 "Bounded background
+   //  contexts" 已规范化:WithoutCancel + 5s WithTimeout 一起用)。
+   //  cleanup 路径明确从 context.Background() 派生,避免被失败的 r.Context() 污染。
 
 4. // RequestCode 仍用 r.Context() 以便客户端真的不要时取消上游往返;
    //  失败路径用 bgCtx 释放占位。
@@ -423,8 +428,8 @@ GET /api/commander/login/poll?id=<lid>
                             → 200 {"status":"pending"}      (下一跳由前端 1.5s 节流)
 
 [B] rec.SessionIDHash != "" OR rec.Failure != "" (已是终态):
-    bgCtx := context.WithoutCancel(ctx)
-    consumed, err := store.ConsumeLogin(bgCtx, lid)
+    wctx, cancel := a.writeCtx(ctx); defer cancel()
+    consumed, err := store.ConsumeLogin(wctx, lid)
     err==ErrNotFound  → 404 "unknown login"
     err!=nil          → 502 "store unavailable"
     if consumed.Failure != "":
@@ -443,7 +448,10 @@ GET /api/commander/login/poll?id=<lid>
     dc := DeviceCode{Code: rec.DeviceCode, ExpiresIn: time.Until(rec.CodeExpiresAt),
                      Interval: time.Duration(rec.IntervalSeconds)*time.Second}
     tok, ready, retryable, slowDown, perr := flow.PollOnce(pollCtx, dc)
-    bgCtx := context.WithoutCancel(ctx)                       // 写路径用
+    // All store writes below MUST use a.writeCtx(ctx) (= WithoutCancel + 5s
+    // WithTimeout, per §5 "Bounded background contexts"). The pseudo-code
+    // uses `bgCtx, _ := a.writeCtx(ctx)` as shorthand; the implementation
+    // pairs it with `defer cancel()`.
 
     [C1] ready==true:
         ident, err := identityFromIDToken(tok.IDToken, time.Now())

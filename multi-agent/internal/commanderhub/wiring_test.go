@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/yourorg/multi-agent/internal/commanderhub/authstore"
 	"github.com/yourorg/multi-agent/internal/identity"
 )
 
@@ -17,7 +18,7 @@ func TestMountAll_RegistersAllSurfaces(t *testing.T) {
 		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
 	}}
 	mux := http.NewServeMux()
-	MountAll(mux, resolver, "https://agent.example/")
+	MountAll(mux, resolver, "https://agent.example/", authstore.NewInMemoryStore())
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
