@@ -1,0 +1,236 @@
+# Commander state-persistence e2e: 3-replica observer-server fronted by a
+# round-robin Service, sharing a single Postgres pod and pointed at a mock
+# agentserver. Matches the topology the production fix is for (3 pods, no
+# session affinity).
+#
+# Apply order does not matter much (Deployments wait for dependencies via
+# readiness checks), but the test driver does block on all pods being Ready.
+#
+# All resources live in namespace `commander-e2e`.
+#
+# Images expected to be loaded into the cluster's docker (minikube docker-env):
+#   - observer-server:e2e
+#   - mock-agentserver:e2e
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: commander-e2e
+---
+# ============================================================================
+# Postgres — single replica, ephemeral. Backs commander_logins + commander_sessions
+# for all observer pods. Same shared-DB story as production.
+# ============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: commander-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - {name: POSTGRES_DB, value: observer}
+            - {name: POSTGRES_USER, value: observer}
+            - {name: POSTGRES_PASSWORD, value: observer}
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "observer", "-d", "observer"]
+            initialDelaySeconds: 2
+            periodSeconds: 2
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits:   {cpu: 500m, memory: 512Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: commander-e2e
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+# ============================================================================
+# Mock agentserver — replaces agent.cs.ac.cn for the test. Returns
+# deterministic id_token claims (user_id=alice-mock, workspace_id=W-mock).
+# /api/agent/whoami accepts only "fixture-proxy" Bearer.
+# ============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-agentserver
+  namespace: commander-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mock-agentserver
+  template:
+    metadata:
+      labels:
+        app: mock-agentserver
+    spec:
+      containers:
+        - name: mock-agentserver
+          image: mock-agentserver:e2e
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: MOCK_LISTEN, value: ":18080"}
+            - {name: MOCK_PUBLIC_URL, value: "http://mock-agentserver.commander-e2e.svc.cluster.local:18080"}
+          ports:
+            - containerPort: 18080
+          readinessProbe:
+            httpGet: {path: /healthz, port: 18080}
+            initialDelaySeconds: 1
+            periodSeconds: 2
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits:   {cpu: 200m, memory: 128Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-agentserver
+  namespace: commander-e2e
+spec:
+  selector:
+    app: mock-agentserver
+  ports:
+    - port: 18080
+      targetPort: 18080
+---
+# ============================================================================
+# observer-server: 3 replicas, ClusterIP Service WITHOUT sessionAffinity.
+# This is the exact topology that exposed the original bug.
+# ============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: observer-config
+  namespace: commander-e2e
+data:
+  observer.yaml: |
+    listen_addr: ":8090"
+    production: false
+    identity:
+      legacy_api_keys:
+        enabled: false
+      agentserver:
+        enabled: true
+        url: "http://mock-agentserver.commander-e2e.svc.cluster.local:18080"
+        fresh_ttl: 60s
+        stale_grace: 5m
+        request_timeout: 5s
+        startup_probe: true
+    store:
+      driver: postgres
+      postgres:
+        dsn_env: OBSERVER_DATABASE_URL
+        max_open_conns: 10
+        max_idle_conns: 5
+        conn_max_lifetime: 30m
+      allow_sqlite_in_production: true
+    object_store:
+      # memory driver: each pod has its own in-process map. Fine for the
+      # e2e because we never exercise artifact upload/read — the test only
+      # touches /api/commander/login + /poll + /tree + /logout, none of
+      # which interact with the object store.
+      driver: memory
+      proxy:
+        enabled: true
+        max_bytes: 8388608
+    telemetry:
+      enabled: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: observer-server
+  namespace: commander-e2e
+spec:
+  # Three replicas: this is the topology the production bug surfaced under.
+  replicas: 3
+  selector:
+    matchLabels:
+      app: observer-server
+  template:
+    metadata:
+      labels:
+        app: observer-server
+    spec:
+      # Init container runs schema migrations once before any observer pod
+      # serves traffic. Mirrors the helm `migration-job.yaml` pattern but
+      # inlined to keep this e2e self-contained.
+      initContainers:
+        - name: wait-and-migrate
+          image: observer-server:e2e
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              until pg_status=$(observer-server -config /config/observer.yaml -migrate-only 2>&1); do
+                echo "migrate retry: $pg_status"
+                sleep 2
+              done
+              echo "migrate ok"
+          env:
+            - {name: OBSERVER_DATABASE_URL, value: "postgres://observer:observer@postgres.commander-e2e.svc.cluster.local:5432/observer?sslmode=disable"}
+          volumeMounts:
+            - {name: config, mountPath: /config}
+      containers:
+        - name: observer-server
+          image: observer-server:e2e
+          imagePullPolicy: IfNotPresent
+          args: ["-config", "/config/observer.yaml"]
+          env:
+            - {name: OBSERVER_DATABASE_URL, value: "postgres://observer:observer@postgres.commander-e2e.svc.cluster.local:5432/observer?sslmode=disable"}
+          ports:
+            - {name: http, containerPort: 8090}
+          readinessProbe:
+            httpGet: {path: /readyz, port: 8090}
+            initialDelaySeconds: 2
+            periodSeconds: 2
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8090}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - {name: config, mountPath: /config}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits:   {cpu: 500m, memory: 512Mi}
+      volumes:
+        - name: config
+          configMap:
+            name: observer-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: observer
+  namespace: commander-e2e
+spec:
+  # CRITICAL: no sessionAffinity. This is the topology the production
+  # bug existed under — and the fix's job is to remain correct under it.
+  selector:
+    app: observer-server
+  ports:
+    - {name: http, port: 8090, targetPort: 8090}
