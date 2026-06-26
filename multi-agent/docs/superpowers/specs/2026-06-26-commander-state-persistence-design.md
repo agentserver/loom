@@ -275,6 +275,22 @@ type Store interface {
 }
 ```
 
+### Bounded background contexts for unkillable writes
+
+任何 `context.WithoutCancel(ctx)` 包装的 DB 写,在调用 store 之前**必须**再叠一层 `context.WithTimeout(bgCtx, storeWriteTimeout)`,`storeWriteTimeout = 5*time.Second`(常量)。这避免 Postgres 或连接池阻塞时,handler / sweep goroutine 永久挂起、把连接池吃干(Codex Stage 1 R3 blocker)。规范化的模式:
+
+```go
+bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), storeWriteTimeout)
+defer cancel()
+err := store.MarkLoginDone(bgCtx, lid, sess)
+```
+
+Authenticator 应封一个 helper `(a *Authenticator) writeCtx(ctx context.Context) (context.Context, context.CancelFunc)` 复用。
+
+适用方法:`FinalizeReservedLogin`、`DeleteLogin`(post-reserve cleanup)、`MarkLoginDone`、`MarkLoginFailed`、`SetPollThrottle`、`ConsumeLogin`(在 [B]/[A3])、`DeleteSession`(在 ServeLogout)。`ReserveLogin` 不需要(它跑在 r.Context 上,client cancel 时安全;失败就让 cap 名额随上下文清,Reserve 之前没有副作用)。`SweepExpired` 用 sweeper-owned 30s 上下文,沿用 §8 已有写法,与本节一致。
+
+`§6 POST /login` 和 `/poll` 状态机里的所有 `WithoutCancel` 调用点都按上述模式叠 `WithTimeout`。Stage 2 plan 把这条作为单独一项工程检查。
+
 ### SanitizeFailure(err error) Failure  (`internal/commanderhub/authstore/failure.go`)
 
 ```go
@@ -316,7 +332,9 @@ func SanitizeFailure(err error) Failure {
 
 `deviceFlow.PollOnce` 内部在感知 `access_denied` / `expired_token` / `slow_down` / `authorization_pending` 后,**返回 sentinel error**(`errAuthorizationDenied` 等), 不返回 raw HTTP body 字符串。Authenticator 收到 `perr` 直接 `SanitizeFailure(perr)`。
 
-`commander_logins.failure` 列 CHECK `length(failure) <= 256` 是防误用的最后兜底(枚举最长 256 内,但 CHECK 阻止未来加超长枚举或绕过 SanitizeFailure 的代码路径写超长串)。
+**DB 端枚举执法**:`commander_logins.failure` 列 CHECK `failure IS NULL OR failure IN ('authorization denied','authorization expired','upstream timeout','id token invalid','device flow error','store unavailable')`。这把"枚举性"从 Go 层强化到 DB 层 —— 即便有人将来 `authstore.Failure(err.Error())` 强转写入,SQL 也会拒绝(Codex Stage 1 R3 安全条:`Failure` newtype 不是 unforgeable)。CHECK 列表跟 `failure.go` 常量定义必须同步;Stage 2 plan 加一项"failure.go 改动必须同步 schema_postgres.sql + migration"。
+
+`commander_logins.failure` 列还附带 `length(failure) <= 256` CHECK 作为长度兜底。
 
 ### 设计要点
 
@@ -507,6 +525,16 @@ CREATE TABLE IF NOT EXISTS commander_logins (
     CONSTRAINT commander_logins_failure_len CHECK (
         failure IS NULL OR length(failure) <= 256
     ),
+    CONSTRAINT commander_logins_failure_enum CHECK (
+        failure IS NULL OR failure IN (
+            'authorization denied',
+            'authorization expired',
+            'upstream timeout',
+            'id token invalid',
+            'device flow error',
+            'store unavailable'
+        )
+    ),
     CONSTRAINT commander_logins_login_id_nonempty CHECK (length(login_id) > 0),
     -- reserved (device_code = '') 行必须 code_expires_at IS NULL;
     -- 非 reserved 行必须 code_expires_at IS NOT NULL。完整性兜底。
@@ -598,6 +626,8 @@ COMMIT;
 inmemory 实现:`sync.Mutex` + `len(map) < 1024`(同样严格保证)。
 
 advisory lock 常量 `8442987421341` 应集中定义在 `authstore/postgres.go` 一个 const,加注释解释它的 namespace。其他 Postgres 表如有 advisory lock 协同也用同一文件 const 区段。
+
+**已知:已完成的 `[C1]` 行(`session_id_hash IS NOT NULL`)仍占 cap 直到 `loginTTL = 10 min` 过期**,因为新版本不在 [C1] 同步 ConsumeLogin。1024 上限下不构成实际限制(每分钟峰值 ≤ 100 次成功登录就远低于 cap 周转率)。如果将来上线发现 cap 被堆挤,简单对策是 [C1] 成功后调度一次 `WithoutCancel + 5s timeout` 的 `ConsumeLogin`(本 pod 自己最先看到 done,所以一致性不变)—— Stage 2 plan 评估是否本次就做。
 
 inmemory `ReserveLogin` 实现:`mu.Lock` → sweep expired → check len → insert → unlock。
 
@@ -695,7 +725,7 @@ func MountAll(mux *http.ServeMux, resolver identity.Resolver,
   - MarkLoginFailed 输入超 256 字符 → store 实现侧拒绝或截断(契约:caller 已 sanitize,但 store 也守底线 = CHECK 约束)
   - ConsumeLogin reserved / pending / done / failed 四态都能拿出 + 删
   - ConsumeLogin one-shot:第二次拿 ErrNotFound
-  - SetNextPollAt OK + 不存在 lid 返 nil
+  - SetPollThrottle 写完 GetLogin 验 interval_seconds + next_poll_at;不存在 lid 返 nil
   - GetSession 用明文 sid 查 → hash 命中;用错的 sid → ErrNotFound
   - GetSession 过期 → ErrNotFound(SQL/逻辑层过滤)
   - DeleteSession 幂等,DeleteSession 后 GetSession ErrNotFound
@@ -712,7 +742,7 @@ func MountAll(mux *http.ServeMux, resolver identity.Resolver,
   - 截断 257 字符 → 256
   - 输入包含 `Bearer xxx` / `access_token=xxx` / `id_token=xxx` / 类 JWT (三段 base64) → 输出不含
   - 已知错误模式映射成枚举
-  - `nil` 输入 → 空串
+  - `nil` 输入 → `FailureDeviceFlow`(与 SanitizeFailure 实现一致;原 nit 已修)
 
 ### Authenticator 层
 
@@ -811,4 +841,4 @@ func MountAll(mux *http.ServeMux, resolver identity.Resolver,
 - `sessions` 表加 `last_seen_at` 做空转回收(空闲 4h 主动失效)
 - observer-server graceful shutdown(其它 ticker 也受益)
 - 把 commander 跟 observer 拆 deployment(本变更让这件事变得显然可行,但不在本次)
-- `MarkLoginDone` 改 `pg_advisory_xact_lock` 严格防 cap 超额(目前 ≤ 副本数轻微超额)
+- 用 `commander_logins.consumed_at` 软删替代 `DELETE RETURNING`,以便对完成的 logins 做事后审计
