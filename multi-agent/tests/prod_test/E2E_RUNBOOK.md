@@ -2,11 +2,13 @@
 
 How to set up, run, and tear down the prod e2e environment against the real `agent.cs.ac.cn` agentserver. This document covers **infrastructure only** — specific test targets live in the test scripts themselves (`driver_mcp_e2e.py`, `commander-live.spec.ts`, etc.).
 
+> **For commander multi-pod / state-persistence verification, this runbook is the WRONG tool** — host mode runs a single observer process at `:18091`, so the production "two pods, different state" failure mode cannot reproduce here. Use `tests/k8s_commander/` (minikube + 3-replica observer + mock agentserver) for that surface. The two suites are complementary; see [§ Commander multi-pod e2e (k8s)](#commander-multi-pod-e2e-k8s) below.
+
 The `tests/prod_test/` tree (except whitelisted files) is `.gitignore`-d: it holds OAuth credentials, sqlite state, and locally-rebuilt binaries. **The actual configs live in this directory in the canonical repo checkout (`/root/multi-agent/multi-agent/tests/prod_test/` in the dev environment) and are NOT visible from worktrees.**
 
 > **After each successful or failed run, update this file in-place** with whatever drifted: short_ids, port numbers, model/provider settings, config paths, new gotchas. The file is meant to stay current with the actual setup state.
 
-## Topology
+## Topology (host mode — single observer process)
 
 ```
                       ┌────────────────────────┐
@@ -285,6 +287,100 @@ All three per-agent `.codex/config.toml` files (`driver-codex-local/.codex/`, `s
 | Killing a slave makes its sandbox immediately `forbidden` | agentserver detects tunnel disconnect and flips sandbox state | Don't kill agents between registration and test completion; re-register if needed |
 | Driver MCP `tools/call` reports `user cancelled MCP tool call` | Upstream model request was 429 / capacity / network-cancelled mid-tool-call; codex relabels it as user-cancel | Retry; if persistent, swap models per the provider section |
 | `list_agents` only returns one slave even though both daemons are healthy | Second slave's PublishCard hasn't propagated yet (race with first invocation) or the second slave's last reconnect cycle re-published stale card | Wait 30-60s and retry; if persistent, restart the missing slave to trigger a fresh PublishCard |
+| Commander login intermittently `HTTP 404` in production but never in host e2e | Multi-pod observer-server with in-memory commander state — host e2e runs ONE observer process so it can't reproduce | Use `tests/k8s_commander/` to reproduce; the fix landed via authstore.Store (PR #37) |
+
+## Commander multi-pod e2e (k8s)
+
+Host-mode e2e above runs a **single** observer process at `:18091`. That is fine for exercising driver/slave behavior against the real agentserver, but it CANNOT reproduce or regress-test failure modes that only appear when commander state must be shared across observer-server replicas — most prominently the `登录失败: HTTP 404` symptom that motivated `internal/commanderhub/authstore/` (PR #37).
+
+`tests/k8s_commander/` covers exactly that surface. It stands up the production-shaped topology in a local minikube cluster:
+
+```
+                +-----------------------+
+                | mock-agentserver (1×) |
+                +-----------+-----------+
+                            |
+                +-----------+-----------+
+                | observer (3×, ClusterIP, NO sessionAffinity) |
+                +-----------+-----------+
+                            |
+                      postgres (1×)
+```
+
+**The mock agentserver is intentional** — this suite isolates the multi-pod cross-replica state contracts (login_id consistency, cookie hash storage, advisory-lock cap) from device-flow + sandbox + tunnel concerns that host-mode e2e already covers against the real agentserver. Don't try to point it at `agent.cs.ac.cn`; that's host-mode's job.
+
+### When to run which
+
+| Surface to verify | Use | Why |
+| --- | --- | --- |
+| Driver MCP tool semantics, slave registration, tunnel/sandbox lifecycle, real codex calls | host e2e (`tests/prod_test/run_e2e.sh`) | Needs the real agentserver + a real OAuth-issued sandbox |
+| Commander login pollable from any pod, cookie usable across pods, cross-pod logout, cap under concurrency, `pg_advisory_xact_lock` actually serializing | k8s e2e (`tests/k8s_commander/run_e2e.sh`) | Needs ≥2 observer pods sharing one Postgres |
+| Unit + tx-level contracts of `authstore.Store` | `go test ./internal/commanderhub/...` (and `OBSERVER_POSTGRES_TEST_DSN=... go test ...` for the postgres conformance suite) | Cheap and DSN-gated |
+
+### Run
+
+Prereqs: `docker`, `minikube` ≥ 1.38, `kubectl`. See `tests/k8s_commander/README.md` for the canonical instructions; quick version:
+
+```bash
+# One-time per host:
+minikube start --driver=docker --force --cpus=4 --memory=6g --kubernetes-version=v1.31.4
+
+# Build images inside minikube's docker daemon (no registry push):
+eval $(minikube docker-env)
+docker build -f cmd/observer-server/Dockerfile -t observer-server:e2e .
+
+# Build the mock agentserver — its Go file lives at
+# tests/k8s_commander/mock-agentserver/main.go but is built against the
+# repo's go.mod, so build the binary then bake into the image:
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' \
+    -o tests/k8s_commander/mock-agentserver/mock-agentserver \
+    ./tests/k8s_commander/mock-agentserver
+docker build -t mock-agentserver:e2e tests/k8s_commander/mock-agentserver/
+
+# Apply + run:
+kubectl apply -f tests/k8s_commander/manifests.yaml
+kubectl -n commander-e2e wait --for=condition=Ready pod -l app=observer-server --timeout=180s
+./tests/k8s_commander/run_e2e.sh
+```
+
+### What each step proves (and what it would have looked like pre-fix)
+
+| Step | Asserted property | Pre-fix behavior |
+| --- | --- | --- |
+| 1 | POST /login on pod A → 200 + login_id | 200 (same) |
+| 2 | GET /poll on **pod B** → 200 pending | **404 "unknown login"** — the production bug |
+| 3 | [C1] inline Set-Cookie 200 ok via Service round-robin | First wrong-pod /poll 404'd |
+| 4 | Cookie authenticates on **every pod** (cross-pod `GetSession` via shared DB) | Only the issuing pod accepted it |
+| 5 | Logout on one pod invalidates cookie **everywhere** | Other pods kept accepting it |
+| 6 | 1100 concurrent POST /login: 200 count never exceeds `MaxActiveLogins=1024`, AND some 429s observed | Per-pod 64-cap allowed 3× upstream amplification |
+
+### Re-running
+
+The k8s e2e leaves commander state in Postgres between runs (Step 6 in particular fills the cap). Either wait `loginTTL = 10min` for the sweeper, or:
+
+```bash
+kubectl -n commander-e2e exec deploy/postgres -- \
+  psql -U observer -d observer -c 'TRUNCATE commander_logins, commander_sessions'
+```
+
+### Teardown
+
+```bash
+kubectl delete namespace commander-e2e        # keep minikube
+# or
+minikube delete                                 # destroy the cluster too
+```
+
+### Common k8s e2e failure modes
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| `observer-server` pod stuck in `Init:0/1` for >30s | Postgres still starting (DB connection retries log every 2s in `wait-and-migrate` init) | Wait — the init container retries forever; this is expected for ~30-40s |
+| Step 6 reports `200=N, 429=0` with N << 1024 | port-forward connection churn dropped requests before they hit the cap | Restart minikube; if persistent, lower `xargs -P` concurrency in `run_e2e.sh` |
+| Step 6 reports `200 > 1024` | `pg_advisory_xact_lock` not actually serializing — implementation regression | Check `internal/commanderhub/authstore/postgres.go::ReserveLogin` advisory-lock call is intact |
+| `userspace object store is required when store.driver is postgres` in observer logs | configmap missing `object_store.driver: memory` block | Reapply `manifests.yaml`; the `memory` driver is required because the commander e2e never exercises the object proxy but the userspace init path still requires one |
+| `minikube start` warns about root + docker driver | Running as root | Pass `--force`; safe in a dev VM |
+| Step 2 → 404 unexpectedly | Reverted to in-memory state (rebuild without authstore wiring) | Re-run `eval $(minikube docker-env) && docker build -t observer-server:e2e .` from this branch's HEAD |
 
 ## When you finish a run
 
@@ -296,3 +392,9 @@ All three per-agent `.codex/config.toml` files (`driver-codex-local/.codex/`, `s
 - Did the model provider change? Update the "Model provider" section.
 
 The file is one of the few persistent artifacts that survives session/context loss. Memory entries `[[prod-e2e-setup]]` and `[[slave-daemon-startup-race]]` summarize from this file, not the other way around.
+
+For the **k8s commander e2e** section above:
+
+- Did the manifest defaults drift (image tag, postgres image, resource requests)? Update the section + `tests/k8s_commander/README.md`.
+- Did a new "what step N proves" assertion get added to `run_e2e.sh`? Update the step table here.
+- Did a new failure mode bite you under minikube? Add a row to the k8s failure-modes table.
