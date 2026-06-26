@@ -479,10 +479,17 @@ func (a *Authenticator) ServeLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
 		ctx, cancel := a.writeCtx(r.Context())
-		if err := a.store.DeleteSession(ctx, c.Value); err != nil {
-			log.Printf("commanderhub: DeleteSession failed: %v", err)
-		}
+		err := a.store.DeleteSession(ctx, c.Value)
 		cancel()
+		if err != nil {
+			// Surface the failure: if we cleared the cookie + returned 200
+			// while the server-side session row is still alive, the user
+			// would believe they were logged out but other pods would still
+			// accept the cookie. Force the client to retry.
+			log.Printf("commanderhub: DeleteSession failed: %v", err)
+			http.Error(w, "store unavailable", http.StatusBadGateway)
+			return
+		}
 	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1})
 	writeJSON(w, map[string]any{"status": "ok"})
