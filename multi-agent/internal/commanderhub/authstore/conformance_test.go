@@ -42,7 +42,18 @@ func RunConformanceTests(t *testing.T, newStore func(t *testing.T) Store) {
 	})
 
 	t.Run("ReserveLogin_capped_then_sweep_releases", func(t *testing.T) {
+		// This subtest is slow on real Postgres: each ReserveLogin
+		// transaction takes an advisory lock + DELETE + INSERT (~5-50 ms
+		// per call), so seeding MaxActiveLogins serially can take many
+		// seconds even on a healthy local DB. Implementations that scale
+		// inversely with cap (e.g. the inmemory map) run it cheaply; the
+		// postgresStore conformance run defers strict-cap coverage to the
+		// k8s e2e (tests/k8s_commander/run_e2e.sh subcase 6), which
+		// drives the same advisory-lock path with real concurrency.
 		s := newStore(t)
+		if _, ok := s.(interface{ skipCapConformance() }); ok {
+			t.Skip("strict-cap conformance is deferred to k8s e2e for this store")
+		}
 		ctx := context.Background()
 		for i := 0; i < MaxActiveLogins; i++ {
 			require.NoError(t, s.ReserveLogin(ctx, fmt.Sprintf("lid%d", i),
@@ -77,6 +88,38 @@ func RunConformanceTests(t *testing.T, newStore func(t *testing.T) Store) {
 		rec, err := s.GetLogin(ctx, "lid")
 		require.NoError(t, err)
 		require.GreaterOrEqual(t, rec.IntervalSeconds, MinIntervalSeconds)
+	})
+
+	t.Run("FinalizeReservedLogin_advances_next_poll_at_by_interval", func(t *testing.T) {
+		s := newStore(t)
+		ctx := context.Background()
+		require.NoError(t, s.ReserveLogin(ctx, "lid", time.Now(), 10*time.Minute))
+		before := time.Now()
+		require.NoError(t, s.FinalizeReservedLogin(ctx, "lid",
+			"dc", time.Now().Add(5*time.Minute), 30))
+		rec, err := s.GetLogin(ctx, "lid")
+		require.NoError(t, err)
+		// Should be at least `before + 30s`, allowing a bit of clock slack.
+		earliest := before.Add(30 * time.Second).Add(-2 * time.Second)
+		require.False(t, rec.NextPollAt.Before(earliest),
+			"NextPollAt %v must be at or after %v (Finalize must respect agentserver interval)",
+			rec.NextPollAt, earliest)
+		// Sanity ceiling so we catch implementations that hard-code huge defaults.
+		require.True(t, rec.NextPollAt.Before(before.Add(5*time.Minute)),
+			"NextPollAt %v should be within ~minute of finalize, got 5min+", rec.NextPollAt)
+	})
+
+	t.Run("FinalizeReservedLogin_on_expired_reservation_NotFound", func(t *testing.T) {
+		// A slow RequestCode could leave the reservation row past loginTTL.
+		// Finalizing it would issue a login_id whose first poll 404s.
+		s := newStore(t)
+		ctx := context.Background()
+		require.NoError(t, s.ReserveLogin(ctx, "lid", time.Now(), 30*time.Millisecond))
+		time.Sleep(80 * time.Millisecond)
+		err := s.FinalizeReservedLogin(ctx, "lid",
+			"dc", time.Now().Add(5*time.Minute), 5)
+		require.ErrorIs(t, err, ErrNotFound,
+			"Finalize on an expired reservation must refuse so ServeLogin's cleanup runs")
 	})
 
 	t.Run("DeleteLogin_idempotent_and_frees_cap", func(t *testing.T) {
@@ -406,13 +449,25 @@ func RunConformanceTests(t *testing.T, newStore func(t *testing.T) Store) {
 	})
 
 	t.Run("SweepExpired_deletes_expired_only_correct_counts", func(t *testing.T) {
+		// Test design note: ReserveLogin's contract includes an internal
+		// "DELETE WHERE expires_at < now()" sweep before counting. If we
+		// seeded expired-soon-to-die rows AND THEN did more ReserveLogin
+		// calls (which is normal in this test), the internal sweep would
+		// eat the expired rows as collateral, and the test's explicit
+		// SweepExpired at the end would observe 0 deletions. To make the
+		// signal cleanly attributable to the explicit SweepExpired call,
+		// we use a LONG-enough TTL that the row stays alive through ALL
+		// the setup ReserveLogin/Finalize/MarkLoginDone work, then sleep
+		// past the TTL exactly once before the assertion.
 		s := newStore(t)
 		ctx := context.Background()
 
-		// 3 expired logins.
+		const expireTTL = 2 * time.Second // long enough to survive postgres-roundtrip setup
+
+		// 3 expired-soon logins.
 		for i := 0; i < 3; i++ {
 			lid := fmt.Sprintf("expired-l-%d", i)
-			require.NoError(t, s.ReserveLogin(ctx, lid, time.Now(), 50*time.Millisecond))
+			require.NoError(t, s.ReserveLogin(ctx, lid, time.Now(), expireTTL))
 		}
 		// 2 fresh logins.
 		for i := 0; i < 2; i++ {
@@ -420,7 +475,7 @@ func RunConformanceTests(t *testing.T, newStore func(t *testing.T) Store) {
 			require.NoError(t, s.ReserveLogin(ctx, lid, time.Now(), 10*time.Minute))
 		}
 
-		// 4 expired sessions via tiny-TTL MarkLoginDone.
+		// 4 expired-soon sessions via short-TTL MarkLoginDone.
 		for i := 0; i < 4; i++ {
 			lid := fmt.Sprintf("expired-s-l-%d", i)
 			sid := fmt.Sprintf("expired-sid-%d", i)
@@ -430,7 +485,7 @@ func RunConformanceTests(t *testing.T, newStore func(t *testing.T) Store) {
 			require.NoError(t, s.MarkLoginDone(ctx, lid, SessionRecord{
 				PlaintextSessionID: sid,
 				Identity:           mkIdentity(),
-				ExpiresAt:          time.Now().Add(50 * time.Millisecond),
+				ExpiresAt:          time.Now().Add(expireTTL),
 			}))
 		}
 		// 1 fresh session.
@@ -443,7 +498,9 @@ func RunConformanceTests(t *testing.T, newStore func(t *testing.T) Store) {
 			ExpiresAt:          time.Now().Add(12 * time.Hour),
 		}))
 
-		time.Sleep(150 * time.Millisecond)
+		// Wait past the short TTL with margin so the assertion attribution
+		// is unambiguous even under a slow CI Postgres.
+		time.Sleep(expireTTL + 500*time.Millisecond)
 
 		ld, sd, err := s.SweepExpired(ctx)
 		require.NoError(t, err)

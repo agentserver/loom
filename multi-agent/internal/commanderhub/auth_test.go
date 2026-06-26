@@ -260,6 +260,25 @@ func TestAuth_LoginPoll_ReservedState_ReturnsPending(t *testing.T) {
 	require.Contains(t, rec.Body.String(), `"pending"`)
 }
 
+func TestAuth_LoginPoll_FirstPollAfterServeLoginRespectsInterval(t *testing.T) {
+	// Regression: ServeLogin used to leave next_poll_at = reservation time,
+	// so the very first /poll from the frontend (≤1.5s later) called
+	// PollOnce immediately — below the agentserver-advertised interval.
+	// Now FinalizeReservedLogin must seed next_poll_at = now + interval.
+	a, _ := newAuth(t, &fakeResolver{}, newFakeDeviceFlow("alice", "W1"))
+	flow := authFlow(a).(*fakeDeviceFlow)
+	lid, _, code := startLogin(t, a)
+	require.Equal(t, http.StatusOK, code)
+
+	prev := atomic.LoadInt32(&flow.pollOnceN)
+	rec := pollLogin(a, lid, pollOpts{})
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), `"pending"`)
+	require.Equal(t, prev, atomic.LoadInt32(&flow.pollOnceN),
+		"first /poll after ServeLogin must NOT call PollOnce until next_poll_at — got %d → %d",
+		prev, atomic.LoadInt32(&flow.pollOnceN))
+}
+
 func TestAuth_LoginPoll_RespectsNextPollAtThrottle(t *testing.T) {
 	a, store := newAuth(t, &fakeResolver{}, newFakeDeviceFlow("alice", "W1"))
 	lid, _, _ := startLogin(t, a)
