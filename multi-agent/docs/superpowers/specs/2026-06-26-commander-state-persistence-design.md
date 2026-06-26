@@ -77,10 +77,11 @@ Browser (≈1.5 s 后) → GET /login/poll?id=lid → Service round-robin → Po
 | One-shot 消费 | `DELETE … RETURNING *`(Postgres) / map lock+delete(inmemory) | 与今天 in-memory 1:1 等价,不引入 `consumed_at` 软删列 |
 | Session 存储:cookie 明文 / DB 存哈希 | DB 列 `session_id_hash = sha256_hex(sid)`,cookie 仍下发明文 `sid`;`GetSession(sid)` 走 `WHERE session_id_hash = $1`。**`access_token` 不入 DB**(commander 本身只需要 identity,access_token 在登录闭环外没人用) | 替代:明文 sid 入库 → DBA / 备份 / 慢查询日志直接拿到 cookie 等价物。哈希后即便泄露也无法用作 cookie |
 | TTL 清扫 | 写路径懒扫 + 每 pod `1h` `time.Ticker` 兜底 `DELETE WHERE expires_at < now()` | 多 pod 重复执行无害 |
-| `MarkLoginDone` 防孤儿 | **强一致**:一个事务里 `UPDATE commander_logins SET session_id=… WHERE login_id=$1 AND session_id IS NULL AND failure IS NULL AND expires_at>now()`,RowsAffected=0 → 整个事务 rollback,session 不写,返回 `ErrNotFound`。**§7 的"接受孤儿"段落删除** | 替代:接受孤儿。Codex Stage 1 审 blocker #4 指出语义自相矛盾;选最干净的语义 |
-| 服务端节流 `next_poll_at` | `commander_logins.next_poll_at` 列。[C] 分支进入前 `if rec.NextPollAt > now: return pending`;`PollOnce` 后根据返回:`retryable` → `next_poll_at = now + max(5s, Interval)`、`slow_down` → 当前 interval + 5s 持久化 | agentserver `slow_down`/速率防护;不再让前端 1.5 s 转化为后端真的 1.5 s × N 用户 |
+| `MarkLoginDone` 防孤儿 | **强一致**:一个事务里 `UPDATE commander_logins SET session_id_hash=… WHERE login_id=$1 AND session_id_hash IS NULL AND failure IS NULL AND expires_at>now()`,RowsAffected=0 → 整个事务 rollback,session 不写,返回 `ErrNotFound`。**§7 的"接受孤儿"段落删除** | 替代:接受孤儿。Codex Stage 1 审 blocker #4 指出语义自相矛盾;选最干净的语义 |
+| **[C1] 同步 Set-Cookie**(废弃 ★ 不变式) | [C1] 成功 → 立即 Set-Cookie + 返回 `{"status":"ok"}`。[B] 分支只服务 (a) failure → 401 (b) done(说明客户端没收到上次 [C1] 的 200 响应 / 或在另一 pod 走完 [C1])→ **404 `{"status":"error","error":"login already completed"}`,客户端按"重新点登录"处理** | Codex Stage 1 R2 blocker #1。 一致性来源是 `MarkLoginDone` 的 UPDATE WHERE pending(任何并发 [C1] 只有一个能赢得 UPDATE);明文 sid 完全不必跨 pod 传递,DB 列继续只存 hash。罕见的"[C1] done 后客户端断网"窗口 < 1%,UX 同 OAuth device flow 正常重新发起,可接受 |
+| 服务端节流 `next_poll_at` + interval 动态升级 | `commander_logins.next_poll_at` + `interval_seconds` 列。[C] 进入前 `if rec.NextPollAt > now: return pending`;`PollOnce` 后:`retryable` → `next_poll_at = now + max(5s, interval_seconds)`;`slow_down` → `interval_seconds += 5` 且 `next_poll_at` 增量;一次性方法 `SetPollThrottle(ctx, lid, intervalSeconds, nextPollAt)` 同时更新两列 | agentserver `slow_down`/速率防护;一次写避免分两个 SQL 出现"interval 升了 next_poll 没升"的中间态 |
 | Schema 字段 | 行内列(`user_id`、`workspace_id`、`role`、`source`),不存 JSON、**不存 access_token、不存明文 sid**。`logins` 只持久化 `device_code`、`code_expires_at`、`interval_seconds`、`next_poll_at`、`session_id_hash`、`failure` | 紧凑、可索引、易运维 |
-| Failure 文本入库前必须净化 | `sanitizeFailure(err) string`:截断 ≤ 256 字节、剥离上游 raw body / token / device_code / id_token 等 token-shape 子串、统一映射为 `authorization denied` / `authorization expired` / `device flow error`。store 接口标注"failure 必须已 sanitize" | 防 OAuth raw body / token 字符串泄露到 DB 和前端 |
+| Failure 文本入库前必须净化 | `SanitizeFailure(err) string` **只输出枚举集合**:`"authorization denied"` / `"authorization expired"` / `"upstream timeout"` / `"device flow error"` / `"id token invalid"` / `"store unavailable"`。**不接收 raw 字符串、不返回 raw 字符串。** store 接口标注"failure 必须是枚举之一" | Codex Stage 1 R2:regex scrubbing 总会有漏网。enum 是安全的 fail-closed:任何未识别的错误降级为 `"device flow error"` |
 | Schema 迁移 | 同 `userspace.MigratePostgres` 套路:`schema_postgres.sql` 嵌入 + `db.Exec()`;接入 `observer-server --migrate-only`,跟随 helm `migration-job.yaml` 运行 | 不动 helm chart yaml |
 | 测试拓扑 | 1) `authstore_test` 包(`_test.go`)里 `RunConformanceTests(t, factory)` 用同一组断言驱动 inmemory + postgres;2) postgres-specific SQL 方言测试用 recording driver;3) Authenticator 测试用 inmemory store。集成测沿用 `OBSERVER_POSTGRES_TEST_DSN`,空则 skip | 不写双 SQL 方言一致性测,把"两实现行为一致"由 conformance 顶住。conformance 在 `_test.go` 里(Codex Stage 1 nit) |
 | 进程生命周期 | sweep goroutine 直接 `go auth.runSweep(time.Hour)`,跟随进程死(observer-server 无 graceful shutdown) | 不为此引入 ctx 参数 |
@@ -114,18 +115,21 @@ Browser (≈1.5 s 后) → GET /login/poll?id=lid → Service round-robin → Po
 
 ```
 internal/commanderhub/
-  auth.go                            // Authenticator,删 map,持 authstore.Store
+  auth.go                            // Authenticator,删 logins/sessions 内存 map,
+                                     // 持 authstore.Store。无任何 cross-pod 内存状态
   http.go / hub.go / web.go / ...    // 不动
   authstore/                         // 新包
     store.go                         // Store 接口 + LoginRecord/SessionRecord
+    failure.go                       // SanitizeFailure (enum-only) + Failure 类型
     inmemory.go                      // inmemoryStore(map + sync.Mutex)
     postgres.go                      // postgresStore(*sql.DB)
     schema_postgres.sql              // 嵌入
     migrate.go                       // MigratePostgres(db *sql.DB)
-    conformance.go                   // 公共契约测套件(non-_test.go,可复用)
+    conformance_test.go              // 导出 RunConformanceTests,suffix _test.go(Codex Stage 1 nit)
     inmemory_test.go                 // RunConformanceTests + 纯逻辑
     postgres_test.go                 // RunConformanceTests + SQL 方言 + DSN-gated 集成
     sql_dialect_test.go              // recordingSQLDB 套路,无需 DSN
+    failure_test.go                  // SanitizeFailure 枚举性验证
 
 cmd/observer-server/main.go
   - 启动时,如果 driver=postgres,authstore.MigratePostgres(st.DB())
@@ -218,24 +222,32 @@ type Store interface {
     // 调用方负责判 ExpiresAt < now 视为过期。
     GetLogin(ctx context.Context, loginID string) (LoginRecord, error)
 
-    // SetNextPollAt 持久化服务端节流时刻。幂等;不存在的 lid 返回 nil(本次 /poll 失效不破 SLA)。
-    SetNextPollAt(ctx context.Context, loginID string, nextPollAt time.Time) error
+    // SetPollThrottle 单 SQL 同时更新 interval_seconds 与 next_poll_at。
+    // 幂等;不存在的 lid 返回 nil(本次 /poll 节流失效不破 SLA)。
+    // intervalSeconds 必须 > 0(store 实现侧用 CHECK 守住)。
+    SetPollThrottle(ctx context.Context, loginID string, intervalSeconds int, nextPollAt time.Time) error
 
     // MarkLoginDone 单事务原子地:
-    //   1) UPDATE commander_logins SET session_id_hash=$hash WHERE login_id=$lid
-    //        AND session_id_hash IS NULL AND failure IS NULL
-    //        AND device_code != '' AND expires_at > now
+    //   1) UPDATE commander_logins
+    //          SET session_id_hash=$hash, finalized_at=now()
+    //        WHERE login_id=$lid
+    //          AND session_id_hash IS NULL AND failure IS NULL
+    //          AND device_code != '' AND expires_at > now
     //   2) RowsAffected = 0 → ROLLBACK,返回 ErrNotFound
     //   3) RowsAffected = 1 → INSERT INTO commander_sessions ... COMMIT
     //
+    // 必须置 finalized_at,否则 commander_logins_finalized_iff_terminal CHECK 失败。
     // 输入 session.PlaintextSessionID 由实现侧 hash 后写;调用方持有明文用于 Set-Cookie。
     // 输入 ctx 不应在写入路径上被取消(由 Authenticator 用 context.WithoutCancel 包好)。
     MarkLoginDone(ctx context.Context, loginID string, session SessionRecord) error
 
-    // MarkLoginFailed 设 failure 字段(input MUST be sanitized)。
+    // MarkLoginFailed 设 failure 字段(input MUST be a SanitizeFailure enum)。
+    // 单事务原子地置 failure + finalized_at,WHERE session_id_hash IS NULL
+    // AND failure IS NULL AND expires_at > now。
     // 仅在 pending 或 reserved 态成功;终态 / 不存在 / 过期 → ErrNotFound。
-    // 由实现侧用 WHERE session_id_hash IS NULL AND failure IS NULL AND expires_at > now 守住。
-    MarkLoginFailed(ctx context.Context, loginID, sanitizedFailure string) error
+    // 输入 sanitizedFailure 必须是 SanitizeFailure 输出枚举之一,store 侧不再二次过滤;
+    // CHECK 约束 length <= 256 兜底误用。
+    MarkLoginFailed(ctx context.Context, loginID string, sanitizedFailure Failure) error
 
     // ConsumeLogin: 原子 SELECT + DELETE,one-shot 语义的核心。
     // Postgres: DELETE FROM commander_logins WHERE login_id=$1 RETURNING ...
@@ -263,20 +275,48 @@ type Store interface {
 }
 ```
 
-### sanitizeFailure(err error) string
+### SanitizeFailure(err error) Failure  (`internal/commanderhub/authstore/failure.go`)
 
-集中放在 `internal/commanderhub/authstore/sanitize.go`(纯函数,无 DB 依赖,store 实现侧用,Authenticator 也用)。规则:
+```go
+// Failure 是一个 string newtype,只有枚举常量构造合法实例。
+// MarkLoginFailed 的 sanitizedFailure 参数类型即 Failure,编译期阻止 raw string 入库。
+type Failure string
 
-1. 长度截断 ≤ 256 字节
-2. 把已知错误模式映射成枚举字符串:
-   - `errors.Is(err, errAuthorizationDenied)` → `"authorization denied"`
-   - `errors.Is(err, errAuthorizationExpired)` → `"authorization expired"`
-   - context.DeadlineExceeded → `"upstream timeout"`
-   - 其它 → `"device flow error"`
-3. 不让 raw HTTP body、access_token、id_token、device_code 字符串进入返回值
-4. 是 `PollOnce` / `identityFromIDToken` / 任何上游错误的统一出口;入库前必经
+const (
+    FailureAuthorizationDenied  Failure = "authorization denied"
+    FailureAuthorizationExpired Failure = "authorization expired"
+    FailureUpstreamTimeout      Failure = "upstream timeout"
+    FailureIDTokenInvalid       Failure = "id token invalid"
+    FailureDeviceFlow           Failure = "device flow error"
+    FailureStoreUnavailable     Failure = "store unavailable"
+)
 
-`commander_logins.failure` 列也加 `CHECK (length(failure) <= 256)`。
+// SanitizeFailure 是上游错误的唯一出口,fail-closed:
+// 任何未明确识别的错误降级为 FailureDeviceFlow。
+// 永远不返回 raw err.Error() 文本。
+func SanitizeFailure(err error) Failure {
+    if err == nil {
+        return FailureDeviceFlow // defensive; shouldn't be called with nil
+    }
+    if errors.Is(err, context.DeadlineExceeded) {
+        return FailureUpstreamTimeout
+    }
+    if errors.Is(err, errAuthorizationDenied) {
+        return FailureAuthorizationDenied
+    }
+    if errors.Is(err, errAuthorizationExpired) {
+        return FailureAuthorizationExpired
+    }
+    if errors.Is(err, errIDTokenInvalid) {
+        return FailureIDTokenInvalid
+    }
+    return FailureDeviceFlow
+}
+```
+
+`deviceFlow.PollOnce` 内部在感知 `access_denied` / `expired_token` / `slow_down` / `authorization_pending` 后,**返回 sentinel error**(`errAuthorizationDenied` 等), 不返回 raw HTTP body 字符串。Authenticator 收到 `perr` 直接 `SanitizeFailure(perr)`。
+
+`commander_logins.failure` 列 CHECK `length(failure) <= 256` 是防误用的最后兜底(枚举最长 256 内,但 CHECK 阻止未来加超长枚举或绕过 SanitizeFailure 的代码路径写超长串)。
 
 ### 设计要点
 
@@ -321,20 +361,37 @@ POST /api/commander/login
      ErrCapped  → 429 "too many pending logins"
      err != nil → 502 "store unavailable"
      OK         → 继续
-3. dc, err := flow.RequestCode(ctx)
-     err != nil:
-        store.DeleteLogin(ctx, lid)   // best-effort 释放占位
-        return 502 "device flow: <sanitized>"
-4. err := store.FinalizeReservedLogin(ctx, lid,
+
+3. // 一旦 reserve 成功,后续清理必须 unkillable —— 否则 client cancel
+   //  会留下占位行直到 loginTTL,unauth 客户端可循环填满 cap。
+   bgCtx := context.WithoutCancel(ctx)
+
+4. // RequestCode 仍用 r.Context() 以便客户端真的不要时取消上游往返;
+   //  失败路径用 bgCtx 释放占位。
+   dc, err := flow.RequestCode(ctx)
+   if err != nil:
+       store.DeleteLogin(bgCtx, lid)                          // ★ unkillable cleanup
+       return 502 "device flow: " + SanitizeFailure(err)
+   if ctx.Err() != nil:                                       // client 在 RequestCode 后断开
+       store.DeleteLogin(bgCtx, lid)
+       return                                                 // ResponseWriter 已无意义
+
+5. err := store.FinalizeReservedLogin(bgCtx, lid,             // ★ unkillable write
             dc.Code, time.Now().Add(dc.ExpiresIn), int(dc.Interval/time.Second))
-     ErrNotFound → 502 "login expired during init"       (极罕见:sweep 抢先)
-     err != nil  → 502 "store unavailable"
-5. 返回 200 {"verification_uri_complete": dc.VerificationURIComplete, "login_id": lid, "expires_in": ...}
+   if err == ErrNotFound:
+       return 502 "login expired during init"                 (极罕见:sweep 抢先)
+   if err != nil:
+       store.DeleteLogin(bgCtx, lid)
+       return 502 "store unavailable"
+
+6. 200 {"verification_uri_complete": dc.VerificationURIComplete, "login_id": lid, "expires_in": ...}
 ```
 
-Reservation 模式保证 cap 不被 TOCTOU 击穿:无论多少并发请求,Reserve 必先消费 cap 名额。
+Reservation 模式 + 全程 `WithoutCancel` 清理保证 cap 不被 TOCTOU 击穿,也保证 client cancel 不能囤积 reservation。
 
 ### GET /api/commander/login/poll (ServeLoginPoll)
+
+新版本**废弃**之前的 ★ "[B] 唯一终态出口" 不变式。终态在 [C1] / [C3] 现场返回。[B] 只服务"读到已存在的终态"(主要是 failure)或"二次访问已 done"(异常路径)。
 
 ```
 GET /api/commander/login/poll?id=<lid>
@@ -342,95 +399,81 @@ GET /api/commander/login/poll?id=<lid>
 [A] rec, err := store.GetLogin(ctx, lid)
     [A1] ErrNotFound       → 404 "unknown login"
     [A2] 其它 err           → 502 "store unavailable"
-    [A3] rec.ExpiresAt<now  → store.ConsumeLogin best-effort, 404 "unknown login"
+    [A3] rec.ExpiresAt<now  → store.ConsumeLogin(WithoutCancel(ctx)) best-effort
+                              → 404 "unknown login"
     [A4] rec.DeviceCode==""  (reserved 但 RequestCode 还没返回 / fail):
-                            → 200 {"status":"pending"}     (下一跳由前端 1.5s 节流)
+                            → 200 {"status":"pending"}      (下一跳由前端 1.5s 节流)
 
-[B] rec.SessionIDHash != "" OR rec.Failure != "" (terminal):
-    consumed, err := store.ConsumeLogin(ctx, lid)
-    err==ErrNotFound        → 404 "unknown login"          (并发 /poll 抢先,one-shot)
-    err!=nil                → 502 "store unavailable"
-    consumed.Failure != ""  → 401 {"status":"error","error": consumed.Failure}
-                              (Failure 已 sanitized;直接回前端)
-    consumed.SessionIDHash != "":
-        // 此处需要明文 sid 给客户端做 cookie。Hash 入库的方案要求 MarkLoginDone
-        // 调用方持有明文。但 ConsumeLogin 返回的只有 hash,明文已被丢弃。
-        // 解法:见下 "★ 明文 sid 怎么从 [C1] 流到 [B]"
-        Set-Cookie commander_sess=<plaintext>, 200 {"status":"ok"}
+[B] rec.SessionIDHash != "" OR rec.Failure != "" (已是终态):
+    bgCtx := context.WithoutCancel(ctx)
+    consumed, err := store.ConsumeLogin(bgCtx, lid)
+    err==ErrNotFound  → 404 "unknown login"
+    err!=nil          → 502 "store unavailable"
+    if consumed.Failure != "":
+        → 401 {"status":"error","error": string(consumed.Failure)}
+    if consumed.SessionIDHash != "":
+        // [C1] 在某个 pod 成功了,但客户端没收到那次响应(网络抖、断开、跨 pod):
+        // 没有明文 sid 可发,只能让前端重新发起登录流程。
+        → 401 {"status":"error","error":"authorization expired"}
+        // 注:用枚举字符串避免暴露内部信息;前端逻辑跟其它 401 一致。
 
 [C] pending (rec.DeviceCode != ""):
-    [C-throttle] if rec.NextPollAt > now → 200 {"status":"pending"}   // 服务端节流
+    [C-throttle] if rec.NextPollAt > now → 200 {"status":"pending"}
 
-    pollCtx := context.WithTimeout(r.Context(), 5*time.Second)
+    pollCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+    defer cancel()
     dc := DeviceCode{Code: rec.DeviceCode, ExpiresIn: time.Until(rec.CodeExpiresAt),
                      Interval: time.Duration(rec.IntervalSeconds)*time.Second}
     tok, ready, retryable, slowDown, perr := flow.PollOnce(pollCtx, dc)
+    bgCtx := context.WithoutCancel(ctx)                       // 写路径用
 
     [C1] ready==true:
         ident, err := identityFromIDToken(tok.IDToken, time.Now())
         if err != nil:
-            writeCtx := context.WithoutCancel(ctx)                    // ★ 不被客户端断开打断
-            store.MarkLoginFailed(writeCtx, lid, authstore.SanitizeFailure(err))
-            return 200 {"status":"pending"}                           // 下一跳走 [B]
+            store.MarkLoginFailed(bgCtx, lid, SanitizeFailure(err))    // best-effort
+            return 401 {"status":"error","error": string(FailureIDTokenInvalid)}
+
         sid := randomID()
-        writeCtx := context.WithoutCancel(ctx)                        // ★
-        err = store.MarkLoginDone(writeCtx, lid, SessionRecord{
-            PlaintextSessionID: sid,                                  // store 内部 hash
+        err = store.MarkLoginDone(bgCtx, lid, SessionRecord{
+            PlaintextSessionID: sid,                          // store 内部 hash
             Identity:           ident,
             ExpiresAt:          time.Now().Add(sessionTTL),
         })
         if err == ErrNotFound:
-            return 404 "unknown login"
+            // 另一 pod 已经赢了。我们 sid 没人知道,丢弃即可。
+            return 401 {"status":"error","error":"authorization expired"}
         if err != nil:
             return 502 "store unavailable"
 
-        // ★ 明文 sid 暂存(见下方)
-        ourSidByLoginID.Put(lid, sid, ttl=loginTTL)
-        return 200 {"status":"pending"}                               // 不本次发 cookie
+        // ★ NEW 不变式:[C1] 同步发 cookie + ok
+        Set-Cookie commander_sess=<sid>;Path=/;HttpOnly;SameSite=Lax;Secure(if TLS)
+        return 200 {"status":"ok"}
 
     [C2] retryable==true:
-        delta := time.Duration(rec.IntervalSeconds)*time.Second
-        if slowDown: delta += 5*time.Second
-        if delta < 5*time.Second: delta = 5*time.Second
-        nextPollAt := time.Now().Add(delta)
+        intervalSeconds := rec.IntervalSeconds
         if slowDown:
-            // 持久化 interval 增长,后续所有 pod 都尊重
-            store.FinalizeReservedLogin? — 不,改用 store.SetNextPollAt(ctx, lid, nextPollAt)
-        else:
-            store.SetNextPollAt(ctx, lid, nextPollAt)                 // best-effort
+            intervalSeconds += 5                              // §3 决策
+        if intervalSeconds < 5: intervalSeconds = 5
+        nextPollAt := time.Now().Add(time.Duration(intervalSeconds)*time.Second)
+        store.SetPollThrottle(bgCtx, lid, intervalSeconds, nextPollAt) // best-effort
         return 200 {"status":"pending"}
 
     [C3] retryable==false:
-        writeCtx := context.WithoutCancel(ctx)
-        store.MarkLoginFailed(writeCtx, lid, authstore.SanitizeFailure(perr))
-        return 200 {"status":"pending"}                               // 下一跳走 [B] 返回 401
+        store.MarkLoginFailed(bgCtx, lid, SanitizeFailure(perr))       // best-effort
+        return 401 {"status":"error","error": string(SanitizeFailure(perr))}
 ```
 
-### ★ 明文 sid 怎么从 [C1] 流到 [B]
+### 关键不变式(新)
 
-挑战:`MarkLoginDone` 把 hash 入库,明文丢失;下一跳 /poll 走 [B] 时 `ConsumeLogin` 只能拿回 hash,不能下发 cookie。
+> **终态响应在产生终态的同一次 /poll 调用里直接返回。** [B] 只服务"另一 pod 已写下终态,本 pod 读到了" 的少数异常路径,且统一退化为"请重登"。
 
-解法:`Authenticator` 持一个内存 `sidByLoginID map[string]string`(per-pod,key=login_id, value=明文 sid)。当 [C1] 写完 hash 即写本 map(TTL=loginTTL)。[B] 分支命中 `consumed.SessionIDHash != ""` 时:
-
-1. 优先从 `sidByLoginID[lid]` 取明文。**有 → Set-Cookie 直接下发**(本 pod 自己刚刚写的)
-2. 没有(说明 [C1] 发生在另一 pod):跨 pod 拿不回明文,**这是接受的代价** —— 返回 401 `{"status":"error","error":"login completed on another pod; please retry"}`,前端弹错让用户点重登
-
-代价合理性:
-- 单 pod 部署:0 跨 pod 跳,永远命中
-- 3 pod round-robin:[C1] 在 pod X、[B] 在 pod Y 概率 ≈ 2/3。**但 [B] 在 [C1] 之后才发生(前端 1.5s 后下一跳),命中同 pod 概率 1/3** —— 期望约 33% 的登录第一次拿 401,前端会有"登录失败:..."提示,**点登录按钮再试一次**(那次的 cap 名额仍在,reservation 已用)。重试期望 1.5 跳成功
-
-**这个跨 pod 跳不命中的概率是设计代价**。可接受替代:把 sid plaintext 缓存到 Postgres(那就违背了哈希存储的初衷)。Stage 2 时如果用户嫌弃,可引入"sid 短窗 + 自动重试"前端逻辑;**Stage 1 spec 锁这个语义**。
-
-### 关键不变式
-
-> **所有终态(`ok`/`error`)HTTP 响应,都从 [B] 分支的 `ConsumeLogin RETURNING` 出。**
-
-[C1] / [C3] 只"写终态",[B] 才"消费终态"。一次 /poll 只做一件事。代价:用户看到终态最多延迟 1.5 s。
+这意味着 cookie 一旦下发,客户端就拥有完整 session。跨 pod 不必传递明文。DB 永远只存 hash。
 
 ### 客户端断开
 
-`pollCtx` 派生自 `r.Context()`,用于 `PollOnce`(网络往返,可取消)。
-**写路径(MarkLoginDone / MarkLoginFailed)用 `context.WithoutCancel(ctx)`** 包,客户端断开不打断 DB 写入 —— Codex Stage 1 设计点:成功换到 token 后绝不能因为客户端断开丢失,否则下次 /poll 又会去 agentserver 再换一次,而 agentserver 早已把 device_code 标 used。
+- `PollOnce` 用 `r.Context()` —— 客户端断开取消上游往返,无副作用,下次 /poll 重做
+- 一切写路径(`DeleteLogin`/`FinalizeReservedLogin`/`MarkLoginDone`/`MarkLoginFailed`/`SetPollThrottle`/`ConsumeLogin`/`DeleteSession`)用 `context.WithoutCancel(ctx)` —— 客户端断开不破坏一致性
+- 在写完 `MarkLoginDone` 但响应未发出之间客户端断开:DB 标 done,客户端没拿到 sid,下次 /poll 走 [B] 拿 401 → 用户重登。比"sid 串号"安全得多
 
 ### 5 秒 PollOnce 超时
 
@@ -464,7 +507,15 @@ CREATE TABLE IF NOT EXISTS commander_logins (
     CONSTRAINT commander_logins_failure_len CHECK (
         failure IS NULL OR length(failure) <= 256
     ),
-    CONSTRAINT commander_logins_login_id_nonempty CHECK (length(login_id) > 0)
+    CONSTRAINT commander_logins_login_id_nonempty CHECK (length(login_id) > 0),
+    -- reserved (device_code = '') 行必须 code_expires_at IS NULL;
+    -- 非 reserved 行必须 code_expires_at IS NOT NULL。完整性兜底。
+    CONSTRAINT commander_logins_code_expires_iff_devcode CHECK (
+        (device_code = '' AND code_expires_at IS NULL)
+        OR
+        (device_code <> '' AND code_expires_at IS NOT NULL)
+    ),
+    CONSTRAINT commander_logins_interval_positive CHECK (interval_seconds > 0)
 );
 CREATE INDEX IF NOT EXISTS commander_logins_expires_idx
     ON commander_logins (expires_at);
@@ -528,30 +579,25 @@ func (a *Authenticator) runSweep(interval time.Duration) {
 }
 ```
 
-POST /login 的 cap **不再**通过分立的 `count() + insert`(TOCTOU 已在 § 5 决策 + § 6 ServeLogin 步骤里说明)。`store.ReserveLogin` 单 SQL 原子完成"sweep expired + count + insert reservation",cap = 1024。Postgres 实现示例:
+POST /login 的 cap **必须**用强一致路径(Codex Stage 1 R2 blocker #2:RC 下并发可超 cap 任意多)。选 `pg_advisory_xact_lock`:**事务期间持一个全局常量锁**,所有 ReserveLogin 串行化。`commander_logins.cap` 操作 ≤ 数毫秒,1024 是安全的并发上限。
 
 ```sql
-WITH
-  swept AS (
-    DELETE FROM commander_logins WHERE expires_at < now()
-  ),
-  current AS (
-    SELECT count(*) AS n FROM commander_logins
-  ),
-  inserted AS (
-    INSERT INTO commander_logins (login_id, expires_at)
-    SELECT $1, $2 FROM current WHERE current.n < 1024
-    RETURNING login_id
-  )
-SELECT (SELECT count(*) FROM inserted) AS inserted_rows;
+-- ReserveLogin (Postgres, BEGIN/COMMIT 在 store 代码里):
+BEGIN;
+SELECT pg_advisory_xact_lock(8442987421341);          -- arbitrary const, scoped 到 commander_logins
+DELETE FROM commander_logins WHERE expires_at < now();
+INSERT INTO commander_logins (login_id, expires_at)
+SELECT $1, $2
+WHERE (SELECT count(*) FROM commander_logins) < 1024
+RETURNING login_id;
+COMMIT;
 ```
 
-`inserted_rows = 0` → 返回 ErrCapped。多 pod 并发:每个事务里 CTE `current` 拿到的是 MVCC snapshot,但 `INSERT` 受唯一性约束 + isolation level,**正确的强保证需要 REPEATABLE READ 或 SERIALIZABLE**。Stage 2 plan 段评估两个方案:
-- 方案 A:用 `SERIALIZABLE` + retry
-- 方案 B:用 advisory lock (`SELECT pg_advisory_xact_lock(<const>)`),用一个全局 1024 闸门
-- 方案 C:`INSERT ... SELECT ... WHERE (SELECT count(*) FROM commander_logins) < 1024` 在 RC 下也能跑,小概率超 cap 几个 ≤ 副本数,可接受
+`RETURNING` 行数 = 0 → 返回 `ErrCapped`(不报 SQL 错;由 store 实现侧把"未插入"翻译成 `ErrCapped`)。`pg_advisory_xact_lock` 在事务提交/回滚时自动释放,不会泄漏。
 
-**默认方案 C**:简单,小幅超 cap (≤ 3 行,集群副本数级) 无关紧要,后续要严格再加 advisory lock。inmemory 实现用 `sync.Mutex` + `len(map) < 1024` 严格保证。
+inmemory 实现:`sync.Mutex` + `len(map) < 1024`(同样严格保证)。
+
+advisory lock 常量 `8442987421341` 应集中定义在 `authstore/postgres.go` 一个 const,加注释解释它的 namespace。其他 Postgres 表如有 advisory lock 协同也用同一文件 const 区段。
 
 inmemory `ReserveLogin` 实现:`mu.Lock` → sweep expired → check len → insert → unlock。
 
@@ -677,15 +723,15 @@ func MountAll(mux *http.ServeMux, resolver identity.Resolver,
 - 新增覆盖 §6 状态机:
   - POST /login:reservation 成功 + cap 触发 429 + RequestCode 错误释放名额
   - [A1]/[A2]/[A3]/[A4 reserved]
-  - [B done]/[B failed]/[B one-shot] —— 第一次 cookie OK,第二次拿 404
-  - [B done] **明文 sid 已在 sidByLoginID** vs **不在(模拟跨 pod)→ 401**(覆盖 §6 ★ 段落)
+  - [B failed]/[B done one-shot]/[B 二次访问 → 404 one-shot]
+  - [B done] 来自另一 pod 的写入 → 401 "authorization expired"(因本 pod 无明文 sid 不发 cookie)
   - [C-throttle] next_poll_at > now → pending(没有 PollOnce 调用)
-  - [C1] OK → 写 sid 到 sidByLoginID;下一跳 /poll cookie
-  - [C1] **id_token 解析失败 → 入库的 failure 是 sanitized 串**(断言不含 token)
-  - [C2] retryable + slowDown → next_poll_at 增量
-  - [C3] retryable=false → 入库 sanitized failure
-  - [C1] 写 done 时 store 返 ErrNotFound (sweep 抢先) → 404
-  - **客户端在 [C1] PollOnce 完成、MarkLoginDone 前断开 → MarkLoginDone 仍执行(WithoutCancel)**
+  - [C1] OK → 单次响应 Set-Cookie + 200 ok(新不变式)
+  - [C1] **id_token 解析失败 → 入库的 failure 是 SanitizeFailure 枚举之一**(断言完全等于 `string(FailureIDTokenInvalid)`,**不含**任何原始错误文本 / token / device_code)
+  - [C2] retryable + slowDown → SetPollThrottle 调用,interval_seconds 增长 5,next_poll_at 推后
+  - [C3] retryable=false → 入库 SanitizeFailure 枚举,响应 401
+  - [C1] MarkLoginDone 返 ErrNotFound (另一 pod 抢先) → 401 "authorization expired"
+  - **客户端在 [C1] PollOnce 完成、MarkLoginDone 前断开**:虽然 client cancel 了 ctx,WithoutCancel 包好的写路径仍执行,store 看到 done;下一跳 /poll 走 [B] 返回 401 让用户重登(不可能既"客户端拿到 cookie"又"DB 没写")
 - Cookie 属性断言:`HttpOnly`、`SameSite=Lax`、`Secure` 在 r.TLS / X-Forwarded-Proto=https 下置 true
 - Logout 路径:`DeleteSession` 后另一个 Authenticator 实例(同 store)`GetSession` 拿 ErrNotFound
 
@@ -699,11 +745,12 @@ func MountAll(mux *http.ServeMux, resolver identity.Resolver,
 
 `internal/commanderhub/integration_test.go`(新),DSN-gated:
 - 同一个 `*sql.DB` 起两个 Authenticator 实例(模拟 pod A / pod B)
-- 子用例 1: pod A `POST /login` → pod B `GET /poll` (pending) → pod B `GET /poll` ([C1] 在 pod B,sid 进 B 的 sidByLoginID) → pod B `GET /poll` 拿 cookie ([B] 同 pod, 成功)
-- 子用例 2: pod A `POST /login` → pod B `GET /poll` (pending) → pod A `GET /poll` ([C1] 在 pod A,sid 进 A 的 sidByLoginID) → pod B `GET /poll` ([B] 在 pod B 拿不到明文 → 401)
-- 子用例 3: pod A 登入拿 cookie → pod B `/api/commander/tree` mock CommanderTree → 通过
-- 子用例 4: pod A logout → pod B 同 cookie → 401
-- 子用例 5: pod A `MarkLoginDone` 进行中,pod B 同时 `MarkLoginDone` → 恰 1 个 session,一个调用拿 ErrNotFound
+- 子用例 1: pod A `POST /login` → pod B `GET /poll` (pending) → pod B `GET /poll` 拉到 token → Set-Cookie + 200 ok(任意 pod 都能完成 [C1])
+- 子用例 2: pod A `POST /login` → pod A 完成 [C1] 拿 cookie → pod B 拿 cookie `GET /api/commander/tree` → 通过(session 跨 pod)
+- 子用例 3: pod A logout → pod B 同 cookie → 401(失效跨 pod)
+- 子用例 4: pod A 与 pod B 同时 `MarkLoginDone` 同 lid 不同 sid → 恰 1 个 session,输的调用拿 ErrNotFound,/poll 返回 401(强一致)
+- 子用例 5: pod A `POST /login` → pod A 完成 [C1] (上次 response 因模拟客户端断开未达) → 客户端重发 `GET /poll` → pod B 收 [B] 路径,看到 done → 401 "authorization expired"(可重新发起 POST /login)
+- 子用例 6: 1100 并发 `POST /login` → 恰 1024 个 200(强 cap),其余 429,且只有 1024 次 RequestCode 被调用(用 fake flow counter 验)
 
 ### 前端
 
@@ -725,7 +772,7 @@ func MountAll(mux *http.ServeMux, resolver identity.Resolver,
 | 客户端断开导致 token 丢失 (Stage 1 设计点) | r.Context 取消会杀写路径 | 写路径用 `context.WithoutCancel(ctx)` |
 | 上游限流 (slow_down) 被无视 (Stage 1 设计点) | 前端 1.5s × N → agentserver 抖 | `commander_logins.next_poll_at` 持久化节流;[C-throttle] 直接 pending 不调 PollOnce |
 | 跨 workspace 越权 | `commander_sessions` 无 workspace_id scoping | sid → identity.WorkspaceID,commanderhub 路由内部按 owner 过滤(不变;§6 ServeLogin 链上不直接处理 owner 隔离) |
-| Login 风暴 → agentserver | POST /login 暴打 RequestDeviceCode | `ReserveLogin` 单 SQL 原子 sweep+count+insert,cap=1024;**RequestCode 在 cap 名额持有后才打** |
+| Login 风暴 → agentserver | POST /login 暴打 RequestDeviceCode | `ReserveLogin` 走 `pg_advisory_xact_lock` 串行化(Codex Stage 1 R2),cap=1024 严格;**RequestCode 在 cap 名额持有后才打**;cleanup 路径全部 `WithoutCancel` 防 client cancel 囤积 reservation |
 | pod 之间 session 串号 | sid 全局 128-bit | randomID `crypto/rand` 16 bytes |
 | login_id URL 泄漏 → 攻击者 race 取 cookie | `login_id` 在 query string,可能进 access log / ingress trace | **本次不修(对应 frontend 改造);spec 显式记录** —— Stage 2/3 评估是否把 login_id 改到 cookie / POST body,或要求 ingress 配 query string scrubbing。生产 Helm chart values 中加 ingress 注释建议 |
 | logout 后旧 cookie 在其它 pod 仍能用 | 今天的隐患 | **本变更顺带修**:DeleteSession 在 DB 即刻生效,所有 pod 下次 GetSession ErrNotFound |
