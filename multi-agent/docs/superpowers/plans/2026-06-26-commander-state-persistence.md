@@ -514,23 +514,21 @@ func RunConformanceTests(t *testing.T, newStore func(t *testing.T) Store) {
     t.Run("ReserveLogin_capped_then_sweep_releases", func(t *testing.T) {
         s := newStore(t)
         ctx := context.Background()
-        // fill cap to 1024 with non-expired rows
+        // Fill cap with TINY TTL so they all expire shortly.
         for i := 0; i < 1024; i++ {
             require.NoError(t, s.ReserveLogin(ctx, fmt.Sprintf("lid%d", i),
-                time.Now(), 10*time.Minute))
+                time.Now(), 50*time.Millisecond))
         }
+        // Confirm cap is hit.
         err := s.ReserveLogin(ctx, "overflow", time.Now(), 10*time.Minute)
         require.ErrorIs(t, err, ErrCapped)
 
-        // Now insert 100 already-expired rows via direct manipulation isn't
-        // available cross-implementation; emulate by reserving with negative
-        // ttl. Implementations must compute expires_at = now + ttl, so:
-        // — Replace last 100 with expired by overwrite? No. Instead, rely on
-        //   ReserveLogin's internal "DELETE WHERE expires_at < now" sweep:
-        //   shift clock requires test helper. Solution: do TTL=1ms and sleep.
-        // For tests, accept this branch coverage in postgres-only "with clock
-        // injection" follow-up; conformance-side asserts cap rejects only.
-        _ = ctx
+        // Wait past expiry so ReserveLogin's internal sweep ("DELETE WHERE
+        // expires_at < now()") will reclaim slots on the next call.
+        time.Sleep(150 * time.Millisecond)
+
+        // Now a fresh reserve must succeed via lazy sweep.
+        require.NoError(t, s.ReserveLogin(ctx, "after-sweep", time.Now(), 10*time.Minute))
     })
 
     t.Run("FinalizeReservedLogin_OK_then_double_call_NotFound", func(t *testing.T) { /* ... */ })
@@ -547,7 +545,23 @@ func RunConformanceTests(t *testing.T, newStore func(t *testing.T) Store) {
         // 1st MarkLoginDone wins; 2nd MarkLoginDone with different sid → ErrNotFound, session table unchanged
     })
     t.Run("MarkLoginDone_on_expired_login_NotFound_no_session_insert", func(t *testing.T) {
-        // reserve with TTL=10ms; sleep 20ms; MarkLoginDone → ErrNotFound; commander_sessions still empty
+        // Reserve + FinalizeReservedLogin so the login is in 'pending' state
+        // (NOT reserved — otherwise MarkLoginDone would return ErrNotFound
+        // for the WRONG reason: device_code='' guard rather than expiry).
+        // Then wait past expiry, then MarkLoginDone → ErrNotFound, sessions empty.
+        ctx := context.Background()
+        require.NoError(t, s.ReserveLogin(ctx, "expired-pending", time.Now(), 50*time.Millisecond))
+        require.NoError(t, s.FinalizeReservedLogin(ctx, "expired-pending",
+            "dc-x", time.Now().Add(5*time.Minute), 5))
+        time.Sleep(150 * time.Millisecond)
+        err := s.MarkLoginDone(ctx, "expired-pending", SessionRecord{
+            PlaintextSessionID: "should-not-stick",
+            Identity:           identity.Identity{UserID: "u", WorkspaceID: "w", Source: identity.SourceAgentserver},
+            ExpiresAt:          time.Now().Add(12 * time.Hour),
+        })
+        require.ErrorIs(t, err, ErrNotFound, "expired login row must reject MarkLoginDone")
+        _, err = s.GetSession(ctx, "should-not-stick")
+        require.ErrorIs(t, err, ErrNotFound, "no session row may exist when MarkLoginDone fails")
     })
     t.Run("MarkLoginDone_on_failed_login_NotFound", func(t *testing.T) {
         // reserve+finalize+MarkLoginFailed → MarkLoginDone returns ErrNotFound
@@ -558,14 +572,19 @@ func RunConformanceTests(t *testing.T, newStore func(t *testing.T) Store) {
     t.Run("MarkLoginDone_strong_consistency_concurrent", func(t *testing.T) { /* see Step 2 */ })
     t.Run("MarkLoginFailed_OK_then_double_call_NotFound", func(t *testing.T) { /* */ })
     t.Run("MarkLoginFailed_with_invalid_Failure_value_rejected", func(t *testing.T) {
-        // The Failure newtype CAN be constructed via `authstore.Failure("custom raw error")`
-        // (Go has no unforgeable string newtypes). Stores must reject any value not in
-        // the enum allowlist:
-        //   inmemory: implementation-level allowlist check before write → ErrNotFound or panic
-        //   postgres: DB CHECK rejects (returns a pq error; store wraps to a non-ErrNotFound error)
-        // Conformance contract: this method MUST NOT succeed; the row stays untouched.
-        // (Implementation choice between error vs panic should be consistent — recommend
-        //  returning a typed `ErrInvalidFailure = errors.New("authstore: invalid failure value")`.)
+        // The Failure newtype can be constructed via `authstore.Failure("custom raw error")`.
+        // Both stores must reject any value not in ValidFailure() and return ErrInvalidFailure
+        // BEFORE writing anything. Row state stays as 'pending'.
+        ctx := context.Background()
+        require.NoError(t, s.ReserveLogin(ctx, "bad-fail", time.Now(), 10*time.Minute))
+        require.NoError(t, s.FinalizeReservedLogin(ctx, "bad-fail",
+            "dc-y", time.Now().Add(5*time.Minute), 5))
+        err := s.MarkLoginFailed(ctx, "bad-fail", Failure("custom raw error not in enum"))
+        require.ErrorIs(t, err, ErrInvalidFailure, "non-enum Failure must be rejected")
+        rec, err := s.GetLogin(ctx, "bad-fail")
+        require.NoError(t, err)
+        require.Empty(t, string(rec.Failure), "row failure column must remain untouched")
+        require.Equal(t, "", rec.SessionIDHash, "row session_id_hash must remain untouched")
     })
     t.Run("ConsumeLogin_reserved_pending_done_failed_all_consumable", func(t *testing.T) { /* 4 subcases */ })
     t.Run("ConsumeLogin_oneshot_concurrent", func(t *testing.T) { /* see Step 3 */ })
