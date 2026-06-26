@@ -15,7 +15,7 @@
 - `observerweb.Options.AuthStore` required if `AgentserverURL != ""` (panic if nil — no silent in-memory fallback in production).
 - 1h ticker per pod for `SweepExpired`.
 
-**Tech Stack:** Go 1.23, `database/sql`, `pgx/v5` stdlib, `crypto/sha256`, `crypto/rand`. Postgres 16+ for the prod path (`pg_advisory_xact_lock`, `CHECK`, `RETURNING`). Tests via standard `testing`, `github.com/stretchr/testify/require`, `OBSERVER_POSTGRES_TEST_DSN` for the DSN-gated integration suite. Frontend unchanged.
+**Tech Stack:** Go 1.26 (see `go.mod`), `database/sql`, `pgx/v5` stdlib, `crypto/sha256`, `crypto/rand`. Postgres 16+ for the prod path (`pg_advisory_xact_lock`, `CHECK`, `RETURNING`). Tests via standard `testing`, `github.com/stretchr/testify/require`, `OBSERVER_POSTGRES_TEST_DSN` for the DSN-gated integration suite. Frontend unchanged.
 
 ## Global Constraints
 
@@ -95,8 +95,7 @@ Tasks ordered so each step is green-bar before the next. The `authstore` package
 4. **Task 4:** `authstore.RunConformanceTests` suite  (drives Task 3 & later Task 6)
 5. **Task 5:** `authstore.MigratePostgres` + `schema_postgres.sql`  (DDL only; idempotent)
 6. **Task 6:** `authstore.NewPostgresStore` implementation  (passes conformance + dialect + DSN-gated)
-7. **Task 7:** rewrite `deviceFlow` seam: `PollOnce` replacing `PollToken` death-loop; sentinel errors
-8. **Task 8:** rewrite `Authenticator` to hold `Store` + new state machine + `writeCtx` helper
+7. **Task 7+8 (combined commit):** rewrite `deviceFlow` seam (`PollOnce` + sentinel errors) **and** `Authenticator` (Store + new state machine + `writeCtx`). They MUST land together because today's `pollLogin` goroutine calls `PollToken` — replacing one alone breaks the build. Detailed sections below keep the Task 7 / Task 8 split for clarity but the workflow ships them in one commit, e.g. via the worker doing both task lists end-to-end before running `go test`.
 9. **Task 9:** `internal/commanderhub/wiring.go` — `MountAll` signature change + sweep ticker
 10. **Task 10:** `internal/observerweb/server.go` — `Options.AuthStore` + panic guard
 11. **Task 11:** `cmd/observer-server/main.go` — store construction + `MigratePostgres` in main & `--migrate-only`
@@ -506,11 +505,63 @@ func RunConformanceTests(t *testing.T, newStore func(t *testing.T) Store) {
         _ = ctx
     })
 
-    // ...continue with FinalizeReservedLogin / DeleteLogin / MarkLoginDone /
-    //    MarkLoginFailed / ConsumeLogin (3 states) / SetPollThrottle /
-    //    GetSession / DeleteSession / SweepExpired
-    //    + the concurrent MarkLoginDone "exactly one wins, one session row"
-    //    + the concurrent ConsumeLogin "exactly one observer"
+    t.Run("FinalizeReservedLogin_OK_then_double_call_NotFound", func(t *testing.T) { /* ... */ })
+    t.Run("FinalizeReservedLogin_intervalSeconds_below_5_is_clamped_by_store", func(t *testing.T) { /* see Task 6 design point */ })
+    t.Run("DeleteLogin_idempotent", func(t *testing.T) { /* exists / missing both nil */ })
+    t.Run("DeleteLogin_frees_cap_slot", func(t *testing.T) { /* fill, delete one, reserve OK */ })
+    t.Run("GetLogin_missing_NotFound", func(t *testing.T) { /* */ })
+    t.Run("SetPollThrottle_writes_both_fields", func(t *testing.T) {
+        // ReserveLogin + FinalizeReservedLogin first; SetPollThrottle(60, future);
+        // GetLogin verifies IntervalSeconds=60, NextPollAt≈future ±1s.
+    })
+    t.Run("SetPollThrottle_missing_lid_returns_nil", func(t *testing.T) { /* */ })
+    t.Run("MarkLoginDone_terminal_existing_NotFound", func(t *testing.T) {
+        // 1st MarkLoginDone wins; 2nd MarkLoginDone with different sid → ErrNotFound, session table unchanged
+    })
+    t.Run("MarkLoginDone_on_expired_login_NotFound_no_session_insert", func(t *testing.T) {
+        // reserve with TTL=10ms; sleep 20ms; MarkLoginDone → ErrNotFound; commander_sessions still empty
+    })
+    t.Run("MarkLoginDone_on_failed_login_NotFound", func(t *testing.T) {
+        // reserve+finalize+MarkLoginFailed → MarkLoginDone returns ErrNotFound
+    })
+    t.Run("MarkLoginDone_on_reserved_login_NotFound", func(t *testing.T) {
+        // reserve (no finalize) → MarkLoginDone returns ErrNotFound (device_code = '' guards it)
+    })
+    t.Run("MarkLoginDone_strong_consistency_concurrent", func(t *testing.T) { /* see Step 2 */ })
+    t.Run("MarkLoginFailed_OK_then_double_call_NotFound", func(t *testing.T) { /* */ })
+    t.Run("MarkLoginFailed_with_invalid_Failure_value_rejected", func(t *testing.T) {
+        // The Failure newtype CAN be constructed via `authstore.Failure("custom raw error")`
+        // (Go has no unforgeable string newtypes). Stores must reject any value not in
+        // the enum allowlist:
+        //   inmemory: implementation-level allowlist check before write → ErrNotFound or panic
+        //   postgres: DB CHECK rejects (returns a pq error; store wraps to a non-ErrNotFound error)
+        // Conformance contract: this method MUST NOT succeed; the row stays untouched.
+        // (Implementation choice between error vs panic should be consistent — recommend
+        //  returning a typed `ErrInvalidFailure = errors.New("authstore: invalid failure value")`.)
+    })
+    t.Run("ConsumeLogin_reserved_pending_done_failed_all_consumable", func(t *testing.T) { /* 4 subcases */ })
+    t.Run("ConsumeLogin_oneshot_concurrent", func(t *testing.T) { /* see Step 3 */ })
+    t.Run("GetSession_hash_lookup_works", func(t *testing.T) {
+        // Reserve+Finalize+MarkLoginDone with PlaintextSessionID="P"; GetSession("P") hits;
+        // GetSession("Q") (different plaintext) misses.
+    })
+    t.Run("GetSession_expired_NotFound", func(t *testing.T) {
+        // MarkLoginDone with ExpiresAt = now-1s → GetSession ErrNotFound.
+    })
+    t.Run("DeleteSession_then_GetSession_NotFound", func(t *testing.T) { /* */ })
+    t.Run("DeleteSession_missing_idempotent_nil", func(t *testing.T) { /* */ })
+    t.Run("SweepExpired_deletes_expired_only_correct_counts", func(t *testing.T) {
+        // Seed: 3 expired logins + 2 fresh logins + 4 expired sessions + 1 fresh session
+        // SweepExpired → (3, 4, nil); remaining rows verified by GetLogin/GetSession scans.
+    })
+    t.Run("SweepExpired_empty_tables_returns_zero", func(t *testing.T) { /* (0, 0, nil) */ })
+
+    // Enum drift guard (no-DSN, but applies to both impls):
+    t.Run("FailureEnumMatchesSchema", func(t *testing.T) {
+        // Parse schemaPostgresSQL for `failure IN (...)`; assert string set equals
+        // {string(f) for f in allFailureValues}. Lives in inmemory_test.go too because
+        // it's runnable without DSN.
+    })
 }
 ```
 
@@ -854,6 +905,37 @@ func scanLoginRecord(row interface{ Scan(...any) error }) (LoginRecord, error) {
 
 Implement remaining methods in the same style. `MarkLoginFailed` uses a single UPDATE+WHERE; `SetPollThrottle` single UPDATE; `GetSession` single SELECT WHERE session_id_hash + expires_at; `DeleteSession`/`DeleteLogin` single DELETE; `SweepExpired` two DELETEs (one tx OK or two separate calls — separate is simpler and equally safe).
 
+**Design point — clamp `intervalSeconds` to >= 5** in `FinalizeReservedLogin` and `SetPollThrottle` BEFORE writing. Reason: agentserver upstream can return `Interval=0` (Codex Stage 2 design concern), which would violate `commander_logins_interval_positive` CHECK and fail the whole login. Helper:
+
+```go
+func clampIntervalSeconds(n int) int {
+    if n < 5 {
+        return 5
+    }
+    return n
+}
+```
+
+Both store implementations apply this clamp; conformance test "FinalizeReservedLogin_intervalSeconds_below_5_is_clamped_by_store" verifies behavior is consistent.
+
+**Failure value validation** — `MarkLoginFailed(ctx, lid, f)` must reject `f` not in the enum allowlist:
+```go
+// failure.go addendum
+func ValidFailure(f Failure) bool {
+    switch f {
+    case FailureAuthorizationDenied, FailureAuthorizationExpired,
+         FailureUpstreamTimeout, FailureIDTokenInvalid,
+         FailureDeviceFlow, FailureStoreUnavailable:
+        return true
+    }
+    return false
+}
+
+var ErrInvalidFailure = errors.New("authstore: invalid failure value")
+```
+
+Both store implementations check `if !ValidFailure(f) { return ErrInvalidFailure }` as the very first statement in `MarkLoginFailed`. Postgres DB CHECK is the second line of defense.
+
 `hashSID`:
 
 ```go
@@ -895,10 +977,11 @@ func TestPostgresStore_Conformance(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Write `sql_dialect_test.go`** modeled after `internal/userspace/store_postgres_test.go:21` — a recording `driver.Driver` wrapping the pgx test queries to assert:
-  - All `?` placeholders absent
+- [ ] **Step 3: Write `sql_dialect_test.go`** modeled after `internal/userspace/store_postgres_test.go:21` — a recording `driver.Driver` capturing **both** the query string AND the named/positional args of every `ExecContext`/`QueryContext`/`QueryRowContext`:
+  - All `?` placeholders absent (must use `$1`)
   - No `INSERT OR REPLACE` / `AUTOINCREMENT` / `PRAGMA`
   - No SQL line contains `fmt.Sprintf`-style `%s` after parameter substitution (best-effort regex against captured queries)
+  - **Plaintext-sid leak check**: drive each store method that takes a plaintext sid (`MarkLoginDone`, `GetSession`, `DeleteSession`) with a known sentinel `plaintext := "DIALECT_TEST_PLAINTEXT_SID"` and assert that NEITHER the captured queries NOR any captured arg contains this literal — only its sha256_hex hash is permitted to appear. This is the structural test that plaintext never reaches SQL parameters.
   - No DSN required
 
 Use the existing `recordingSQLDB` helper pattern from userspace; if it's not exported, copy-adapt into a small in-test recorder. Reference: `git grep -n 'newRecordingSQLDB' internal/userspace/store_postgres_test.go`.
@@ -931,8 +1014,10 @@ type deviceFlow interface {
   - `slow_down` → `retryable=true, slowDown=true, err=nil`
   - `access_denied` → `err = ErrAuthorizationDenied`
   - `expired_token` → `err = ErrAuthorizationExpired`
-  - HTTP network error → `retryable=true, err=nil` (let Authenticator retry on the next /poll tick)
-  - Any other code or parse error → `err = nil` returned as a wrapped generic device-flow error? **No** — return a fresh `errors.New("device flow: unknown")` so `SanitizeFailure` will map it to `FailureDeviceFlow`. Sentinel reserved for the known cases.
+  - HTTP network error (dial/timeout/EOF) → `retryable=true, err=nil` (let Authenticator retry on the next /poll tick)
+  - HTTP 5xx response (502/503/504/...) → `retryable=true, err=nil`. **Do NOT** include the response body in any return path. Per spec § 11 + Codex Stage 2 security note, 502 bodies may contain token-shaped content — silently retry.
+  - HTTP 4xx response other than the listed OAuth errors → terminal: `retryable=false`, return `errors.New("device flow: unknown 4xx")` (no body interpolation; `SanitizeFailure` maps to `FailureDeviceFlow`).
+  - JSON parse failure (200 body) → terminal: `retryable=false`, return `errors.New("device flow: bad token response")` (no body interpolation).
 
 - [ ] **Step 1: Update interface + impl, delete old `PollToken` death loop.**
 
@@ -979,13 +1064,28 @@ func (a *Authenticator) writeCtx(ctx context.Context) (context.Context, context.
 - [ ] **Step 3: Rewrite `ServeLogin` per spec § 6.** Steps:
   1. `lid := randomID()`
   2. `if err := a.store.ReserveLogin(r.Context(), lid, time.Now(), loginTTL); err != nil { ... }` (translate ErrCapped → 429, other → 502)
-  3. `dc, err := a.flow.RequestCode(r.Context())` — if err, `bgCtx, cancel := a.writeCtx(r.Context()); defer cancel(); a.store.DeleteLogin(bgCtx, lid)`. Return 502.
-  4. `if err := r.Context().Err(); err != nil` — same DeleteLogin cleanup; bail.
-  5. `bgCtx, cancel := a.writeCtx(r.Context()); defer cancel()`
-     `if err := a.store.FinalizeReservedLogin(bgCtx, lid, dc.Code, time.Now().Add(dc.ExpiresIn), int(dc.Interval/time.Second)); err != nil { ... DeleteLogin + 502 ... }`
+  3. `dc, err := a.flow.RequestCode(r.Context())` — if err, do **fresh** cleanup ctx: `cleanCtx, cancel := a.writeCtx(context.Background()); defer cancel(); a.store.DeleteLogin(cleanCtx, lid)`. Return 502. **Always derive cleanup from `context.Background()`, NOT from a possibly-already-failed/timed-out `r.Context()`** (Codex Stage 2 design concern: the same ctx whose timeout caused the failure would be useless for cleanup).
+  4. `if err := r.Context().Err(); err != nil` — same fresh cleanup; bail (response is already moot, just call `return` without writing).
+  5. `writeCtx, cancel := a.writeCtx(r.Context()); defer cancel()`
+     `if err := a.store.FinalizeReservedLogin(writeCtx, lid, dc.Code, time.Now().Add(dc.ExpiresIn), clampIntervalSeconds(int(dc.Interval/time.Second))); err != nil {`
+     `    cleanCtx, c2 := a.writeCtx(context.Background()); a.store.DeleteLogin(cleanCtx, lid); c2();`
+     `    if err == authstore.ErrNotFound { return 502 "login expired during init" } else { return 502 "store unavailable" }`
+     `}`
   6. `writeJSON(w, map[string]any{"verification_uri_complete": dc.VerificationURIComplete, "login_id": lid, "expires_in": int(dc.ExpiresIn/time.Second)})`
 
-  Note: spec § 5 nit said §6 pseudo-code shows raw `WithoutCancel` not the helper. Use the helper consistently.
+  Note: spec § 5 nit said §6 pseudo-code shows raw `WithoutCancel` not the helper. Use the helper consistently in code.
+
+  Helper rule: `a.writeCtx(parent)` should accept either `r.Context()` (when we want to keep the request's deadlines/values where applicable) or `context.Background()` (for cleanup that must outlive any request failure):
+
+  ```go
+  func (a *Authenticator) writeCtx(parent context.Context) (context.Context, context.CancelFunc) {
+      // WithoutCancel preserves values from `parent` (trace IDs, etc.) while
+      // dropping its cancel/deadline. The 5s timeout is fresh.
+      return context.WithTimeout(context.WithoutCancel(parent), storeWriteTimeout)
+  }
+  ```
+
+  This way `a.writeCtx(context.Background())` is still a fine call — WithoutCancel of Background returns Background, then WithTimeout adds the 5s budget.
 
 - [ ] **Step 4: Rewrite `ServeLoginPoll` per spec § 6 state machine.** Implement [A1]–[A4], [B], [C-throttle], [C1]–[C3] exactly. All writes wrapped with `writeCtx`.
 
@@ -1029,7 +1129,10 @@ func (a *Authenticator) CommanderIdentity(r *http.Request) (identity.Identity, b
   - Adapt `newAuthenticatorWithFlow(resolver, flow)` → take a `store authstore.Store` parameter. Default in tests: `authstore.NewInMemoryStore()`.
   - Add tests for the cases enumerated in spec § 10 ("Authenticator 层") and "CommanderIdentity 故障语义测试". Each state machine branch gets one positive + one negative case.
   - Cookie attribute test: assert `HttpOnly`, `SameSite=Lax`, `Secure` (with X-Forwarded-Proto=https), MaxAge correct.
-  - **Test that `WithoutCancel` works**: spawn the request with a `ctx, cancel := context.WithCancel(...)` where the test cancels mid-handler (a barrier in the fake flow's PollOnce), then asserts the DB row is still written (use an `instrumentedStore` wrapper that signals when MarkLoginDone completes).
+  - **WithoutCancel test (refined per Codex Stage 2)**:
+    - **Positive case**: `fakeFlow.PollOnce` returns `tokenReady=true` after a small (deterministic, not timing-dependent) signal, but the test cancels `r.Context()` AFTER PollOnce returns and BEFORE MarkLoginDone is observed by the store. Use an `instrumentedStore` wrapping `inmemoryStore` that signals on MarkLoginDone entry. Assert: (a) MarkLoginDone called, (b) Session row exists when probed via `GetSession`. (i.e. WithoutCancel actually causes the write to land.)
+    - **Negative case**: cancel BEFORE `PollOnce` returns. Assert no MarkLoginDone is called and the login row is still in `pending` state. (i.e. cancellation during PollOnce is honored cleanly.)
+  - **PollOnce 502 token-leak test** (deviceFlow test, augments Task 7): httptest server returns `502` with body `{"raw_token":"super-secret","access_token":"Bearer abc"}`. Assert: `retryable=true`, `err=nil`, and any subsequent SanitizeFailure-of-err call returns FailureDeviceFlow (not body-derived). Pair with a direct grep of the captured PollOnce return values: `string(captured)` must not contain `super-secret` or `Bearer abc`.
 
 - [ ] **Step 9: Run `go test ./internal/commanderhub/...` — passes.**
 
@@ -1114,7 +1217,8 @@ func TestNewWithResolverOptions_PanicsWithoutAuthStore(t *testing.T) {
             t.Fatal("expected panic")
         }
     }()
-    _ = NewWithResolverOptions(testStore(t), nil, static.New(testStore(t)), Options{
+    s := testStore(t)
+    _ = NewWithResolverOptions(s, nil, static.New(s), Options{
         AgentserverURL: "https://agent.example/",
         // AuthStore intentionally absent
     })
@@ -1185,6 +1289,8 @@ if cfg.Store.Driver == "postgres" {
 
 - [ ] **Step 2: Implement the 6 subcases enumerated in spec § 10.** Use `httptest.NewServer(pod.mux).URL` for each pod. fake `deviceFlow` shared between pods (records counts). Carry the cookie between pod requests manually (httptest doesn't follow cookies by default).
 
+  Specifically for **subcase 5** (lost-response simulation, per Codex Stage 2): after pod A completes [C1] and returns 200, the test code **must extract the cookie from the response, then explicitly discard it** before sending the next `GET /poll?id=lid` to pod B. The next request goes out WITHOUT a `Cookie:` header. This models the user's browser never having received the Set-Cookie response. Assert: pod B's response is 401 `"authorization expired"` and the user can POST a fresh /login to retry.
+
 - [ ] **Step 3: Subcase 6 (cap stress)** spawns 1100 goroutines doing `POST /login` against pod A's URL, asserts exactly 1024 succeed with 200, the rest 429, and the fake `RequestCode` was called exactly 1024 times.
 
 - [ ] **Step 4: With DSN set, `go test ./internal/commanderhub/ -run TestCrossPod` passes.**
@@ -1234,8 +1340,12 @@ After completing all tasks:
 
 - [ ] All new SQL is parameterized (`$1`)
 - [ ] All `WithoutCancel` wraps have `WithTimeout`
-- [ ] No plaintext sid in any SQL parameter except the `hashSID` callsites
-- [ ] `failure.go` enum constants match `commander_logins_failure_enum` CHECK list exactly
+- [ ] No plaintext sid in any SQL parameter except the `hashSID` callsites (sql_dialect_test asserts)
+- [ ] `failure.go` enum constants match `commander_logins_failure_enum` CHECK list exactly (`FailureEnumMatchesSchema` test asserts)
+- [ ] `MarkLoginFailed` rejects values outside the enum (`ErrInvalidFailure`); both stores
+- [ ] `FinalizeReservedLogin` and `SetPollThrottle` clamp `intervalSeconds >= 5`
+- [ ] `FailureStoreUnavailable` either used somewhere or removed from `failure.go` (Codex Stage 2 nit; if no caller, delete the constant)
+- [ ] All post-`ReserveLogin` cleanup paths use `a.writeCtx(context.Background())`, never the request ctx
 - [ ] No `pollLogin` goroutine remains
 - [ ] No `Authenticator.{logins,sessions,loginMu,sessMu}` fields remain
 - [ ] `MountAll` callers all pass an `authstore.Store`
