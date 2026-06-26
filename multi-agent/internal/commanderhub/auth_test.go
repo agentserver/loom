@@ -414,6 +414,24 @@ func TestAuth_CommanderIdentity_CookieFailsClosedOnStoreError(t *testing.T) {
 
 // --- logout ------------------------------------------------------------------
 
+func TestAuth_LogoutReturns502OnStoreError(t *testing.T) {
+	// Codex Stage 3 blocker: if DeleteSession fails but we still 200 +
+	// clear-cookie, the user thinks they logged out while other pods still
+	// accept the cookie. Force a retryable error response.
+	a := &Authenticator{
+		resolver: &fakeResolver{},
+		flow:     newFakeDeviceFlow("alice", "W1"),
+		store:    errorStore{err: errors.New("db down")},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/commander/logout", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "some-sid"})
+	rec := httptest.NewRecorder()
+	a.ServeLogout(rec, req)
+	require.Equal(t, http.StatusBadGateway, rec.Code, "store error must surface as 502")
+	// Cookie must NOT have been cleared (no Set-Cookie: foo=; Max-Age=-1).
+	require.Empty(t, rec.Result().Cookies())
+}
+
 func TestAuth_LogoutDeletesSession(t *testing.T) {
 	a, store := newAuth(t, &fakeResolver{}, newFakeDeviceFlow("alice", "W1"))
 	sid := seedSession(t, store, identity.Identity{
