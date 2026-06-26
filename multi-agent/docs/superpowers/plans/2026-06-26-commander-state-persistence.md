@@ -113,7 +113,8 @@ Tasks ordered so each step is green-bar before the next. The `authstore` package
 **Interfaces:**
 - Exports: `Failure` (string newtype), constants `FailureAuthorizationDenied`, `FailureAuthorizationExpired`, `FailureUpstreamTimeout`, `FailureIDTokenInvalid`, `FailureDeviceFlow`, `FailureStoreUnavailable`.
 - Exports: `SanitizeFailure(err error) Failure`.
-- Exports: sentinel errors `ErrAuthorizationDenied`, `ErrAuthorizationExpired`, `ErrIDTokenInvalid` (used by `deviceFlow.PollOnce` and `identityFromIDToken`).
+- Exports: `ValidFailure(f Failure) bool`. Whitelist of the six constants above.
+- Exports: sentinel errors `ErrAuthorizationDenied`, `ErrAuthorizationExpired`, `ErrIDTokenInvalid`, `ErrInvalidFailure`.
 
 - [ ] **Step 1: Write failing tests in `failure_test.go`**
 
@@ -161,6 +162,15 @@ func TestFailureEnumLengthSanity(t *testing.T) {
     // schema CHECK requires <= 256
     for _, f := range allFailureValues {
         require.LessOrEqual(t, len(string(f)), 256)
+    }
+}
+
+func TestValidFailure_RejectsRawString(t *testing.T) {
+    require.False(t, ValidFailure(Failure("anything custom")), "unforged enum values must be rejected")
+    require.False(t, ValidFailure(Failure("")), "empty must be rejected")
+    require.False(t, ValidFailure(Failure("authorization-denied")), "near-miss must be rejected")
+    for _, f := range allFailureValues {
+        require.True(t, ValidFailure(f), "%q is in allowlist but ValidFailure said false", f)
     }
 }
 
@@ -234,6 +244,24 @@ func SanitizeFailure(err error) Failure {
         return FailureDeviceFlow
     }
 }
+
+// ValidFailure is the runtime allowlist for Failure values. The Go type
+// system cannot prevent `Failure(rawErr)` strong conversion; ValidFailure +
+// store enforcement guard the persistence boundary. Postgres CHECK is the
+// last line of defense.
+func ValidFailure(f Failure) bool {
+    switch f {
+    case FailureAuthorizationDenied, FailureAuthorizationExpired,
+         FailureUpstreamTimeout, FailureIDTokenInvalid,
+         FailureDeviceFlow, FailureStoreUnavailable:
+        return true
+    }
+    return false
+}
+
+// ErrInvalidFailure is returned by Store.MarkLoginFailed when the input
+// Failure value is not in the allowlist.
+var ErrInvalidFailure = errors.New("authstore: invalid failure value")
 ```
 
 - [ ] **Step 4: Run `go test ./internal/commanderhub/authstore/...` — both tests pass.**
@@ -556,12 +584,9 @@ func RunConformanceTests(t *testing.T, newStore func(t *testing.T) Store) {
     })
     t.Run("SweepExpired_empty_tables_returns_zero", func(t *testing.T) { /* (0, 0, nil) */ })
 
-    // Enum drift guard (no-DSN, but applies to both impls):
-    t.Run("FailureEnumMatchesSchema", func(t *testing.T) {
-        // Parse schemaPostgresSQL for `failure IN (...)`; assert string set equals
-        // {string(f) for f in allFailureValues}. Lives in inmemory_test.go too because
-        // it's runnable without DSN.
-    })
+    // Note: FailureEnumMatchesSchema drift guard lives in Task 5's migrate_test.go,
+    // NOT inside this conformance suite — it depends on schema_postgres.sql which
+    // doesn't exist until Task 5. See Task 5 Step 5.
 }
 ```
 
@@ -756,6 +781,51 @@ func TestMigratePostgres_Idempotent(t *testing.T) {
 
 - [ ] **Step 4: With DSN set, run `go test ./internal/commanderhub/authstore/ -run TestMigratePostgres`. Passes.**
 
+- [ ] **Step 5: Add `FailureEnumMatchesSchema` drift-guard test (no-DSN)** in `migrate_test.go` (or `failure_drift_test.go` if you prefer to keep migrate_test.go DSN-gated):
+
+```go
+package authstore
+
+import (
+    "regexp"
+    "sort"
+    "strings"
+    "testing"
+
+    "github.com/stretchr/testify/require"
+)
+
+func TestFailureEnumMatchesSchema(t *testing.T) {
+    // Extract the `failure IN ('a', 'b', ...)` list from schemaPostgresSQL
+    // and assert it equals the Go enum allowlist.
+    re := regexp.MustCompile(`(?s)commander_logins_failure_enum CHECK \(\s*failure IS NULL OR failure IN \(([^)]+)\)`)
+    match := re.FindStringSubmatch(schemaPostgresSQL)
+    require.NotNil(t, match, "schema_postgres.sql missing commander_logins_failure_enum CHECK")
+
+    raw := match[1]
+    var schemaList []string
+    for _, lit := range strings.Split(raw, ",") {
+        lit = strings.TrimSpace(lit)
+        lit = strings.Trim(lit, "'")
+        if lit != "" {
+            schemaList = append(schemaList, lit)
+        }
+    }
+    sort.Strings(schemaList)
+
+    var goList []string
+    for _, f := range allFailureValues {
+        goList = append(goList, string(f))
+    }
+    sort.Strings(goList)
+
+    require.Equal(t, goList, schemaList,
+        "Go Failure enum and SQL CHECK list have drifted; sync both.")
+}
+```
+
+Runnable without DSN since `schemaPostgresSQL` is the embedded string. **`allFailureValues` is defined in `failure_test.go` from Task 1; this test reuses it by being in the same package.**
+
 ---
 
 ### Task 6: `authstore.NewPostgresStore`
@@ -918,23 +988,7 @@ func clampIntervalSeconds(n int) int {
 
 Both store implementations apply this clamp; conformance test "FinalizeReservedLogin_intervalSeconds_below_5_is_clamped_by_store" verifies behavior is consistent.
 
-**Failure value validation** — `MarkLoginFailed(ctx, lid, f)` must reject `f` not in the enum allowlist:
-```go
-// failure.go addendum
-func ValidFailure(f Failure) bool {
-    switch f {
-    case FailureAuthorizationDenied, FailureAuthorizationExpired,
-         FailureUpstreamTimeout, FailureIDTokenInvalid,
-         FailureDeviceFlow, FailureStoreUnavailable:
-        return true
-    }
-    return false
-}
-
-var ErrInvalidFailure = errors.New("authstore: invalid failure value")
-```
-
-Both store implementations check `if !ValidFailure(f) { return ErrInvalidFailure }` as the very first statement in `MarkLoginFailed`. Postgres DB CHECK is the second line of defense.
+**Failure value validation** — both store implementations check `if !ValidFailure(f) { return ErrInvalidFailure }` as the very first statement in `MarkLoginFailed`. `ValidFailure` and `ErrInvalidFailure` are defined in Task 1's `failure.go` (moved earlier per Codex Stage 2 R2 ordering blocker). Postgres DB CHECK `commander_logins_failure_enum` is the second line of defense.
 
 `hashSID`:
 
@@ -1032,7 +1086,7 @@ func TestAgentsdkDeviceFlow_PollOnce_StateMapping(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run `go test ./internal/commanderhub/...` — passes.**
+- [ ] **Step 3: DO NOT run `go test ./internal/commanderhub/...` yet.** Authenticator (Task 8) still calls the removed `PollToken` — compilation will fail. Tasks 7 + 8 share a green checkpoint at the END of Task 8. Move directly to Task 8.
 
 ---
 
