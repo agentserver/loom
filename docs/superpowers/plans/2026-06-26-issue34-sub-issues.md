@@ -14,7 +14,7 @@
 - **Soft deps:** improves the work if landed first but not blocking.
 - **Estimated PRs:** rough split count; milestone-sized items list checkpoints.
 - **Labels:** apply at issue-creation time from the label set below.
-- **Path prefix:** every `internal/...`, `cmd/...`, `pkg/...`, `tests/...`, `scripts/...`, `examples/...` reference is relative to `multi-agent/` (the Go module root). Paths under `docs/`, `skills/`, `tests/prod_test/` (top-level), and `.github/` are repo-root relative.
+- **Path prefix:** every `internal/...`, `cmd/...`, `pkg/...`, `tests/...` (including `tests/prod_test/`), `scripts/...`, `examples/...` reference is relative to `multi-agent/` (the Go module root, `github.com/yourorg/multi-agent`). Paths under `docs/`, `skills/`, and `.github/` are repo-root relative.
 
 ## Prerequisites Before Filing Sub-issues
 
@@ -32,7 +32,7 @@
   gh label create good-first-subissue --color 7057FF
   ```
 
-- **CI scope note.** `.github/workflows/multi-agent.yml` only triggers on `multi-agent/**`, `skills/**`, and the workflow files themselves. Pure-docs PRs (this plan, item 09, item 21, etc.) will land with `gh pr checks` reporting *no checks*. That is expected — do not block on missing CI for documentation-only items. If you want docs lint to gate, add a separate lightweight workflow rather than widening the Go test trigger.
+- **CI scope note.** `.github/workflows/multi-agent.yml` only triggers on `multi-agent/**`, `skills/**`, and the workflow files themselves. Repo-root `docs/**` and `tests/prod_test/**` *outside* `multi-agent/` are not in the trigger list. A pure-docs PR like this plan or item 09 lands with `gh pr checks` reporting *no checks* — expected, do not block. Items that *do* edit Go code or `multi-agent/**` content (10 driver tool descriptions, 17 store init, 19 dynamicmcp marshalling, 21 driver tool description cross-links, etc.) **will** trigger CI; do not assume "the doc says it's docs-flavoured" means CI is skipped — read the diff. If you want docs lint to gate, add a separate lightweight workflow rather than widening the Go test trigger.
 
 ## Current Baseline From Code Audit
 
@@ -173,7 +173,7 @@ Items run on three parallel **tracks**, not sequential phases. Track labels repl
 **Acceptance:**
 
 - After PR 1: there is exactly one scheduler/runner package for contract DAG execution in production paths.
-- After PR 1: `rg -l '"github.com/agentserver/loom/internal/orchestrator"'` matches only the shim file or `_test.go`.
+- After PR 1: `rg -l '"github.com/yourorg/multi-agent/internal/orchestrator"'` matches only the shim file or `_test.go`.
 - After PR 2: `internal/orchestrator/` is deleted.
 
 **Hard deps:** 01, 02.
@@ -459,12 +459,12 @@ Items run on three parallel **tracks**, not sequential phases. Track labels repl
 **Acceptance:**
 
 - `pkg/agentbackend/claude` and `pkg/agentbackend/opencode` each declare `_ agentbackend.SessionWorkerBackend = (*workerBackend)(nil)`.
-- The matrix from 12b covers `worker_mode: app_server` for all three backends, not just codex.
+- Within this item: enable the parameterised matrix harness from 12b for `worker_mode: app_server` on whichever backend(s) land here (22a → claude row; 22b → opencode row). Codex's app-server row is already on after 11.
 - Hot-worker reuse is observable in logs/metrics (turn N+1 reuses the same worker PID as turn N for the same session).
 - Documented opt-out env exists for rollback.
 
-**Hard deps:** 11 (the unsafe-env gate must be removed first; the same humanloop routing contract applies).
-**Soft deps:** 12 (status constants stable).
+**Hard deps:** 11 (the unsafe-env gate must be removed first; the same humanloop routing contract applies), 12b (the parameterised matrix harness is the test substrate).
+**Soft deps:** 12a (status constants stable).
 
 ### 12. Backend-neutral turn-state and CI matrix
 
@@ -482,7 +482,7 @@ Items run on three parallel **tracks**, not sequential phases. Track labels repl
 **Scope (12b):**
 
 - Runtime matrix for submit, wait, resume, cancel placeholder, register_mcp, artifact passing, and capability matching across claude/codex/opencode.
-- Hot-worker parity (claude/opencode `SessionWorkerBackend`) is **out of scope** here — it gets its own item (22). 12b only asserts cold-path parity.
+- 12b ships as a **cold-path-only matrix** at first (each backend runs in its default spawn-per-turn mode); the matrix harness is parameterised so additional rows for `worker_mode: app_server` can be enabled per backend as item 22 lands. Implementing the hot-worker backends themselves is **out of scope** for 12b — that work lives in 22.
 
 **Acceptance:**
 
