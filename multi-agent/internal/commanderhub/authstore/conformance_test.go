@@ -55,14 +55,23 @@ func RunConformanceTests(t *testing.T, newStore func(t *testing.T) Store) {
 			t.Skip("strict-cap conformance is deferred to k8s e2e for this store")
 		}
 		ctx := context.Background()
+		// TTL must outlive the time it takes to seed MaxActiveLogins
+		// reservations. Under a loaded CI runner the cumulative latency
+		// can be hundreds of ms even for an in-memory map (a previous
+		// 50 ms ceiling flaked in GitHub Actions). 2 s leaves comfortable
+		// margin; the matched sleep below stays within typical Go-test
+		// runtime budgets.
+		const expireTTL = 2 * time.Second
 		for i := 0; i < MaxActiveLogins; i++ {
 			require.NoError(t, s.ReserveLogin(ctx, fmt.Sprintf("lid%d", i),
-				time.Now(), 50*time.Millisecond))
+				time.Now(), expireTTL))
 		}
 		err := s.ReserveLogin(ctx, "overflow", time.Now(), 10*time.Minute)
 		require.ErrorIs(t, err, ErrCapped)
 
-		time.Sleep(150 * time.Millisecond)
+		// Wait past the cap rows' TTL with margin so the next
+		// ReserveLogin's internal sweep reclaims slots.
+		time.Sleep(expireTTL + 500*time.Millisecond)
 
 		require.NoError(t, s.ReserveLogin(ctx, "after-sweep", time.Now(), 10*time.Minute))
 	})
