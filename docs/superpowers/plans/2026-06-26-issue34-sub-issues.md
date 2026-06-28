@@ -53,7 +53,7 @@
 - `cmd/master-agent/` still exists and still builds; live references remain in `scripts/agents.sh`, all three `examples/*/scripts/e2e.sh`, `tests/scripts/agents_script_test.go`, `tests/runtime/README.md`.
 - `RoutingMasterOnly` / `master_only` remains in contract (`internal/contract/types.go:105`), driver capability tools (`internal/driver/capability_tools.go:121,232`), driver/orchestrator tests, and `examples/dynamic-mcp/scenario_test.go`.
 - `internal/orchestrator/` and `internal/orchestration/` still both exist; `cmd/driver-agent/main.go:198` uses `orchestration.NewDriverRunner`.
-- No canonical `internal/agentcard/` package — card parsing is duplicated across ≥7 sites: `internal/driver/agent_card.go`, `driver/tools.go:352,374,425`, `driver/slave_tools.go`, `driver/capability_tools.go:290`, `internal/orchestrator/route.go:128`, `internal/orchestration/plan_semantics.go:78,83`, `internal/planner/prompts.go:239,265`, `internal/contract/snapshot.go:29`.
+- No canonical `internal/agentcard/` package — card parsing is duplicated across ≥7 sites: `internal/driver/agent_card.go`, `internal/driver/tools.go:352,374,425`, `internal/driver/slave_tools.go`, `internal/driver/capability_tools.go:290`, `internal/orchestrator/route.go:128`, `internal/orchestration/plan_semantics.go:78,83`, `internal/planner/prompts.go:239,265`, `internal/contract/snapshot.go:29`.
 - Agent card carries `MCPTools` as `json.RawMessage` but has no structured `data` field; `contract.CapabilityRequirements` has no `data` or `mcp_servers`.
 - Runtime dispatch (`internal/dispatch/dispatch.go:59-162`) still routes by `task.Skill` only, no tools/MCP/data capability matching.
 - Planner still receives full agent lists (`internal/planner/planner.go:187` → `prompts.go:182`); no capability prefilter.
@@ -84,10 +84,11 @@
 09 → {10, 12}
 10 → 11
 10 → 20
+12b → 22
+11 → 22
 13 ← 03
 16, 17, 18, 21 — independent (no hard deps)
 19 ← 09
-22 ← 11 (claude/opencode SessionWorkerBackend, see Track C)
 ```
 
 Soft edges are noted per-item under **Soft deps**. The earlier draft had two contradictions, both fixed: (1) `11 → 12` was a cycle since item 11 also listed 12 as preferred — 12 now depends on 09, and 11 and 12 are siblings whose order is operator-chosen; (2) `09 → 10` was tagged "soft-precedes" in the graph while item 10 listed 09 as Hard — now a hard edge consistent with item 10. Items 17, 18, 21 are explicitly independent (no hard deps).
@@ -126,9 +127,9 @@ Items run on three parallel **tracks**, not sequential phases. Track labels repl
 **Acceptance:**
 
 - `go test ./...` no longer compiles `cmd/master-agent`.
-- `rg "go build .*cmd/master-agent|bin/master-agent|master-agent config"` matches only files under `docs/history/` or `cmd/master-agent/README.md`'s deprecation banner.
+- `rg "go build .*cmd/master-agent|bin/master-agent|master-agent config"` matches only files under `docs/history/` (new) or `cmd/master-agent/README.md`'s deprecation banner.
 - `scripts/agents.sh` no longer starts a master process.
-- `docs/README.md` and `tests/runtime/README.md` state that supported topology is driver + slave.
+- The existing topology-describing surfaces — repo-root `README.md` and `README.en.md`, `docs/superpowers/ROADMAP.md`, and `multi-agent/tests/runtime/README.md` — state that supported topology is driver + slave. (`docs/README.md` does not exist today; if creating it is desired, list it in this item's scope and create explicitly, otherwise update the four files above only.)
 
 **Hard deps:** none.
 **Soft deps:** none.
@@ -250,7 +251,7 @@ Items run on three parallel **tracks**, not sequential phases. Track labels repl
 
 - Dry-run and actual dispatch produce identical eligibility verdicts for the same `(card, req)` pair (table-driven test).
 - Missing reasons include field-specific entries such as `skill:bash`, `mcp_server:foo`, `data.kind:finance`.
-- After PR 2: `rg "agent.Skills.*==" internal/orchestrator/` returns no skill-only matching outside the new package.
+- After PR 2: the legacy skill-only matcher in `internal/orchestrator/route.go` (today: `agentHasRequiredSkills` at line 121, called from `selectAgentForTask` at line 98, reading `card.Skills`) is deleted, and `rg "agentHasRequiredSkills|card\.Skills" multi-agent/internal/orchestrator/` returns no hits outside `_test.go`.
 
 **Hard deps:** 04, 05.
 **Soft deps:** none.
@@ -704,8 +705,8 @@ This order respects hard deps and frontloads work that informs later scope.
 9. **08a / 08b** — Data setup, then `find_data`.
 10. **10** — Driver tool surface.
 11. **11** — App-server unsafe gate removal.
-12. **22a / 22b** — claude / opencode `SessionWorkerBackend` implementations.
-13. **12a / 12b** — Status migration, then CI matrix.
+12. **12a / 12b** — Status migration, then CI matrix (the parameterised matrix harness lands here so 22 can plug into it).
+13. **22a / 22b** — claude / opencode `SessionWorkerBackend` implementations.
 14. **13a / 13b / 13c** — Cancel, nudge, concurrency warning.
 15. **14** — Approval wiring.
 16. **15a / 15b** — `map_reduce` node, then reduce + retry policy.
