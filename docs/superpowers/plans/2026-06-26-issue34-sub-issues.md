@@ -51,9 +51,9 @@
 ### Still Open In Code
 
 - `cmd/master-agent/` still exists and still builds; live references remain in `scripts/agents.sh`, all three `examples/*/scripts/e2e.sh`, `tests/scripts/agents_script_test.go`, `tests/runtime/README.md`.
-- `RoutingMasterOnly` / `master_only` remains in contract (`internal/contract/types.go:105`), driver capability tools (`internal/driver/capability_tools.go:121,232`), driver/orchestrator tests, and `examples/dynamic-mcp/scenario_test.go`.
+- `RoutingMasterOnly` / `master_only` remains in contract (`internal/contract/types.go:13`), driver capability tools (`internal/driver/capability_tools.go:121,232`), driver/orchestrator tests, and `examples/dynamic-mcp/scenario_test.go`.
 - `internal/orchestrator/` and `internal/orchestration/` still both exist; `cmd/driver-agent/main.go:198` uses `orchestration.NewDriverRunner`.
-- No canonical `internal/agentcard/` package — card parsing is duplicated across ≥7 sites: `internal/driver/agent_card.go`, `internal/driver/tools.go:352,374,425`, `internal/driver/slave_tools.go`, `internal/driver/capability_tools.go:290`, `internal/orchestrator/route.go:128`, `internal/orchestration/plan_semantics.go:78,83`, `internal/planner/prompts.go:239,265`, `internal/contract/snapshot.go:29`.
+- No canonical `internal/agentcard/` package — card parsing is duplicated across ≥8 sites: `internal/driver/agent_card.go`, `internal/driver/tools.go:352,374,425`, `internal/driver/slave_tools.go`, `internal/driver/capability_tools.go:290`, `internal/orchestrator/route.go:128`, `internal/orchestration/plan_semantics.go:78,83`, `internal/planner/prompts.go:239,265`, `internal/contract/snapshot.go:29`, `internal/capability/types.go:40` (`ExtractFromAgentCard`).
 - Agent card carries `MCPTools` as `json.RawMessage` but has no structured `data` field; `contract.CapabilityRequirements` has no `data` or `mcp_servers`.
 - Runtime dispatch (`internal/dispatch/dispatch.go:59-162`) still routes by `task.Skill` only, no tools/MCP/data capability matching.
 - Planner still receives full agent lists (`internal/planner/planner.go:187` → `prompts.go:182`); no capability prefilter.
@@ -81,13 +81,12 @@
 01 → 02 → 03
 03 → 04 → 05 → 06 → {07, 08, 14}
 07 → 15
-09 → {10, 12}
-10 → 11
+09 → {10, 11, 12}
 10 → 20
 12b → 22
 11 → 22
 13 ← 03
-16, 17, 18, 21 — independent (no hard deps)
+16, 17, 18, 21 — independent (no hard deps; 16/17/18 soft-prefer 01)
 19 ← 09
 ```
 
@@ -556,8 +555,8 @@ Items run on three parallel **tracks**, not sequential phases. Track labels repl
 - Event readers can page/order by `seq`.
 - Migration works for existing SQLite/Postgres DBs (CI runs `go test ./internal/observerstore/...` against both backends).
 
-**Hard deps:** 01.
-**Soft deps:** none.
+**Hard deps:** none.
+**Soft deps:** 01 (less topology churn during schema migration).
 
 ### 17. Userspace SQLite WAL/busy timeout and humanloop lock GC
 
@@ -615,7 +614,7 @@ Items run on three parallel **tracks**, not sequential phases. Track labels repl
 **Labels:** `prod-test`
 **Estimated PRs:** 1
 
-**Problem:** Prod-test runbook exists, but health and codex smoke scripts are missing. Also, **a current bug**: `internal/executor/dynamicmcp.go:20` already persists `Tools []capability.MCPToolDescriptor`, whose `InputSchema` field is `json.RawMessage` (`internal/capability/types.go:9`). Default `gopkg.in/yaml.v3` marshalling of `[]byte` (which is what `json.RawMessage` is) emits a **YAML sequence of integers**, not a readable schema object. Anyone who registers an MCP whose tool descriptors include `InputSchema` today writes garbage into `dynamic_mcp.yaml` and round-trip via the existing `UnmarshalYAML` will fail to reconstruct the schema. This is not a "future" hardening — it is a current correctness bug.
+**Problem:** Prod-test runbook exists, but health and codex smoke scripts are missing. Also, **a current readability bug**: `internal/executor/dynamicmcp.go:20` persists `Tools []capability.MCPToolDescriptor`, whose `InputSchema` field is `json.RawMessage` (`internal/capability/types.go:9`). Default `gopkg.in/yaml.v3` marshalling of `[]byte` (which is what `json.RawMessage` is) emits a base64-encoded `!!binary` blob (or, depending on tag config, a sequence of integers). Bytes round-trip via the existing `UnmarshalYAML` because both forms decode back to the same `[]byte`, but the on-disk `dynamic_mcp.yaml` is unreadable to humans and unusable as configuration — defeating the point of a YAML config file. This is a current correctness/UX bug, not future hardening.
 
 **Scope:**
 
@@ -629,7 +628,7 @@ Items run on three parallel **tracks**, not sequential phases. Track labels repl
 
 - One command (`tests/prod_test/health.sh`) validates driver token, observer reachability, tunnel readiness, and absolute audit log paths.
 - One command (`tests/prod_test/codex-smoke.sh`) runs minimal codex CLI → driver MCP → slave task → artifact retrieval.
-- A test in `internal/executor/dynamicmcp_test.go` registers an MCP tool with `InputSchema={"type":"object","properties":{"x":{"type":"string"}}}`, writes `dynamic_mcp.yaml`, re-reads, and asserts the decoded schema equals the original (currently fails, will pass after the fix).
+- A test in `internal/executor/dynamicmcp_test.go` registers an MCP tool with `InputSchema={"type":"object","properties":{"x":{"type":"string"}}}`, writes `dynamic_mcp.yaml`, and asserts both (a) bytes round-trip — the decoded `InputSchema` equals the input — *and* (b) on-disk format is a YAML mapping, by reading the raw file and asserting it contains `type: object` rather than `!!binary` / a digit sequence. (Today (a) already holds; (b) currently fails — fix makes both pass.)
 
 **Hard deps:** 09 (codex path clarity).
 **Soft deps:** 10 (tool surface stable), 17 (humanloop lock cleanup verified in prod test).
