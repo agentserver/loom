@@ -2,12 +2,20 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/yourorg/multi-agent/internal/identity"
+	"github.com/yourorg/multi-agent/internal/identity/agentserver"
 )
 
 // helper: spin up the stub on an httptest server and return the URL + cleanup.
@@ -333,5 +341,151 @@ func TestErrorStatusCodes(t *testing.T) {
 				t.Errorf("status = %d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestResolverDrivesStub is the real contract test: stand the stub up, register
+// an agent, then ask the production
+// internal/identity/agentserver.Resolver to resolve the proxy_token. The
+// resolver's validate() requires user_id/workspace_id/sandbox_id/role to all be
+// non-empty, and the returned identity.Identity must carry the same short_id
+// the stub minted. If any JSON field name drifts (e.g. snake_case vs camelCase)
+// or a required field goes empty, this test catches it where the unit tests
+// would not.
+func TestResolverDrivesStub(t *testing.T) {
+	srv := NewServer("ws-eval-auto")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Register via the real handler so token derivation, lookup table insert,
+	// and the JSON shape we serve are all exercised in one path.
+	creds := decodeCreds(t, postJSON(t, ts.URL+"/api/v1/agents/register",
+		map[string]string{"role": "observer", "short_id": "obs-resolver"}))
+
+	resolver := agentserver.New(agentserver.Config{
+		BaseURL: ts.URL,
+		Timeout: 2 * time.Second,
+	})
+	got, err := resolver.Resolve(context.Background(), creds.ProxyToken)
+	if err != nil {
+		t.Fatalf("resolver.Resolve: %v", err)
+	}
+	want := identity.Identity{
+		UserID:        "eval-user",
+		WorkspaceID:   "ws-eval-auto",
+		WorkspaceName: "ws-eval-auto",
+		AgentID:       "obs-resolver",
+		SandboxID:     creds.SandboxID,
+		Role:          "observer",
+		Source:        identity.SourceAgentserver,
+	}
+	if got != want {
+		t.Errorf("identity mismatch:\n  got  = %+v\n  want = %+v", got, want)
+	}
+
+	// Resolver maps 401 → ErrInvalid; the stub's bad-token path must keep
+	// driving that branch (otherwise downstream code can't distinguish a
+	// bad token from a transient outage).
+	if _, err := resolver.Resolve(context.Background(), "not-a-real-token"); err == nil {
+		t.Error("resolver.Resolve(bad token): want error, got nil")
+	} else if err != identity.ErrInvalid {
+		t.Errorf("resolver.Resolve(bad token): err = %v, want ErrInvalid", err)
+	}
+}
+
+// TestConcurrentRegisterAndWhoami stresses the lookup table under parallel
+// register + whoami load. Run with `-race` to catch any unsynchronized access
+// to byProxy/byTunnel; the assertions also catch silent corruption (a whoami
+// returning the wrong identity, or register losing a token).
+func TestConcurrentRegisterAndWhoami(t *testing.T) {
+	url, stop := newTestStub(t)
+	defer stop()
+
+	const (
+		registrars      = 16
+		perRegistrar    = 8 // 16 × 8 = 128 distinct (role, short_id) tuples
+		whoamiers       = 16
+		whoamiPerWorker = 32
+	)
+
+	// Phase 1: seed one token per worker so whoami goroutines have something
+	// to race against from the start.
+	type seed struct {
+		shortID string
+		creds   Credentials
+	}
+	seeds := make([]seed, whoamiers)
+	for i := range seeds {
+		shortID := "seed-" + strconv.Itoa(i)
+		c := decodeCreds(t, postJSON(t, url+"/api/v1/agents/register",
+			map[string]string{"role": "driver", "short_id": shortID}))
+		seeds[i] = seed{shortID: shortID, creds: c}
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, registrars*perRegistrar+whoamiers*whoamiPerWorker)
+
+	// Phase 2a: registrars keep minting fresh credentials.
+	for r := 0; r < registrars; r++ {
+		r := r
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for k := 0; k < perRegistrar; k++ {
+				shortID := "race-" + strconv.Itoa(r) + "-" + strconv.Itoa(k)
+				resp, err := http.Post(url+"/api/v1/agents/register",
+					"application/json",
+					strings.NewReader(`{"role":"slave-a","short_id":"`+shortID+`"}`))
+				if err != nil {
+					errCh <- err
+					return
+				}
+				resp.Body.Close()
+				if resp.StatusCode != http.StatusOK {
+					errCh <- fmt.Errorf("register %s: status %d", shortID, resp.StatusCode)
+					return
+				}
+			}
+		}()
+	}
+
+	// Phase 2b: whoami workers re-resolve their seed credentials in a loop.
+	for w := 0; w < whoamiers; w++ {
+		w := w
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			want := seeds[w]
+			for k := 0; k < whoamiPerWorker; k++ {
+				req, _ := http.NewRequest(http.MethodGet, url+"/api/v1/agents/whoami", nil)
+				req.Header.Set("Authorization", "Bearer "+want.creds.ProxyToken)
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					errCh <- err
+					return
+				}
+				var who whoamiResponse
+				err = json.NewDecoder(resp.Body).Decode(&who)
+				resp.Body.Close()
+				if err != nil {
+					errCh <- err
+					return
+				}
+				if who.ShortID != want.shortID {
+					errCh <- fmt.Errorf("whoami short_id = %q, want %q", who.ShortID, want.shortID)
+					return
+				}
+				if who.SandboxID != want.creds.SandboxID {
+					errCh <- fmt.Errorf("whoami sandbox_id = %q, want %q", who.SandboxID, want.creds.SandboxID)
+					return
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
 	}
 }
