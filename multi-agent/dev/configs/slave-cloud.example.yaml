@@ -21,13 +21,14 @@ discovery:
   # Tier label: cloud sandbox slave (§C1 four-node fleet — Linux
   # laptop driver + Linux headless server slave + Windows desktop
   # slave + cloud sandbox slave). The runtime detector overlays
-  # detected shells (bash on Linux, powershell on Windows). The
-  # `sandbox` skill is the routing hint capability-discovery needs to
-  # tell driver "this is the ephemeral cloud tier", not local laptop.
+  # detected shells (bash on Linux, powershell on Windows). Skill
+  # set matches the other Linux slaves; tier-aware routing (e.g. a
+  # dedicated `sandbox` skill the driver matches on) is Phase 1/2
+  # work and not introduced by WT-0 — advertising a `sandbox` skill
+  # here without a consumer in internal/driver would be dead code.
   skills:
     - chat
     - mcp
-    - sandbox
 
 observer:
   enabled: true
@@ -39,7 +40,7 @@ observer:
   token_state_path: /tmp/observer-slave-cloud-dev.token
 
 resources:
-  memory_gb: 8
+  memory_gb: 16
   tags:
     - cloud
     - sandbox

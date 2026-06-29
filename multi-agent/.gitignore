@@ -18,6 +18,7 @@ tests/runtime/slave/work/
 /dev/configs/observer.yaml
 /dev/configs/slave-a.yaml
 /dev/configs/slave-b.yaml
+/dev/configs/slave-cloud.yaml
 /dev/configs/observer-e2e.db
 /dev/tmp/*.jsonl
 /dev/.env

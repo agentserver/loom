@@ -63,29 +63,54 @@ not exercise the **cloud sandbox** tier of the §C1 four-node fleet.
 The real Windows node cannot ship in a Linux compose file (handled
 separately by `deploy/windows/slave/install.ps1`), but the cloud
 sandbox tier can — it is just another slave-agent container with a
-different config advertising sandbox-style resources/skills.
+different config and tag set. WT-0 only ships the container
+placeholder; tier-aware routing (e.g. a driver matcher keyed on a
+dedicated `sandbox` skill) is **out of scope** and belongs to Phase
+1/2.
 
 Changes:
 
 1. **`multi-agent/dev/compose.distributed.yaml`** — added a
    `slave-cloud` service modelled on `slave-b`, mounting
    `./configs/slave-cloud.yaml`.
-2. **`multi-agent/dev/configs/slave-cloud.example.yaml`** — new config
-   marking the node with `display_name: slave-cloud-dev`, skills
-   `[chat, mcp, sandbox]`, and resource tags `[cloud, sandbox,
-   ephemeral]`. Comment explains the §C1 tier intent.
+2. **`multi-agent/dev/configs/slave-cloud.example.yaml`** — new
+   config marking the node with `display_name: slave-cloud-dev`,
+   skills `[chat, mcp]` (identical to the other Linux slaves —
+   WT-0 deliberately does not introduce a `sandbox` routing skill,
+   because no driver code consumes it yet), and resource tags
+   `[cloud, sandbox, ephemeral]`. Comment explains the §C1 tier
+   intent.
 3. **`multi-agent/tests/scripts/distributed_compose_test.go`** —
-   extended the existing structural smoke to require `slave-cloud:`,
-   the new mount, and the new example config loads cleanly via
-   `agentconfig.Load`.
+   extended the existing structural smoke to (a) require the new
+   compose mount for `slave-cloud.yaml`, (b) parse the compose YAML
+   and assert `services.slave-cloud` exists structurally (instead
+   of a bare substring on `slave-cloud:`, which would also match a
+   comment or mount line), and (c) load the new example config
+   cleanly via `agentconfig.Load`.
+4. **`multi-agent/.gitignore`** — added `/dev/configs/slave-cloud.yaml`
+   alongside the sibling `slave-a.yaml` / `slave-b.yaml` entries so
+   the live (non-`.example`) copy that operators populate with
+   secrets is never tracked.
 
 ## Verification (this worktree)
 
+The Go test suite and the compose-config check below cover this
+PR's diff. `GOOS=windows go build` is a master-level health check
+and is included only because the surrounding plan tracks it; this
+PR contains no Go production-code changes.
+
 ```
 go test ./...                  → all packages pass
-GOOS=windows go build ./...    → exit 0
+GOOS=windows go build ./...    → exit 0   # no Go prod-code changes in this PR;
+                                          # master-level health check only
 docker compose -f dev/compose.distributed.yaml config   → exit 0
-                                  (slave-cloud renders with the new config)
+   # `compose config` validates YAML schema but does NOT verify
+   # bind-mount source existence. To produce that exit-0 the six
+   # example files were temporarily copied to their live names
+   # (cp dev/configs/<name>.example.yaml dev/configs/<name>.yaml
+   # for master/driver/observer/slave-a/slave-b/slave-cloud) and
+   # removed after the check; the .gitignore additions above keep
+   # the live copies out of git.
 ```
 
 ## What is NOT in scope here

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	agentconfig "github.com/yourorg/multi-agent/internal/config"
 	"github.com/yourorg/multi-agent/internal/driver"
 	// Register backend kinds so driver.LoadConfig's whitelist
@@ -20,13 +22,6 @@ func TestDistributedComposeScaffold(t *testing.T) {
 	}
 	text := string(data)
 	for _, want := range []string{
-		"master:",
-		"driver:",
-		"slave-a:",
-		"slave-b:",
-		"observer:",
-		"agentserver:",
-		"postgres:",
 		"context: ..",
 		"ANTHROPIC_BASE_URL: https://code.ai.cs.ac.cn",
 		"ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}",
@@ -39,13 +34,37 @@ func TestDistributedComposeScaffold(t *testing.T) {
 		"./configs/slave-b.yaml:/config/config.yaml",
 		"./configs/slave-cloud.yaml:/config/config.yaml",
 		"./configs/observer.yaml:/config/config.yaml",
-		"slave-cloud:",
 		"go run ./cmd/driver-agent serve-mcp --config /config/config.yaml",
 		"go run ./cmd/observer-server --config /config/config.yaml",
 		"restart: unless-stopped",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("compose missing %q", want)
+		}
+	}
+
+	// Service-name presence is asserted structurally so a future
+	// refactor that deletes a service block but leaves a same-named
+	// comment or mount path cannot pass the test (the previous bare
+	// substring check would have).
+	var parsed struct {
+		Services map[string]yaml.Node `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("parse compose: %v", err)
+	}
+	for _, svc := range []string{
+		"postgres",
+		"agentserver",
+		"master",
+		"driver",
+		"slave-a",
+		"slave-b",
+		"slave-cloud",
+		"observer",
+	} {
+		if _, ok := parsed.Services[svc]; !ok {
+			t.Fatalf("compose services missing %q", svc)
 		}
 	}
 }
