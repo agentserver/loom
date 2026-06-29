@@ -103,6 +103,58 @@ def test_returns_na_when_git_times_out(tiny_repo: Path, monkeypatch) -> None:
     assert result.startswith("N/A:")
 
 
+def test_detached_head_renders_HEAD_as_branch(tmp_path: Path) -> None:
+    """On a detached HEAD checkout, `git rev-parse --abbrev-ref HEAD`
+    returns the literal string "HEAD". The wrapper documents this in its
+    docstring and the README is built around it (state stays informative);
+    lock that contract so a future "if branch == 'HEAD': return ...'detached'..."
+    refactor can't silently change the artifact format Phase 1 ingests.
+    """
+    repo = tmp_path / "detached"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / "f.txt").write_text("a\n")
+    _git(repo, "add", "f.txt")
+    _git(repo, "commit", "-q", "-m", "first")
+    (repo / "f.txt").write_text("b\n")
+    _git(repo, "add", "f.txt")
+    _git(repo, "commit", "-q", "-m", "second")
+    # Detach by checking out HEAD~1's SHA directly.
+    older_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD~1"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    _git(repo, "checkout", "-q", older_sha)
+
+    result = get_commit(str(repo))
+    assert "(HEAD clean)" in result, (
+        f"detached HEAD should render branch as 'HEAD', got {result!r}"
+    )
+    # Sanity: still a SHA prefix on the front.
+    head_token = result.split(" ", 1)[0]
+    assert len(head_token) >= 7
+    assert all(c in "0123456789abcdef" for c in head_token)
+
+
+def test_returns_na_for_empty_repo_with_no_commits(tmp_path: Path) -> None:
+    """`git init` with no commits: `rev-parse HEAD` fails (no HEAD ref yet).
+    Wrapper must surface a stable N/A string instead of leaking the failure
+    or returning the empty string as a SHA. Real scenario: a freshly
+    bootstrapped repo whose first commit hasn't landed yet.
+    """
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    _git(fresh, "init", "-q", "-b", "main")
+    result = get_commit(str(fresh))
+    assert result.startswith("N/A:"), (
+        f"empty repo should yield N/A, got {result!r}"
+    )
+    assert str(fresh) in result, (
+        f"N/A message must name the attempted path, got {result!r}"
+    )
+
+
 def test_find_git_root_returns_repo_root(tiny_repo: Path) -> None:
     """find_git_root walks up from a directory inside a repo and returns
     the repo's top level — exercised by _resolve_loom but otherwise
