@@ -68,6 +68,20 @@ placeholder; tier-aware routing (e.g. a driver matcher keyed on a
 dedicated `sandbox` skill) is **out of scope** and belongs to Phase
 1/2.
 
+What this compose change does *not* prove: in Linux compose,
+`slave-cloud` and `slave-b` advertise the same `[chat, mcp]` skill
+set and run on the same Linux/bash runtime, so capability discovery
+sees two functionally similar nodes that differ only by the
+`resources.tags` `[cloud, sandbox, ephemeral]` vs the laptop tags.
+That is enough to exercise the tag-keyed half of
+`internal/driver/capability_tools.go` (`cardSatisfiesResources`,
+`resourceJSONContains`), which is the §C1 routing surface this PR
+actually unlocks locally. True OS heterogeneity — the PowerShell
+vs bash split that drives `command_interfaces` divergence — only
+materialises on a real Windows host via
+`deploy/windows/slave/install.ps1`; that signal is covered by
+Phase 3 §C5 smoke, not by this compose node.
+
 Changes:
 
 1. **`multi-agent/dev/compose.distributed.yaml`** — added a

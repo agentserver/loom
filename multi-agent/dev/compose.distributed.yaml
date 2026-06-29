@@ -93,11 +93,15 @@ services:
   # slave-cloud is the cloud-sandbox tier in the §C1 four-node fleet
   # (Linux laptop driver + Linux headless server slave + Windows
   # desktop slave + cloud sandbox slave). It is a regular slave-agent
-  # container with a distinct config that advertises sandbox-style
-  # resources/skills, so a local `docker compose up` already exercises
-  # the multi-tier capability-discovery path that prod will see across
-  # physical machines. The real Windows node is handled by
-  # deploy/windows/*/install.ps1 (cannot ship in Linux compose).
+  # container whose config tags it with `[cloud, sandbox, ephemeral]`
+  # (skills are `[chat, mcp]`, identical to slave-a/slave-b — a
+  # routing `sandbox` skill is Phase 1/2 work). The tags are the only
+  # functional differentiator at runtime, so `docker compose up`
+  # exercises the tag-based capability-discovery path
+  # (internal/driver/capability_tools.go) that prod will see across
+  # physical machines. True OS heterogeneity (PowerShell / bash
+  # split) requires the real Windows host and lives in
+  # deploy/windows/*/install.ps1 — cannot ship in Linux compose.
   slave-cloud:
     build:
       context: ..
