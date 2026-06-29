@@ -393,6 +393,46 @@ func TestResolverDrivesStub(t *testing.T) {
 	}
 }
 
+// TestRegister_AutoWorkspaceNormalized guards against a caller passing
+// `--workspace-id auto` to the `issue` subcommand. NewServer normalizes the
+// "auto" sentinel to "ws-eval-auto" at process start, but the request handler
+// must do the same — otherwise the literal string "auto" would slot into the
+// returned credentials and the lookup table, and downstream resolvers would
+// see workspace_id="auto" instead of the canonical default.
+func TestRegister_AutoWorkspaceNormalized(t *testing.T) {
+	url, stop := newTestStub(t)
+	defer stop()
+
+	creds := decodeCreds(t, postJSON(t, url+"/api/v1/agents/register",
+		map[string]string{
+			"role":         "driver",
+			"short_id":     "drv-auto",
+			"workspace_id": "auto",
+		}))
+	if creds.WorkspaceID != "ws-eval-auto" {
+		t.Errorf(`creds.WorkspaceID = %q, want "ws-eval-auto" (literal "auto" leaked through register handler)`, creds.WorkspaceID)
+	}
+
+	// And the same workspace surfaces back through whoami.
+	req, _ := http.NewRequest(http.MethodGet, url+"/api/v1/agents/whoami", nil)
+	req.Header.Set("Authorization", "Bearer "+creds.ProxyToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("whoami: %v", err)
+	}
+	defer resp.Body.Close()
+	var who whoamiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&who); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if who.WorkspaceID != "ws-eval-auto" {
+		t.Errorf(`whoami.WorkspaceID = %q, want "ws-eval-auto"`, who.WorkspaceID)
+	}
+	if who.WorkspaceName != "ws-eval-auto" {
+		t.Errorf(`whoami.WorkspaceName = %q, want "ws-eval-auto"`, who.WorkspaceName)
+	}
+}
+
 // TestConcurrentRegisterAndWhoami stresses the lookup table under parallel
 // register + whoami load. Run with `-race` to catch any unsynchronized access
 // to byProxy/byTunnel; the assertions also catch silent corruption (a whoami

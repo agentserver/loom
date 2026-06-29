@@ -113,7 +113,8 @@ agentserver-stub/
 ├── main.go              CLI: serve (default) + `issue` subcommand
 ├── server.go            handlers + mux wiring; both path schemes
 ├── tokens.go            HMAC-based deterministic token derivation
-├── stub_test.go         5 required tests + alias smoke + error-code coverage
+├── stub_test.go         5 required tests + alias smoke + error-code table
+│                        + real-resolver contract + concurrency stress + auto-ws guard
 ├── README.md            this file
 └── examples/
     └── eval-bootstrap.sh   self-check used in PR validation

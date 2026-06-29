@@ -96,8 +96,11 @@ one. Body is read and discarded. No state mutation, no expiry.
 ### CLI
 
 ```
-agentserver-stub --listen :18080 [--workspace-id auto|<id>]
+agentserver-stub --listen 127.0.0.1:18080 [--workspace-id auto|<id>]
                                   starts the HTTP server in the foreground
+                                  (loopback by default — register has no auth,
+                                   so an all-interfaces bind would let anyone
+                                   on the network mint tokens)
 agentserver-stub issue --server http://127.0.0.1:18080 --role <role> --short-id <id> [--workspace-id <id>]
                                   POSTs to /api/v1/agents/register on a running
                                   stub and prints the five-tuple JSON to stdout
@@ -120,8 +123,10 @@ multi-agent/tools/eval/agentserver-stub/
     └── eval-bootstrap.sh
 ```
 
-The whole binary should sit under ~400 LOC. Token registry is an in-memory
-`sync.Map[token -> identity]`. No persistence.
+The whole binary should sit under ~400 LOC. Token registry is two in-memory
+maps (`byProxy`, `byTunnel`) guarded by a `sync.RWMutex` — readers (whoami,
+heartbeat) take RLock, writers (register) take Lock. Race-tested by
+`TestConcurrentRegisterAndWhoami` under `-race`. No persistence.
 
 ## Test plan (TDD order)
 
@@ -165,7 +170,8 @@ Script is idempotent and self-contained — Phase 1 eval-runner can crib it.
 - Heartbeat is a black hole — no liveness state for downstream consumers.
 - Single-workspace default (`ws-eval-auto`). Multi-workspace is allowed by
   passing `--workspace-id` to `issue`, but no isolation guarantees.
-- No TLS. Bind to loopback in real use (`--listen 127.0.0.1:18080`).
+- No TLS. Loopback bind is the default (`--listen 127.0.0.1:18080`); override
+  with `--listen 0.0.0.0:...` only on a sealed eval host.
 
 ## Why HMAC instead of random tokens
 

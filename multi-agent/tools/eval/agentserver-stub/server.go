@@ -104,7 +104,11 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "role and short_id are required", http.StatusBadRequest)
 		return
 	}
-	if req.WorkspaceID == "" {
+	// Mirror the NewServer normalization: an empty workspace_id, or the
+	// sentinel "auto", both mean "use the server default". Without this branch
+	// a caller running `agentserver-stub issue --workspace-id auto` would slot
+	// the literal "auto" string into credentials, lookup, and whoami.
+	if req.WorkspaceID == "" || req.WorkspaceID == "auto" {
 		req.WorkspaceID = s.defaultWorkspace
 	}
 
