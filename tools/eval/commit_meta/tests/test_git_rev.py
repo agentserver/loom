@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from commit_meta.git_rev import get_commit
+from commit_meta.git_rev import find_git_root, get_commit
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -74,3 +74,51 @@ def test_returns_na_for_none_path() -> None:
     # must produce a stable N/A string, not crash.
     result = get_commit(None)
     assert result.startswith("N/A:")
+
+
+def test_returns_na_when_git_binary_missing(tiny_repo: Path, monkeypatch) -> None:
+    """If git is not on PATH, subprocess.run raises FileNotFoundError.
+    Wrapper must absorb it and surface a stable N/A string rather than
+    propagating the exception.
+    """
+
+    def _boom(*args, **kwargs):  # noqa: ANN001 — signature mirrors subprocess.run
+        raise FileNotFoundError(2, "No such file or directory: 'git'")
+
+    monkeypatch.setattr(subprocess, "run", _boom)
+    result = get_commit(str(tiny_repo))
+    assert result.startswith("N/A:")
+
+
+def test_returns_na_when_git_times_out(tiny_repo: Path, monkeypatch) -> None:
+    """The 5-second timeout branch in _run_git is otherwise untested;
+    a hung git on a corrupt repo must not deadlock the collector.
+    """
+
+    def _slow(*args, **kwargs):  # noqa: ANN001
+        raise subprocess.TimeoutExpired(cmd="git", timeout=5)
+
+    monkeypatch.setattr(subprocess, "run", _slow)
+    result = get_commit(str(tiny_repo))
+    assert result.startswith("N/A:")
+
+
+def test_find_git_root_returns_repo_root(tiny_repo: Path) -> None:
+    """find_git_root walks up from a directory inside a repo and returns
+    the repo's top level — exercised by _resolve_loom but otherwise
+    uncovered.
+    """
+    nested = tiny_repo / "sub" / "deeper"
+    nested.mkdir(parents=True)
+    root = find_git_root(str(nested))
+    assert root is not None
+    # Use realpath to absorb any /tmp -> /private/tmp symlink on macOS.
+    import os
+
+    assert os.path.realpath(root) == os.path.realpath(str(tiny_repo))
+
+
+def test_find_git_root_returns_none_outside_repo(tmp_path: Path) -> None:
+    not_a_repo = tmp_path / "scratch"
+    not_a_repo.mkdir()
+    assert find_git_root(str(not_a_repo)) is None
