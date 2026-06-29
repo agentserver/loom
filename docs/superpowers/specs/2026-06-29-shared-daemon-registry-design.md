@@ -2,7 +2,7 @@
 
 **Issue:** [#49](https://github.com/agentserver/loom/issues/49) — commanderhub daemon registry not shared across observer instances; the commander UI shows daemons intermittently when the observer scales horizontally.
 
-> Revision history: v1 (initial), v2 (post-Claude adversarial review — fixes B1–B4, M1–M11, m1–m10), v3 (post-Codex review — fixes additional 9 BLOCKERs + 14 MAJORs), **v4 (post-Codex round-2 — fixes 7 BLOCKERs + 9 MAJORs centered on security, stable identity, Helm/existingSecret rendering, and worst-case wire sizing)**.
+> Revision history: v1 (initial), v2 (post-Claude adversarial review — fixes B1–B4, M1–M11, m1–m10), v3 (post-Codex review — fixes additional 9 BLOCKERs + 14 MAJORs), v4 (post-Codex round-2 — fixes 7 BLOCKERs + 9 MAJORs), **v5 (post-Codex round-3 — fixes 4 BLOCKERs + 4 MAJORs: connection_id guard on remove/heartbeat, drain endpoint auth, NetworkPolicy egress fix, JSON-escape worst case via daemon-side bound, path/SQL coherence, preStop without wget, documented secret-leak threat model)**.
 
 ## Context
 
@@ -22,7 +22,7 @@ Four layers:
 
 2. **Internal pod-to-pod command forwarding** over a **separate dedicated listener** (`:8091` by default) that is **never exposed by Ingress/HTTPRoute**. Auth: HMAC over `(timestamp, nonce, body)` with a 60 s window and a Postgres-backed nonce table (replay-proof within the window, fail-closed on PG unavailable). Supports current+previous secret pair for three-phase rotation. Wire format: length-prefixed JSON envelopes capped at **4 MiB** per envelope (see "Wire sizing" below for the worst-case math).
 
-3. **Postgres-backed `turnStateStore`** (`commander_turns` table). Owner pod's `routeFrame` is the single writer: it interprets each envelope using a stored `pendingEntry.command` + session id, runs the existing turn-state machine, and UPSERTs the row. Read paths (`tree.go::cachedSessionRows`, etc.) read by `(owner, daemon_id, session_id)`. `turns.begin()` becomes a row-level lock via `INSERT … ON CONFLICT … WHERE state IN ('idle','done','error','awaiting_approval','disconnected')`.
+3. **Postgres-backed `turnStateStore`** (`commander_turns` table). Owner pod's `routeFrame` is the single writer: it interprets each envelope using a stored `pendingEntry.command` + session id, runs the existing turn-state machine, and UPSERTs the row. Read paths (`tree.go::cachedSessionRows`, etc.) read by `(owner, short_id, session_id)`. `turns.begin()` becomes a row-level lock via `INSERT … ON CONFLICT … WHERE state IN ('idle','done','error','awaiting_approval','disconnected')`.
 
 4. **`sessionListCache` disabled when shared mode is active.** The cache exists to spare daemons repeated `list_sessions` traffic when a UI tab refreshes quickly; the cost in shared mode (cross-pod invalidation, stale lists for up to 10s) is worse than just paying the daemon hit. In single-pod mode the cache stays exactly as-is.
 
@@ -42,7 +42,7 @@ All four layers are **fail-closed on partial config**: any mix-up of `cluster.ad
 | Session-cache gating                                 | `internal/commanderhub/hub.go` `NewHub`, `tree.go`                      | when `sharedReg != nil`, `sessionCache` set to nil; `cachedSessionRows` checks for nil and skips caching |
 | Forwarding client                                    | `internal/commanderhub/forward_client.go` (new)                         | called by `proxy.go` `SendCommand`/`SendCommandStream` when local lookup misses and shared lookup returns remote |
 | Forwarding HTTP handler                              | `internal/commanderhub/forward_server.go` (new)                         | mounts `/api/commander/_internal/forward` on the INTERNAL mux (path namespace matches the public Ingress deny rule for defense in depth); calls `sendCommandToLocal` / `sendCommandStreamToLocal` |
-| Internal codec (length-prefixed JSON)                | `internal/commanderhub/forward_codec.go` (new)                          | 3 MiB cap per envelope; decimal-ASCII length + `\n` + JSON bytes             |
+| Internal codec (length-prefixed JSON)                | `internal/commanderhub/forward_codec.go` (new)                          | 1 MiB cap per envelope (matches existing wsReadLimit); decimal-ASCII length + `\n` + JSON bytes             |
 | `sendCommandToLocal` / `sendCommandStreamToLocal`    | `internal/commanderhub/proxy.go`                                        | factor out the post-lookup body of `SendCommand[Stream]` into local-only helpers; `SendCommand[Stream]` now does lookup → local OR forward |
 | Read-path helpers                                    | `internal/commanderhub/hub.go`                                          | `(h *Hub).listDaemons(ctx, o) []DaemonInfo`, `(h *Hub).lookupDaemon(ctx, o, daemonID) (lookupResult, error)`; used by `daemons`, `CommanderTree`, `FanOutSessions`, `ch.turn`'s guard |
 | Hub wiring                                           | `internal/commanderhub/wiring.go`, `hub.go`                             | `MountAll(publicMux, internalMux, resolver, agentserverURL, store, cluster ClusterRuntime)`; `internalMux=nil` ⇒ skip forward endpoint; `NewHub(resolver)` keeps signature; in-mode wiring via `Hub.attachSharedRegistry(...)` |
@@ -180,7 +180,7 @@ func (h *Hub) attachSharedRegistry(sr *sharedRegistry, fc *forwardClient, turns 
 
 ```go
 // publicMux receives /api/daemon-link + /api/commander/*.
-// internalMux receives /forward (nil in single-pod mode → no forwarding endpoint).
+// internalMux receives /api/commander/_internal/forward and /api/commander/_internal/drain (nil in single-pod mode → no forwarding endpoint).
 func MountAll(
     publicMux *http.ServeMux,
     internalMux *http.ServeMux,
@@ -264,6 +264,19 @@ The old `newHTTPServer` (with 60s read/write timeouts) is retained ONLY for the 
 
 Existing `*registry` → `*localRegistry`, same methods, same behavior. `Hub.reg`'s **method surface stays identical**; only the underlying type is renamed. Tests calling `hub.reg.add(...)` / `hub.reg.daemons(...)` recompile unchanged.
 
+**`localRegistry` v5 changes** (codex round-3 BLOCKER #1): keyed externally by `short_id` for cluster compatibility, but its `remove` must compare-and-delete by the **exact `*daemonConn` pointer** (or equivalently by `connection_id`), not just by `(owner, short_id)`. Otherwise: same-pod fast reconnect — new WS lands on same pod, gets a new `connection_id`, registers under same `short_id`; old WS goroutine's `defer h.reg.remove(o, dc.shortID)` would delete the NEW entry.
+
+```go
+// v5 method surface (preserves existing tests that use add/daemons/lookup;
+// remove gains a connection_id guard).
+func (r *localRegistry) add(dc *daemonConn)                          // unchanged
+func (r *localRegistry) lookup(o owner, shortID string) (*daemonConn, bool)  // key change: shortID
+func (r *localRegistry) removeIf(o owner, shortID, connectionID string)      // NEW: only delete if connection_id matches
+func (r *localRegistry) daemons(o owner) []DaemonInfo                // unchanged
+```
+
+Existing test sites use `hub.reg.add(&daemonConn{id: "a1", ...})` (e.g. `hub_test.go:197`). `daemonConn` gains a `shortID` field already set; tests must populate it (one-line per call site; ~10 test fixture updates). `hub.reg.remove(o, id)` calls in tests are very rare — verified via grep — and become `hub.reg.removeIf(o, shortID, connID)`. Per-test fixtures may use sentinel `connID="test-conn"`.
+
 `*sharedRegistry`:
 
 ```go
@@ -276,23 +289,34 @@ type sharedRegistry struct {
     sweepEvery          time.Duration // 30s
 }
 
-// connectUpsert claims ownership on a new WS connect. INSERT … ON CONFLICT …
-// DO UPDATE without an owning-pod guard — connect is allowed to take ownership
-// because the daemon reconnected to us.
+// connectUpsert claims ownership on a new WS connect. INSERT … ON CONFLICT
+// (user_id,workspace_id,short_id) DO UPDATE without ownership guard — connect
+// is allowed to take ownership because the daemon reconnected to us. Sets
+// owning_instance_url AND connection_id to this WS's values. After this runs,
+// the previous owning pod's heartbeat will see 0 rows (its ownership guard
+// includes connection_id) and exit.
 func (s *sharedRegistry) connectUpsert(ctx context.Context, dc *daemonConn) error
 
-// heartbeatUpsert refreshes last_seen_at ONLY when this pod still owns the row.
+// heartbeatUpsert refreshes last_seen_at ONLY when this pod AND this exact
+// connection still owns the row:
 //   INSERT INTO commander_daemons (...) VALUES (...)
-//   ON CONFLICT (user_id, workspace_id, daemon_id) DO UPDATE
-//     SET last_seen_at = now(),
-//         short_id     = EXCLUDED.short_id, … etc
-//     WHERE commander_daemons.owning_instance_url = EXCLUDED.owning_instance_url;
-// 0 rows affected ⇒ another pod took ownership; heartbeat exits.
-func (s *sharedRegistry) heartbeatUpsert(ctx context.Context, dc *daemonConn) (claimed bool, err error)
+//   ON CONFLICT (user_id, workspace_id, short_id) DO UPDATE
+//     SET last_seen_at = now(), display_name = EXCLUDED.display_name, …
+//     WHERE commander_daemons.owning_instance_url = EXCLUDED.owning_instance_url
+//       AND commander_daemons.connection_id     = EXCLUDED.connection_id;
+// 0 rows affected ⇒ row was claimed by another pod OR a newer connection on
+// THIS pod. In either case, the heartbeat goroutine exits and the caller
+// (ServeHTTP defer chain) should also CLOSE the WS — see the heartbeat-loss
+// handling note below.
+func (s *sharedRegistry) heartbeatUpsert(ctx context.Context, dc *daemonConn) (stillOwn bool, err error)
 
-// remove DELETEs only when owning_instance_url matches this pod (so a daemon
-// already reconnected to a sibling pod isn't unlinked).
-func (s *sharedRegistry) remove(ctx context.Context, o owner, daemonID string) error
+// remove DELETEs only when BOTH owning_instance_url AND connection_id match
+// (so a same-pod-reconnect's old WS goroutine's deferred remove doesn't
+// delete the NEW connection's row):
+//   DELETE FROM commander_daemons
+//   WHERE user_id=$1 AND workspace_id=$2 AND short_id=$3
+//     AND owning_instance_url=$4 AND connection_id=$5
+func (s *sharedRegistry) remove(ctx context.Context, o owner, shortID, connectionID string) error
 
 // lookupRemote returns peerURL+info iff a fresh row exists AND its
 // owning_instance_url != this pod's advertiseURL. Returns ok=false otherwise.
@@ -354,7 +378,7 @@ if h.sharedReg != nil {
     }()
 }
 
-defer h.reg.remove(o, dc.shortID)
+defer h.reg.removeIf(o, dc.shortID, dc.connectionID)   // compare-and-delete by connection_id
 defer h.invalidateDaemonSessions(o, dc.shortID)
 defer close(dc.done)
 defer dc.failAllPending()
@@ -363,7 +387,7 @@ defer func() {
         hbCancel()
         <-hbDone                                       // wait for heartbeat goroutine
         removeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-        _ = h.sharedReg.remove(removeCtx, o, dc.shortID) // ownership-guarded DELETE
+        _ = h.sharedReg.remove(removeCtx, o, dc.shortID, dc.connectionID) // ownership + connection guard
         cancel()
     }
 }()
@@ -371,11 +395,26 @@ defer func() {
 
 `hbCancel + <-hbDone` ensures the heartbeat goroutine has exited before the DELETE runs, so the heartbeat cannot resurrect the row between the DELETE and the WS goroutine return. The connect-upsert-before-local-admit order means **a PG-degraded pod refuses new WS connections** (daemons retry, hopefully landing on a healthy pod) rather than admitting locally-visible-but-cluster-invisible daemons.
 
+**Heartbeat-loss handling** (codex round-3 BLOCKER #1 addendum): when `heartbeatUpsert` returns `stillOwn=false`, the heartbeat goroutine logs WARN and **forcibly closes the WS** via `dc.conn.Close()`. This wakes the read loop with `io.EOF`, ServeHTTP exits, defers run with `removeIf`+`remove` — both of which are guarded by `connection_id`, so neither deletes the new owner's state. Daemon's `wsclient.Run()` reconnects via its normal backoff (`commander/wsclient.go:88`). This guarantees that a displaced WS doesn't keep serving stale requests on the losing pod until the next read-timeout.
+
 ### Forwarding: client, server, codec
 
 #### Internal mux — separate `http.ServeMux`
 
-The forward endpoint is mounted on a **second mux** that is **never** registered on the public ServeMux. The chart exposes the internal mux via a per-pod-addressable Service (see §"Internal Service"), not via Ingress. The public Ingress/HTTPRoute templates also add a hardening rule (§"Ingress hardening") so even if a future change accidentally re-mounts `/forward` on the public mux, the edge will 404 it.
+The forward endpoint is mounted on a **second mux** that is **never** registered on the public ServeMux. The chart exposes the internal mux via a per-pod-addressable Service (see §"Internal Service"), not via Ingress. The public Ingress/HTTPRoute templates also add a hardening rule (§"Ingress hardening") so even if a future change accidentally re-mounts `/api/commander/_internal/forward` on the public mux, the edge will 404 it.
+
+**Route table** (for clarity):
+
+| Mux       | Path prefix                          | Purpose                                   | Auth                                         |
+|-----------|--------------------------------------|-------------------------------------------|----------------------------------------------|
+| public    | `/api/daemon-link`                   | daemon WS upgrade                         | Bearer token via identity.Resolver           |
+| public    | `/api/commander/login*`              | commander UI login flow                   | (login flow itself)                          |
+| public    | `/api/commander/{daemons,tree,sessions}` | UI read endpoints                       | cookie session via Authenticator             |
+| public    | `/api/commander/daemons/{id}/...`    | UI command/turn endpoints                 | cookie session via Authenticator             |
+| public    | `/commander`, `/commander/assets/*`  | UI page + assets                          | (public)                                     |
+| public    | `/api/commander/_internal/*`         | **REJECTED at Ingress (deny rule)**       | n/a — never reach the pod from outside       |
+| internal  | `/api/commander/_internal/forward`   | pod-to-pod command/stream forwarding      | HMAC + nonce; NetworkPolicy peers-only       |
+| internal  | `/api/commander/_internal/drain`     | preStop drain hook                        | loopback OR HMAC; NetworkPolicy peers-only   |
 
 #### Per-pod DNS — headless Service
 
@@ -394,7 +433,7 @@ X-Observer-Cluster-Auth:      <hex(hmac_sha256(secret, timestamp || "\n" || nonc
 ```
 
 Receiver (strict ordering — DO NOT reorder; nonce insert MUST come last so an unauthenticated caller cannot exhaust the nonce table or DoS legitimate senders):
-1. Reject (413) immediately if `Content-Length > 4 MiB` (wire cap, see "Wire sizing" below).
+1. Reject (413) immediately if `Content-Length > 1.5 MiB` (wire cap, see "Wire sizing" below).
 2. Reject (400) if any of the three headers absent or malformed (e.g. `X-Observer-Cluster-Auth` not 64 hex chars; timestamp not decimal int; nonce not 32 hex chars).
 3. Reject (403) if `|now - timestamp| > 60s` — header-only check, no body read yet.
 4. Read body into a `[]byte` via `io.LimitReader(r.Body, 4 MiB+1)`; reject 413 if N+1 bytes were read (body exceeds cap).
@@ -424,7 +463,7 @@ The 403→prev-retry is a defense-in-depth for misordered rollouts within a phas
 POST /api/commander/_internal/forward HTTP/1.1   (mounted on the INTERNAL listener only — NOT on the public mux)
 Headers: as above
 Content-Type: application/json
-Content-Length: <N>      # capped at 4 MiB; receiver returns 413 if exceeded
+Content-Length: <N>      # capped at 1.5 MiB (request body) / 1 MiB (per streamed envelope); receiver returns 413 if exceeded
 
 {
   "user_id":      "<owner.userID>",
@@ -453,21 +492,32 @@ The forward **client** maps `{"error":...}` back to `*DaemonError` (preserving `
 
 `Transfer-Encoding: chunked`. Body is a sequence of `<decimal-ascii-length>\n<envelope-json-bytes>`. Receiver reads ASCII digits until `\n` (max 8 digits, cap `length ≤ 4 MiB`), then reads exactly that many bytes. Each chunk MUST parse as a single `commander.Envelope`. Stream ends on EOF (terminal frame seen) or upstream cancel (see §"Cancellation propagation").
 
-#### Wire sizing — worst-case math (codex BLOCKER #7)
+#### Wire sizing — worst-case math (codex round-3 BLOCKER #2 correction)
 
-The 4 MiB cap is derived from:
-- `MaxFilePreviewBytes = 2 MiB` (`commander/protocol.go:19`) — the largest payload a daemon can emit in a single `read_file` `command_result`.
-- Go's `encoding/json` escapes `<0x20`, `"`, `\`, and (with `SetEscapeHTML(true)`, the default) `<`, `>`, `&` as either `\b`/`\f`/`\n`/`\r`/`\t` (2 bytes) or `\u00XX` (6 bytes). Worst case: every byte expands 6×.
-- Daemon files: `commander/files.go` returns `Binary: true` with **empty content** for non-text files (skim of `files.go:117` and onwards — binary files don't put bytes on the wire). Text files in practice expand 1.0–1.2×; the worst plausible expansion for "JSON-quoted UTF-8 text with a lot of low-ASCII control bytes" is ~2.5×, not 6× (which would require every byte to be `\u00XX`-escaped, which doesn't happen for valid text).
-- Conservative budget: 2 MiB text × 3× JSON overhead = 6 MiB worst-realistic, but file responses with that profile would already exceed the existing 1 MiB observer WS read limit (`hub.go:20`) and **break in single-pod mode today**.
+Round-2 spec proposed 4 MiB cap reasoning that text files "don't escape every byte." Codex correctly objected: a 2 MiB file full of valid non-NUL **C0 control bytes** (`\x01`-`\x1F`, all valid UTF-8) passes `utf8.Valid` and isn't classified as binary by typical heuristics, then `encoding/json` escapes each byte as `\u00XX` (6 bytes), producing ~12 MiB.
 
-**Pre-existing latent bug** (separate concern, folded into v4): the daemon→observer WS read limit is `wsReadLimit = 1 << 20` (1 MiB) at `hub.go:20`. A 2 MiB-text file with even 1.5× JSON expansion exceeds this. This means today's single-pod observer also can't handle a worst-case `read_file`. Fix folded into v4:
+The correct approach: **bound JSON-encoded size at the daemon, not raw byte size**. The wire never sees > 1 MiB even pathologically, matching the existing observer `wsReadLimit = 1 << 20`.
 
-- Raise observer-side `wsReadLimit` to `4 << 20` (4 MiB) to match the forward cap. Documented in v4 commit message; this is a behavior change for single-pod observers but only widens what's accepted.
-- Forward request body and each streamed envelope are also capped at 4 MiB.
-- If `MaxFilePreviewBytes` is ever raised above ~1.5 MiB, both caps must be revisited proportionally.
+Changes in v5 (note: these affect the daemon side, which is a separate binary):
 
-If a file_read response WOULD exceed 4 MiB after JSON expansion (genuinely pathological text file), the daemon truncates with `TooLarge: true` and an empty `Content` — same behavior as today for files exceeding `MaxFilePreviewBytes`. The forwarding path never sees an oversized envelope from the daemon because the daemon enforces `MaxFilePreviewBytes` on its side first.
+- `internal/commander/files.go::readFilePreview` (caller-side, pre-JSON-encode): after constructing the result struct, run `out, _ := json.Marshal(result)`; if `len(out) > maxEncodedFileResponse` (set to 768 KiB to leave headroom for envelope wrapping), set `Result.TooLarge = true, Content = ""` and return the small placeholder. This guarantees a `read_file` `command_result` envelope is always < `wsReadLimit`.
+- This is a **daemon-side change** to a shared package (`commander`). It must ship with the observer-side change because old daemons (no encoded-size check) sending to new observers risk WS frame too large → existing failure (1 MiB WS limit fires). No regression for old-daemon-new-observer; just preserves current latent-bug behavior on 12 MiB cases.
+- New daemons connecting to old observers: smaller previews returned for control-heavy files. UX improvement; no breakage.
+
+**Wire caps v5 (unchanged from existing single-pod behavior):**
+- Observer `wsReadLimit` stays `1 << 20` (1 MiB). NO raise. v4's raise to 4 MiB is REVERTED.
+- Forward request body cap: `1.5 << 20` (1.5 MiB) — accommodates one 1 MiB envelope plus the forward request's JSON wrapping (`{user_id, workspace_id, ..., args: <1 MiB payload>}`).
+- Forward streamed envelope cap (per length-prefixed chunk): `1 << 20` (1 MiB) — same as WS read limit; envelopes pass through transparently.
+
+Per-envelope wire format constants live in `internal/commanderhub/forward_codec.go`:
+```go
+const (
+    forwardReqBodyCap    = 1 << 20 + 1 << 19  // 1.5 MiB
+    forwardStreamFrameCap = 1 << 20            // 1 MiB
+)
+```
+
+The `Content-Length > forwardReqBodyCap` and `length-prefix > forwardStreamFrameCap` checks return 413 (request) or terminate stream + log (response). Tests `forward_test.go::TestForwardBodyCapEnforced` and `TestForwardStreamFrameCapEnforced` cover both.
 
 #### Back-pressure
 
@@ -578,7 +628,22 @@ type turnStateBackend interface {
 
 All methods take a `context.Context` so PG row locks, deadlocks, or failover don't hang the WS goroutine. Callers always pass a per-operation timeout (5 s default for state mutations; the request ctx for `get`). The Postgres impl sets `SET LOCAL lock_timeout = '500ms'; SET LOCAL statement_timeout = '5s';` at the start of every transaction so a hot row never wedges the heartbeat path.
 
-In-memory impl is the existing code, unchanged. New `turn_state_pg.go` provides `*pgTurnStore` implementing the same interface against `commander_turns`. `begin` uses `INSERT … ON CONFLICT (user_id,workspace_id,daemon_id,session_id) DO UPDATE SET state='queued', updated_at=now() WHERE commander_turns.state IN ('idle','done','error','awaiting_approval','disconnected') RETURNING xmax` — `xmax=0` means insert (begin succeeded); `xmax>0` and rows affected = 1 means update (begin succeeded); rows affected = 0 means conflict (turn in flight elsewhere, return false). Result: cross-pod turn-in-flight dedup falls out naturally — a second pod's `begin` blocks the duplicate turn.
+In-memory impl is the existing code, unchanged. New `turn_state_pg.go` provides `*pgTurnStore` implementing the same interface against `commander_turns`. `turnKey` is `{owner, shortID, sessionID}` (NOT the per-connection daemon_id — codex round-3 MAJOR #6 correction). `begin` uses:
+
+```sql
+INSERT INTO commander_turns (user_id, workspace_id, short_id, session_id, state, updated_at)
+VALUES ($1, $2, $3, $4, 'queued', now())
+ON CONFLICT (user_id, workspace_id, short_id, session_id) DO UPDATE
+  SET state='queued', updated_at=now()
+  WHERE commander_turns.state IN ('idle','done','error','awaiting_approval','disconnected')
+RETURNING (xmax = 0) AS inserted
+```
+
+- 1 row returned with `inserted=true` → first turn, begin succeeded
+- 1 row returned with `inserted=false` → previous turn ended (terminal state); begin succeeded
+- 0 rows returned → conflict (current state is `queued` or `answering`); begin returns false
+
+Result: cross-pod turn-in-flight dedup falls out naturally — a second pod's `begin` blocks the duplicate turn.
 
 The **owning pod is the single writer** for non-`begin` mutations. `routeFrame` (`hub.go:243-260`) is extended:
 
@@ -898,6 +963,13 @@ spec:
       app.kubernetes.io/component: observer
   policyTypes: [Ingress]
   ingress:
+    # Rule 1: public observer port — allow from ANYWHERE (Ingress, Gateway,
+    # daemon clients, in-cluster probes). NetworkPolicy without this rule
+    # would deny public traffic to selected pods (codex round-3 BLOCKER #4).
+    - ports:
+        - port: {{ .Values.service.port }}
+          protocol: TCP
+    # Rule 2: internal port — restrict to observer pods only (peers).
     - ports:
         - port: {{ .Values.cluster.internalServicePort }}
           protocol: TCP
@@ -908,6 +980,10 @@ spec:
               app.kubernetes.io/component: observer
 {{- end }}
 ```
+
+The two-rule shape is critical: a NetworkPolicy with one rule selecting target pods + ingress-restricting only port 8091 implicitly DENIES all other ingress to those pods (Kubernetes default-deny semantics for selected pods). Rule 1 explicitly allows public 8090 from anywhere; Rule 2 restricts 8091 to observer pods.
+
+`values.yaml` adds: `cluster.networkPolicy.enabled: true` default; operators on CNIs that don't enforce NetworkPolicy (e.g. flannel without `--with-network-policy`) explicitly set `false`. The chart's README documents this prerequisite. **NetworkPolicy is defense in depth** — the HMAC + nonce + loopback-only check on /drain is the primary auth.
 
 `values.yaml` adds:
 
@@ -1089,10 +1165,10 @@ fi
 1. UI → LB → Pod B → `POST /api/commander/daemons/<id>/sessions/<sid>/turn`.
 2. `ch.turn` calls `hub.lookupDaemon(r.Context(), o, daemonID)` → `{PeerURL: "http://10.0.1.42:8091", …}`.
 3. `ch.hub.turns.begin(key)` — Postgres-backed in shared mode, ATOMIC across pods: Pod B's INSERT-on-conflict returns true; a duplicate from Pod C (or even Pod B's second tab) returns false → 409 "turn already in flight". This is the multi-pod dedup that v2 explicitly left out and v3 fixes.
-4. `SendCommandStream(ctx, o, daemonID, "session_turn", args)`. Local lookup misses → shared lookup returns peer → forward client opens POST to `http://10.0.1.42:8091/forward` with streaming=true.
-5. Pod A's `/forward` handler:
+4. `SendCommandStream(ctx, o, daemonID, "session_turn", args)`. Local lookup misses → shared lookup returns peer → forward client opens POST to `http://10.0.1.42:8091/api/commander/_internal/forward` with streaming=true.
+5. Pod A's `/api/commander/_internal/forward` handler:
    - Validates HMAC + timestamp + nonce-insert.
-   - Reads body (3 MiB cap).
+   - Reads body (1.5 MiB cap).
    - Validates daemon is in Pod A's `localReg` (404 otherwise).
    - Calls `hub.sendCommandStreamToLocal(ctx, dc, "session_turn", args, outBuffer=256)`.
    - Drains the returned channel and writes length-prefixed JSON to the chunked HTTP body.
@@ -1136,7 +1212,7 @@ fi
 | HMAC/timestamp invalid                                       | 403         | Caller logs (WARN, no secret) + returns `ErrDaemonGone`               |
 | Nonce already seen within 60 s window                        | 403         | Same                                                                  |
 | Receiver not in shared mode                                  | 503         | Caller logs + returns `ErrDaemonGone`                                 |
-| Body > 4 MiB                                                 | 413         | Caller logs + returns `ErrDaemonGone`                                 |
+| Body > 1.5 MiB                                                 | 413         | Caller logs + returns `ErrDaemonGone`                                 |
 | Daemon not in receiver's local registry                      | 404         | Caller returns `ErrDaemonNotFound` (UI 404); next sweep cleans row    |
 | Daemon present, daemon-originated error                      | 200         | Caller wraps `{"error":{code,message}}` back into `*DaemonError`; preserves `commander.ErrCodeSessionNotFound`/`ErrCodeInvalidRequest`/etc. |
 | Daemon present, command OK                                   | 200         | Normal path                                                           |
@@ -1148,7 +1224,7 @@ fi
 
 **Unit (no Postgres):**
 - `registry_shared_test.go` — `go-sqlmock` against `*sql.DB`: assert ownership-guarded UPSERT/heartbeat/DELETE/sweep SQL; assert `lookupRemote` returns false for self-owned rows.
-- `forward_test.go` — `httptest`-driven round-trip; HMAC valid/invalid; timestamp drift > 60s → 403; nonce replay → 403; body > 4 MiB → 413; receiver not in shared mode → 503; caller cancel propagates; slow reader triggers drop counter + synthetic `truncated` envelope; daemon-error code preserved across the wire.
+- `forward_test.go` — `httptest`-driven round-trip; HMAC valid/invalid; timestamp drift > 60s → 403; nonce replay → 403; body > 1.5 MiB → 413; receiver not in shared mode → 503; caller cancel propagates; slow reader triggers drop counter + synthetic `truncated` envelope; daemon-error code preserved across the wire.
 - `turn_state_pg_test.go` — `go-sqlmock`: begin returns true on first call, false on conflict; rekey moves key atomically; cleanupOrphans flips stale rows.
 
 **Integration (Postgres via env-skip pattern; mirrors `authstore/postgres_test.go:15-23`):**
@@ -1159,7 +1235,7 @@ fi
   - Concurrent `turns.begin(same key)` on Hub A and Hub B — only one returns true.
   - Kill Hub A; sweep on Hub B removes row after `deleteAfter` (use injected `time.Now` faker).
   - Reconnect daemon to Hub B; ownership flipped; Hub A (relaunched) lookups now hit Hub B.
-- `multi_pod_files_test.go` — forward a 2 MiB `read_file` response; assert success (3 MiB cap covers it).
+- `multi_pod_files_test.go` — forward a 2 MiB `read_file` response; assert success (1.5 MiB cap covers the wrapped envelope).
 
 **Local repro:** `dev/compose.multi-observer.yaml` boots PG + 2 observers + nginx LB; `dev/README.md` documents `make multi-observer-up`.
 
@@ -1210,12 +1286,37 @@ go test ./internal/commanderhub/... -race -count=1
 OBSERVER_POSTGRES_TEST_DSN=... go test -run TestMultiPod -race ./internal/commanderhub/...
 ```
 
+### Threat model — cluster secret compromise (codex round-3 MAJOR #8)
+
+**Trust boundary:** the cluster secret authenticates pod-to-pod forwarding. A holder of the cluster secret can:
+- Forge a `forward` request with arbitrary `user_id` and `workspace_id`, **provided the target daemon (`short_id`) is in the target pod's local registry**.
+- Cause the target pod to execute commands (list_sessions, get_session, list_files, read_file, session_turn) on that daemon AS the impersonated owner.
+- Receive the daemon's response (file content, session contents, turn output).
+
+**This is functionally equivalent to a full-cluster compromise** for the commander surface. The cluster secret must be treated as a high-value credential, on par with the Postgres DSN and S3 keys.
+
+**Mitigations in v5:**
+1. **Network isolation** via NetworkPolicy restricts the internal listener to observer pods only. A compromised non-observer pod cannot reach the listener.
+2. **Audit log** records every accepted forward with (`user_id`, `workspace_id`, `short_id`, `command`, `peer remote_addr`). Detection post-compromise, not prevention.
+3. **Three-phase rotation procedure** lets ops rotate quickly when compromise is suspected.
+4. **Sender-side and receiver-side audit** lets ops correlate "this request appeared at pod B from a peer not in our pod set."
+
+**NOT mitigated** (documented limitations):
+- **No per-tenant authorization beyond the daemon's owner check.** A cluster-secret holder who knows a target tenant's `(user_id, workspace_id, short_id)` triple can issue commands. The triple is not secret — short_id is visible in the commander UI's daemon list. Strong tenant-isolation would require per-tenant capability tokens stored in the registry row and checked by the receiver. Spec'd as **follow-up issue** (cap-token registry).
+- **Network policy not enforced** by all CNIs. Operators on flannel-without-`--with-network-policy` get no network-layer defense. Documented; ops responsibility.
+
+**Rotation playbook** (`deploy/README.md`):
+- Suspected compromise: rotate cluster secret via three-phase procedure (Phase A → B → C in §"Three-phase secret rotation"); minimum 6 minutes total.
+- Confirmed compromise: rotate secret AND audit `forward.received` logs for the 24 h preceding detection; manually review the listed commands per (user, workspace) and notify any tenant whose data was accessed.
+
 ### Out of scope (follow-up issues)
 
+- **Per-tenant capability tokens** (codex round-3 MAJOR #8 ultimate fix) — currently a cluster-secret holder can impersonate any tenant. Follow-up adds a per-(user,workspace,short_id) capability token stored with the registry row, signed by the owning pod, included in `forward` body, and verified by the receiver. Real defense against secret leakage. Requires careful key management.
 - **mTLS between pods** — HMAC + nonce + non-public Service is adequate for cluster-internal traffic; mTLS via cert-manager is a separate sprint.
 - **Headless-DNS-based addressing for forwarding** — pod IPs via downward API + headless Service for discovery is simpler; revisit if pod IP churn becomes a real problem.
-- **`cleanupOrphans` for `commander_turns`** — basic implementation in v3 (flip to `disconnected` after `TurnTimeout`); a follow-up could improve UX by linking the orphan to its `commander_daemons` row and flipping when the daemon row disappears.
-- **PG-backed session-list cache** — v3 simply disables the cache in shared mode. A follow-up could add a generation column for shared invalidation if `list_sessions` traffic becomes hot.
+- **`cleanupOrphans` for `commander_turns`** — basic implementation in v5 (flip to `disconnected` after `TurnTimeout`); a follow-up could improve UX by linking the orphan to its `commander_daemons` row and flipping when the daemon row disappears.
+- **PG-backed session-list cache** — v5 simply disables the cache in shared mode. A follow-up could add a generation column for shared invalidation if `list_sessions` traffic becomes hot.
+- **Daemon-side file_read encoded-size enforcement test coverage** — v5 adds the enforcement in `commander/files.go`; integration test against a 2 MiB control-byte file is a small follow-up.
 
 ### Rollout sequence
 
@@ -1238,20 +1339,45 @@ OBSERVER_POSTGRES_TEST_DSN=... go test -run TestMultiPod -race ./internal/comman
 {{- if .Values.cluster.enabled }}
 lifecycle:
   preStop:
-    exec:
-      command:
-        - /bin/sh
-        - -ec
-        - |
-          # Tell the observer to close all WS connections cleanly. The handler
-          # at /api/commander/_internal/drain triggers wsclient reconnect on the
-          # daemon side. Sleep briefly for the close frames to flush.
-          wget -qO- --post-data='' "http://127.0.0.1:{{ .Values.cluster.internalServicePort }}/api/commander/_internal/drain" || true
-          sleep 5
+    # Use Kubernetes-native httpGet so we don't depend on wget/curl being
+    # present in the image (codex round-3 MAJOR #7 — base image is
+    # debian:bookworm-slim with only ca-certificates; wget is NOT installed).
+    # httpGet calls localhost on the pod itself, satisfying the drain
+    # handler's loopback bypass. Method must be GET-compatible; the drain
+    # handler accepts both GET (probe) and POST.
+    httpGet:
+      path: /api/commander/_internal/drain
+      port: internal
+      host: 127.0.0.1
+      scheme: HTTP
 {{- end }}
 ```
 
-A new endpoint `/api/commander/_internal/drain` (no auth needed — bound to loopback by the preStop hook; the internal mux is also NetworkPolicy-restricted to peers) iterates `localRegistry` and writes `{type:"close",payload:{reason:"observer-restart"}}` envelopes to every daemon, then closes the WS. `wsclient.Run` reconnects with backoff (`commander/wsclient.go:88`).
+After `preStop`, kubelet's `terminationGracePeriodSeconds` (default 30 s, override via chart `values.yaml::terminationGracePeriodSeconds`) elapses before SIGKILL. Our observer's `http.Server.Shutdown` handles the rest. The drain endpoint must accept GET (since httpGet uses GET); the handler treats GET and POST identically.
+
+A new endpoint `/api/commander/_internal/drain` lives on the INTERNAL mux. **Auth (codex round-3 BLOCKER #3):** by default requires the same HMAC+nonce auth as `/forward`, because the internal listener binds `0.0.0.0:8091` and is reachable from any cluster pod (NetworkPolicy is defense-in-depth, not the primary auth). A special-case exemption: requests whose `RemoteAddr` resolves to a loopback address (`127.0.0.0/8` or `::1`) skip HMAC — this is the preStop hook calling itself.
+
+```go
+// drainHandler v5: require HMAC unless source is loopback.
+func (h *Hub) drainHandler(w http.ResponseWriter, r *http.Request) {
+    if !isLoopback(r.RemoteAddr) {
+        if err := verifyForwardAuth(r, h.cluster.Secret, h.cluster.PrevSecret); err != nil {
+            http.Error(w, "unauthorized", http.StatusForbidden)
+            auditLog("drain.denied", r.RemoteAddr, err)
+            return
+        }
+    }
+    h.drainAllLocalDaemons("observer-restart")
+    auditLog("drain.executed", r.RemoteAddr, nil)
+    w.WriteHeader(http.StatusOK)
+}
+```
+
+`isLoopback` parses the host portion of `r.RemoteAddr` and checks `net.IP.IsLoopback`. Standard pattern.
+
+`drainAllLocalDaemons` iterates `localRegistry`, for each WS writes a `{type:"event",payload:{event_kind:"observer_draining","text":"observer-restart"}}` envelope (informational; the daemon's wsclient.Run hits read EOF on the subsequent conn.Close), then `dc.conn.Close()`. `wsclient.Run` reconnects with backoff (`commander/wsclient.go:88`).
+
+**Three layers** of drain protection: loopback restriction (preStop only) + HMAC (cluster peers if any) + NetworkPolicy (CNI defense in depth). A pod in the same namespace cannot drain another pod's daemons without the cluster secret.
 
 Rollback: `helm rollback observer <prev>`. New tables (`commander_daemons`, `commander_turns`, `commander_forward_nonces`) are left behind (no down migration in the chart); rows become stale, irrelevant. A subsequent re-roll-forward consumes them harmlessly. Manual down migration (`schema_postgres_rollback.sql`) is documented in `deploy/README.md`.
 
