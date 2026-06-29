@@ -11,6 +11,11 @@ all four endpoints under one MCP with a `method` discriminator; Stage C
 reuse: call the other three endpoints without re-prompting the model for
 URL/header plumbing.
 
+**Tool input surface** (also stated in `_shared/openapi.yaml` `info.description`):
+`{method, body?, headers?, base_url?}`. `base_url` is optional and only
+used by the acceptance `negative_service_down` case to point the wrapper
+at a deliberately-unreachable address — runtime task specs never set it.
+
 ## Layout
 
 | Path | Role |

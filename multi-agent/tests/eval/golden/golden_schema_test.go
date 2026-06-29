@@ -383,6 +383,191 @@ func pngColorMode(ct byte) string {
 	}
 }
 
+// TestAcceptanceFixturesAgreeWithCases cross-checks the acceptance/fixtures/
+// images against the matching cases.jsonl entries — same drift class as
+// TestImageMetadataMatchesPNGFile but for the acceptance fixtures, which
+// the original guard skipped. A swapped fixture (or a hand-edited expected
+// width) now fails loudly.
+func TestAcceptanceFixturesAgreeWithCases(t *testing.T) {
+	famDir := filepath.Join(goldenRoot(t), "image-metadata-extractor")
+	raw, err := os.ReadFile(filepath.Join(famDir, "acceptance", "cases.jsonl"))
+	if err != nil {
+		t.Fatalf("read cases.jsonl: %v", err)
+	}
+	type expectShape struct {
+		Width     uint32 `json:"width"`
+		Height    uint32 `json:"height"`
+		Format    string `json:"format"`
+		ColorMode string `json:"color_mode"`
+	}
+	type inputShape struct {
+		Path string `json:"path"`
+	}
+	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var c acceptanceCase
+		if err := json.Unmarshal([]byte(line), &c); err != nil {
+			t.Fatalf("parse line %q: %v", line, err)
+		}
+		var in inputShape
+		if err := json.Unmarshal(c.Input, &in); err != nil {
+			t.Fatalf("%s: parse input: %v", c.Name, err)
+		}
+		// Only validate cases whose input is an in-repo fixture we can read.
+		// Cases pointing at /tmp/... are intentionally non-existent.
+		if !strings.HasPrefix(in.Path, "tests/eval/golden/") {
+			continue
+		}
+		// Resolve relative to the multi-agent module root — paths in
+		// cases.jsonl are repo-relative per WT-1 convention.
+		// goldenRoot returns .../multi-agent/tests/eval/golden, so trim back.
+		repoRoot := strings.TrimSuffix(goldenRoot(t), "/tests/eval/golden")
+		abs := filepath.Join(repoRoot, in.Path)
+		data, err := os.ReadFile(abs)
+		if err != nil {
+			t.Errorf("%s: fixture not readable at %s: %v", c.Name, abs, err)
+			continue
+		}
+		w, h, ct, ok := pngIHDR(data)
+		if c.ExpectedError != "" {
+			// Negative cases targeting bad.png must NOT parse as PNG.
+			if ok {
+				t.Errorf("%s: negative case but %s parses as PNG (w=%d h=%d)", c.Name, abs, w, h)
+			}
+			continue
+		}
+		if !ok {
+			t.Errorf("%s: expected PNG but IHDR rejected %s", c.Name, abs)
+			continue
+		}
+		var exp expectShape
+		if err := json.Unmarshal(c.Expected, &exp); err != nil {
+			t.Errorf("%s: parse expected: %v", c.Name, err)
+			continue
+		}
+		if exp.Width != 0 && exp.Width != w {
+			t.Errorf("%s: expected.width=%d, IHDR=%d", c.Name, exp.Width, w)
+		}
+		if exp.Height != 0 && exp.Height != h {
+			t.Errorf("%s: expected.height=%d, IHDR=%d", c.Name, exp.Height, h)
+		}
+		if exp.Format != "" && exp.Format != "PNG" {
+			t.Errorf("%s: expected.format=%q want PNG", c.Name, exp.Format)
+		}
+		if exp.ColorMode != "" {
+			if got := pngColorMode(ct); got != exp.ColorMode {
+				t.Errorf("%s: expected.color_mode=%q, IHDR ct=%d → %q", c.Name, exp.ColorMode, ct, got)
+			}
+		}
+	}
+}
+
+// TestAcceptanceCaseInputsAreSelfContained guards a different drift class:
+// every cases.jsonl input field references either an in-repo fixture path
+// (which must exist) OR an inline payload (refund order, api request).
+// It also enforces that each case's input only uses fields the family's
+// tool surface actually declares — currently a closed allowlist per tool.
+// This is the test that catches the "negative_service_down adds base_url
+// but local_echo_call has no base_url parameter" class of bug.
+func TestAcceptanceCaseInputsAreSelfContained(t *testing.T) {
+	repoRoot := strings.TrimSuffix(goldenRoot(t), "/tests/eval/golden")
+
+	// Closed set of fields each固化 tool accepts. If acceptance/cases.jsonl
+	// references a field not in this set the tool surface and the gate are
+	// out of sync — WT-1 will either reject the call or silently ignore it.
+	toolAllowedFields := map[string]map[string]bool{
+		"csv_profile": {
+			"path": true,
+		},
+		"parse_access_log": {
+			"path":   true,
+			"format": true,
+		},
+		"check_refund_eligibility": {
+			"order":       true,
+			"policy_path": true,
+		},
+		"image_metadata": {
+			"path": true,
+		},
+		"local_echo_call": {
+			"method":  true,
+			"body":    true,
+			"headers": true,
+			// base_url is documented as an optional override in
+			// api-wrapper-for-local-service/_shared/openapi.yaml
+			// info.description and README; only the acceptance
+			// negative_service_down case sets it.
+			"base_url": true,
+		},
+	}
+
+	for _, fam := range expectedFamilies {
+		fam := fam
+		t.Run(fam, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join(goldenRoot(t), fam, "acceptance", "cases.jsonl"))
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+				if strings.TrimSpace(line) == "" {
+					continue
+				}
+				var c acceptanceCase
+				if err := json.Unmarshal([]byte(line), &c); err != nil {
+					t.Errorf("parse: %v", err)
+					continue
+				}
+				allowed, ok := toolAllowedFields[c.Tool]
+				if !ok {
+					t.Errorf("%s: tool %q has no field allowlist in test (forgot to register?)", c.Name, c.Tool)
+					continue
+				}
+				var input map[string]json.RawMessage
+				if err := json.Unmarshal(c.Input, &input); err != nil {
+					t.Errorf("%s: input is not an object: %v", c.Name, err)
+					continue
+				}
+				for k := range input {
+					if !allowed[k] {
+						t.Errorf("%s: input field %q not declared for tool %q (declared: %v)",
+							c.Name, k, c.Tool, sortedKeys(allowed))
+					}
+				}
+				// If input references an in-repo path string, that file must
+				// exist (negative cases use /tmp/... which we skip).
+				for _, field := range []string{"path", "policy_path"} {
+					rawVal, ok := input[field]
+					if !ok {
+						continue
+					}
+					var s string
+					if err := json.Unmarshal(rawVal, &s); err != nil {
+						continue
+					}
+					if !strings.HasPrefix(s, "tests/eval/golden/") {
+						continue
+					}
+					if _, err := os.Stat(filepath.Join(repoRoot, s)); err != nil {
+						t.Errorf("%s: input.%s %q does not exist relative to repo root", c.Name, field, s)
+					}
+				}
+			}
+		})
+	}
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // TestImageMetadataMatchesPNGFile cross-checks expected/metadata.json
 // against the actual PNG on disk for every task in image-metadata-extractor.
 // This catches the easy class of bug where someone hand-edits metadata.json

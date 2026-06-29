@@ -2,6 +2,13 @@ openapi: 3.0.3
 info:
   title: local-echo
   version: "0.1.0"
+  description: |
+    Toy echo service wrapped by the `local_echo_call` MCP. The MCP tool
+    surface accepts: `method` (required, one of the path keys below),
+    `body` (string|object, optional), `headers` (object, optional), and
+    `base_url` (string, optional — overrides the default `servers[0].url`
+    so acceptance/negative tests can point the wrapper at a deliberately
+    unreachable address without coordinating a service stop).
 servers:
   - url: http://localhost:8080
 paths:
