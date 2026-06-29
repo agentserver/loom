@@ -2,7 +2,7 @@
 
 **Issue:** [#49](https://github.com/agentserver/loom/issues/49) — commanderhub daemon registry not shared across observer instances; the commander UI shows daemons intermittently when the observer scales horizontally.
 
-> Revision history: v1 (initial), v2 (post-Claude adversarial review — fixes B1–B4, M1–M11, m1–m10), v3 (post-Codex review — fixes additional 9 BLOCKERs + 14 MAJORs), v4 (post-Codex round-2 — fixes 7 BLOCKERs + 9 MAJORs), v5 (post-Codex round-3 — fixes 4 BLOCKERs + 4 MAJORs), v6 (post-Codex round-4 — fixes 1 BLOCKER + 5 MAJORs), v7 (post-Codex round-5 — fixes 0 BLOCKERs + 4 MAJORs), **v8 (post-Codex round-6 — fixes 0 BLOCKERs + 3 MAJORs: cache TTL 5s → 1s for ≤1s residual race; capability-gate error code dedicated 426 Upgrade Required; --drain-local nonzero exit on config errors)**.
+> Revision history: v1 (initial), v2 (post-Claude adversarial review — fixes B1–B4, M1–M11, m1–m10), v3 (post-Codex review — fixes additional 9 BLOCKERs + 14 MAJORs), v4 (post-Codex round-2 — fixes 7 BLOCKERs + 9 MAJORs), v5 (post-Codex round-3 — fixes 4 BLOCKERs + 4 MAJORs), v6 (post-Codex round-4 — fixes 1 BLOCKER + 5 MAJORs), v7 (post-Codex round-5 — fixes 0 BLOCKERs + 4 MAJORs), v8 (post-Codex round-6 — fixes 0 BLOCKERs + 3 MAJORs), **v9 (post-Codex round-7 — fixes 0 BLOCKERs + 2 MAJORs: preStop passes --config; positive-ownership cache eliminated for command paths — every shared-mode send does a 500ms PG check)**.
 
 ## Context
 
@@ -416,13 +416,12 @@ defer func() {
 
 **Heartbeat-loss handling** (codex round-3 BLOCKER #1 addendum + round-4 explicit race window): when `heartbeatUpsert` returns `stillOwn=false`, the heartbeat goroutine logs WARN and **forcibly closes the WS** via `dc.conn.Close()`. This wakes the read loop with `io.EOF`, ServeHTTP exits, defers run with `removeIf`+`remove` — both guarded by `connection_id`, so neither deletes the new owner's state. Daemon's `wsclient.Run()` reconnects via its normal backoff (`commander/wsclient.go:88`).
 
-**Race-window elimination via cached ownership check** (codex round-5 MAJOR #1): in shared mode, every local-path `SendCommand[Stream]` revalidates ownership before writing to the WS. Implementation:
+**Race-window elimination via per-send ownership check** (codex round-5/6/7): in shared mode, every local-path `SendCommand[Stream]` does a fresh ownership read against `commander_daemons` before writing to the WS. **No positive cache.** Only a negative cache: once we discover we've lost ownership, we cache that for the brief remaining lifetime of the `*daemonConn` to avoid re-querying for the next command on the same dead conn.
 
 ```go
 // In SendCommand[Stream], before dc.writeEnvelope:
 if h.sharedReg != nil {
-    if !dc.ownershipValid(time.Now()) {
-        // Cached or fresh check found ownership lost; treat as gone.
+    if !dc.confirmOwnership(ctx) {
         return nil, ErrDaemonGone
     }
 }
@@ -430,23 +429,18 @@ if h.sharedReg != nil {
 // daemonConn gains:
 type daemonConn struct {
     /* ... existing ... */
-    ownerCheckMu     sync.Mutex
-    ownerCheckedAt   time.Time
-    ownerStillOurs   bool
+    ownershipLost    atomic.Bool // sticky: once true, never goes back to false
 }
 
-// ownershipValid does a cached check: if last successful confirmation is
-// < 1s old, return true. Otherwise do a short SELECT against the shared
-// registry; cache the result. (v8: TTL tightened 5s→1s per codex round-5.)
-func (dc *daemonConn) ownershipValid(now time.Time) bool {
-    dc.ownerCheckMu.Lock()
-    if dc.ownerStillOurs && now.Sub(dc.ownerCheckedAt) < 1*time.Second {
-        dc.ownerCheckMu.Unlock()
-        return true
+// confirmOwnership: read the row's owning_instance_url + connection_id; if
+// they don't match this pod + this conn, mark ownership lost and return
+// false. PG failure or row missing → false too (fail-closed). Bounded
+// latency via per-call context: 500ms.
+func (dc *daemonConn) confirmOwnership(parentCtx context.Context) bool {
+    if dc.ownershipLost.Load() {
+        return false
     }
-    dc.ownerCheckMu.Unlock()
-
-    ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+    ctx, cancel := context.WithTimeout(parentCtx, 500*time.Millisecond)
     defer cancel()
     var ownerURL, connID string
     row := dc.hub.sharedReg.db.QueryRowContext(ctx,
@@ -454,22 +448,19 @@ func (dc *daemonConn) ownershipValid(now time.Time) bool {
          WHERE user_id=$1 AND workspace_id=$2 AND short_id=$3`,
         dc.owner.userID, dc.owner.workspaceID, dc.shortID)
     err := row.Scan(&ownerURL, &connID)
-
-    dc.ownerCheckMu.Lock()
-    defer dc.ownerCheckMu.Unlock()
     if err != nil || ownerURL != dc.hub.sharedReg.advertiseURL || connID != dc.id {
-        dc.ownerStillOurs = false
+        dc.ownershipLost.Store(true)
         return false
     }
-    dc.ownerStillOurs = true
-    dc.ownerCheckedAt = now
     return true
 }
 ```
 
-Cost: at most 1 PG round-trip per 1 s per command-active daemon (very small load: even a 1000-daemon active fleet generates ≤1000 SELECTs/sec, comfortable for PG). Bounded latency 500 ms (returns `false` on PG failure → command 502s rather than hangs). On successful heartbeat (`heartbeatUpsert` returning `stillOwn=true`), the heartbeat ALSO calls `dc.ownerCheckMu.Lock(); dc.ownerStillOurs=true; dc.ownerCheckedAt=now; dc.ownerCheckMu.Unlock()` so a quiescent daemon still has a fresh cache without extra reads.
+**Cost analysis:** every `SendCommand[Stream]` adds one PG SELECT (single-row by PK, sub-ms typical). For an active 1k-daemon fleet at 10 commands/sec aggregate, that's 10 extra PG queries/sec — negligible. The single-pod path (no shared mode) is unaffected. Long-running streams pay the check ONCE at SendCommandStream start; per-frame routing inside the daemon→observer WS doesn't recheck.
 
-**Residual race window: ≤1 s** (cache TTL). A sibling pod's claim at t=0 may not be visible to the losing pod until t=1s; commands during that window can still write to the stale WS. After t=1s, all commands either route correctly or fail-fast with `ErrDaemonGone`. For the user-visible bug fix this is acceptable: a single stale-WS write times out the daemon's TCP send buffer at OS-level (typically 10-30s) — much better than v6's 10s/10m hang. A user clicking a button at t<1s after sibling claim sees a brief failure; retry succeeds.
+**Residual race window: zero.** A sibling pod's `connectUpsert` updates the row atomically; the losing pod's next `confirmOwnership` reads the new row and refuses. The 10s/10m hang on stale writes is fully eliminated.
+
+**PG outage degradation:** if PG is unreachable during `confirmOwnership`, commands return `ErrDaemonGone` → 502 to UI. This is a deliberate fail-closed choice — a brief PG hiccup degrades commander to read-mostly. Acceptable; matches how the heartbeat path handles PG outage. NetworkPolicy + nonce-DoS prevention in the forwarding path keep us safe even under degraded PG.
 
 **Why not PG LISTEN/NOTIFY:** would require a per-pod long-lived LISTEN connection and an additional pgx feature. The cached-check approach achieves the same SLA (≤5s) with simpler code and no extra connection. LISTEN/NOTIFY is a viable follow-up if the SELECT-on-stale-cache becomes a hot path.
 
@@ -1431,6 +1422,8 @@ lifecycle:
     exec:
       command:
         - /usr/local/bin/observer-server
+        - --config
+        - /etc/observer/observer.yaml
         - --drain-local
         - --internal-port={{ .Values.cluster.internalServicePort }}
 {{- end }}
