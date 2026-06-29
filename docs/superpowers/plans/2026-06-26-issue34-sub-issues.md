@@ -187,7 +187,7 @@ Items run on three parallel **tracks**, not sequential phases. Track labels repl
 **Labels:** `architecture`, `capability-routing`
 **Estimated PRs:** 1
 
-**Problem:** Agent card parsing is duplicated across ≥7 hot spots (see Baseline).
+**Problem:** Agent card parsing is duplicated across ≥8 hot spots (see Baseline).
 
 **Scope:**
 
@@ -197,7 +197,7 @@ Items run on three parallel **tracks**, not sequential phases. Track labels repl
 
 **Acceptance:**
 
-- `rg "json.Unmarshal\\(.*Card|parseAgentCard|parseAgentCapabilities|agentsJSON"` outside `internal/agentcard/` matches only test files.
+- `rg "json.Unmarshal\\(.*Card|parseAgentCard|parseAgentCapabilities|agentsJSON|ExtractFromAgentCard"` outside `internal/agentcard/` matches only test files. (`internal/capability/types.go:40` either moves into the new package or becomes a thin wrapper that delegates to it; either way the canonical schema lives in one place.)
 - Unit tests cover missing/null/malformed cards and known field extraction.
 - No behavior regression in `list_agents`, planner prompts, dry-run, route validation (existing tests for those flows still pass unchanged).
 
