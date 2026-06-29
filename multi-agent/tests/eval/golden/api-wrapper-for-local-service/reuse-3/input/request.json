@@ -1,0 +1,4 @@
+{
+  "method": "health",
+  "endpoint": "GET /healthz"
+}

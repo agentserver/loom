@@ -1,0 +1,5 @@
+{
+  "method": "echo_headers",
+  "endpoint": "GET /echo/headers",
+  "headers": {"X-Loom-Trace": "abc-123"}
+}

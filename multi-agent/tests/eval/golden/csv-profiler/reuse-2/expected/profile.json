@@ -1,0 +1,8 @@
+{
+  "rows": 6,
+  "cols": 2,
+  "columns": [
+    {"name": "ts", "dtype": "string", "nulls": 0},
+    {"name": "reading", "dtype": "float", "nulls": 0, "min": 7.0, "max": 100.0, "mean": 29.166667}
+  ]
+}

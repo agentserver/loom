@@ -1,0 +1,17 @@
+family: image-metadata-extractor
+id: image-metadata-extractor/reuse-2
+kind: reuse
+intent:
+  goal: 3×2 RGBA PNG — non-square boundary case.
+  success_criteria:
+    - "width == 3 and height == 2"
+    - "color_mode == 'RGBA'"
+inputs:
+  - path: input/photo.png
+expected:
+  artifacts:
+    - path: expected/metadata.json
+capability_requirements:
+  skills: []
+  tools:
+    - image_metadata

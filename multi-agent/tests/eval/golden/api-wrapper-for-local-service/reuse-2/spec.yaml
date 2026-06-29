@@ -1,0 +1,17 @@
+family: api-wrapper-for-local-service
+id: api-wrapper-for-local-service/reuse-2
+kind: reuse
+intent:
+  goal: Call /echo/headers and verify the custom X-Loom-Trace header round-trips.
+  success_criteria:
+    - "status == 200"
+    - "body.x_loom_trace == 'abc-123'"
+inputs:
+  - path: input/request.json
+expected:
+  artifacts:
+    - path: expected/response.json
+capability_requirements:
+  skills: []
+  tools:
+    - local_echo_call

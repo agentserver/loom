@@ -1,0 +1,21 @@
+family: csv-profiler
+id: csv-profiler/first-task
+kind: first
+intent:
+  goal: |
+    Produce basic statistics for a small sales CSV: row count, column count,
+    per-column dtype, null counts, and mean/min/max for numeric columns.
+  success_criteria:
+    - "rows == 5"
+    - "cols == 3"
+    - "numeric column 'amount' has min=10.0 max=99.5 within 1e-6"
+inputs:
+  - path: input/sales.csv
+expected:
+  artifacts:
+    - path: expected/profile.json
+capability_requirements:
+  skills:
+    - run_slave_bash
+  tools:
+    - csv_profile

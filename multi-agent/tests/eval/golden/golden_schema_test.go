@@ -1,0 +1,691 @@
+// Package golden validates the on-disk shape of the E4 task family golden
+// fixtures. It is intentionally hermetic: no network, no compose, no MCP — it
+// only walks the directory tree and asserts the documented contract for §F2.
+//
+// What "shape" means here:
+//
+//   - Every directory under tests/eval/golden/<family-id>/ must contain
+//     exactly the layout documented in WT-0 prompt: first-task/, reuse-1/,
+//     reuse-2/, reuse-3/, acceptance/.
+//   - Each task directory holds a valid spec.yaml conforming to the §F1
+//     workload spec field convention (we re-implement the minimal subset
+//     here so this worktree has no source dependency on the §F1 worktree).
+//   - Each task directory carries input/ and expected/ subtrees (oracle
+//     ground-truth lives in expected/).
+//   - acceptance/cases.jsonl is one JSON object per line, ≥5 cases, with the
+//     {name, tool, input, expected|expected_error} protocol consumed later
+//     by `skills/mcp-acceptance --cases`.
+//   - The five family IDs documented in §F2 are present.
+package golden
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+)
+
+// expectedFamilies is the closed set of family IDs §F2 commits to.
+var expectedFamilies = []string{
+	"api-wrapper-for-local-service",
+	"csv-profiler",
+	"image-metadata-extractor",
+	"log-parser",
+	"refund-policy-checker",
+}
+
+// requiredTaskDirs is the per-family directory contract.
+var requiredTaskDirs = []string{"first-task", "reuse-1", "reuse-2", "reuse-3"}
+
+// minCases is the §F2 acceptance floor — at least 5 cases per family
+// covering happy path / edge / error / boundary / negative.
+const minCases = 5
+
+// taskSpec is the minimal §F1-aligned spec.yaml shape we enforce. We do NOT
+// import internal/contract here because the §F1 worktree owns that struct
+// and §F2 must stay decoupled (per prompt: "你这边只用结构，不依赖 §F1
+// worktree 的代码").
+type taskSpec struct {
+	Family string `yaml:"family"`
+	ID     string `yaml:"id"`
+	Kind   string `yaml:"kind"` // "first" | "reuse"
+	Intent struct {
+		Goal            string   `yaml:"goal"`
+		SuccessCriteria []string `yaml:"success_criteria"`
+	} `yaml:"intent"`
+	Inputs []struct {
+		Path string `yaml:"path"`
+	} `yaml:"inputs"`
+	Expected struct {
+		Artifacts []struct {
+			Path string `yaml:"path"`
+		} `yaml:"artifacts"`
+	} `yaml:"expected"`
+	CapabilityRequirements struct {
+		Skills []string `yaml:"skills"`
+		Tools  []string `yaml:"tools"`
+	} `yaml:"capability_requirements"`
+}
+
+// acceptanceCase is the jsonl line contract from §F2 / B3.
+//
+// Exactly one of {Expected, ExpectedError} must be set per line.
+type acceptanceCase struct {
+	Name          string          `json:"name"`
+	Tool          string          `json:"tool"`
+	Input         json.RawMessage `json:"input"`
+	Expected      json.RawMessage `json:"expected,omitempty"`
+	ExpectedError string          `json:"expected_error,omitempty"`
+}
+
+func goldenRoot(t *testing.T) string {
+	t.Helper()
+	// The test runs from the package directory (tests/eval/golden), so the
+	// fixtures live alongside this file. Resolving relative keeps the test
+	// movable.
+	abs, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+	return abs
+}
+
+func TestExpectedFamiliesArePresent(t *testing.T) {
+	root := goldenRoot(t)
+	for _, fam := range expectedFamilies {
+		info, err := os.Stat(filepath.Join(root, fam))
+		if err != nil {
+			t.Errorf("family %q missing: %v", fam, err)
+			continue
+		}
+		if !info.IsDir() {
+			t.Errorf("family %q is not a directory", fam)
+		}
+	}
+}
+
+func TestNoUnexpectedFamilies(t *testing.T) {
+	root := goldenRoot(t)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("readdir %s: %v", root, err)
+	}
+	want := map[string]struct{}{}
+	for _, f := range expectedFamilies {
+		want[f] = struct{}{}
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		// Allow ad-hoc helper subdirs prefixed with "_" if we ever need
+		// them; require everything else to be in the closed set.
+		if strings.HasPrefix(e.Name(), "_") {
+			continue
+		}
+		if _, ok := want[e.Name()]; !ok {
+			t.Errorf("unexpected family dir %q under %s", e.Name(), root)
+		}
+	}
+}
+
+func TestEachFamilyHasRequiredLayout(t *testing.T) {
+	root := goldenRoot(t)
+	for _, fam := range expectedFamilies {
+		fam := fam
+		t.Run(fam, func(t *testing.T) {
+			famDir := filepath.Join(root, fam)
+			// README + acceptance dir required.
+			if _, err := os.Stat(filepath.Join(famDir, "README.md")); err != nil {
+				t.Errorf("missing README.md: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(famDir, "acceptance", "cases.jsonl")); err != nil {
+				t.Errorf("missing acceptance/cases.jsonl: %v", err)
+			}
+			for _, sub := range requiredTaskDirs {
+				taskDir := filepath.Join(famDir, sub)
+				if _, err := os.Stat(taskDir); err != nil {
+					t.Errorf("missing task dir %s: %v", sub, err)
+					continue
+				}
+				validateTaskDir(t, fam, sub, taskDir)
+			}
+		})
+	}
+}
+
+func validateTaskDir(t *testing.T, family, name, dir string) {
+	t.Helper()
+
+	specPath := filepath.Join(dir, "spec.yaml")
+	raw, err := os.ReadFile(specPath)
+	if err != nil {
+		t.Errorf("%s: missing spec.yaml: %v", name, err)
+		return
+	}
+	var spec taskSpec
+	if err := yaml.Unmarshal(raw, &spec); err != nil {
+		t.Errorf("%s: spec.yaml parse: %v", name, err)
+		return
+	}
+	if spec.Family != family {
+		t.Errorf("%s/spec.yaml: family=%q want %q", name, spec.Family, family)
+	}
+	if spec.ID == "" {
+		t.Errorf("%s/spec.yaml: id is empty", name)
+	}
+	wantKind := "reuse"
+	if name == "first-task" {
+		wantKind = "first"
+	}
+	if spec.Kind != wantKind {
+		t.Errorf("%s/spec.yaml: kind=%q want %q", name, spec.Kind, wantKind)
+	}
+	if strings.TrimSpace(spec.Intent.Goal) == "" {
+		t.Errorf("%s/spec.yaml: intent.goal empty", name)
+	}
+	if len(spec.Intent.SuccessCriteria) == 0 {
+		t.Errorf("%s/spec.yaml: intent.success_criteria empty", name)
+	}
+	if len(spec.Inputs) == 0 {
+		t.Errorf("%s/spec.yaml: inputs empty", name)
+	}
+	if len(spec.Expected.Artifacts) == 0 {
+		t.Errorf("%s/spec.yaml: expected.artifacts empty", name)
+	}
+	if len(spec.CapabilityRequirements.Tools) == 0 {
+		t.Errorf("%s/spec.yaml: capability_requirements.tools empty (need at least one tool name so Stage C lookup has something to hit)", name)
+	}
+
+	// Referenced input/expected files must exist on disk, anchored to the
+	// task dir — the oracle has to be able to find them.
+	for _, in := range spec.Inputs {
+		if _, err := os.Stat(filepath.Join(dir, in.Path)); err != nil {
+			t.Errorf("%s/spec.yaml input %q not found: %v", name, in.Path, err)
+		}
+	}
+	for _, art := range spec.Expected.Artifacts {
+		if _, err := os.Stat(filepath.Join(dir, art.Path)); err != nil {
+			t.Errorf("%s/spec.yaml expected %q not found: %v", name, art.Path, err)
+		}
+	}
+}
+
+func TestAcceptanceCasesAreValid(t *testing.T) {
+	root := goldenRoot(t)
+	for _, fam := range expectedFamilies {
+		fam := fam
+		t.Run(fam, func(t *testing.T) {
+			path := filepath.Join(root, fam, "acceptance", "cases.jsonl")
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read %s: %v", path, err)
+			}
+			lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+			var cases []acceptanceCase
+			names := map[string]int{}
+			for i, line := range lines {
+				if strings.TrimSpace(line) == "" {
+					t.Errorf("line %d: blank line not allowed in jsonl", i+1)
+					continue
+				}
+				var c acceptanceCase
+				dec := json.NewDecoder(strings.NewReader(line))
+				dec.DisallowUnknownFields()
+				if err := dec.Decode(&c); err != nil {
+					t.Errorf("line %d: parse: %v", i+1, err)
+					continue
+				}
+				if c.Name == "" {
+					t.Errorf("line %d: name empty", i+1)
+				}
+				if c.Tool == "" {
+					t.Errorf("line %d: tool empty", i+1)
+				}
+				if len(c.Input) == 0 {
+					t.Errorf("line %d: input missing", i+1)
+				}
+				hasExpected := len(c.Expected) > 0
+				hasError := c.ExpectedError != ""
+				if hasExpected == hasError {
+					t.Errorf("line %d: exactly one of {expected, expected_error} required (have expected=%v error=%v)", i+1, hasExpected, hasError)
+				}
+				names[c.Name]++
+				cases = append(cases, c)
+			}
+			if len(cases) < minCases {
+				t.Errorf("%s: have %d cases, need ≥%d", fam, len(cases), minCases)
+			}
+			for n, count := range names {
+				if count > 1 {
+					t.Errorf("duplicate case name %q (%d occurrences)", n, count)
+				}
+			}
+			// Sanity: case names should be deterministic for sorted output,
+			// and the tool field should be uniform per family (one MCP per
+			// family — Stage B固化 produces one tool per family).
+			tools := map[string]struct{}{}
+			for _, c := range cases {
+				tools[c.Tool] = struct{}{}
+			}
+			if len(tools) != 1 {
+				keys := make([]string, 0, len(tools))
+				for k := range tools {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				t.Errorf("%s acceptance: expected exactly one tool per family, got %v", fam, keys)
+			}
+		})
+	}
+}
+
+// TestAcceptanceToolMatchesSpec catches the case where a family's
+// acceptance/cases.jsonl names tool "X" but the spec.yaml files declare
+// capability_requirements.tools=[Y] — i.e., the固化 tool name drifted on
+// one side and not the other. Stage C lookup would then miss every reuse
+// task even though both files individually parse fine.
+func TestAcceptanceToolMatchesSpec(t *testing.T) {
+	root := goldenRoot(t)
+	for _, fam := range expectedFamilies {
+		fam := fam
+		t.Run(fam, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join(root, fam, "acceptance", "cases.jsonl"))
+			if err != nil {
+				t.Fatalf("read acceptance: %v", err)
+			}
+			acceptTool := ""
+			for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+				if strings.TrimSpace(line) == "" {
+					continue
+				}
+				var c acceptanceCase
+				if err := json.Unmarshal([]byte(line), &c); err != nil {
+					t.Fatalf("parse acceptance line: %v", err)
+				}
+				if acceptTool == "" {
+					acceptTool = c.Tool
+				}
+			}
+			if acceptTool == "" {
+				t.Fatalf("acceptance cases empty")
+			}
+			for _, sub := range requiredTaskDirs {
+				specPath := filepath.Join(root, fam, sub, "spec.yaml")
+				sraw, err := os.ReadFile(specPath)
+				if err != nil {
+					t.Errorf("read %s: %v", specPath, err)
+					continue
+				}
+				var s taskSpec
+				if err := yaml.Unmarshal(sraw, &s); err != nil {
+					t.Errorf("parse %s: %v", specPath, err)
+					continue
+				}
+				found := false
+				for _, tool := range s.CapabilityRequirements.Tools {
+					if tool == acceptTool {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("%s/%s spec.tools=%v does not include acceptance tool %q",
+						fam, sub, s.CapabilityRequirements.Tools, acceptTool)
+				}
+			}
+		})
+	}
+}
+
+// pngIHDR parses a PNG header and returns (width, height, color-type byte, ok).
+func pngIHDR(data []byte) (uint32, uint32, byte, bool) {
+	if len(data) < 33 {
+		return 0, 0, 0, false
+	}
+	sig := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}
+	for i, b := range sig {
+		if data[i] != b {
+			return 0, 0, 0, false
+		}
+	}
+	if string(data[12:16]) != "IHDR" {
+		return 0, 0, 0, false
+	}
+	w := uint32(data[16])<<24 | uint32(data[17])<<16 | uint32(data[18])<<8 | uint32(data[19])
+	h := uint32(data[20])<<24 | uint32(data[21])<<16 | uint32(data[22])<<8 | uint32(data[23])
+	return w, h, data[25], true
+}
+
+// pngColorMode maps PNG IHDR color-type bytes to the PIL/Pillow-style
+// label that image_metadata returns. Only the modes our fixtures use are
+// covered; anything else returns "" so the test fails loudly.
+func pngColorMode(ct byte) string {
+	switch ct {
+	case 0:
+		return "L"
+	case 2:
+		return "RGB"
+	case 3:
+		return "P"
+	case 4:
+		return "LA"
+	case 6:
+		return "RGBA"
+	default:
+		return ""
+	}
+}
+
+// TestAcceptanceFixturesAgreeWithCases cross-checks the acceptance/fixtures/
+// images against the matching cases.jsonl entries — same drift class as
+// TestImageMetadataMatchesPNGFile but for the acceptance fixtures, which
+// the original guard skipped. A swapped fixture (or a hand-edited expected
+// width) now fails loudly.
+func TestAcceptanceFixturesAgreeWithCases(t *testing.T) {
+	famDir := filepath.Join(goldenRoot(t), "image-metadata-extractor")
+	raw, err := os.ReadFile(filepath.Join(famDir, "acceptance", "cases.jsonl"))
+	if err != nil {
+		t.Fatalf("read cases.jsonl: %v", err)
+	}
+	type expectShape struct {
+		Width     uint32 `json:"width"`
+		Height    uint32 `json:"height"`
+		Format    string `json:"format"`
+		ColorMode string `json:"color_mode"`
+	}
+	type inputShape struct {
+		Path string `json:"path"`
+	}
+	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var c acceptanceCase
+		if err := json.Unmarshal([]byte(line), &c); err != nil {
+			t.Fatalf("parse line %q: %v", line, err)
+		}
+		var in inputShape
+		if err := json.Unmarshal(c.Input, &in); err != nil {
+			t.Fatalf("%s: parse input: %v", c.Name, err)
+		}
+		// Only validate cases whose input is an in-repo fixture we can read.
+		// Cases pointing at /tmp/... are intentionally non-existent.
+		if !strings.HasPrefix(in.Path, "tests/eval/golden/") {
+			continue
+		}
+		// Resolve relative to the multi-agent module root — paths in
+		// cases.jsonl are repo-relative per WT-1 convention.
+		// goldenRoot returns .../multi-agent/tests/eval/golden, so trim back.
+		repoRoot := strings.TrimSuffix(goldenRoot(t), "/tests/eval/golden")
+		abs := filepath.Join(repoRoot, in.Path)
+		data, err := os.ReadFile(abs)
+		if err != nil {
+			t.Errorf("%s: fixture not readable at %s: %v", c.Name, abs, err)
+			continue
+		}
+		w, h, ct, ok := pngIHDR(data)
+		if c.ExpectedError != "" {
+			// Negative cases targeting bad.png must NOT parse as PNG.
+			if ok {
+				t.Errorf("%s: negative case but %s parses as PNG (w=%d h=%d)", c.Name, abs, w, h)
+			}
+			continue
+		}
+		if !ok {
+			t.Errorf("%s: expected PNG but IHDR rejected %s", c.Name, abs)
+			continue
+		}
+		var exp expectShape
+		if err := json.Unmarshal(c.Expected, &exp); err != nil {
+			t.Errorf("%s: parse expected: %v", c.Name, err)
+			continue
+		}
+		if exp.Width != 0 && exp.Width != w {
+			t.Errorf("%s: expected.width=%d, IHDR=%d", c.Name, exp.Width, w)
+		}
+		if exp.Height != 0 && exp.Height != h {
+			t.Errorf("%s: expected.height=%d, IHDR=%d", c.Name, exp.Height, h)
+		}
+		if exp.Format != "" && exp.Format != "PNG" {
+			t.Errorf("%s: expected.format=%q want PNG", c.Name, exp.Format)
+		}
+		if exp.ColorMode != "" {
+			if got := pngColorMode(ct); got != exp.ColorMode {
+				t.Errorf("%s: expected.color_mode=%q, IHDR ct=%d → %q", c.Name, exp.ColorMode, ct, got)
+			}
+		}
+	}
+}
+
+// TestAcceptanceCaseInputsAreSelfContained guards a different drift class:
+// every cases.jsonl input field references either an in-repo fixture path
+// (which must exist) OR an inline payload (refund order, api request).
+// It also enforces that each case's input only uses fields the family's
+// tool surface actually declares — currently a closed allowlist per tool.
+// This is the test that catches the "negative_service_down adds base_url
+// but local_echo_call has no base_url parameter" class of bug.
+func TestAcceptanceCaseInputsAreSelfContained(t *testing.T) {
+	repoRoot := strings.TrimSuffix(goldenRoot(t), "/tests/eval/golden")
+
+	// Closed set of fields each固化 tool accepts. If acceptance/cases.jsonl
+	// references a field not in this set the tool surface and the gate are
+	// out of sync — WT-1 will either reject the call or silently ignore it.
+	toolAllowedFields := map[string]map[string]bool{
+		"csv_profile": {
+			"path": true,
+		},
+		"parse_access_log": {
+			"path":   true,
+			"format": true,
+		},
+		"check_refund_eligibility": {
+			"order":       true,
+			"policy_path": true,
+		},
+		"image_metadata": {
+			"path": true,
+		},
+		"local_echo_call": {
+			"method":  true,
+			"body":    true,
+			"headers": true,
+			// base_url is documented as an optional override in
+			// api-wrapper-for-local-service/_shared/openapi.yaml
+			// info.description and README; only the acceptance
+			// negative_service_down case sets it.
+			"base_url": true,
+		},
+	}
+
+	for _, fam := range expectedFamilies {
+		fam := fam
+		t.Run(fam, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join(goldenRoot(t), fam, "acceptance", "cases.jsonl"))
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+				if strings.TrimSpace(line) == "" {
+					continue
+				}
+				var c acceptanceCase
+				if err := json.Unmarshal([]byte(line), &c); err != nil {
+					t.Errorf("parse: %v", err)
+					continue
+				}
+				allowed, ok := toolAllowedFields[c.Tool]
+				if !ok {
+					t.Errorf("%s: tool %q has no field allowlist in test (forgot to register?)", c.Name, c.Tool)
+					continue
+				}
+				var input map[string]json.RawMessage
+				if err := json.Unmarshal(c.Input, &input); err != nil {
+					t.Errorf("%s: input is not an object: %v", c.Name, err)
+					continue
+				}
+				for k := range input {
+					if !allowed[k] {
+						t.Errorf("%s: input field %q not declared for tool %q (declared: %v)",
+							c.Name, k, c.Tool, sortedKeys(allowed))
+					}
+				}
+				// If input references an in-repo path string, that file must
+				// exist (negative cases use /tmp/... which we skip).
+				for _, field := range []string{"path", "policy_path"} {
+					rawVal, ok := input[field]
+					if !ok {
+						continue
+					}
+					var s string
+					if err := json.Unmarshal(rawVal, &s); err != nil {
+						continue
+					}
+					if !strings.HasPrefix(s, "tests/eval/golden/") {
+						continue
+					}
+					if _, err := os.Stat(filepath.Join(repoRoot, s)); err != nil {
+						t.Errorf("%s: input.%s %q does not exist relative to repo root", c.Name, field, s)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestAcceptanceExpectedKeyVocabularyMatchesDocs guards a third-pass-found
+// drift: the top-level README and per-family READMEs commit to the
+// `required_keys`-only carve-out for partial-match comparison (api-wrapper
+// `/healthz`). Any acceptance case using a different synonym for the same
+// idea (e.g. `body_has`, `has_keys`, `body.required_keys`) means the B3
+// runner has to guess which convention to honor. Pin one: anything that
+// looks like a partial-match hint in an `expected` body must use the
+// `required_keys` key the docs commit to.
+//
+// We currently look for the two synonyms that showed up in earlier drafts.
+// Add more if review surfaces them.
+func TestAcceptanceExpectedKeyVocabularyMatchesDocs(t *testing.T) {
+	forbiddenSynonyms := []string{"body_has", "has_keys", "requiredKeys"}
+	for _, fam := range expectedFamilies {
+		fam := fam
+		t.Run(fam, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join(goldenRoot(t), fam, "acceptance", "cases.jsonl"))
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			for i, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+				if strings.TrimSpace(line) == "" {
+					continue
+				}
+				var c acceptanceCase
+				if err := json.Unmarshal([]byte(line), &c); err != nil {
+					t.Errorf("line %d: parse: %v", i+1, err)
+					continue
+				}
+				if len(c.Expected) == 0 {
+					continue
+				}
+				// Walk the expected blob's top-level keys AND its `body`
+				// subobject (where the drift was found) for any forbidden
+				// synonym.
+				var exp map[string]json.RawMessage
+				if err := json.Unmarshal(c.Expected, &exp); err != nil {
+					// non-object expected is fine (e.g. scalar) — nothing to scan.
+					continue
+				}
+				scan := func(obj map[string]json.RawMessage, where string) {
+					for _, syn := range forbiddenSynonyms {
+						if _, hit := obj[syn]; hit {
+							t.Errorf("%s: expected%s uses forbidden synonym %q — README commits to `required_keys` for partial-match hints; rename to keep B3 runner unambiguous",
+								c.Name, where, syn)
+						}
+					}
+				}
+				scan(exp, "")
+				if rawBody, ok := exp["body"]; ok {
+					var body map[string]json.RawMessage
+					if err := json.Unmarshal(rawBody, &body); err == nil {
+						scan(body, ".body")
+					}
+				}
+			}
+		})
+	}
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestImageMetadataMatchesPNGFile cross-checks expected/metadata.json
+// against the actual PNG on disk for every task in image-metadata-extractor.
+// This catches the easy class of bug where someone hand-edits metadata.json
+// (or swaps the .png) without re-running the extractor.
+func TestImageMetadataMatchesPNGFile(t *testing.T) {
+	famDir := filepath.Join(goldenRoot(t), "image-metadata-extractor")
+	for _, sub := range requiredTaskDirs {
+		sub := sub
+		t.Run(sub, func(t *testing.T) {
+			pngPath := filepath.Join(famDir, sub, "input", "photo.png")
+			pngBytes, err := os.ReadFile(pngPath)
+			if err != nil {
+				t.Fatalf("read png: %v", err)
+			}
+			w, h, ct, ok := pngIHDR(pngBytes)
+			if !ok {
+				t.Fatalf("not a PNG: %s", pngPath)
+			}
+			mode := pngColorMode(ct)
+			if mode == "" {
+				t.Fatalf("unmapped PNG color-type %d in %s", ct, pngPath)
+			}
+			sum := sha256.Sum256(pngBytes)
+			actualSHA := hex.EncodeToString(sum[:])
+
+			metaRaw, err := os.ReadFile(filepath.Join(famDir, sub, "expected", "metadata.json"))
+			if err != nil {
+				t.Fatalf("read metadata: %v", err)
+			}
+			var meta struct {
+				Width     uint32 `json:"width"`
+				Height    uint32 `json:"height"`
+				Format    string `json:"format"`
+				ColorMode string `json:"color_mode"`
+				Bytes     int    `json:"bytes"`
+				SHA256    string `json:"sha256"`
+			}
+			if err := json.Unmarshal(metaRaw, &meta); err != nil {
+				t.Fatalf("parse metadata: %v", err)
+			}
+			if meta.Width != w {
+				t.Errorf("%s: meta.width=%d, png IHDR=%d", sub, meta.Width, w)
+			}
+			if meta.Height != h {
+				t.Errorf("%s: meta.height=%d, png IHDR=%d", sub, meta.Height, h)
+			}
+			if meta.Format != "PNG" {
+				t.Errorf("%s: meta.format=%q want PNG", sub, meta.Format)
+			}
+			if meta.ColorMode != mode {
+				t.Errorf("%s: meta.color_mode=%q, but PNG IHDR color-type=%d → %q", sub, meta.ColorMode, ct, mode)
+			}
+			if meta.Bytes != len(pngBytes) {
+				t.Errorf("%s: meta.bytes=%d, file size=%d", sub, meta.Bytes, len(pngBytes))
+			}
+			if !strings.EqualFold(meta.SHA256, actualSHA) {
+				t.Errorf("%s: meta.sha256=%s, actual=%s", sub, meta.SHA256, actualSHA)
+			}
+		})
+	}
+}

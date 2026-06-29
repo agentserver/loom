@@ -1,0 +1,18 @@
+family: refund-policy-checker
+id: refund-policy-checker/reuse-2
+kind: reuse
+intent:
+  goal: Damaged-on-arrival should override window and final-sale (clause 3).
+  success_criteria:
+    - "eligible == true"
+    - "policy_clause == 3"
+inputs:
+  - path: input/order.json
+  - path: input/policy.md
+expected:
+  artifacts:
+    - path: expected/verdict.json
+capability_requirements:
+  skills: []
+  tools:
+    - check_refund_eligibility

@@ -1,0 +1,18 @@
+family: refund-policy-checker
+id: refund-policy-checker/reuse-3
+kind: reuse
+intent:
+  goal: Happy path — within window, normal category (clause 4).
+  success_criteria:
+    - "eligible == true"
+    - "policy_clause == 4"
+inputs:
+  - path: input/order.json
+  - path: input/policy.md
+expected:
+  artifacts:
+    - path: expected/verdict.json
+capability_requirements:
+  skills: []
+  tools:
+    - check_refund_eligibility

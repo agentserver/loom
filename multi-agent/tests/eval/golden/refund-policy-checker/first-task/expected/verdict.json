@@ -1,0 +1,6 @@
+{
+  "order_id": "O-100",
+  "eligible": false,
+  "reason": "delivered 59 days ago, exceeds 30-day window",
+  "policy_clause": 1
+}

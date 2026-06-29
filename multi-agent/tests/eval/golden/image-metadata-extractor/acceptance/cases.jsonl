@@ -1,0 +1,6 @@
+{"name": "happy_path_min_png", "tool": "image_metadata", "input": {"path": "tests/eval/golden/image-metadata-extractor/acceptance/fixtures/min.png"}, "expected": {"width": 1, "height": 1, "format": "PNG"}}
+{"name": "happy_path_grayscale", "tool": "image_metadata", "input": {"path": "tests/eval/golden/image-metadata-extractor/reuse-1/input/photo.png"}, "expected": {"width": 2, "height": 1, "color_mode": "LA"}}
+{"name": "boundary_non_square", "tool": "image_metadata", "input": {"path": "tests/eval/golden/image-metadata-extractor/reuse-2/input/photo.png"}, "expected": {"width": 3, "height": 2}}
+{"name": "boundary_larger_rgba", "tool": "image_metadata", "input": {"path": "tests/eval/golden/image-metadata-extractor/reuse-3/input/photo.png"}, "expected": {"width": 4, "height": 4, "format": "PNG"}}
+{"name": "error_missing_file", "tool": "image_metadata", "input": {"path": "/tmp/no-such-image-aa17.png"}, "expected_error": "file not found"}
+{"name": "negative_corrupt_png", "tool": "image_metadata", "input": {"path": "tests/eval/golden/image-metadata-extractor/acceptance/fixtures/bad.png"}, "expected_error": "invalid PNG header"}

@@ -1,0 +1,6 @@
+{
+  "method": "echo",
+  "endpoint": "POST /echo",
+  "body": "hello loom",
+  "content_type": "text/plain"
+}

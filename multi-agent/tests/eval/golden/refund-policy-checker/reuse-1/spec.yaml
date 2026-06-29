@@ -1,0 +1,18 @@
+family: refund-policy-checker
+id: refund-policy-checker/reuse-1
+kind: reuse
+intent:
+  goal: Check order O-201 — final-sale item should be denied regardless of window.
+  success_criteria:
+    - "eligible == false"
+    - "policy_clause == 2"
+inputs:
+  - path: input/order.json
+  - path: input/policy.md
+expected:
+  artifacts:
+    - path: expected/verdict.json
+capability_requirements:
+  skills: []
+  tools:
+    - check_refund_eligibility

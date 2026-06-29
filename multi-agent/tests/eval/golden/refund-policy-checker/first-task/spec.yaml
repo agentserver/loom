@@ -1,0 +1,19 @@
+family: refund-policy-checker
+id: refund-policy-checker/first-task
+kind: first
+intent:
+  goal: Check whether order O-100 is eligible for refund (delivered > 30 days ago).
+  success_criteria:
+    - "eligible == false"
+    - "policy_clause == 1"
+inputs:
+  - path: input/order.json
+  - path: input/policy.md
+expected:
+  artifacts:
+    - path: expected/verdict.json
+capability_requirements:
+  skills:
+    - run_slave_bash
+  tools:
+    - check_refund_eligibility

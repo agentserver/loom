@@ -1,0 +1,9 @@
+{
+  "rows": 5,
+  "cols": 3,
+  "columns": [
+    {"name": "order_id", "dtype": "int", "nulls": 0, "min": 1, "max": 5, "mean": 3.0},
+    {"name": "region", "dtype": "string", "nulls": 0},
+    {"name": "amount", "dtype": "float", "nulls": 0, "min": 10.0, "max": 99.5, "mean": 48.0}
+  ]
+}

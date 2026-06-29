@@ -1,0 +1,17 @@
+family: image-metadata-extractor
+id: image-metadata-extractor/reuse-1
+kind: reuse
+intent:
+  goal: 2×1 PNG, grayscale+alpha — verify color_mode discrimination.
+  success_criteria:
+    - "width == 2"
+    - "color_mode == 'LA'"
+inputs:
+  - path: input/photo.png
+expected:
+  artifacts:
+    - path: expected/metadata.json
+capability_requirements:
+  skills: []
+  tools:
+    - image_metadata

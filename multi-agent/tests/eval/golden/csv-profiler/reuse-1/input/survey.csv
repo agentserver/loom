@@ -1,0 +1,5 @@
+id,age,score,group
+A,21,7.5,alpha
+B,,8.0,alpha
+C,34,6.0,beta
+D,29,9.5,beta
