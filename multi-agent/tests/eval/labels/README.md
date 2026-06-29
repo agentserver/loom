@@ -66,12 +66,24 @@ schemas under `schema/`.
 Rules the test enforces (see `labels_schema_test.go`):
 
 - Exactly **5** files under `workloads/` and **20** under `families/`.
-- `task_id` is **globally unique** across both directories.
-- The whole document matches both schemas with `additionalProperties: false`
-  on every object — typos in field names fail the build.
-- Negative cases in `TestSchemasRejectBadInput` prove the schemas reject
-  unknown `agent_role`, unknown capability `kind`, stray keys, and
-  upper-case credential aliases.
+- `task_id` is **globally unique** across both directories and a
+  kebab-case slug (enforced by `schema/labels_file.schema.json`).
+- The **wrapper** `{task_id, ground_truth_context, context_ground_truth}`
+  and both sub-objects are schema-validated with
+  `additionalProperties: false` at every level — stray keys at any
+  level (including the outer wrapper) fail the build.
+- `ground_truth_context.(agent_role, context_id)` must appear in the
+  closed `knownContexts` allowlist in `labels_schema_test.go`,
+  mirroring the §`context_id ↔ spec coupling` table below. Extending
+  the namespace means editing the table **and** the allowlist in the
+  same PR.
+- Every `credential`-kind capability inside `required_capabilities`
+  must be mirrored in the top-level `credential_aliases`, and vice
+  versa. Asymmetric drift fails the build.
+- Negative cases in `TestSchemasRejectBadInput`,
+  `TestKnownContextRejectsTypoAndMismatch`, and
+  `TestLabelsFileSchemaRejectsBadWrapper` lock the rules above
+  against regression.
 
 ## Capability vocabulary (`context_ground_truth.required_capabilities`)
 
@@ -114,13 +126,20 @@ is owned by a different worktree.
 3. Fill `ground_truth_context` with a single role/context/rationale that
    *uniquely* satisfies the oracle. If two contexts could equally satisfy
    it, the workload is mis-designed for `RoutingAccuracy` and should be split.
+   If your `(agent_role, context_id)` pair is not yet in the §`context_id
+   ↔ spec coupling` table above, add it there **and** to `knownContexts`
+   in `labels_schema_test.go` in the same PR — the closed-set check
+   will otherwise reject it.
 4. List **every** capability the target context must provide. Be exhaustive
    for `tool`/`platform`/`network`; for `file` use the same `path_pattern`
-   the workload's oracle reads.
+   the workload's oracle reads. If any capability has `kind: credential`,
+   list its alias in `credential_aliases` too — the mirror check is
+   bidirectional and fails the build either way.
 5. Add `forbidden_capabilities` only when a *plausible wrong* context exists
    that you must rule out (e.g. internet egress for an air-gapped reuse).
-6. Run `go test ./tests/eval/labels/...` — schema violations and duplicate
-   `task_id`s fail the build.
+6. Run `go test ./tests/eval/labels/...` — schema violations, duplicate
+   `task_id`s, unknown `(agent_role, context_id)` pairs, and credential
+   alias drift all fail the build.
 7. If you added a new workload, also bump the expected counts in the test:
    `expectedWorkloadLabels` / `expectedFamilyLabels`.
 
