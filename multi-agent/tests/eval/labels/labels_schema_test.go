@@ -86,6 +86,37 @@ func loadCompiler(t *testing.T, path string) *jsonschema.Schema {
 	return sch
 }
 
+// loadSchemaBundle compiles the wrapper schema (labels_file.schema.json) along
+// with its two siblings. The wrapper $refs the siblings by file name, but the
+// jsonschema library resolves $ref against the parent schema's $id, so we
+// register each sibling under that absolute URL as well as under the file
+// name (so the entry-point Compile call can still use the short name).
+// Returned schema validates a whole *.labels.json document — wrapper keys
+// included — so a stray top-level key (e.g. forbidden_capabilities
+// misplaced outside context_ground_truth) is caught by the build, matching
+// the README claim that "typos in field names fail the build".
+func loadSchemaBundle(t *testing.T, schemaDir string) *jsonschema.Schema {
+	t.Helper()
+	c := jsonschema.NewCompiler()
+	c.Draft = jsonschema.Draft7
+	const idBase = "https://loom.local/eval/labels/"
+	for _, name := range []string{
+		"ground_truth_context.schema.json",
+		"context_ground_truth.schema.json",
+		"labels_file.schema.json",
+	} {
+		// Re-open per registration: the compiler consumes the reader.
+		if err := c.AddResource(idBase+name, mustOpen(t, filepath.Join(schemaDir, name))); err != nil {
+			t.Fatalf("AddResource %s: %v", name, err)
+		}
+	}
+	sch, err := c.Compile(idBase + "labels_file.schema.json")
+	if err != nil {
+		t.Fatalf("compile bundle: %v", err)
+	}
+	return sch
+}
+
 func mustOpen(t *testing.T, path string) *os.File {
 	t.Helper()
 	f, err := os.Open(path)
@@ -178,13 +209,15 @@ func TestSchemasCompile(t *testing.T) {
 	for _, name := range []string{
 		"ground_truth_context.schema.json",
 		"context_ground_truth.schema.json",
+		"labels_file.schema.json",
 	} {
 		p := filepath.Join(dir, name)
 		if _, err := os.Stat(p); err != nil {
 			t.Fatalf("schema missing: %s", p)
 		}
-		_ = loadCompiler(t, p)
 	}
+	// Bundle compiles (resolves the wrapper's $refs to its siblings).
+	_ = loadSchemaBundle(t, dir)
 }
 
 func TestLabelsValidateAgainstSchemas(t *testing.T) {
@@ -193,6 +226,11 @@ func TestLabelsValidateAgainstSchemas(t *testing.T) {
 
 	gtcSchema := loadCompiler(t, filepath.Join(schemaDir, "ground_truth_context.schema.json"))
 	cgtSchema := loadCompiler(t, filepath.Join(schemaDir, "context_ground_truth.schema.json"))
+	// wrapper bundle: validates the whole *.labels.json document so a stray
+	// key at the top level (not just inside the two sub-objects) fails the
+	// build. Without this gate a misplaced forbidden_capabilities would
+	// silently degrade CapabilityPrecision.
+	bundle := loadSchemaBundle(t, schemaDir)
 
 	workloads := collectLabels(t, filepath.Join(base, "workloads"))
 	families := collectLabels(t, filepath.Join(base, "families"))
@@ -208,6 +246,12 @@ func TestLabelsValidateAgainstSchemas(t *testing.T) {
 	for _, p := range append(append([]string{}, workloads...), families...) {
 		t.Run(strings.TrimPrefix(p, base+string(os.PathSeparator)), func(t *testing.T) {
 			doc := mustReadJSON(t, p)
+			// Validate the whole document (wrapper + both sub-objects via
+			// $ref) before drilling in. This is the gate that catches
+			// stray top-level keys / typos / misplaced fields.
+			if err := bundle.Validate(doc); err != nil {
+				t.Fatalf("labels-file schema violation: %v", err)
+			}
 			m, ok := doc.(map[string]any)
 			if !ok {
 				t.Fatalf("top-level must be object")
@@ -360,6 +404,77 @@ func TestKnownContextRejectsTypoAndMismatch(t *testing.T) {
 				t.Fatalf("expected checkKnownContext to reject %v, got nil", tc.gtc)
 			}
 		})
+	}
+}
+
+// TestLabelsFileSchemaRejectsBadWrapper is the regression net for the wrapper
+// validation gap that survived the first two reviews: each *.labels.json's
+// outer object had no schema, so a stray top-level key (a misplaced
+// forbidden_capabilities, a leftover scratch field, a typo'd duplicate of a
+// real key) silently passed validation. The README documents the wrapper as
+// {task_id, ground_truth_context, context_ground_truth} and the load-bearing
+// metrics (CapabilityRecall / CapabilityPrecision) depend on those being the
+// only keys; the wrapper schema makes that contract enforceable.
+func TestLabelsFileSchemaRejectsBadWrapper(t *testing.T) {
+	bundle := loadSchemaBundle(t, filepath.Join(labelsDir(t), "schema"))
+
+	goodGTC := `"ground_truth_context":{"agent_role":"sandbox","context_id":"sandbox-cloud","rationale":"long enough rationale"}`
+	goodCGT := `"context_ground_truth":{"required_capabilities":[{"kind":"tool","name":"curl"}]}`
+
+	cases := []struct {
+		name string
+		doc  string
+	}{
+		{
+			name: "stray top-level key",
+			doc:  `{"task_id":"x-y","` + goodGTC[1:] + `,` + goodCGT + `,"stray":1}`,
+		},
+		{
+			name: "forbidden_capabilities misplaced at wrapper instead of inside context_ground_truth",
+			doc:  `{"task_id":"x-y","` + goodGTC[1:] + `,` + goodCGT + `,"forbidden_capabilities":[{"kind":"platform","os":"linux"}]}`,
+		},
+		{
+			name: "missing context_ground_truth",
+			doc:  `{"task_id":"x-y","` + goodGTC[1:] + `}`,
+		},
+		{
+			name: "missing ground_truth_context",
+			doc:  `{"task_id":"x-y","` + goodCGT[1:] + `}`,
+		},
+		{
+			name: "missing task_id",
+			doc:  `{"` + goodGTC[1:] + `,` + goodCGT + `}`,
+		},
+		{
+			name: "task_id not kebab-case",
+			doc:  `{"task_id":"NotKebabCase","` + goodGTC[1:] + `,` + goodCGT + `}`,
+		},
+		{
+			name: "task_id with leading hyphen",
+			doc:  `{"task_id":"-leading-hyphen","` + goodGTC[1:] + `,` + goodCGT + `}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var v any
+			if err := jsonUnmarshalStrict([]byte(tc.doc), &v); err != nil {
+				t.Fatalf("doc not parseable: %v", err)
+			}
+			if err := bundle.Validate(v); err == nil {
+				t.Fatalf("expected wrapper-schema rejection, got accept for: %s", tc.doc)
+			}
+		})
+	}
+
+	// Positive control: a minimal well-formed document must pass, otherwise
+	// the negative cases above are unfalsifiable.
+	good := `{"task_id":"x-y","` + goodGTC[1:] + `,` + goodCGT + `}`
+	var v any
+	if err := jsonUnmarshalStrict([]byte(good), &v); err != nil {
+		t.Fatalf("positive control not parseable: %v", err)
+	}
+	if err := bundle.Validate(v); err != nil {
+		t.Fatalf("positive control rejected by wrapper schema: %v", err)
 	}
 }
 

@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://loom.local/eval/labels/labels_file.schema.json",
+  "title": "LabelsFile",
+  "description": "Top-level wrapper schema for *.labels.json. The two prior reviews validated the ground_truth_context / context_ground_truth sub-objects but left the wrapper unconstrained, so a misplaced key at this level (e.g. forbidden_capabilities at the wrapper instead of inside context_ground_truth) silently passed validation and degraded CapabilityPrecision scoring. README states 'typos in field names fail the build'; this schema makes that claim true at the wrapper level too.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["task_id", "ground_truth_context", "context_ground_truth"],
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "description": "Globally-unique kebab-case slug (matches README 'Adding a new workload's labels' step 2). Uniqueness is enforced by the test, shape is enforced here.",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "minLength": 3,
+      "maxLength": 96
+    },
+    "ground_truth_context": {
+      "$ref": "ground_truth_context.schema.json"
+    },
+    "context_ground_truth": {
+      "$ref": "context_ground_truth.schema.json"
+    }
+  }
+}

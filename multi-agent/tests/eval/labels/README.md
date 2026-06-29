@@ -23,6 +23,7 @@ tests/eval/labels/
 ├── labels_schema_test.go            ← `go test ./tests/eval/labels/...`
 ├── json_strict.go
 ├── schema/
+│   ├── labels_file.schema.json          ← wrapper: {task_id, gtc, cgt}
 │   ├── ground_truth_context.schema.json
 │   └── context_ground_truth.schema.json
 ├── workloads/                       ← §F1 5 main workloads
