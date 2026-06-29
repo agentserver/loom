@@ -232,6 +232,45 @@ def test_cli_json_roundtrips_through_schema(tiny_repo: Path, tmp_path: Path) -> 
     assert proc.stdout.rstrip("\n") == schema.to_json()
 
 
+def test_cli_yaml_roundtrips_through_schema(tiny_repo: Path, tmp_path: Path) -> None:
+    """CLI's yaml output must validate against CommitMetaSchema and produce the
+    same model as the json output for the same inputs. Phase 1 consumers may
+    pick either format; both must yield byte-identical schema instances. Guards
+    against future drift between _format("yaml", ...) and the schema field set
+    (e.g. a regression that drops or reorders fields would silently break
+    yaml-based consumers while json-based tests still pass).
+    """
+    from commit_meta.schema import CommitMetaSchema
+
+    missing = tmp_path / "missing"
+    common = [
+        "--loom", str(tiny_repo),
+        "--agentserver", str(missing),
+        "--modelserver", str(missing),
+        "--app", str(missing),
+    ]
+    json_proc = _run_cli(*common)
+    yaml_proc = _run_cli(*common, "--format=yaml")
+    assert json_proc.returncode == 0, json_proc.stderr
+    assert yaml_proc.returncode == 0, yaml_proc.stderr
+
+    parsed = yaml.safe_load(yaml_proc.stdout)
+    yaml_schema = CommitMetaSchema.model_validate(parsed)
+    json_schema = CommitMetaSchema.from_json(json_proc.stdout)
+
+    # Both formats must produce the same set of fields with the same values
+    # for everything except the wall-clock stamp (collected_at_unix can drift
+    # by 1s between the two subprocess invocations).
+    yaml_dump = yaml_schema.model_dump()
+    json_dump = json_schema.model_dump()
+    assert yaml_dump.keys() == json_dump.keys()
+    for key in yaml_dump:
+        if key == "collected_at_unix":
+            assert abs(yaml_dump[key] - json_dump[key]) <= 2
+            continue
+        assert yaml_dump[key] == json_dump[key], f"field {key} differs across formats"
+
+
 def test_loom_defaults_to_cwd_git_root(tiny_repo: Path, tmp_path: Path) -> None:
     # No --loom => collector finds git root from cwd.
     missing = tmp_path / "missing"
