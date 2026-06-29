@@ -2,7 +2,7 @@
 
 **Issue:** [#49](https://github.com/agentserver/loom/issues/49) — commanderhub daemon registry not shared across observer instances; the commander UI shows daemons intermittently when the observer scales horizontally.
 
-> Revision history: v1 (initial), v2 (post-Claude adversarial review — fixes B1–B4, M1–M11, m1–m10), v3 (post-Codex review — fixes additional 9 BLOCKERs + 14 MAJORs), v4 (post-Codex round-2 — fixes 7 BLOCKERs + 9 MAJORs), v5 (post-Codex round-3 — fixes 4 BLOCKERs + 4 MAJORs), **v6 (post-Codex round-4 — fixes 1 BLOCKER + 5 MAJORs: connection_id field unification with `dc.id`, preStop via exec-subcommand not httpGet, daemon-binary rollout coordination, cap-reference sweep, turnKey rename, files.go function name)**.
+> Revision history: v1 (initial), v2 (post-Claude adversarial review — fixes B1–B4, M1–M11, m1–m10), v3 (post-Codex review — fixes additional 9 BLOCKERs + 14 MAJORs), v4 (post-Codex round-2 — fixes 7 BLOCKERs + 9 MAJORs), v5 (post-Codex round-3 — fixes 4 BLOCKERs + 4 MAJORs), v6 (post-Codex round-4 — fixes 1 BLOCKER + 5 MAJORs), **v7 (post-Codex round-5 — fixes 0 BLOCKERs + 4 MAJORs: race-window elimination via cached ownership check, 128-bit dc.id with rand error propagation, capability-gated `read_file`, drain bind requirement)**.
 
 ## Context
 
@@ -269,6 +269,22 @@ Existing `*registry` → `*localRegistry`, same methods, same behavior. `Hub.reg
 
 **Field naming (codex round-4 correction):** `daemonConn` (`registry.go:39-57`) already has `id string` populated by `newDaemonID()` (`hub.go:80, 305`). v6 reuses this field as the connection generation — the spec column is named `connection_id` in SQL but mapped from `dc.id` in Go (no new field added). Wherever the spec says "connection_id", reads write `dc.id` in code.
 
+**Entropy/error handling (codex round-5 MAJOR #2):** today's `newDaemonID()` reads 8 random bytes (64 bits) and ignores `rand.Read` errors (`hub.go:305-309`). Now that `dc.id` is cluster-wide ownership state, v7 changes the signature:
+
+```go
+// 16 bytes (128 bits) — eliminates birthday collision risk across fleet.
+// Returns error so WS admission can refuse on entropy starvation.
+func newDaemonID() (string, error) {
+    var b [16]byte
+    if _, err := rand.Read(b[:]); err != nil {
+        return "", fmt.Errorf("newDaemonID: %w", err)
+    }
+    return hex.EncodeToString(b[:]), nil
+}
+```
+
+Caller (`hub.go::ServeHTTP`): on error, write `errorEnvelope("", commander.ErrCodeBackendUnavailable, "id generation failed")` and close. crypto/rand failure is operating-system-level and unrecoverable; refusing the WS is correct.
+
 ```go
 // v5 method surface (preserves existing tests that use add/daemons/lookup;
 // remove gains a connection_id guard).
@@ -400,9 +416,62 @@ defer func() {
 
 **Heartbeat-loss handling** (codex round-3 BLOCKER #1 addendum + round-4 explicit race window): when `heartbeatUpsert` returns `stillOwn=false`, the heartbeat goroutine logs WARN and **forcibly closes the WS** via `dc.conn.Close()`. This wakes the read loop with `io.EOF`, ServeHTTP exits, defers run with `removeIf`+`remove` — both guarded by `connection_id`, so neither deletes the new owner's state. Daemon's `wsclient.Run()` reconnects via its normal backoff (`commander/wsclient.go:88`).
 
-**Honest race window** (codex round-4 BLOCKER #1 refinement): between (a) sibling pod's `connectUpsert` succeeding and (b) losing pod's next heartbeat tick + WS close, the losing pod's `localReg.lookup` still returns the stale `*daemonConn`. A local `SendCommand`/`SendCommandStream` landing on the losing pod during this window will write to the dead WS — `writeEnvelope` may succeed (TCP buffer) but the response never arrives, the request times out at `defaultCmdTimeout` (10s) or `TurnTimeout` (10min). User-visible symptom: one failed command, retry succeeds. Window is bounded by `heartbeatEvery = 15s`.
+**Race-window elimination via cached ownership check** (codex round-5 MAJOR #1): in shared mode, every local-path `SendCommand[Stream]` revalidates ownership before writing to the WS. Implementation:
 
-Reducing the window to ≤5s is possible by setting `cluster.heartbeat_interval: 5s`. Eliminating it would require either a synchronous local-conn ownership check on every `SendCommand` (PG round-trip per call — too expensive) or a PG `LISTEN/NOTIFY` channel where `connectUpsert` notifies the previous owner — both deferred as follow-ups. The 5–15s window is acceptable for the user-visible fix; documented as a known limitation.
+```go
+// In SendCommand[Stream], before dc.writeEnvelope:
+if h.sharedReg != nil {
+    if !dc.ownershipValid(time.Now()) {
+        // Cached or fresh check found ownership lost; treat as gone.
+        return nil, ErrDaemonGone
+    }
+}
+
+// daemonConn gains:
+type daemonConn struct {
+    /* ... existing ... */
+    ownerCheckMu     sync.Mutex
+    ownerCheckedAt   time.Time
+    ownerStillOurs   bool
+}
+
+// ownershipValid does a cached check: if last successful confirmation is
+// < 5s old, return true. Otherwise do a short SELECT against the shared
+// registry; cache the result.
+func (dc *daemonConn) ownershipValid(now time.Time) bool {
+    dc.ownerCheckMu.Lock()
+    if dc.ownerStillOurs && now.Sub(dc.ownerCheckedAt) < 5*time.Second {
+        dc.ownerCheckMu.Unlock()
+        return true
+    }
+    dc.ownerCheckMu.Unlock()
+
+    ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+    defer cancel()
+    var ownerURL, connID string
+    row := dc.hub.sharedReg.db.QueryRowContext(ctx,
+        `SELECT owning_instance_url, connection_id FROM commander_daemons
+         WHERE user_id=$1 AND workspace_id=$2 AND short_id=$3`,
+        dc.owner.userID, dc.owner.workspaceID, dc.shortID)
+    err := row.Scan(&ownerURL, &connID)
+
+    dc.ownerCheckMu.Lock()
+    defer dc.ownerCheckMu.Unlock()
+    if err != nil || ownerURL != dc.hub.sharedReg.advertiseURL || connID != dc.id {
+        dc.ownerStillOurs = false
+        return false
+    }
+    dc.ownerStillOurs = true
+    dc.ownerCheckedAt = now
+    return true
+}
+```
+
+Cost: at most 1 PG round-trip per 5s per command-active daemon. Bounded latency 500 ms (returns `false` on PG failure → command 502s rather than hangs). On successful heartbeat (`heartbeatUpsert` returning `stillOwn=true`), the heartbeat ALSO calls `dc.ownerCheckMu.Lock(); dc.ownerStillOurs=true; dc.ownerCheckedAt=now; dc.ownerCheckMu.Unlock()` so a quiescent daemon still has a fresh cache without extra reads.
+
+Window between sibling claim and our cache invalidation: ≤5s (cache TTL) regardless of heartbeat interval. Cost: one extra SELECT per `SendCommand` if cache stale. Acceptable for the user-visible fix; the 10s `defaultCmdTimeout` / 10m `TurnTimeout` hang on stale-WS-writes from v6 is gone.
+
+**Why not PG LISTEN/NOTIFY:** would require a per-pod long-lived LISTEN connection and an additional pgx feature. The cached-check approach achieves the same SLA (≤5s) with simpler code and no extra connection. LISTEN/NOTIFY is a viable follow-up if the SELECT-on-stale-cache becomes a hot path.
 
 ### Forwarding: client, server, codec
 
@@ -512,7 +581,9 @@ Changes in v5 (note: these affect the daemon side, which is a separate binary):
   - Observer image: built and pushed by the existing `observer-deploy.yml` workflow.
   - driver-agent + slave-agent binaries: built and pushed by the separate release workflow (`.github/workflows/release.yml`). v6 adds a release coordination note in `deploy/README.md`: bump observer and daemon binaries together for this PR.
   - **Mixed-version safety:** old daemons (no encoded-size check) sending to new observers risk hitting the existing `wsReadLimit = 1 MiB` and getting a WS close — pre-existing failure mode, no regression. New daemons connecting to old observers: smaller previews returned for control-heavy files — UX improvement; no breakage.
-  - **Capability gate:** the daemon's `RegisterPayload.Capabilities` set gains a new entry `"file_preview_encoded_cap"` when the daemon enforces the encoded-size check. Observer logs which daemons have the capability; for daemons without it, observer marks `read_file` responses as potentially unsafe in logs (no behavior change; just visibility).
+  - **Capability gate (codex round-5 MAJOR #3 — now ENFORCED, not just logged):** the daemon's `RegisterPayload.Capabilities` set gains a new entry `"file_preview_encoded_cap"` when the daemon enforces the encoded-size check. In shared mode, the observer's `read_file` handler (`http.go::ReadFile` via `proxy.go::ReadFile`) returns `*DaemonError{Code: commander.ErrCodeBackendUnavailable, Message: "daemon binary too old; upgrade required for file preview in cluster mode"}` for daemons missing this capability. The 400 surfaced to UI tells the user to update their daemon binary.
+  - In single-pod mode (legacy), no enforcement — the 1 MiB WS read limit already kills oversized frames the way it always has; no behavior change.
+  - **Mixed-version rollout window:** during the ~30-120 s rolling-update window, some daemons may not yet have the capability — they get 400 on read_file but other commands work. This is the same risk profile as the registry mixed-version window; documented in `deploy/README.md` along with the rollout coordination notes.
 
 **Wire caps v5 (unchanged from existing single-pod behavior):**
 - Observer `wsReadLimit` stays `1 << 20` (1 MiB). NO raise. v4's raise to 4 MiB is REVERTED.
@@ -1365,12 +1436,15 @@ lifecycle:
 {{- end }}
 ```
 
-The observer-server binary gains a `--drain-local` flag that:
-1. Reads `--internal-port` (default `8091`) for the address.
-2. Issues `POST http://127.0.0.1:<port>/api/commander/_internal/drain` using `net/http`.
-3. Exits 0 on 200; logs and exits 0 on connect error (preStop is best-effort; the pod terminates regardless).
+The observer-server binary gains a `--drain-local` flag. Behavior:
 
-This avoids needing wget/curl in the image. Implementation: a small Go subcommand in `cmd/observer-server/drain_local.go` (new). After `preStop`, kubelet's `terminationGracePeriodSeconds` (default 30 s, override via chart `values.yaml::terminationGracePeriodSeconds`) elapses before SIGKILL. Our observer's `http.Server.Shutdown` handles the rest.
+1. Reads the observer's main config (same `--config` path as the main server) and extracts `cluster.internal_listen_addr` (or its env-var resolution). Parses the address; **`drain-local` requires the address's host portion to be empty (`:8091`), `0.0.0.0`, or `127.0.0.1`** — anything else means the internal listener is not bound to loopback and drain cannot work locally.
+2. **`validateConfig` enforces this at observer startup too** (codex round-5 MAJOR #4): if `cluster.internal_listen_addr` is set to a non-loopback-covering address (e.g. `10.0.0.42:8091`), the observer refuses to start with a fatal `"cluster.internal_listen_addr must bind to all interfaces or loopback so preStop drain can reach it; got <addr>"`. Operators wanting bind to a specific pod IP must use a sidecar/inspect override (out of scope; documented).
+3. Issues `POST http://127.0.0.1:<port>/api/commander/_internal/drain` using `net/http`.
+4. Exits 0 on 200; logs and exits 0 on connect error (preStop is best-effort; the pod terminates regardless).
+5. **If the binary cannot read its config (e.g. `--config` mount missing in preStop ctx), it exits 0 with WARN log** — preStop is still best-effort.
+
+Implementation: a small Go subcommand in `cmd/observer-server/drain_local.go` (new). After `preStop`, kubelet's `terminationGracePeriodSeconds` (default 30 s, override via chart `values.yaml::terminationGracePeriodSeconds`) elapses before SIGKILL. Our observer's `http.Server.Shutdown` handles the rest.
 
 A new endpoint `/api/commander/_internal/drain` lives on the INTERNAL mux. **Auth (codex round-3 BLOCKER #3):** by default requires the same HMAC+nonce auth as `/forward`, because the internal listener binds `0.0.0.0:8091` and is reachable from any cluster pod (NetworkPolicy is defense-in-depth, not the primary auth). A special-case exemption: requests whose `RemoteAddr` resolves to a loopback address (`127.0.0.0/8` or `::1`) skip HMAC — this is the preStop hook calling itself.
 
