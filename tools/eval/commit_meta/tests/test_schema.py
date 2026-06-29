@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import json
 
+import pytest
+from pydantic import ValidationError
+
 from commit_meta.schema import CommitMetaSchema, OSInfo
 
 
@@ -59,3 +62,24 @@ def test_na_strings_accepted_for_missing_repos() -> None:
     payload["agentserver_commit"] = "N/A: not present at /root/agentserver"
     schema = CommitMetaSchema.from_json(json.dumps(payload))
     assert schema.agentserver_commit.startswith("N/A:")
+
+
+def test_from_json_rejects_unknown_top_level_field() -> None:
+    """extra='forbid' on CommitMetaSchema must block stray top-level keys
+    so Phase 1 fails loudly when the contract drifts, not silently.
+    """
+    payload = _sample_payload()
+    payload["surprise_field"] = "should be rejected"
+    with pytest.raises(ValidationError):
+        CommitMetaSchema.from_json(json.dumps(payload))
+
+
+def test_from_json_rejects_unknown_os_field() -> None:
+    """extra='forbid' on the nested OSInfo must also block stray keys —
+    otherwise a renamed/added OS field on one side of the contract goes
+    undetected.
+    """
+    payload = _sample_payload()
+    payload["os"]["microarch"] = "znver4"
+    with pytest.raises(ValidationError):
+        CommitMetaSchema.from_json(json.dumps(payload))
