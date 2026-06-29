@@ -38,7 +38,7 @@ func (i *inspectCapabilitiesTool) Call(ctx context.Context, raw json.RawMessage)
 	}
 	cards, err := i.t.sdk.DiscoverAgents(ctx)
 	if err != nil {
-		return nil, &MCPToolError{Message: "discover agents: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
+		return nil, &MCPToolError{Message: "discover agents: " + err.Error(), Category: observerstore.FailUnknown}
 	}
 	snapshot := contract.NewResourceSnapshot(cards, i.t.cfg.Credentials.SandboxID)
 	warnings := []string{}
@@ -184,7 +184,7 @@ func (d *dryRunContractTool) Call(ctx context.Context, raw json.RawMessage) (jso
 	}
 	cards, err := d.t.sdk.DiscoverAgents(ctx)
 	if err != nil {
-		return nil, &MCPToolError{Message: "discover agents: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
+		return nil, &MCPToolError{Message: "discover agents: " + err.Error(), Category: observerstore.FailUnknown}
 	}
 	report := analyzeContractCapabilities(cards, d.t.cfg.Credentials.SandboxID, tc)
 	return json.Marshal(report)

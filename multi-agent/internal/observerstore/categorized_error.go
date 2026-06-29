@@ -61,14 +61,21 @@ func (e *CategorizedError) FailureCategory() FailureCategory {
 // found — the sentinel makes "no tag" indistinguishable from "tag explicitly
 // unknown" at the analytics layer, which is fine because both bucket to
 // "unclassified".
+//
+// Walks the whole Unwrap chain looking for the first Categorized that
+// reports a non-empty tag. An outer Categorized with empty Category does NOT
+// shadow an inner one — that lets a struct-style carrier (e.g.
+// *driver.MCPToolError) wrap an inner Categorize() result without dropping
+// its tag.
 func CategoryOf(err error) FailureCategory {
-	if err == nil {
-		return FailUnknown
-	}
-	var c Categorized
-	if errors.As(err, &c) && c != nil {
-		if cat := c.FailureCategory(); cat != "" {
-			return cat
+	// Per-step inspection: errors.As would jump straight to the deepest
+	// Categorized in the chain, hiding intermediate ones. We want outer
+	// non-empty to win, but allow an outer empty Category to fall through.
+	for cur := err; cur != nil; cur = errors.Unwrap(cur) {
+		if c, ok := cur.(Categorized); ok && c != nil {
+			if cat := c.FailureCategory(); cat != "" {
+				return cat
+			}
 		}
 	}
 	return FailUnknown

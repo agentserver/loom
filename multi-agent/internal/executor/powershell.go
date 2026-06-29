@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -73,11 +74,14 @@ func (e *PowerShellExecutor) Run(ctx context.Context, t Task, sink Sink) (Result
 		var err error
 		workdir, err = os.Getwd()
 		if err != nil {
-			return Result{}, observerstore.Categorize(err, observerstore.FailMissingFile)
+			return Result{}, observerstore.Categorize(err, observerstore.FailUnknown)
 		}
 	}
 	if err := os.MkdirAll(workdir, 0o755); err != nil {
-		return Result{}, observerstore.Categorize(err, observerstore.FailMissingFile)
+		if errors.Is(err, os.ErrPermission) {
+			return Result{}, observerstore.Categorize(err, observerstore.FailPolicyViolation)
+		}
+		return Result{}, observerstore.Categorize(err, observerstore.FailUnknown)
 	}
 	bin, err := e.resolveBin()
 	if err != nil {

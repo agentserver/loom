@@ -156,7 +156,7 @@ func (t *Tools) delegateShellTask(ctx context.Context, card agentsdk.AgentCard, 
 		TimeoutSeconds: args.TimeoutSec,
 	})
 	if err != nil {
-		return nil, &MCPToolError{Message: "delegate " + skill + " task: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
+		return nil, &MCPToolError{Message: "delegate " + skill + " task: " + err.Error(), Category: observerstore.FailUnknown}
 	}
 	wait := false
 	if args.Wait != nil {
@@ -289,7 +289,7 @@ func (t *Tools) delegatePermissionTask(ctx context.Context, toolName, targetAgen
 		Prompt:   prompt,
 	})
 	if err != nil {
-		return nil, &MCPToolError{Message: "delegate " + skill + " task: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
+		return nil, &MCPToolError{Message: "delegate " + skill + " task: " + err.Error(), Category: observerstore.FailUnknown}
 	}
 	// DelegateTask succeeded — degrade journal append failure to a log entry
 	// so we still wait on the permission task. See §1.1 #1 of the
@@ -318,7 +318,7 @@ func (t *Tools) resolveAvailableAgent(ctx context.Context, targetAgentID, target
 	}
 	cards, err := t.sdk.DiscoverAgents(ctx)
 	if err != nil {
-		return agentsdk.AgentCard{}, &MCPToolError{Message: "discover agents: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
+		return agentsdk.AgentCard{}, &MCPToolError{Message: "discover agents: " + err.Error(), Category: observerstore.FailUnknown}
 	}
 	var unavailable bool
 	var matches []agentsdk.AgentCard
@@ -369,7 +369,7 @@ func (t *Tools) waitDelegatedTask(ctx context.Context, taskID string, timeoutSec
 	for {
 		info, err := t.sdk.GetTask(ctx, taskID, true)
 		if err != nil {
-			return nil, &MCPToolError{Message: "get task " + taskID + ": " + err.Error(), Category: observerstore.FailSlaveDisconnect}
+			return nil, &MCPToolError{Message: "get task " + taskID + ": " + err.Error(), Category: observerstore.FailUnknown}
 		}
 		if isTerminalStatus(info.Status) {
 			isAwaiting, unwrappedOutput, question := unwrapResultMarker(info)
@@ -378,7 +378,11 @@ func (t *Tools) waitDelegatedTask(ctx context.Context, taskID string, timeoutSec
 			}
 			output := unwrappedOutput
 			if info.Status != "completed" {
-				// Slave-side failure; the underlying category is opaque from here.
+				// Slave-side failure: info.Status is "failed" or "cancelled"
+				// (per isTerminalStatus). info.FailureReason is an opaque
+				// human-readable string the slave executor produced; bucketing
+				// it would require parsing it. Leave FailUnknown until the
+				// slave protocol returns a typed category alongside the reason.
 				return nil, &MCPToolError{Message: "task " + taskID + " " + info.Status + ": " + firstNonEmpty(info.FailureReason, output), Category: observerstore.FailUnknown}
 			}
 			return marshalDelegatedTaskOutput(taskID, info, output)

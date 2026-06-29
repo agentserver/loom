@@ -288,6 +288,9 @@ func (e *FileExecutor) doWrite(req fileRequest, abs string, sink Sink) (Result, 
 
 	if req.Mkdir {
 		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			if errors.Is(err, os.ErrPermission) {
+				return Result{}, observerstore.Categorize(err, observerstore.FailPolicyViolation)
+			}
 			return Result{}, observerstore.Categorize(err, observerstore.FailUnknown)
 		}
 	}
@@ -307,12 +310,19 @@ func (e *FileExecutor) doWrite(req fileRequest, abs string, sink Sink) (Result, 
 		f, err = os.OpenFile(abs, os.O_WRONLY|os.O_CREATE, 0o644)
 	}
 	if err != nil {
-		// O_EXCL collision is a duplicate-write; the rest are missing path /
-		// permission issues. Keep it as missing_file for simplicity here.
-		if mode == "create_new" && errors.Is(err, fs.ErrExist) {
+		// O_EXCL collision → duplicate-write; permission denied → policy;
+		// anything else (read-only fs, ENOSPC, etc.) → unknown rather than
+		// pretending it's a missing-file class.
+		switch {
+		case mode == "create_new" && errors.Is(err, fs.ErrExist):
 			return Result{}, observerstore.Categorize(err, observerstore.FailDuplicateWrite)
+		case errors.Is(err, fs.ErrPermission):
+			return Result{}, observerstore.Categorize(err, observerstore.FailPolicyViolation)
+		case errors.Is(err, fs.ErrNotExist):
+			return Result{}, observerstore.Categorize(err, observerstore.FailMissingFile)
+		default:
+			return Result{}, observerstore.Categorize(err, observerstore.FailUnknown)
 		}
-		return Result{}, observerstore.Categorize(err, observerstore.FailMissingFile)
 	}
 	defer f.Close()
 

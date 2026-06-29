@@ -98,7 +98,10 @@ func (e *RegisterMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Resul
 
 	mcpCfg := MCPServerCfg{Transport: "stdio", Command: "python3", Args: []string{absPath}}
 	if err := e.cfg.MCPExec.RegisterStdio(p.Spec.Name, mcpCfg); err != nil {
-		return Result{}, observerstore.Categorize(fmt.Errorf("register_mcp: register: %w", err), observerstore.FailDuplicateWrite)
+		// RegisterStdio's only failure path today is "transport must be
+		// stdio" — a malformed cfg, not a runtime/idempotency fault. If
+		// new failure modes appear, branch here before tagging.
+		return Result{}, observerstore.Categorize(fmt.Errorf("register_mcp: register: %w", err), observerstore.FailContractViolation)
 	}
 
 	entry := DynamicEntry{

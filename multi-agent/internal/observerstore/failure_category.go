@@ -10,6 +10,19 @@ package observerstore
 // IsKnown updated in lockstep. FailUnknown is a sentinel for sites that
 // cannot be classified at injection time; it is intentionally excluded from
 // AllCategories and IsKnown so analytics treat it as "unbucketed".
+//
+// Reserved-for-future tags. FailWrongVersion, FailForbiddenCred and
+// FailDriverRestart are declared in the taxonomy because Phase 0 fixed all
+// 11 categories up front, but Phase 0's driver/executor injection has no
+// confidently-classifiable sites for them yet. They will get tagged sites
+// when their failure surfaces become observable:
+//   - FailForbiddenCred: when the agentsdk SDK returns typed 401/403 errors
+//     (today every transport error funnels through a string-only path that
+//     bucketing would mis-attribute).
+//   - FailWrongVersion: when version/protocol mismatch surfaces as a typed
+//     error from agentbackend / agentsdk.
+//   - FailDriverRestart: when journal/recovery code reports resumed work
+//     after a driver crash; today restart is detected outside this package.
 type FailureCategory string
 
 const (

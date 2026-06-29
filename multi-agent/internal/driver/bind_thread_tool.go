@@ -51,10 +51,10 @@ func (b *bindThreadTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	}
 	result, err := b.t.BindThread(ctx, args.ThreadID)
 	if err != nil {
-		// BindThread returns validation / wrong-context errors; the underlying
-		// kind is not classified at this layer. Mark as wrong_context which is
-		// the failure mode the tool exists to prevent (binding the wrong thread).
-		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailWrongContext}
+		// BindThread can fail for several reasons (validation, downstream
+		// state checks). Leave untagged until BindThread itself returns
+		// typed errors a tag can be inferred from.
+		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailUnknown}
 	}
 	return json.Marshal(result)
 }

@@ -55,7 +55,7 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 	// these are observable side effects. ---
 	cards, err := s.t.sdk.DiscoverAgents(ctx) // read-only RPC #1
 	if err != nil {
-		return nil, &MCPToolError{Message: "discover agents: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
+		return nil, &MCPToolError{Message: "discover agents: " + err.Error(), Category: observerstore.FailUnknown}
 	}
 	snapshot := contract.NewResourceSnapshot(cards, s.t.cfg.Credentials.SandboxID)
 	snapshotBody, err := json.Marshal(snapshot)
@@ -166,7 +166,10 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 		TimeoutSeconds: timeout,
 	})
 	if err != nil {
-		return nil, &MCPToolError{Message: "delegate: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
+		// agentsdk DelegateTask wraps multiple failure modes (transport,
+		// auth, version, deadline) into a string-only error today; keep
+		// FailUnknown until the SDK exposes a typed error.
+		return nil, &MCPToolError{Message: "delegate: " + err.Error(), Category: observerstore.FailUnknown}
 	}
 
 	// --- DelegateTask succeeded — from here helper failures degrade to

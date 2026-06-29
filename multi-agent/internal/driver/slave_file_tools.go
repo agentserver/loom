@@ -131,7 +131,7 @@ func (r *readSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (json
 		TargetID: card.AgentID, Skill: "file", Prompt: string(pb),
 	})
 	if err != nil {
-		return nil, &MCPToolError{Message: "delegate file read: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
+		return nil, &MCPToolError{Message: "delegate file read: " + err.Error(), Category: observerstore.FailUnknown}
 	}
 	// DelegateTask succeeded — degrade journal append failure to a log entry
 	// so we still wait on the slave file read. See §1.1 #1 of the
@@ -311,7 +311,10 @@ func (w *writeSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (jso
 		sha := strings.TrimPrefix(args.SourceBlob, "sha256:")
 		path, ok := w.t.reg.LookupBlob(sha)
 		if !ok {
-			return nil, &MCPToolError{Message: "source_blob " + args.SourceBlob + " not in driver FileRegistry", Category: observerstore.FailMissingFile}
+			// The blob handle was valid syntax; the registry just doesn't know
+			// it (GC'd, evicted, or never registered) — caller's capability
+			// snapshot is stale, not a missing-file system fault.
+			return nil, &MCPToolError{Message: "source_blob " + args.SourceBlob + " not in driver FileRegistry", Category: observerstore.FailStaleCapability}
 		}
 		body, err := os.ReadFile(path)
 		if err != nil {
@@ -359,7 +362,7 @@ func (w *writeSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (jso
 		TargetID: card.AgentID, Skill: "file", Prompt: string(pb),
 	})
 	if err != nil {
-		return nil, &MCPToolError{Message: "delegate file write: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
+		return nil, &MCPToolError{Message: "delegate file write: " + err.Error(), Category: observerstore.FailUnknown}
 	}
 	// DelegateTask succeeded — degrade journal append failure to a log entry
 	// so we still wait on the slave file write. See §1.1 #1 of the
@@ -446,7 +449,7 @@ func (s *statSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (json
 		TargetID: card.AgentID, Skill: "file", Prompt: string(prompt),
 	})
 	if err != nil {
-		return nil, &MCPToolError{Message: "delegate file stat: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
+		return nil, &MCPToolError{Message: "delegate file stat: " + err.Error(), Category: observerstore.FailUnknown}
 	}
 	// DelegateTask succeeded — degrade journal append failure to a log entry
 	// so we still wait on the slave file stat. See §1.1 #1 of the

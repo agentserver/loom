@@ -287,7 +287,7 @@ func (t *Tools) observerRelay() *ObserverRelay {
 func (t *Tools) resolveTarget(ctx context.Context, override string) (id, displayName, shortID, role string, err error) {
 	cards, err := t.sdk.DiscoverAgents(ctx)
 	if err != nil {
-		return "", "", "", "", &MCPToolError{Message: "discover agents: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
+		return "", "", "", "", &MCPToolError{Message: "discover agents: " + err.Error(), Category: observerstore.FailUnknown}
 	}
 	if override == "" {
 		override = t.cfg.DriverDefaults.TargetDisplayName
@@ -399,7 +399,7 @@ func (l *listAgentsTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	}
 	cards, err := l.t.sdk.DiscoverAgents(ctx)
 	if err != nil {
-		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailSlaveDisconnect}
+		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailUnknown}
 	}
 	type out struct {
 		AgentID           string                          `json:"agent_id"`
@@ -660,7 +660,10 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		TimeoutSeconds: timeout,
 	})
 	if err != nil {
-		return nil, &MCPToolError{Message: "delegate: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
+		// agentsdk DelegateTask wraps multiple failure modes (transport,
+		// auth, version, deadline) into a string-only error today; keep
+		// FailUnknown until the SDK exposes a typed error.
+		return nil, &MCPToolError{Message: "delegate: " + err.Error(), Category: observerstore.FailUnknown}
 	}
 
 	// From this point on, the task is running on the slave. Any helper-step
@@ -754,7 +757,7 @@ func (g *getTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMe
 	}
 	info, err := g.t.sdk.GetTask(ctx, args.TaskID, true)
 	if err != nil {
-		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailSlaveDisconnect}
+		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailUnknown}
 	}
 	taskID := info.TaskID
 	if taskID == "" {
@@ -877,7 +880,7 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 	for {
 		info, err := w.t.sdk.GetTask(ctx, args.TaskID, true)
 		if err != nil {
-			return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailSlaveDisconnect}
+			return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailUnknown}
 		}
 		switch info.Status {
 		case "completed", "failed", "cancelled":
@@ -1126,7 +1129,7 @@ func (ts *tailSubtasksTool) Call(ctx context.Context, raw json.RawMessage) (json
 	}
 	cards, err := ts.t.sdk.DiscoverAgents(ctx)
 	if err != nil {
-		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailSlaveDisconnect}
+		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailUnknown}
 	}
 
 	// Resolve master with the same auto-pick / ambiguity rules as submit_task.
@@ -1173,7 +1176,7 @@ func (ts *tailSubtasksTool) Call(ctx context.Context, raw json.RawMessage) (json
 		path := "/tasks/" + args.TaskID + "/children"
 		resp, err := ts.t.sdk.PeerProxy(ctx, "GET", masterShort, path, nil)
 		if err != nil {
-			return nil, &MCPToolError{Message: "peer-proxy: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
+			return nil, &MCPToolError{Message: "peer-proxy: " + err.Error(), Category: observerstore.FailUnknown}
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
@@ -1228,7 +1231,7 @@ func (c *cancelTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	}
 	info, err := c.t.sdk.GetTask(ctx, args.TaskID, false)
 	if err != nil {
-		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailSlaveDisconnect}
+		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailUnknown}
 	}
 	return json.Marshal(map[string]interface{}{
 		"ok":     false,
@@ -1279,7 +1282,7 @@ func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 
 	info, err := r.t.sdk.GetTask(ctx, args.LastTaskID, true)
 	if err != nil {
-		return nil, &MCPToolError{Message: "get_task: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
+		return nil, &MCPToolError{Message: "get_task: " + err.Error(), Category: observerstore.FailUnknown}
 	}
 	// Validate: status == completed AND kind == awaiting_user. The marker
 	// can live in info.Output (string), info.Result (legacy json.RawMessage),
@@ -1357,7 +1360,7 @@ func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		TimeoutSeconds: timeout,
 	})
 	if err != nil {
-		return nil, &MCPToolError{Message: "delegate chat_resume: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
+		return nil, &MCPToolError{Message: "delegate chat_resume: " + err.Error(), Category: observerstore.FailUnknown}
 	}
 	// Recover ChildAgentID from the prior delegation journal record so the
 	// resume record carries the same agent shortID. Falls through to "" if the

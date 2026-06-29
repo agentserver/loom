@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -53,11 +54,18 @@ func (e *BashExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, erro
 		var err error
 		workdir, err = os.Getwd()
 		if err != nil {
-			return Result{}, observerstore.Categorize(err, observerstore.FailMissingFile)
+			// Getwd failures (deleted cwd, lost permission to read it) don't
+			// fit any infrastructure category cleanly; leave unknown.
+			return Result{}, observerstore.Categorize(err, observerstore.FailUnknown)
 		}
 	}
 	if err := os.MkdirAll(workdir, 0o755); err != nil {
-		return Result{}, observerstore.Categorize(err, observerstore.FailMissingFile)
+		// MkdirAll fails almost always on permission; surface that explicitly,
+		// fall back to unknown for everything else (ENOSPC, ROFS, etc.).
+		if errors.Is(err, os.ErrPermission) {
+			return Result{}, observerstore.Categorize(err, observerstore.FailPolicyViolation)
+		}
+		return Result{}, observerstore.Categorize(err, observerstore.FailUnknown)
 	}
 
 	runCtx := ctx

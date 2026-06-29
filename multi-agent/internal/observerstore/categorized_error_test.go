@@ -67,3 +67,34 @@ func TestCategorize_OuterCategoryWins(t *testing.T) {
 func TestCategorizedError_ImplementsError(t *testing.T) {
 	var _ error = (*CategorizedError)(nil)
 }
+
+// fakeCategorized lets us construct a Categorized whose Category is empty
+// without going through Categorize() (which always sets a tag).
+type fakeCategorized struct {
+	cat FailureCategory
+	err error
+}
+
+func (f *fakeCategorized) Error() string                  { return f.err.Error() }
+func (f *fakeCategorized) Unwrap() error                  { return f.err }
+func (f *fakeCategorized) FailureCategory() FailureCategory { return f.cat }
+
+func TestCategoryOf_EmptyOuterFallsThroughToInner(t *testing.T) {
+	// Pin: an outer Categorized with empty Category must NOT shadow an inner
+	// one that has a real tag. Otherwise a struct-style carrier (like
+	// driver.MCPToolError with an unset Category) wrapping a Categorize()
+	// result would drop the inner tag on the floor.
+	inner := Categorize(errors.New("io err"), FailMissingFile)
+	outer := &fakeCategorized{cat: "", err: inner}
+	if got := CategoryOf(outer); got != FailMissingFile {
+		t.Errorf("CategoryOf(empty-outer over tagged-inner) = %q, want %q", got, FailMissingFile)
+	}
+}
+
+func TestCategoryOf_EmptyChainIsUnknown(t *testing.T) {
+	// All-empty chain (or no Categorized at all in chain) → FailUnknown.
+	chain := &fakeCategorized{cat: "", err: errors.New("plain")}
+	if got := CategoryOf(chain); got != FailUnknown {
+		t.Errorf("CategoryOf(empty-chain) = %q, want %q", got, FailUnknown)
+	}
+}
