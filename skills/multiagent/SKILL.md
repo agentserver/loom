@@ -257,6 +257,18 @@ When `dry_run_contract` reports missing tools and a slave has `register_mcp`, bu
 
 Do not call `register_slave_mcp` directly from a one-shot Claude generation: `register_mcp` only does structural checks, so semantic bugs in tool implementations register silently.
 
+> ⚠️ **Historical note — `BuildMCPExecutor` was never implemented.**
+> The 2026-05-09 spec at `docs/superpowers/specs/2026-05-09-dynamic-mcp-design.md`
+> proposed a master-driven auto-build path called `BuildMCPExecutor` (skill
+> `build_mcp`). **That code never landed** — `grep -ri BuildMCPExecutor
+> multi-agent/` returns zero hits, and the master path is now frozen. If you
+> grep'd your way here from the old spec name expecting an executor you can
+> call, there isn't one. Current Loom uses the **driver-first user-promoted
+> capability lifecycle** described in the four steps above: the user authors
+> the MCP server on a slave via `bash`, `mcp-acceptance` gates it, and
+> `register_slave_mcp` persists it. There is no automatic master build path,
+> and adding one is out of scope for the current paper v3 cycle.
+
 ## Common Mistakes
 
 - Skipping clarification and jumping straight to `draft_task_contract` / `scaffold-mcp-server` because "the intent seems obvious".

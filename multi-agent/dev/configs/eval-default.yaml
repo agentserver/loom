@@ -1,0 +1,15 @@
+# eval-default.yaml — default config template for paper v3 eval-runner
+#
+# Routing is pinned to driver-first because the master path
+# (cmd/master-agent / internal/orchestrator / internal/orchestration)
+# is FROZEN for the v3 cycle. See:
+#   - README.md  → "Historical note — BuildMCPExecutor was never implemented"
+#   - skills/multiagent/SKILL.md
+#   - docs/superpowers/specs/2026-05-09-dynamic-mcp-design.md (top of file)
+#
+# Any eval driver that loads this file MUST refuse to route work through a
+# master node. allow_master:false is the safety latch.
+
+routing:
+  mode: driver-first      # do NOT go through cmd/master-agent
+  allow_master: false     # hard refusal switch — flip would break the freeze
