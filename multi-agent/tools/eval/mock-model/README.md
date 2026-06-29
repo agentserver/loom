@@ -81,11 +81,13 @@ model_provider = "modelserver"
 ```
 
 > **codex version note.** `wire_api = "chat"` was removed from `openai/codex`
-> in 0.96 (Feb 2026); the last release supporting it is `0.93.0`. For
-> ablation runs against newer codex CLIs, drive the mock through eval-runner
-> (which talks raw `/v1/chat/completions`) rather than through codex.
-> codex's chat path always hard-codes `stream: true`
-> (openai/codex#3513), which this server now emits as SSE.
+> in `rust-v0.95.0` (4 Feb 2026, PR openai/codex#10157, discussion #7782);
+> the last release supporting it is `rust-v0.94.0`. Newer codex CLIs reject
+> `wire_api = "chat"` at config-parse time. For ablation runs against
+> post-0.94 codex, drive the mock through eval-runner (which talks raw
+> `/v1/chat/completions`) rather than through codex. While codex's chat
+> path still existed it hard-coded `stream: true` (openai/codex#3513),
+> which this server now emits as SSE.
 
 ## Tests
 
