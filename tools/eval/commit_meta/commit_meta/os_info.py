@@ -17,9 +17,15 @@ _OS_RELEASE_PATH = "/etc/os-release"
 
 
 def _read_os_release_distro(path: str) -> str | None:
-    """Return the PRETTY_NAME (or NAME) field from /etc/os-release, or None."""
+    """Return the PRETTY_NAME (or NAME) field from /etc/os-release, or None.
+
+    Errors in opening or decoding the file fall back to None so the caller
+    can use platform.system() instead; we never raise from here. ``errors=
+    "replace"`` keeps stray non-UTF-8 bytes (rare but possible in custom
+    container images) from killing the whole collector.
+    """
     try:
-        with open(path, "r", encoding="utf-8") as fh:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
             entries: Dict[str, str] = {}
             for line in fh:
                 line = line.strip()

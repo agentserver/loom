@@ -35,3 +35,16 @@ def test_distro_fallback_when_os_release_missing(tmp_path, monkeypatch) -> None:
     info = collect_os_info()
     # Fallback should still produce *something* (platform.system() at minimum).
     assert info["distro"]
+
+
+def test_distro_fallback_when_os_release_not_utf8(tmp_path, monkeypatch) -> None:
+    # A /etc/os-release with non-UTF-8 bytes must not crash the collector;
+    # we fall back to platform.system() instead of letting UnicodeDecodeError
+    # bubble out.
+    bad = tmp_path / "bad_release"
+    bad.write_bytes(b"\xff\xfeNAME=foo\n")
+    monkeypatch.setattr(
+        "commit_meta.os_info._OS_RELEASE_PATH", str(bad)
+    )
+    info = collect_os_info()
+    assert info["distro"]  # fallback populated, no exception
