@@ -4,8 +4,8 @@
 // frozen" guarantee a property an automated test can assert on. The default
 // config lives at dev/configs/eval-default.yaml and is referenced by the
 // project README. See the "Historical note — BuildMCPExecutor was never
-// implemented" callout in README.md / README.en.md and the v3 plan in
-// docs/intermediate/.
+// implemented" callout in README.md / README.en.md and the frozen spec at
+// docs/superpowers/specs/2026-05-09-dynamic-mcp-design.md.
 //
 // We deliberately keep the schema small (just the routing block) so this
 // package can grow alongside the eval-runner without re-litigating the
