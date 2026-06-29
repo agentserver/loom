@@ -1,0 +1,288 @@
+"""End-to-end CLI tests.
+
+Drives `python -m commit_meta.collect` as a subprocess to exercise the real
+argparse + main() wiring rather than calling internals.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+import yaml
+
+PKG_ROOT = Path(__file__).resolve().parent.parent  # …/commit_meta
+
+
+def _run_cli(
+    *args: str,
+    cwd: Path | None = None,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    # Make commit_meta importable from the package root regardless of cwd.
+    env["PYTHONPATH"] = str(PKG_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+    if extra_env:
+        env.update(extra_env)
+    return subprocess.run(
+        [sys.executable, "-m", "commit_meta.collect", *args],
+        cwd=str(cwd) if cwd else None,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@pytest.fixture
+def tiny_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "tinyrepo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    (repo / "f.txt").write_text("hi\n")
+    subprocess.run(["git", "add", "f.txt"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "init"], cwd=repo, check=True
+    )
+    return repo
+
+
+def test_json_output_has_all_fields(tiny_repo: Path, tmp_path: Path) -> None:
+    # All 4 repos absent except loom => N/A strings for the rest.
+    missing = tmp_path / "missing"
+    proc = _run_cli(
+        "--loom",
+        str(tiny_repo),
+        "--agentserver",
+        str(missing / "agent"),
+        "--modelserver",
+        str(missing / "model"),
+        "--app",
+        str(missing / "app"),
+    )
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+
+    expected_keys = {
+        "loom_commit",
+        "agentserver_commit",
+        "modelserver_commit",
+        "app_commit",
+        "os",
+        "collected_at_unix",
+        "machine_hostname",
+    }
+    assert set(payload.keys()) == expected_keys
+
+    assert set(payload["os"].keys()) == {"kernel", "distro", "arch"}
+    assert isinstance(payload["collected_at_unix"], int)
+    assert payload["collected_at_unix"] > 0
+    assert isinstance(payload["machine_hostname"], str)
+    assert payload["machine_hostname"]
+
+    assert "(" in payload["loom_commit"]  # branch+state suffix
+    assert payload["agentserver_commit"].startswith("N/A:")
+    assert payload["modelserver_commit"].startswith("N/A:")
+    assert payload["app_commit"].startswith("N/A:")
+
+
+def test_env_vars_override_defaults(tiny_repo: Path, tmp_path: Path) -> None:
+    other = tmp_path / "other"
+    other.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=other, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "t@t"], cwd=other, check=True
+    )
+    subprocess.run(["git", "config", "user.name", "t"], cwd=other, check=True)
+    (other / "x").write_text("x\n")
+    subprocess.run(["git", "add", "x"], cwd=other, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "init"], cwd=other, check=True
+    )
+
+    proc = _run_cli(
+        "--loom",
+        str(tiny_repo),
+        extra_env={
+            "AGENTSERVER_ROOT": str(other),
+            "MODELSERVER_ROOT": "/definitely/not/there",
+            "APP_ROOT": "/also/not/there",
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    # AGENTSERVER_ROOT pointed at a real repo => real SHA, not N/A.
+    assert not payload["agentserver_commit"].startswith("N/A:")
+    assert payload["modelserver_commit"].startswith("N/A:")
+    assert payload["app_commit"].startswith("N/A:")
+
+
+def test_yaml_output_format(tiny_repo: Path, tmp_path: Path) -> None:
+    missing = tmp_path / "missing"
+    proc = _run_cli(
+        "--loom",
+        str(tiny_repo),
+        "--agentserver",
+        str(missing),
+        "--modelserver",
+        str(missing),
+        "--app",
+        str(missing),
+        "--format=yaml",
+    )
+    assert proc.returncode == 0, proc.stderr
+    payload = yaml.safe_load(proc.stdout)
+    assert "loom_commit" in payload
+    assert payload["os"]["kernel"]
+
+
+def test_default_format_is_json(tiny_repo: Path, tmp_path: Path) -> None:
+    missing = tmp_path / "missing"
+    proc = _run_cli(
+        "--loom",
+        str(tiny_repo),
+        "--agentserver",
+        str(missing),
+        "--modelserver",
+        str(missing),
+        "--app",
+        str(missing),
+    )
+    assert proc.returncode == 0, proc.stderr
+    json.loads(proc.stdout)  # raises if not valid JSON
+
+
+def test_missing_default_path_preserved_in_na_string(
+    tiny_repo: Path, tmp_path: Path
+) -> None:
+    """When all CLI flags and env vars are unset and the /root/<repo>
+    defaults don't exist, the N/A string must name the path we actually
+    tried (the default), not ``<unset>`` — otherwise the user has no clue
+    where the collector looked. Documented in README's default-search table.
+    """
+    # Clear inherited env vars so we exercise the pure default-fallback path.
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "commit_meta.collect",
+            "--loom",
+            str(tiny_repo),
+        ],
+        cwd=str(tmp_path),
+        env={
+            "PYTHONPATH": str(PKG_ROOT)
+            + os.pathsep
+            + os.environ.get("PYTHONPATH", ""),
+            "PATH": os.environ.get("PATH", ""),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    # On a host where /root/{agentserver,modelserver,app} are missing,
+    # every N/A string should embed the attempted default path.
+    for field, default in [
+        ("agentserver_commit", "/root/agentserver"),
+        ("modelserver_commit", "/root/modelserver"),
+        ("app_commit", "/root/app"),
+    ]:
+        if payload[field].startswith("N/A:"):
+            assert default in payload[field], (
+                f"{field} N/A string lost path info: {payload[field]!r}; "
+                f"expected '{default}' to appear"
+            )
+
+
+def test_cli_json_roundtrips_through_schema(tiny_repo: Path, tmp_path: Path) -> None:
+    """CLI's json output must round-trip cleanly through
+    CommitMetaSchema.from_json() / .to_json(), so Phase 1 can consume
+    the artifact without reformatting. Guards against future drift
+    between CLI _format and schema.to_json.
+    """
+    from commit_meta.schema import CommitMetaSchema
+
+    missing = tmp_path / "missing"
+    proc = _run_cli(
+        "--loom",
+        str(tiny_repo),
+        "--agentserver",
+        str(missing),
+        "--modelserver",
+        str(missing),
+        "--app",
+        str(missing),
+    )
+    assert proc.returncode == 0, proc.stderr
+    schema = CommitMetaSchema.from_json(proc.stdout)
+    # to_json output should re-parse identically and produce the same string
+    # when fed back through from_json/to_json.
+    second = CommitMetaSchema.from_json(schema.to_json())
+    assert schema.model_dump() == second.model_dump()
+    # CLI stdout (minus trailing newline) must equal schema.to_json() — they
+    # are both supposed to be canonical JSON of the same payload.
+    assert proc.stdout.rstrip("\n") == schema.to_json()
+
+
+def test_cli_yaml_roundtrips_through_schema(tiny_repo: Path, tmp_path: Path) -> None:
+    """CLI's yaml output must validate against CommitMetaSchema and produce the
+    same model as the json output for the same inputs. Phase 1 consumers may
+    pick either format; both must yield byte-identical schema instances. Guards
+    against future drift between _format("yaml", ...) and the schema field set
+    (e.g. a regression that drops or reorders fields would silently break
+    yaml-based consumers while json-based tests still pass).
+    """
+    from commit_meta.schema import CommitMetaSchema
+
+    missing = tmp_path / "missing"
+    common = [
+        "--loom", str(tiny_repo),
+        "--agentserver", str(missing),
+        "--modelserver", str(missing),
+        "--app", str(missing),
+    ]
+    json_proc = _run_cli(*common)
+    yaml_proc = _run_cli(*common, "--format=yaml")
+    assert json_proc.returncode == 0, json_proc.stderr
+    assert yaml_proc.returncode == 0, yaml_proc.stderr
+
+    parsed = yaml.safe_load(yaml_proc.stdout)
+    yaml_schema = CommitMetaSchema.model_validate(parsed)
+    json_schema = CommitMetaSchema.from_json(json_proc.stdout)
+
+    # Both formats must produce the same set of fields with the same values
+    # for everything except the wall-clock stamp (collected_at_unix can drift
+    # by 1s between the two subprocess invocations).
+    yaml_dump = yaml_schema.model_dump()
+    json_dump = json_schema.model_dump()
+    assert yaml_dump.keys() == json_dump.keys()
+    for key in yaml_dump:
+        if key == "collected_at_unix":
+            assert abs(yaml_dump[key] - json_dump[key]) <= 2
+            continue
+        assert yaml_dump[key] == json_dump[key], f"field {key} differs across formats"
+
+
+def test_loom_defaults_to_cwd_git_root(tiny_repo: Path, tmp_path: Path) -> None:
+    # No --loom => collector finds git root from cwd.
+    missing = tmp_path / "missing"
+    proc = _run_cli(
+        "--agentserver",
+        str(missing),
+        "--modelserver",
+        str(missing),
+        "--app",
+        str(missing),
+        cwd=tiny_repo,
+    )
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert not payload["loom_commit"].startswith("N/A:")

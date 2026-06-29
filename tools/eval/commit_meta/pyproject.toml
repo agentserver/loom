@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "commit-meta"
+version = "0.1.0"
+description = "Collect git commit + OS metadata for loom eval runs (Phase 0 D6b)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "loom-eval" }]
+dependencies = [
+  "pydantic>=2.0",
+  "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+commit-meta-collect = "commit_meta.collect:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["commit_meta*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
