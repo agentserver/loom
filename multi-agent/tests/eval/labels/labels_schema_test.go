@@ -221,6 +221,68 @@ func TestLabelsValidateAgainstSchemas(t *testing.T) {
 			if err := cgtSchema.Validate(cgt); err != nil {
 				t.Fatalf("context_ground_truth schema violation: %v", err)
 			}
+
+			// README invariant: every `credential` capability alias must
+			// appear in the top-level credential_aliases mirror, and
+			// vice-versa. The schemas can't express this on their own
+			// (cross-field constraint) so it's enforced here.
+			checkCredentialAliasMirror(t, cgt)
 		})
+	}
+}
+
+// checkCredentialAliasMirror enforces the invariant documented in README.md
+// (`credential_aliases is a top-level mirror of any credential capability`).
+// A drift between the two would silently degrade credential analysis tooling
+// that relies on the mirror to skip a capability-tree walk.
+func checkCredentialAliasMirror(t *testing.T, cgt any) {
+	t.Helper()
+	m, ok := cgt.(map[string]any)
+	if !ok {
+		t.Fatalf("context_ground_truth not an object")
+	}
+	caps, _ := m["required_capabilities"].([]any)
+	fromCaps := map[string]struct{}{}
+	for _, c := range caps {
+		obj, _ := c.(map[string]any)
+		if obj["kind"] != "credential" {
+			continue
+		}
+		alias, _ := obj["alias"].(string)
+		if alias == "" {
+			t.Fatalf("credential capability missing alias: %v", obj)
+		}
+		fromCaps[alias] = struct{}{}
+	}
+	mirror := map[string]struct{}{}
+	if raw, ok := m["credential_aliases"].([]any); ok {
+		for _, v := range raw {
+			s, _ := v.(string)
+			mirror[s] = struct{}{}
+		}
+	}
+	for a := range fromCaps {
+		if _, ok := mirror[a]; !ok {
+			t.Errorf("credential alias %q present in required_capabilities but missing from credential_aliases mirror", a)
+		}
+	}
+	for a := range mirror {
+		if _, ok := fromCaps[a]; !ok {
+			t.Errorf("credential alias %q listed in credential_aliases mirror but no matching credential capability", a)
+		}
+	}
+}
+
+// TestJSONStrictRejectsTrailingTokens locks in the bug fix in
+// json_strict.go: a concatenated payload must fail to parse, not
+// silently keep the first object.
+func TestJSONStrictRejectsTrailingTokens(t *testing.T) {
+	var v any
+	if err := jsonUnmarshalStrict([]byte(`{"a":1}{"b":2}`), &v); err == nil {
+		t.Fatalf("expected trailing-token rejection, got nil")
+	}
+	// Sanity: single object still parses.
+	if err := jsonUnmarshalStrict([]byte(`{"a":1}`), &v); err != nil {
+		t.Fatalf("unexpected parse error on single object: %v", err)
 	}
 }
