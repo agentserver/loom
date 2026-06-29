@@ -18,6 +18,25 @@ import (
 
 const fileMaxReadBytes = 8 * 1024 * 1024 // 8 MiB hard cap per read.
 
+// categorizeFSErr maps an os/filesystem error into a FailureCategory.
+// ErrNotExist → missing_file, ErrPermission → policy_violation (OS-level
+// access denial — treated as policy for analytics bucketing; see
+// observerstore.FailPolicyViolation docs), ErrExist → duplicate_write,
+// anything else → unknown. Use at every os.Open/os.Stat/os.MkdirAll site
+// so EACCES/ENOTDIR/ELOOP don't all bucket as "missing".
+func categorizeFSErr(err error) observerstore.FailureCategory {
+	switch {
+	case errors.Is(err, fs.ErrExist):
+		return observerstore.FailDuplicateWrite
+	case errors.Is(err, fs.ErrPermission):
+		return observerstore.FailPolicyViolation
+	case errors.Is(err, fs.ErrNotExist):
+		return observerstore.FailMissingFile
+	default:
+		return observerstore.FailUnknown
+	}
+}
+
 // resolveExistingPrefix returns filepath.EvalSymlinks(p) if p exists.
 // If p doesn't exist, it evaluates the longest existing prefix and
 // rejoins the non-existent tail unchanged. This lets jail checks work
@@ -193,7 +212,7 @@ func (e *FileExecutor) doRead(req fileRequest, abs string, sink Sink) (Result, e
 	}
 	info, err := os.Stat(abs)
 	if err != nil {
-		return Result{}, observerstore.Categorize(fmt.Errorf("stat %s: %w", abs, err), observerstore.FailMissingFile)
+		return Result{}, observerstore.Categorize(fmt.Errorf("stat %s: %w", abs, err), categorizeFSErr(err))
 	}
 	if info.IsDir() {
 		return Result{}, observerstore.Categorize(fmt.Errorf("read target is a directory: %s", abs), observerstore.FailContractViolation)
@@ -217,14 +236,14 @@ func (e *FileExecutor) doRead(req fileRequest, abs string, sink Sink) (Result, e
 	if want > 0 {
 		f, err := os.Open(abs)
 		if err != nil {
-			return Result{}, observerstore.Categorize(err, observerstore.FailMissingFile)
+			return Result{}, observerstore.Categorize(err, categorizeFSErr(err))
 		}
 		n, err := f.ReadAt(buf, req.Offset)
 		f.Close()
 		// ReadAt may return io.EOF when fewer than len(buf) bytes are available;
 		// a short read is fine, but a zero-byte read with a real error is not.
 		if err != nil && n == 0 {
-			return Result{}, observerstore.Categorize(err, observerstore.FailMissingFile)
+			return Result{}, observerstore.Categorize(err, categorizeFSErr(err))
 		}
 		buf = buf[:n]
 	}
@@ -288,10 +307,7 @@ func (e *FileExecutor) doWrite(req fileRequest, abs string, sink Sink) (Result, 
 
 	if req.Mkdir {
 		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-			if errors.Is(err, os.ErrPermission) {
-				return Result{}, observerstore.Categorize(err, observerstore.FailPolicyViolation)
-			}
-			return Result{}, observerstore.Categorize(err, observerstore.FailUnknown)
+			return Result{}, observerstore.Categorize(err, categorizeFSErr(err))
 		}
 	}
 
@@ -310,19 +326,7 @@ func (e *FileExecutor) doWrite(req fileRequest, abs string, sink Sink) (Result, 
 		f, err = os.OpenFile(abs, os.O_WRONLY|os.O_CREATE, 0o644)
 	}
 	if err != nil {
-		// O_EXCL collision → duplicate-write; permission denied → policy;
-		// anything else (read-only fs, ENOSPC, etc.) → unknown rather than
-		// pretending it's a missing-file class.
-		switch {
-		case mode == "create_new" && errors.Is(err, fs.ErrExist):
-			return Result{}, observerstore.Categorize(err, observerstore.FailDuplicateWrite)
-		case errors.Is(err, fs.ErrPermission):
-			return Result{}, observerstore.Categorize(err, observerstore.FailPolicyViolation)
-		case errors.Is(err, fs.ErrNotExist):
-			return Result{}, observerstore.Categorize(err, observerstore.FailMissingFile)
-		default:
-			return Result{}, observerstore.Categorize(err, observerstore.FailUnknown)
-		}
+		return Result{}, observerstore.Categorize(err, categorizeFSErr(err))
 	}
 	defer f.Close()
 
@@ -333,7 +337,10 @@ func (e *FileExecutor) doWrite(req fileRequest, abs string, sink Sink) (Result, 
 		n, err = f.Write(bytesPayload)
 	}
 	if err != nil {
-		return Result{}, observerstore.Categorize(err, observerstore.FailUnknown)
+		// Write/WriteAt after a successful Open: usually ENOSPC, EIO,
+		// EDQUOT. Not a missing-file class, so FailUnknown via the helper
+		// (the helper preserves Permission/Exist if those somehow surface).
+		return Result{}, observerstore.Categorize(err, categorizeFSErr(err))
 	}
 	result := FileWriteResult{
 		Path:         abs,
@@ -358,7 +365,9 @@ func (e *FileExecutor) doStat(req fileRequest, abs string, sink Sink) (Result, e
 		return Result{Summary: string(body)}, nil
 	}
 	if err != nil {
-		return Result{}, observerstore.Categorize(err, observerstore.FailMissingFile)
+		// ErrNotExist is handled above; everything else (EACCES, ENOTDIR,
+		// ELOOP, ENAMETOOLONG, …) must not all bucket as missing.
+		return Result{}, observerstore.Categorize(err, categorizeFSErr(err))
 	}
 	result := FileStatResult{
 		Path:   abs,

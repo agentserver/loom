@@ -48,7 +48,7 @@ func (e *ChatResumeExecutor) Run(ctx context.Context, t Task, sink Sink) (Result
 	}
 
 	if err := os.MkdirAll(e.cfg.FlockDir, 0o700); err != nil {
-		return Result{}, observerstore.Categorize(fmt.Errorf("chat_resume: mkdir %s: %w", e.cfg.FlockDir, err), observerstore.FailMissingFile)
+		return Result{}, observerstore.Categorize(fmt.Errorf("chat_resume: mkdir %s: %w", e.cfg.FlockDir, err), categorizeFSErr(err))
 	}
 	lockPath := filepath.Join(e.cfg.FlockDir, body.SessionID+".lock")
 	lock, err := platform.TryLock(lockPath)

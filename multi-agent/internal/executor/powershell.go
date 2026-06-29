@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -78,10 +77,7 @@ func (e *PowerShellExecutor) Run(ctx context.Context, t Task, sink Sink) (Result
 		}
 	}
 	if err := os.MkdirAll(workdir, 0o755); err != nil {
-		if errors.Is(err, os.ErrPermission) {
-			return Result{}, observerstore.Categorize(err, observerstore.FailPolicyViolation)
-		}
-		return Result{}, observerstore.Categorize(err, observerstore.FailUnknown)
+		return Result{}, observerstore.Categorize(err, categorizeFSErr(err))
 	}
 	bin, err := e.resolveBin()
 	if err != nil {

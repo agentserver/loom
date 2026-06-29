@@ -56,8 +56,13 @@ const (
 	// LLM stream stall).
 	FailTimeout FailureCategory = "timeout"
 
-	// FailPolicyViolation — request rejected by policy/guardrail
-	// (importsallowlist, safe-paths, denied tool, capability gate).
+	// FailPolicyViolation — request rejected by a guardrail. Includes
+	// (a) this codebase's own guardrails (importsallowlist, safe-paths,
+	// denied tool, capability gate) and (b) OS-level access denials
+	// (EACCES, EPERM) encountered when carrying out an LLM-driven file or
+	// process op. The two share a bucket because, from the caller's
+	// perspective, both mean "the system refused this action"; analytics
+	// that need to separate them can pivot on the error message.
 	FailPolicyViolation FailureCategory = "policy_violation"
 
 	// FailContractViolation — payload violates an explicit

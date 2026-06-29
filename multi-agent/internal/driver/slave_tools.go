@@ -346,7 +346,10 @@ func (t *Tools) resolveAvailableAgent(ctx context.Context, targetAgentID, target
 		target = targetDisplayName
 	}
 	if unavailable {
-		return agentsdk.AgentCard{}, &MCPToolError{Message: "agent " + target + " is not available", Category: observerstore.FailSlaveDisconnect}
+		// agentAvailable returns false for both "busy" and "offline";
+		// without inspecting Status here we can't tell capacity from
+		// disconnect. Stay unknown rather than mis-attribute.
+		return agentsdk.AgentCard{}, &MCPToolError{Message: "agent " + target + " is not available", Category: observerstore.FailUnknown}
 	}
 	if len(matches) == 0 {
 		return agentsdk.AgentCard{}, &MCPToolError{Message: "no agent found: " + target, Category: observerstore.FailWrongContext}

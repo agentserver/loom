@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -60,12 +59,7 @@ func (e *BashExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, erro
 		}
 	}
 	if err := os.MkdirAll(workdir, 0o755); err != nil {
-		// MkdirAll fails almost always on permission; surface that explicitly,
-		// fall back to unknown for everything else (ENOSPC, ROFS, etc.).
-		if errors.Is(err, os.ErrPermission) {
-			return Result{}, observerstore.Categorize(err, observerstore.FailPolicyViolation)
-		}
-		return Result{}, observerstore.Categorize(err, observerstore.FailUnknown)
+		return Result{}, observerstore.Categorize(err, categorizeFSErr(err))
 	}
 
 	runCtx := ctx

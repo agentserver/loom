@@ -311,9 +311,12 @@ func (w *writeSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (jso
 		sha := strings.TrimPrefix(args.SourceBlob, "sha256:")
 		path, ok := w.t.reg.LookupBlob(sha)
 		if !ok {
-			// The blob handle was valid syntax; the registry just doesn't know
-			// it (GC'd, evicted, or never registered) — caller's capability
-			// snapshot is stale, not a missing-file system fault.
+			// FileRegistry blobs are never evicted in-process today (see
+			// registry.go — no delete on r.blobs), so the realistic causes
+			// are "never registered with this driver" or "wrong driver
+			// process". Either way the caller's blob handle no longer maps
+			// to anything this driver can serve — closer to a stale
+			// capability than a missing file.
 			return nil, &MCPToolError{Message: "source_blob " + args.SourceBlob + " not in driver FileRegistry", Category: observerstore.FailStaleCapability}
 		}
 		body, err := os.ReadFile(path)

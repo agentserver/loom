@@ -304,7 +304,11 @@ func (t *Tools) resolveTarget(ctx context.Context, override string) (id, display
 			}
 		}
 		if unavailable {
-			return "", "", "", "", &MCPToolError{Message: "agent named " + override + " is not available", Category: observerstore.FailSlaveDisconnect}
+			// agentAvailable returns false for both "busy" (alive, full) and
+			// "offline" (genuinely disconnected). Tagging both as
+			// slave_disconnect mis-attributes capacity events as infra; the
+			// branch here cannot tell them apart without inspecting Status.
+			return "", "", "", "", &MCPToolError{Message: "agent named " + override + " is not available", Category: observerstore.FailUnknown}
 		}
 		return "", "", "", "", &MCPToolError{Message: "no agent named: " + override, Category: observerstore.FailWrongContext}
 	}

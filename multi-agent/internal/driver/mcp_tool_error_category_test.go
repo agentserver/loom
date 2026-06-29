@@ -44,16 +44,23 @@ func TestMCPToolError_CategorySurvivesFmtErrorfWrap(t *testing.T) {
 	}
 }
 
-// MCPToolError with empty Category that wraps a tagged Categorize() inner
-// must surface the inner tag, not FailUnknown. Pins the per-step walk in
-// observerstore.CategoryOf.
-func TestMCPToolError_EmptyCategoryFallsThroughToInner(t *testing.T) {
-	inner := observerstore.Categorize(fmt.Errorf("io"), observerstore.FailMissingFile)
-	e := &MCPToolError{Message: "wrapping", Category: ""}
-	// Make e wrap inner by way of fmt.Errorf — driver doesn't currently use
-	// this idiom but Phase 1+ helpers might, and the semantics must hold.
-	wrapped := fmt.Errorf("%s: %w", e.Error(), inner)
-	if got := observerstore.CategoryOf(wrapped); got != observerstore.FailMissingFile {
-		t.Errorf("CategoryOf(empty-MCPToolError over tagged-inner) = %q, want %q", got, observerstore.FailMissingFile)
+// MCPToolError currently has no Unwrap, so it cannot itself sit "above" a
+// Categorize() chain — the only way an MCPToolError-flavored error reaches
+// CategoryOf is as the leaf. Pin that: when an MCPToolError is the only
+// Categorized in the chain and its Category is empty, the result is
+// FailUnknown, NOT some inadvertent inheritance from an enclosing
+// fmt.Errorf message.
+func TestMCPToolError_EmptyCategoryLeafIsUnknown(t *testing.T) {
+	e := &MCPToolError{Message: "no tag", Category: ""}
+	if got := observerstore.CategoryOf(e); got != observerstore.FailUnknown {
+		t.Errorf("CategoryOf(empty MCPToolError leaf) = %q, want %q", got, observerstore.FailUnknown)
+	}
+	// And the same wrapped through fmt.Errorf — the fmt.wrapError is the
+	// outer, e is reached via Unwrap, e.FailureCategory() returns "" which
+	// the per-step walk treats as "no tag here, keep walking" → falls off
+	// the chain end → FailUnknown.
+	wrapped := fmt.Errorf("outer: %w", e)
+	if got := observerstore.CategoryOf(wrapped); got != observerstore.FailUnknown {
+		t.Errorf("CategoryOf(fmt.Errorf over empty MCPToolError) = %q, want %q", got, observerstore.FailUnknown)
 	}
 }
