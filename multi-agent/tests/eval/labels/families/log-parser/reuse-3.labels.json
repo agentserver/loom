@@ -1,0 +1,18 @@
+{
+  "task_id": "log-parser-reuse-3",
+  "ground_truth_context": {
+    "agent_role": "slave",
+    "context_id": "slave-linux-server",
+    "rationale": "Third reuse covers an alternate rotation schema on the same server; same locality argument as reuse-1."
+  },
+  "context_ground_truth": {
+    "required_capabilities": [
+      {"kind": "tool", "name": "python", "min_version": "3.10"},
+      {"kind": "tool", "name": "regex"},
+      {"kind": "platform", "os": "linux"},
+      {"kind": "file", "kind_detail": "dataset", "path_pattern": "/var/log/nginx/*.log*"}
+    ],
+    "forbidden_capabilities": [],
+    "credential_aliases": []
+  }
+}

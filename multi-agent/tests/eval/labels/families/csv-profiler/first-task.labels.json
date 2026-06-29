@@ -1,0 +1,18 @@
+{
+  "task_id": "csv-profiler-first-task",
+  "ground_truth_context": {
+    "agent_role": "driver",
+    "context_id": "driver-linux-laptop",
+    "rationale": "Stage A: driver scaffolds and registers the csv-profiler MCP locally before reuse. Slaves have no profiler yet, so first-task must run on the driver where the user can review the candidate code."
+  },
+  "context_ground_truth": {
+    "required_capabilities": [
+      {"kind": "tool", "name": "python", "min_version": "3.10"},
+      {"kind": "tool", "name": "pandas"},
+      {"kind": "platform", "os": "linux"},
+      {"kind": "file", "kind_detail": "dataset", "path_pattern": "fixtures/csv-profiler/sample-*.csv"}
+    ],
+    "forbidden_capabilities": [],
+    "credential_aliases": []
+  }
+}

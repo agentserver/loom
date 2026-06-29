@@ -1,0 +1,20 @@
+{
+  "task_id": "remote-data-processing",
+  "ground_truth_context": {
+    "agent_role": "slave",
+    "context_id": "slave-linux-server",
+    "rationale": "Dataset is stored on the headless server's local disk and is too large to ship to the laptop driver; the sandbox slave has no intranet path to the data share. Only slave-linux-server can read the dataset and produce the parquet output."
+  },
+  "context_ground_truth": {
+    "required_capabilities": [
+      {"kind": "tool", "name": "python", "min_version": "3.10"},
+      {"kind": "tool", "name": "pandas"},
+      {"kind": "tool", "name": "pyarrow"},
+      {"kind": "platform", "os": "linux"},
+      {"kind": "file", "kind_detail": "dataset", "path_pattern": "/srv/data/remote-data-processing/**"},
+      {"kind": "network", "reach": "intranet"}
+    ],
+    "forbidden_capabilities": [],
+    "credential_aliases": []
+  }
+}

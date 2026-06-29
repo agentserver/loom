@@ -1,0 +1,93 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://loom.local/eval/labels/context_ground_truth.schema.json",
+  "title": "ContextGroundTruth",
+  "description": "Snapshot-level ground-truth capabilities for the §F4 CapabilityRecall / CapabilityPrecision metrics. Lists the full set of capabilities that any context selected for this task MUST satisfy; also lists forbidden capabilities (used to score precision) and credential aliases (opaque placeholders, never real secrets).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["required_capabilities"],
+  "properties": {
+    "required_capabilities": {
+      "type": "array",
+      "description": "All capabilities the target context must provide. Order does not matter.",
+      "minItems": 1,
+      "items": {"$ref": "#/definitions/capability"}
+    },
+    "forbidden_capabilities": {
+      "type": "array",
+      "description": "Capabilities the target context must NOT have (e.g. a non-sandbox network reach when the task requires isolation). Empty by default.",
+      "default": [],
+      "items": {"$ref": "#/definitions/capability"}
+    },
+    "credential_aliases": {
+      "type": "array",
+      "description": "Opaque alias names for credentials the task needs the agent to broker. NEVER a real token. Empty when the task is credential-free.",
+      "default": [],
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]{2,63}$"
+      },
+      "uniqueItems": true
+    }
+  },
+  "definitions": {
+    "capability": {
+      "description": "Discriminated union on `kind`. Each branch restricts its own additional properties so unknown keys fail schema validation.",
+      "oneOf": [
+        {
+          "title": "tool",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "name"],
+          "properties": {
+            "kind": {"const": "tool"},
+            "name": {"type": "string", "minLength": 1, "maxLength": 64},
+            "min_version": {"type": "string", "pattern": "^[0-9]+(\\.[0-9]+){0,3}([a-z0-9.-]*)?$"}
+          }
+        },
+        {
+          "title": "platform",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "os"],
+          "properties": {
+            "kind": {"const": "platform"},
+            "os": {"type": "string", "enum": ["linux", "windows", "darwin"]},
+            "arch": {"type": "string", "enum": ["amd64", "arm64"]}
+          }
+        },
+        {
+          "title": "file",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "kind_detail", "path_pattern"],
+          "properties": {
+            "kind": {"const": "file"},
+            "kind_detail": {"type": "string", "enum": ["repo", "dataset", "fixture", "config"]},
+            "path_pattern": {"type": "string", "minLength": 1, "maxLength": 256}
+          }
+        },
+        {
+          "title": "network",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "reach"],
+          "properties": {
+            "kind": {"const": "network"},
+            "reach": {"type": "string", "enum": ["internet", "intranet", "loopback-only", "none"]}
+          }
+        },
+        {
+          "title": "credential",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "alias"],
+          "properties": {
+            "kind": {"const": "credential"},
+            "alias": {"type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$"}
+          }
+        }
+      ]
+    }
+  }
+}

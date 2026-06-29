@@ -1,0 +1,20 @@
+{
+  "task_id": "missing-parser-converter",
+  "ground_truth_context": {
+    "agent_role": "driver",
+    "context_id": "driver-linux-laptop",
+    "rationale": "Workload tests the user-promoted lifecycle: the input format has no existing parser, so the driver must scaffold one locally (where the developer + their toolchain live) before dispatching reuse to slaves. Routing the scaffolding step to any slave fails because the slave has no scaffold MCP installed."
+  },
+  "context_ground_truth": {
+    "required_capabilities": [
+      {"kind": "tool", "name": "node", "min_version": "20"},
+      {"kind": "tool", "name": "npm"},
+      {"kind": "tool", "name": "git"},
+      {"kind": "platform", "os": "linux"},
+      {"kind": "file", "kind_detail": "fixture", "path_pattern": "fixtures/missing-parser/sample.*"},
+      {"kind": "network", "reach": "internet"}
+    ],
+    "forbidden_capabilities": [],
+    "credential_aliases": []
+  }
+}

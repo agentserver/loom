@@ -1,0 +1,20 @@
+{
+  "task_id": "api-wrapper-reuse-3",
+  "ground_truth_context": {
+    "agent_role": "slave",
+    "context_id": "slave-linux-server",
+    "rationale": "Third reuse runs in an offline replay mode against cached fixtures on the server (no network, no credential); proves the registered wrapper still works in air-gapped reuse."
+  },
+  "context_ground_truth": {
+    "required_capabilities": [
+      {"kind": "tool", "name": "node", "min_version": "20"},
+      {"kind": "platform", "os": "linux"},
+      {"kind": "file", "kind_detail": "fixture", "path_pattern": "/srv/data/api-wrapper/replay/*.json"},
+      {"kind": "network", "reach": "loopback-only"}
+    ],
+    "forbidden_capabilities": [
+      {"kind": "network", "reach": "internet"}
+    ],
+    "credential_aliases": []
+  }
+}
