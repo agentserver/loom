@@ -9,14 +9,16 @@
   "properties": {
     "required_capabilities": {
       "type": "array",
-      "description": "All capabilities the target context must provide. Order does not matter.",
+      "description": "All capabilities the target context must provide. Order does not matter; duplicates are rejected because they would double-count into CapabilityRecall.",
       "minItems": 1,
+      "uniqueItems": true,
       "items": {"$ref": "#/definitions/capability"}
     },
     "forbidden_capabilities": {
       "type": "array",
-      "description": "Capabilities the target context must NOT have (e.g. a non-sandbox network reach when the task requires isolation). Empty by default.",
+      "description": "Capabilities the target context must NOT have (e.g. a non-sandbox network reach when the task requires isolation). Empty by default; duplicates are rejected because they would double-count into CapabilityPrecision penalties.",
       "default": [],
+      "uniqueItems": true,
       "items": {"$ref": "#/definitions/capability"}
     },
     "credential_aliases": {
