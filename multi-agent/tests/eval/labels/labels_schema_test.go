@@ -190,6 +190,19 @@ func TestSchemasRejectBadInput(t *testing.T) {
 			schema: cgtSchema,
 			doc:    `{"required_capabilities":[{"kind":"tool","name":"go"}],"credential_aliases":["BAD_ALIAS"]}`,
 		},
+		{
+			// Duplicate capability objects would double-count into
+			// CapabilityRecall; uniqueItems on the array must reject them.
+			name:   "cgt rejects duplicate required_capabilities entries",
+			schema: cgtSchema,
+			doc:    `{"required_capabilities":[{"kind":"tool","name":"python","min_version":"3.10"},{"kind":"tool","name":"python","min_version":"3.10"}]}`,
+		},
+		{
+			// Same constraint for forbidden_capabilities (precision side).
+			name:   "cgt rejects duplicate forbidden_capabilities entries",
+			schema: cgtSchema,
+			doc:    `{"required_capabilities":[{"kind":"tool","name":"go"}],"forbidden_capabilities":[{"kind":"platform","os":"linux"},{"kind":"platform","os":"linux"}]}`,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
