@@ -110,6 +110,11 @@ Claude Code 模式写 `.mcp.json` + `.claude/skills/`；opencode 模式写
 
 效果是：**集群从一个最小骨架（只装 claude + bash）起步，按用户真实任务长出真正用得到的工具**，不需要事先准备一套庞大的预制 MCP 集成。`examples/dynamic-mcp/` 是完整的端到端示例。
 
+> ⚠️ **Historical note — `BuildMCPExecutor` was never implemented.**
+> 旧 spec [`docs/superpowers/specs/2026-05-09-dynamic-mcp-design.md`](docs/superpowers/specs/2026-05-09-dynamic-mcp-design.md) 描述了一条 master 端自动构建 MCP 的 `BuildMCPExecutor` / `build_mcp` 路径。该代码**从未落地**（`grep -ri BuildMCPExecutor multi-agent/` 命中为 0）。`cmd/master-agent` 二进制以及 `internal/orchestrator` / `internal/orchestration` 包仍然可以编译，但 master path 在 v3 阶段已**冻结**：不要在其上新增功能，旧 spec 里的自动构建执行器也不会再补。skill 侧同样有 marker，见 [`skills/multiagent/SKILL.md`](skills/multiagent/SKILL.md)。当前 Loom 走 driver-first 的「user-promoted capability lifecycle」：用户用 `bash` 在 slave 上现场写脚本，acceptance 通过后再 `register_mcp` 持久化，整个闭环由 driver 编排，没有自动 master 构建路径。
+>
+> 配套的 eval-runner 默认 config 也将 master path 关停：见 [`multi-agent/dev/configs/eval-default.yaml`](multi-agent/dev/configs/eval-default.yaml)（`routing.mode: driver-first`，`allow_master: false`）。
+
 ## 其它设计要点
 
 - **Driver-first 编排**：用户在 Claude Code / Codex / opencode 里直接和 driver 对话；driver 既是一个 stdio MCP server，也是 agentserver workspace 里的一个普通 agent，能把用户本地的文件清单透传给 slave。

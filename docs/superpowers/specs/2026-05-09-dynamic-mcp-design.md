@@ -1,5 +1,13 @@
 # Dynamic MCP Server Creation — Design
 
+> ⚠️ **FROZEN SPEC — never implemented.**
+> The `BuildMCPExecutor` / `build_mcp` auto-build path described below was
+> never landed in the repo (`grep -ri BuildMCPExecutor multi-agent/` returns
+> zero hits) and the surrounding master path is now frozen. The current
+> production design is the driver-first **user-promoted capability lifecycle**
+> — see the top-level `README.md` callout and `skills/multiagent/SKILL.md`.
+> This document is kept only as historical context for the v3 paper.
+
 **Date:** 2026-05-09
 **Status:** Draft (awaiting user review)
 **Scope:** Extend `multi-agent` so that, when a task requires a tool no agent currently exposes, the master can dispatch a `build_mcp` sub-task to a slave that has the `build_mcp` skill plus the required hardware/runtime resources. The slave uses claude to author a Python MCP server, validates and registers it at runtime, persists it under a clearly-namespaced `generated_mcp/` directory, and re-publishes its agent card. The master then automatically re-plans the rest of the work with the new tool visible. A bounded 3-iteration negotiation loop lets the planner expand `allowed_packages` or revise the spec if the first build attempt is blocked.
