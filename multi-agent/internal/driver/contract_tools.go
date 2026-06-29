@@ -8,6 +8,7 @@ import (
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/yourorg/multi-agent/internal/contract"
 	"github.com/yourorg/multi-agent/internal/observer"
+	"github.com/yourorg/multi-agent/internal/observerstore"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
@@ -42,24 +43,24 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 		TimeoutSec        int                   `json:"timeout_sec"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, &MCPToolError{Message: "invalid args: " + err.Error()}
+		return nil, &MCPToolError{Message: "invalid args: " + err.Error(), Category: observerstore.FailContractViolation}
 	}
 	tc := args.Contract
 	tc.ApplyDefaults()
 	if err := tc.Validate(); err != nil {
-		return nil, &MCPToolError{Message: "invalid contract: " + err.Error()}
+		return nil, &MCPToolError{Message: "invalid contract: " + err.Error(), Category: observerstore.FailContractViolation}
 	}
 
 	// --- Pure / read-only block: allowed BEFORE the bind guard. None of
 	// these are observable side effects. ---
 	cards, err := s.t.sdk.DiscoverAgents(ctx) // read-only RPC #1
 	if err != nil {
-		return nil, &MCPToolError{Message: "discover agents: " + err.Error()}
+		return nil, &MCPToolError{Message: "discover agents: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
 	}
 	snapshot := contract.NewResourceSnapshot(cards, s.t.cfg.Credentials.SandboxID)
 	snapshotBody, err := json.Marshal(snapshot)
 	if err != nil {
-		return nil, &MCPToolError{Message: "encode resource snapshot: " + err.Error()}
+		return nil, &MCPToolError{Message: "encode resource snapshot: " + err.Error(), Category: observerstore.FailUnknown}
 	}
 	report := analyzeContractCapabilities(cards, s.t.cfg.Credentials.SandboxID, tc)
 
@@ -69,7 +70,7 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 	}
 	finalPrompt, err := contract.EncodeEnvelope(tc, body)
 	if err != nil {
-		return nil, &MCPToolError{Message: "encode contract envelope: " + err.Error()}
+		return nil, &MCPToolError{Message: "encode contract envelope: " + err.Error(), Category: observerstore.FailUnknown}
 	}
 
 	// --- Compute needsBind in memory BEFORE running selectTarget. ---
@@ -95,7 +96,9 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 	if needsBind {
 		pid, err := s.t.requireBoundThread()
 		if err != nil {
-			return nil, &MCPToolError{Message: err.Error()}
+			// thread not bound = caller skipped bind_thread; the call has
+			// no parent context to attach to.
+			return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailWrongContext}
 		}
 		parentThreadID = pid
 	}
@@ -109,7 +112,7 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 	// Path A — driver_fanout early return.
 	if pathA {
 		if s.t.contractRunner == nil {
-			return nil, &MCPToolError{Message: "driver_fanout route is recommended but no driver contract runner is configured"}
+			return nil, &MCPToolError{Message: "driver_fanout route is recommended but no driver contract runner is configured", Category: observerstore.FailStaleCapability}
 		}
 		marker := agentbackend.BuildLoomOrigin(
 			s.t.cfg.Credentials.ShortID,
@@ -118,7 +121,7 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 		)
 		result, err := s.t.contractRunner.Run(ctx, finalPrompt, marker)
 		if err != nil {
-			return nil, &MCPToolError{Message: "driver fanout: " + err.Error()}
+			return nil, &MCPToolError{Message: "driver fanout: " + err.Error(), Category: observerstore.FailUnknown}
 		}
 		return json.Marshal(map[string]interface{}{
 			"route":             routeDriverFanout,
@@ -163,7 +166,7 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 		TimeoutSeconds: timeout,
 	})
 	if err != nil {
-		return nil, &MCPToolError{Message: "delegate: " + err.Error()}
+		return nil, &MCPToolError{Message: "delegate: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
 	}
 
 	// --- DelegateTask succeeded — from here helper failures degrade to
@@ -189,7 +192,7 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 
 	contractBody, err := json.Marshal(tc)
 	if err != nil {
-		return nil, &MCPToolError{Message: "encode task contract: " + err.Error()}
+		return nil, &MCPToolError{Message: "encode task contract: " + err.Error(), Category: observerstore.FailUnknown}
 	}
 	if err := s.t.observerRelay().SaveTaskContract(ctx, resp.TaskID, tc.ConversationID, contractBody); err != nil {
 		warnings = append(warnings, "observer save task contract: "+err.Error())
@@ -222,10 +225,10 @@ func (s *submitContractTaskTool) selectTarget(ctx context.Context, cards []agent
 		return "", "", "", "", "", err
 	}
 	if targetRole == observer.RoleMaster && !tc.ExecutionPolicy.AllowsMaster() {
-		return "", "", "", "", "", &MCPToolError{Message: "master fallback is not allowed by contract"}
+		return "", "", "", "", "", &MCPToolError{Message: "master fallback is not allowed by contract", Category: observerstore.FailPolicyViolation}
 	}
 	if !targetAllowed(targetID, tc.ExecutionPolicy.AllowedTargets) {
-		return "", "", "", "", "", &MCPToolError{Message: "target is not allowed by contract: " + targetID}
+		return "", "", "", "", "", &MCPToolError{Message: "target is not allowed by contract: " + targetID, Category: observerstore.FailPolicyViolation}
 	}
 	skill = skillOverride
 	if targetRole == observer.RoleMaster {

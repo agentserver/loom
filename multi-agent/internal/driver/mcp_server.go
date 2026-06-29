@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+
+	"github.com/yourorg/multi-agent/internal/observerstore"
 )
 
 // Tool is what the MCP server dispatches to. Each tool advertises a name,
@@ -24,11 +26,27 @@ type Tool interface {
 
 // MCPToolError lets a tool return a JSON-RPC -32000 error with a custom message.
 // Any other error from Call is also surfaced as -32000.
+//
+// Category is the optional FailureCategory tag for failure analytics
+// (Phase 1/2 A4/A6/D5/D8). It is intentionally not serialized into the
+// JSON-RPC wire payload (Error() only returns Message) — the tag is for
+// in-process observer/driver reporting, not for the codex parent process.
+// The zero value (empty string) maps to observerstore.FailUnknown.
 type MCPToolError struct {
-	Message string
+	Message  string
+	Category observerstore.FailureCategory
 }
 
 func (e *MCPToolError) Error() string { return e.Message }
+
+// FailureCategory satisfies observerstore.Categorized so observerstore.CategoryOf
+// can extract the tag without an explicit *MCPToolError type assertion.
+func (e *MCPToolError) FailureCategory() observerstore.FailureCategory {
+	if e == nil {
+		return observerstore.FailUnknown
+	}
+	return e.Category
+}
 
 type MCPServer struct {
 	tools     map[string]Tool

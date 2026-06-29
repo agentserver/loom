@@ -13,6 +13,7 @@ import (
 	"github.com/yourorg/multi-agent/internal/buildspec"
 	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/observer"
+	"github.com/yourorg/multi-agent/internal/observerstore"
 )
 
 // RegisterMCPConfig wires RegisterMCPExecutor to its slave-side dependencies.
@@ -57,47 +58,47 @@ func (e *RegisterMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Resul
 
 	var p registerMCPPrompt
 	if err := json.Unmarshal([]byte(t.Prompt), &p); err != nil {
-		return Result{}, fmt.Errorf("register_mcp prompt must be JSON: %w", err)
+		return Result{}, observerstore.Categorize(fmt.Errorf("register_mcp prompt must be JSON: %w", err), observerstore.FailContractViolation)
 	}
 
 	p.Spec = buildspec.Normalize(p.Spec)
 	if err := buildspec.Validate(p.Spec); err != nil {
-		return Result{}, fmt.Errorf("register_mcp: invalid spec: %w", err)
+		return Result{}, observerstore.Categorize(fmt.Errorf("register_mcp: invalid spec: %w", err), observerstore.FailContractViolation)
 	}
 
 	if p.SourcePath == "" {
-		return Result{}, fmt.Errorf("register_mcp: source_path is required")
+		return Result{}, observerstore.Categorize(fmt.Errorf("register_mcp: source_path is required"), observerstore.FailContractViolation)
 	}
 
 	relPath := p.SourcePath
 	absPath := filepath.Join(e.cfg.WorkDir, relPath)
 	if !strings.HasPrefix(filepath.Clean(absPath), filepath.Clean(e.cfg.WorkDir)+string(filepath.Separator)) {
-		return Result{}, fmt.Errorf("register_mcp: source_path escapes workdir: %s", relPath)
+		return Result{}, observerstore.Categorize(fmt.Errorf("register_mcp: source_path escapes workdir: %s", relPath), observerstore.FailPolicyViolation)
 	}
 
 	src, err := os.ReadFile(absPath)
 	if err != nil {
-		return Result{}, fmt.Errorf("register_mcp: read source: %w", err)
+		return Result{}, observerstore.Categorize(fmt.Errorf("register_mcp: read source: %w", err), observerstore.FailMissingFile)
 	}
 
 	if err := validatePythonSyntax(string(src)); err != nil {
-		return Result{}, fmt.Errorf("register_mcp: syntax: %w", err)
+		return Result{}, observerstore.Categorize(fmt.Errorf("register_mcp: syntax: %w", err), observerstore.FailContractViolation)
 	}
 
 	if bad, _ := ValidateImports(string(src), p.Spec.AllowedPackages); len(bad) > 0 {
-		return Result{}, fmt.Errorf("register_mcp: disallowed imports: %s", strings.Join(bad, ","))
+		return Result{}, observerstore.Categorize(fmt.Errorf("register_mcp: disallowed imports: %s", strings.Join(bad, ",")), observerstore.FailPolicyViolation)
 	}
 
 	observed, err := SmokeLaunchPython(ctx, absPath, 3*time.Second)
 	if err != nil {
-		return Result{}, fmt.Errorf("register_mcp: smoke: %w", err)
+		return Result{}, observerstore.Categorize(fmt.Errorf("register_mcp: smoke: %w", err), observerstore.FailUnknown)
 	}
 
 	tools := mergeMCPToolDescriptors(p.Spec, observed)
 
 	mcpCfg := MCPServerCfg{Transport: "stdio", Command: "python3", Args: []string{absPath}}
 	if err := e.cfg.MCPExec.RegisterStdio(p.Spec.Name, mcpCfg); err != nil {
-		return Result{}, fmt.Errorf("register_mcp: register: %w", err)
+		return Result{}, observerstore.Categorize(fmt.Errorf("register_mcp: register: %w", err), observerstore.FailDuplicateWrite)
 	}
 
 	entry := DynamicEntry{
@@ -110,7 +111,7 @@ func (e *RegisterMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Resul
 		Tools:     tools,
 	}
 	if err := UpsertDynamicYAML(DynamicYAMLPath(e.cfg.WorkDir), entry); err != nil {
-		return Result{}, fmt.Errorf("register_mcp: persist: %w", err)
+		return Result{}, observerstore.Categorize(fmt.Errorf("register_mcp: persist: %w", err), observerstore.FailUnknown)
 	}
 
 	if e.cfg.Republish != nil {

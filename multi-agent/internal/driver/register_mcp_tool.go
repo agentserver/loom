@@ -6,6 +6,7 @@ import (
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/yourorg/multi-agent/internal/buildspec"
+	"github.com/yourorg/multi-agent/internal/observerstore"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
@@ -34,28 +35,28 @@ func (r *registerSlaveMCPTool) Call(ctx context.Context, raw json.RawMessage) (j
 		TimeoutSec        int            `json:"timeout_sec,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, &MCPToolError{Message: "invalid args: " + err.Error()}
+		return nil, &MCPToolError{Message: "invalid args: " + err.Error(), Category: observerstore.FailContractViolation}
 	}
 	if args.SourcePath == "" {
-		return nil, &MCPToolError{Message: "source_path is required"}
+		return nil, &MCPToolError{Message: "source_path is required", Category: observerstore.FailContractViolation}
 	}
 	spec := buildspec.Normalize(args.Spec)
 	if err := buildspec.Validate(spec); err != nil {
-		return nil, &MCPToolError{Message: "invalid spec: " + err.Error()}
+		return nil, &MCPToolError{Message: "invalid spec: " + err.Error(), Category: observerstore.FailContractViolation}
 	}
 	card, err := r.t.resolveAvailableAgent(ctx, args.TargetAgentID, args.TargetDisplayName)
 	if err != nil {
 		return nil, err
 	}
 	if !hasSkill(card, "register_mcp") {
-		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise register_mcp"}
+		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise register_mcp", Category: observerstore.FailStaleCapability}
 	}
 	prompt, err := json.Marshal(struct {
 		Spec       buildspec.Spec `json:"spec"`
 		SourcePath string         `json:"source_path"`
 	}{Spec: spec, SourcePath: args.SourcePath})
 	if err != nil {
-		return nil, &MCPToolError{Message: err.Error()}
+		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailUnknown}
 	}
 	resp, err := r.t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
 		TargetID:       card.AgentID,
@@ -64,7 +65,7 @@ func (r *registerSlaveMCPTool) Call(ctx context.Context, raw json.RawMessage) (j
 		TimeoutSeconds: args.TimeoutSec,
 	})
 	if err != nil {
-		return nil, &MCPToolError{Message: "delegate register_mcp task: " + err.Error()}
+		return nil, &MCPToolError{Message: "delegate register_mcp task: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
 	}
 	// DelegateTask succeeded — degrade journal append failure to a log entry
 	// so we still wait on the slave task. See §1.1 #1 of the 2026-06-13 review.

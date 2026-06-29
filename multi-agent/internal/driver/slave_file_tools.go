@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
+	"github.com/yourorg/multi-agent/internal/observerstore"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
@@ -103,17 +104,17 @@ func (r *readSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (json
 		InlineMaxBytes    *int64 `json:"inline_max_bytes,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, &MCPToolError{Message: "invalid args: " + err.Error()}
+		return nil, &MCPToolError{Message: "invalid args: " + err.Error(), Category: observerstore.FailContractViolation}
 	}
 	if args.Path == "" {
-		return nil, &MCPToolError{Message: "path is required"}
+		return nil, &MCPToolError{Message: "path is required", Category: observerstore.FailContractViolation}
 	}
 	card, err := r.t.resolveAvailableAgent(ctx, args.TargetAgentID, args.TargetDisplayName)
 	if err != nil {
 		return nil, err
 	}
 	if !hasSkill(card, "file") {
-		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise file"}
+		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise file", Category: observerstore.FailStaleCapability}
 	}
 	prompt := map[string]interface{}{"op": "read", "path": args.Path}
 	if args.Offset > 0 {
@@ -130,7 +131,7 @@ func (r *readSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (json
 		TargetID: card.AgentID, Skill: "file", Prompt: string(pb),
 	})
 	if err != nil {
-		return nil, &MCPToolError{Message: "delegate file read: " + err.Error()}
+		return nil, &MCPToolError{Message: "delegate file read: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
 	}
 	// DelegateTask succeeded — degrade journal append failure to a log entry
 	// so we still wait on the slave file read. See §1.1 #1 of the
@@ -162,7 +163,7 @@ func (r *readSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (json
 		Result json.RawMessage `json:"result"`
 	}
 	if err := json.Unmarshal(waitOut, &wrap); err != nil {
-		return nil, &MCPToolError{Message: "parse task output: " + err.Error()}
+		return nil, &MCPToolError{Message: "parse task output: " + err.Error(), Category: observerstore.FailContractViolation}
 	}
 	var slaveRes struct {
 		Path     string `json:"path"`
@@ -172,7 +173,7 @@ func (r *readSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (json
 		EOF      bool   `json:"eof"`
 	}
 	if err := json.Unmarshal([]byte(wrap.Output), &slaveRes); err != nil {
-		return nil, &MCPToolError{Message: "parse slave file result: " + err.Error()}
+		return nil, &MCPToolError{Message: "parse slave file result: " + err.Error(), Category: observerstore.FailContractViolation}
 	}
 
 	// Decode payload, cache, register.
@@ -183,14 +184,14 @@ func (r *readSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (json
 	case "base64":
 		payload, err = base64.StdEncoding.DecodeString(slaveRes.Content)
 		if err != nil {
-			return nil, &MCPToolError{Message: "slave returned invalid base64: " + err.Error()}
+			return nil, &MCPToolError{Message: "slave returned invalid base64: " + err.Error(), Category: observerstore.FailContractViolation}
 		}
 	default:
-		return nil, &MCPToolError{Message: "slave returned unknown encoding: " + slaveRes.Encoding}
+		return nil, &MCPToolError{Message: "slave returned unknown encoding: " + slaveRes.Encoding, Category: observerstore.FailContractViolation}
 	}
 	sha, cachePath, err := r.t.cacheBytes(payload)
 	if err != nil {
-		return nil, &MCPToolError{Message: "cache slave bytes: " + err.Error()}
+		return nil, &MCPToolError{Message: "cache slave bytes: " + err.Error(), Category: observerstore.FailUnknown}
 	}
 	shortID := cardShortID(card)
 	r.t.audit.Log(AuditEvent{
@@ -253,10 +254,10 @@ func (w *writeSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (jso
 		Offset            *int64  `json:"offset,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, &MCPToolError{Message: "invalid args: " + err.Error()}
+		return nil, &MCPToolError{Message: "invalid args: " + err.Error(), Category: observerstore.FailContractViolation}
 	}
 	if args.Path == "" {
-		return nil, &MCPToolError{Message: "path is required"}
+		return nil, &MCPToolError{Message: "path is required", Category: observerstore.FailContractViolation}
 	}
 	sources := 0
 	if args.Content != nil {
@@ -269,21 +270,21 @@ func (w *writeSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (jso
 		sources++
 	}
 	if sources != 1 {
-		return nil, &MCPToolError{Message: "exactly one of content / source_blob / source_path must be set"}
+		return nil, &MCPToolError{Message: "exactly one of content / source_blob / source_path must be set", Category: observerstore.FailContractViolation}
 	}
 	mode := args.Mode
 	if mode == "" {
 		mode = "overwrite"
 	}
 	if mode != "patch" && args.Offset != nil && *args.Offset != 0 {
-		return nil, &MCPToolError{Message: "offset is only valid with mode=patch"}
+		return nil, &MCPToolError{Message: "offset is only valid with mode=patch", Category: observerstore.FailContractViolation}
 	}
 	card, err := w.t.resolveAvailableAgent(ctx, args.TargetAgentID, args.TargetDisplayName)
 	if err != nil {
 		return nil, err
 	}
 	if !hasSkill(card, "file") {
-		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise file"}
+		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise file", Category: observerstore.FailStaleCapability}
 	}
 
 	var (
@@ -296,7 +297,9 @@ func (w *writeSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (jso
 		if int64(len(*args.Content)) > defaultInlineMaxBytes {
 			return nil, &MCPToolError{Message: fmt.Sprintf(
 				"inline content exceeds inline_max_bytes (%d > %d); use source_blob or source_path",
-				len(*args.Content), defaultInlineMaxBytes)}
+				len(*args.Content), defaultInlineMaxBytes),
+				Category: observerstore.FailContractViolation,
+			}
 		}
 		slaveContent = *args.Content
 		slaveEncoding = args.Encoding
@@ -308,11 +311,11 @@ func (w *writeSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (jso
 		sha := strings.TrimPrefix(args.SourceBlob, "sha256:")
 		path, ok := w.t.reg.LookupBlob(sha)
 		if !ok {
-			return nil, &MCPToolError{Message: "source_blob " + args.SourceBlob + " not in driver FileRegistry"}
+			return nil, &MCPToolError{Message: "source_blob " + args.SourceBlob + " not in driver FileRegistry", Category: observerstore.FailMissingFile}
 		}
 		body, err := os.ReadFile(path)
 		if err != nil {
-			return nil, &MCPToolError{Message: "read source_blob: " + err.Error()}
+			return nil, &MCPToolError{Message: "read source_blob: " + err.Error(), Category: observerstore.FailMissingFile}
 		}
 		slaveContent = base64.StdEncoding.EncodeToString(body)
 		slaveEncoding = "base64"
@@ -324,14 +327,14 @@ func (w *writeSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (jso
 		if err := AssertReadableSource(args.SourcePath,
 			w.t.cfg.DriverDefaults.WorkDir,
 			w.t.cfg.DriverDefaults.SourcePathReadRoots); err != nil {
-			return nil, &MCPToolError{Message: err.Error()}
+			return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailPolicyViolation}
 		}
 		body, err := os.ReadFile(args.SourcePath)
 		if err != nil {
-			return nil, &MCPToolError{Message: "read source_path: " + err.Error()}
+			return nil, &MCPToolError{Message: "read source_path: " + err.Error(), Category: observerstore.FailMissingFile}
 		}
 		if _, _, _, err := w.t.reg.RegisterFile(args.SourcePath); err != nil {
-			return nil, &MCPToolError{Message: "register source_path: " + err.Error()}
+			return nil, &MCPToolError{Message: "register source_path: " + err.Error(), Category: observerstore.FailUnknown}
 		}
 		slaveContent = base64.StdEncoding.EncodeToString(body)
 		slaveEncoding = "base64"
@@ -356,7 +359,7 @@ func (w *writeSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (jso
 		TargetID: card.AgentID, Skill: "file", Prompt: string(pb),
 	})
 	if err != nil {
-		return nil, &MCPToolError{Message: "delegate file write: " + err.Error()}
+		return nil, &MCPToolError{Message: "delegate file write: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
 	}
 	// DelegateTask succeeded — degrade journal append failure to a log entry
 	// so we still wait on the slave file write. See §1.1 #1 of the
@@ -426,24 +429,24 @@ func (s *statSlaveFileTool) Call(ctx context.Context, raw json.RawMessage) (json
 		Path              string `json:"path"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, &MCPToolError{Message: "invalid args: " + err.Error()}
+		return nil, &MCPToolError{Message: "invalid args: " + err.Error(), Category: observerstore.FailContractViolation}
 	}
 	if args.Path == "" {
-		return nil, &MCPToolError{Message: "path is required"}
+		return nil, &MCPToolError{Message: "path is required", Category: observerstore.FailContractViolation}
 	}
 	card, err := s.t.resolveAvailableAgent(ctx, args.TargetAgentID, args.TargetDisplayName)
 	if err != nil {
 		return nil, err
 	}
 	if !hasSkill(card, "file") {
-		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise file"}
+		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise file", Category: observerstore.FailStaleCapability}
 	}
 	prompt, _ := json.Marshal(map[string]string{"op": "stat", "path": args.Path})
 	resp, err := s.t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
 		TargetID: card.AgentID, Skill: "file", Prompt: string(prompt),
 	})
 	if err != nil {
-		return nil, &MCPToolError{Message: "delegate file stat: " + err.Error()}
+		return nil, &MCPToolError{Message: "delegate file stat: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
 	}
 	// DelegateTask succeeded — degrade journal append failure to a log entry
 	// so we still wait on the slave file stat. See §1.1 #1 of the

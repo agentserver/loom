@@ -12,6 +12,7 @@ import (
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/contract"
+	"github.com/yourorg/multi-agent/internal/observerstore"
 )
 
 type inspectCapabilitiesTool struct{ t *Tools }
@@ -32,19 +33,19 @@ func (i *inspectCapabilitiesTool) Call(ctx context.Context, raw json.RawMessage)
 	}
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &args); err != nil {
-			return nil, &MCPToolError{Message: "invalid args: " + err.Error()}
+			return nil, &MCPToolError{Message: "invalid args: " + err.Error(), Category: observerstore.FailContractViolation}
 		}
 	}
 	cards, err := i.t.sdk.DiscoverAgents(ctx)
 	if err != nil {
-		return nil, &MCPToolError{Message: "discover agents: " + err.Error()}
+		return nil, &MCPToolError{Message: "discover agents: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
 	}
 	snapshot := contract.NewResourceSnapshot(cards, i.t.cfg.Credentials.SandboxID)
 	warnings := []string{}
 	if args.SaveSnapshot == nil || *args.SaveSnapshot {
 		body, err := json.Marshal(snapshot)
 		if err != nil {
-			return nil, &MCPToolError{Message: "encode resource snapshot: " + err.Error()}
+			return nil, &MCPToolError{Message: "encode resource snapshot: " + err.Error(), Category: observerstore.FailUnknown}
 		}
 		if err := i.t.observerRelay().SaveResourceSnapshot(ctx, body); err != nil {
 			warnings = append(warnings, "observer save resource snapshot: "+err.Error())
@@ -100,10 +101,10 @@ func (d *draftTaskContractTool) Call(ctx context.Context, raw json.RawMessage) (
 		AllowedTargets  []string               `json:"allowed_targets"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, &MCPToolError{Message: "invalid args: " + err.Error()}
+		return nil, &MCPToolError{Message: "invalid args: " + err.Error(), Category: observerstore.FailContractViolation}
 	}
 	if strings.TrimSpace(args.Goal) == "" {
-		return nil, &MCPToolError{Message: "goal is required"}
+		return nil, &MCPToolError{Message: "goal is required", Category: observerstore.FailContractViolation}
 	}
 	if len(args.SuccessCriteria) == 0 {
 		args.SuccessCriteria = []string{"The requested result is produced as an artifact."}
@@ -174,16 +175,16 @@ func (d *dryRunContractTool) Call(ctx context.Context, raw json.RawMessage) (jso
 		Contract contract.TaskContract `json:"contract"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, &MCPToolError{Message: "invalid args: " + err.Error()}
+		return nil, &MCPToolError{Message: "invalid args: " + err.Error(), Category: observerstore.FailContractViolation}
 	}
 	tc := args.Contract
 	tc.ApplyDefaults()
 	if err := tc.Validate(); err != nil {
-		return nil, &MCPToolError{Message: "invalid contract: " + err.Error()}
+		return nil, &MCPToolError{Message: "invalid contract: " + err.Error(), Category: observerstore.FailContractViolation}
 	}
 	cards, err := d.t.sdk.DiscoverAgents(ctx)
 	if err != nil {
-		return nil, &MCPToolError{Message: "discover agents: " + err.Error()}
+		return nil, &MCPToolError{Message: "discover agents: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
 	}
 	report := analyzeContractCapabilities(cards, d.t.cfg.Credentials.SandboxID, tc)
 	return json.Marshal(report)

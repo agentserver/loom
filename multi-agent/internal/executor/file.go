@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/yourorg/multi-agent/internal/observerstore"
 )
 
 const fileMaxReadBytes = 8 * 1024 * 1024 // 8 MiB hard cap per read.
@@ -147,14 +149,15 @@ func (e *FileExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, erro
 	defer sink.Close()
 	var req fileRequest
 	if err := json.Unmarshal([]byte(t.Prompt), &req); err != nil {
-		return Result{}, fmt.Errorf("file prompt must be JSON: %w", err)
+		return Result{}, observerstore.Categorize(fmt.Errorf("file prompt must be JSON: %w", err), observerstore.FailContractViolation)
 	}
 	if req.Path == "" {
-		return Result{}, errors.New("file path is required")
+		return Result{}, observerstore.Categorize(errors.New("file path is required"), observerstore.FailContractViolation)
 	}
 	abs := e.resolvePath(req.Path)
 	if err := e.assertInJail(abs); err != nil {
-		return Result{}, err
+		// jail-escape attempts are policy violations, not missing files.
+		return Result{}, observerstore.Categorize(err, observerstore.FailPolicyViolation)
 	}
 	switch req.Op {
 	case "read":
@@ -164,7 +167,7 @@ func (e *FileExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, erro
 	case "stat":
 		return e.doStat(req, abs, sink)
 	default:
-		return Result{}, fmt.Errorf("unknown file op %q", req.Op)
+		return Result{}, observerstore.Categorize(fmt.Errorf("unknown file op %q", req.Op), observerstore.FailContractViolation)
 	}
 }
 
@@ -186,18 +189,18 @@ func (e *FileExecutor) doRead(req fileRequest, abs string, sink Sink) (Result, e
 		enc = "utf-8"
 	}
 	if enc != "utf-8" && enc != "base64" {
-		return Result{}, fmt.Errorf("encoding must be utf-8 or base64, got %q", enc)
+		return Result{}, observerstore.Categorize(fmt.Errorf("encoding must be utf-8 or base64, got %q", enc), observerstore.FailContractViolation)
 	}
 	info, err := os.Stat(abs)
 	if err != nil {
-		return Result{}, fmt.Errorf("stat %s: %w", abs, err)
+		return Result{}, observerstore.Categorize(fmt.Errorf("stat %s: %w", abs, err), observerstore.FailMissingFile)
 	}
 	if info.IsDir() {
-		return Result{}, fmt.Errorf("read target is a directory: %s", abs)
+		return Result{}, observerstore.Categorize(fmt.Errorf("read target is a directory: %s", abs), observerstore.FailContractViolation)
 	}
 	size := info.Size()
 	if req.Offset < 0 {
-		return Result{}, fmt.Errorf("offset must be >= 0")
+		return Result{}, observerstore.Categorize(fmt.Errorf("offset must be >= 0"), observerstore.FailContractViolation)
 	}
 	remaining := size - req.Offset
 	if remaining < 0 {
@@ -208,20 +211,20 @@ func (e *FileExecutor) doRead(req fileRequest, abs string, sink Sink) (Result, e
 		want = req.Length
 	}
 	if want > fileMaxReadBytes {
-		return Result{}, fmt.Errorf("read of %d bytes exceeds %d cap; chunk via offset/length", want, fileMaxReadBytes)
+		return Result{}, observerstore.Categorize(fmt.Errorf("read of %d bytes exceeds %d cap; chunk via offset/length", want, fileMaxReadBytes), observerstore.FailPolicyViolation)
 	}
 	buf := make([]byte, want)
 	if want > 0 {
 		f, err := os.Open(abs)
 		if err != nil {
-			return Result{}, err
+			return Result{}, observerstore.Categorize(err, observerstore.FailMissingFile)
 		}
 		n, err := f.ReadAt(buf, req.Offset)
 		f.Close()
 		// ReadAt may return io.EOF when fewer than len(buf) bytes are available;
 		// a short read is fine, but a zero-byte read with a real error is not.
 		if err != nil && n == 0 {
-			return Result{}, err
+			return Result{}, observerstore.Categorize(err, observerstore.FailMissingFile)
 		}
 		buf = buf[:n]
 	}
@@ -229,7 +232,7 @@ func (e *FileExecutor) doRead(req fileRequest, abs string, sink Sink) (Result, e
 	switch enc {
 	case "utf-8":
 		if !utf8.Valid(buf) {
-			return Result{}, fmt.Errorf("content is not valid utf-8; retry with encoding=base64")
+			return Result{}, observerstore.Categorize(fmt.Errorf("content is not valid utf-8; retry with encoding=base64"), observerstore.FailContractViolation)
 		}
 		content = string(buf)
 	case "base64":
@@ -253,7 +256,7 @@ func (e *FileExecutor) doWrite(req fileRequest, abs string, sink Sink) (Result, 
 		enc = "utf-8"
 	}
 	if enc != "utf-8" && enc != "base64" {
-		return Result{}, fmt.Errorf("encoding must be utf-8 or base64, got %q", enc)
+		return Result{}, observerstore.Categorize(fmt.Errorf("encoding must be utf-8 or base64, got %q", enc), observerstore.FailContractViolation)
 	}
 	mode := req.Mode
 	if mode == "" {
@@ -262,13 +265,13 @@ func (e *FileExecutor) doWrite(req fileRequest, abs string, sink Sink) (Result, 
 	switch mode {
 	case "overwrite", "append", "create_new", "patch":
 	default:
-		return Result{}, fmt.Errorf("mode must be overwrite|append|create_new|patch, got %q", mode)
+		return Result{}, observerstore.Categorize(fmt.Errorf("mode must be overwrite|append|create_new|patch, got %q", mode), observerstore.FailContractViolation)
 	}
 	if mode != "patch" && req.Offset != 0 {
-		return Result{}, fmt.Errorf("offset is only valid with mode=patch")
+		return Result{}, observerstore.Categorize(fmt.Errorf("offset is only valid with mode=patch"), observerstore.FailContractViolation)
 	}
 	if req.Offset < 0 {
-		return Result{}, fmt.Errorf("offset must be >= 0")
+		return Result{}, observerstore.Categorize(fmt.Errorf("offset must be >= 0"), observerstore.FailContractViolation)
 	}
 
 	var bytesPayload []byte
@@ -278,14 +281,14 @@ func (e *FileExecutor) doWrite(req fileRequest, abs string, sink Sink) (Result, 
 	case "base64":
 		decoded, err := base64.StdEncoding.DecodeString(req.Content)
 		if err != nil {
-			return Result{}, fmt.Errorf("base64 decode: %w", err)
+			return Result{}, observerstore.Categorize(fmt.Errorf("base64 decode: %w", err), observerstore.FailContractViolation)
 		}
 		bytesPayload = decoded
 	}
 
 	if req.Mkdir {
 		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-			return Result{}, err
+			return Result{}, observerstore.Categorize(err, observerstore.FailUnknown)
 		}
 	}
 
@@ -304,7 +307,12 @@ func (e *FileExecutor) doWrite(req fileRequest, abs string, sink Sink) (Result, 
 		f, err = os.OpenFile(abs, os.O_WRONLY|os.O_CREATE, 0o644)
 	}
 	if err != nil {
-		return Result{}, err
+		// O_EXCL collision is a duplicate-write; the rest are missing path /
+		// permission issues. Keep it as missing_file for simplicity here.
+		if mode == "create_new" && errors.Is(err, fs.ErrExist) {
+			return Result{}, observerstore.Categorize(err, observerstore.FailDuplicateWrite)
+		}
+		return Result{}, observerstore.Categorize(err, observerstore.FailMissingFile)
 	}
 	defer f.Close()
 
@@ -315,7 +323,7 @@ func (e *FileExecutor) doWrite(req fileRequest, abs string, sink Sink) (Result, 
 		n, err = f.Write(bytesPayload)
 	}
 	if err != nil {
-		return Result{}, err
+		return Result{}, observerstore.Categorize(err, observerstore.FailUnknown)
 	}
 	result := FileWriteResult{
 		Path:         abs,
@@ -340,7 +348,7 @@ func (e *FileExecutor) doStat(req fileRequest, abs string, sink Sink) (Result, e
 		return Result{Summary: string(body)}, nil
 	}
 	if err != nil {
-		return Result{}, err
+		return Result{}, observerstore.Categorize(err, observerstore.FailMissingFile)
 	}
 	result := FileStatResult{
 		Path:   abs,

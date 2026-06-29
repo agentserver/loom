@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/yourorg/multi-agent/internal/observerstore"
 	"github.com/yourorg/multi-agent/internal/platform"
 )
 
@@ -40,22 +41,24 @@ func (e *ChatResumeExecutor) Run(ctx context.Context, t Task, sink Sink) (Result
 		Kind      string `json:"kind"`
 	}
 	if err := json.Unmarshal([]byte(t.Prompt), &body); err != nil {
-		return Result{}, fmt.Errorf("chat_resume: bad prompt JSON: %w", err)
+		return Result{}, observerstore.Categorize(fmt.Errorf("chat_resume: bad prompt JSON: %w", err), observerstore.FailContractViolation)
 	}
 	if body.SessionID == "" || body.Answer == "" {
-		return Result{}, fmt.Errorf("chat_resume: session_id and answer required")
+		return Result{}, observerstore.Categorize(fmt.Errorf("chat_resume: session_id and answer required"), observerstore.FailContractViolation)
 	}
 
 	if err := os.MkdirAll(e.cfg.FlockDir, 0o700); err != nil {
-		return Result{}, fmt.Errorf("chat_resume: mkdir %s: %w", e.cfg.FlockDir, err)
+		return Result{}, observerstore.Categorize(fmt.Errorf("chat_resume: mkdir %s: %w", e.cfg.FlockDir, err), observerstore.FailMissingFile)
 	}
 	lockPath := filepath.Join(e.cfg.FlockDir, body.SessionID+".lock")
 	lock, err := platform.TryLock(lockPath)
 	if err != nil {
 		if errors.Is(err, platform.ErrLocked) {
-			return Result{}, fmt.Errorf("chat_resume: session busy (lock=%s)", lockPath)
+			// Concurrent resume on the same backend session — treat as a
+			// duplicate-write race against the lock file.
+			return Result{}, observerstore.Categorize(fmt.Errorf("chat_resume: session busy (lock=%s)", lockPath), observerstore.FailDuplicateWrite)
 		}
-		return Result{}, fmt.Errorf("chat_resume: open lock: %w", err)
+		return Result{}, observerstore.Categorize(fmt.Errorf("chat_resume: open lock: %w", err), observerstore.FailUnknown)
 	}
 	defer lock.Unlock()
 

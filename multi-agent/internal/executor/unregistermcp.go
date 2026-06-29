@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/yourorg/multi-agent/internal/observer"
+	"github.com/yourorg/multi-agent/internal/observerstore"
 )
 
 // UnregisterMCPConfig wires UnregisterMCPExecutor to its slave-side
@@ -52,17 +53,17 @@ func (e *UnregisterMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Res
 
 	var p unregisterMCPPrompt
 	if err := json.Unmarshal([]byte(t.Prompt), &p); err != nil {
-		return Result{}, fmt.Errorf("unregister_mcp prompt must be JSON: %w", err)
+		return Result{}, observerstore.Categorize(fmt.Errorf("unregister_mcp prompt must be JSON: %w", err), observerstore.FailContractViolation)
 	}
 	if p.Name == "" {
-		return Result{}, fmt.Errorf("unregister_mcp: name is required")
+		return Result{}, observerstore.Categorize(fmt.Errorf("unregister_mcp: name is required"), observerstore.FailContractViolation)
 	}
 
 	yamlPath := DynamicYAMLPath(e.cfg.WorkDir)
 	_, present := LookupDynamicEntry(yamlPath, p.Name)
 	if !present {
 		if !p.IfPresent {
-			return Result{}, fmt.Errorf("unregister_mcp: not registered: %s", p.Name)
+			return Result{}, observerstore.Categorize(fmt.Errorf("unregister_mcp: not registered: %s", p.Name), observerstore.FailStaleCapability)
 		}
 		handle := handleJSON{
 			Type: "mcp_unregistered",
@@ -72,12 +73,12 @@ func (e *UnregisterMCPExecutor) Run(ctx context.Context, t Task, sink Sink) (Res
 	}
 
 	if err := e.cfg.MCPExec.UnregisterStdio(p.Name); err != nil && !errors.Is(err, ErrMCPNotRegistered) {
-		return Result{}, fmt.Errorf("unregister_mcp: kill stdio: %w", err)
+		return Result{}, observerstore.Categorize(fmt.Errorf("unregister_mcp: kill stdio: %w", err), observerstore.FailUnknown)
 	}
 
 	removed, err := RemoveDynamicYAML(yamlPath, p.Name)
 	if err != nil {
-		return Result{}, fmt.Errorf("unregister_mcp: persist: %w", err)
+		return Result{}, observerstore.Categorize(fmt.Errorf("unregister_mcp: persist: %w", err), observerstore.FailUnknown)
 	}
 	if !removed {
 		sink.Write("warn", fmt.Sprintf("unregister_mcp: yaml entry %q vanished between lookup and remove", p.Name))

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
+	"github.com/yourorg/multi-agent/internal/observerstore"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
@@ -31,12 +32,12 @@ func (r *runSlaveBashTool) Call(ctx context.Context, raw json.RawMessage) (json.
 	parsed := parseAgentCard(card)
 	if !parsed.SupportsExplicitShell("bash") {
 		if parsed.SupportsExplicitShell("powershell") {
-			return nil, &MCPToolError{Message: "target " + card.DisplayName + " has no Bash command interface; use run_slave_powershell"}
+			return nil, &MCPToolError{Message: "target " + card.DisplayName + " has no Bash command interface; use run_slave_powershell", Category: observerstore.FailStaleCapability}
 		}
 		if parsed.HasSkill("bash") {
-			return nil, &MCPToolError{Message: "target " + card.DisplayName + " has no Bash command interface"}
+			return nil, &MCPToolError{Message: "target " + card.DisplayName + " has no Bash command interface", Category: observerstore.FailStaleCapability}
 		}
-		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise bash"}
+		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise bash", Category: observerstore.FailStaleCapability}
 	}
 	return r.t.delegateShellTask(ctx, card, r.Name(), "bash", args)
 }
@@ -62,9 +63,9 @@ func (r *runSlavePowerShellTool) Call(ctx context.Context, raw json.RawMessage) 
 	parsed := parseAgentCard(card)
 	if !parsed.SupportsExplicitShell("powershell") {
 		if parsed.HasSkill("powershell") {
-			return nil, &MCPToolError{Message: "target " + card.DisplayName + " has no PowerShell command interface"}
+			return nil, &MCPToolError{Message: "target " + card.DisplayName + " has no PowerShell command interface", Category: observerstore.FailStaleCapability}
 		}
-		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise powershell"}
+		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise powershell", Category: observerstore.FailStaleCapability}
 	}
 	return r.t.delegateShellTask(ctx, card, r.Name(), "powershell", args)
 }
@@ -92,20 +93,20 @@ func (r *runSlaveShellTool) Call(ctx context.Context, raw json.RawMessage) (json
 		switch commandInterface.Kind {
 		case "bash", "powershell":
 			if !parsed.SupportsExplicitShell(commandInterface.Kind) {
-				return nil, &MCPToolError{Message: "target " + card.DisplayName + " default " + commandInterface.Kind + " command interface is not supported by advertised skills"}
+				return nil, &MCPToolError{Message: "target " + card.DisplayName + " default " + commandInterface.Kind + " command interface is not supported by advertised skills", Category: observerstore.FailStaleCapability}
 			}
 			return r.t.delegateShellTask(ctx, card, r.Name(), commandInterface.Kind, args)
 		default:
-			return nil, &MCPToolError{Message: "target " + card.DisplayName + " default command interface kind " + commandInterface.Kind + " is unsupported; expected bash or powershell"}
+			return nil, &MCPToolError{Message: "target " + card.DisplayName + " default command interface kind " + commandInterface.Kind + " is unsupported; expected bash or powershell", Category: observerstore.FailStaleCapability}
 		}
 	}
 	if len(parsed.CommandInterfaces) == 0 && parsed.HasSkill("bash") {
 		return r.t.delegateShellTask(ctx, card, r.Name(), "bash", args)
 	}
 	if parsed.SupportsExplicitShell("powershell") {
-		return nil, &MCPToolError{Message: "target " + card.DisplayName + " has no default shell command interface; use run_slave_powershell"}
+		return nil, &MCPToolError{Message: "target " + card.DisplayName + " has no default shell command interface; use run_slave_powershell", Category: observerstore.FailStaleCapability}
 	}
-	return nil, &MCPToolError{Message: "target " + card.DisplayName + " has no supported shell command interface"}
+	return nil, &MCPToolError{Message: "target " + card.DisplayName + " has no supported shell command interface", Category: observerstore.FailStaleCapability}
 }
 
 type shellToolArgs struct {
@@ -131,10 +132,10 @@ func shellToolInputSchema() json.RawMessage {
 func parseShellToolArgs(raw json.RawMessage) (shellToolArgs, error) {
 	var args shellToolArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return shellToolArgs{}, &MCPToolError{Message: "invalid args: " + err.Error()}
+		return shellToolArgs{}, &MCPToolError{Message: "invalid args: " + err.Error(), Category: observerstore.FailContractViolation}
 	}
 	if args.Script == "" {
-		return shellToolArgs{}, &MCPToolError{Message: "script is required"}
+		return shellToolArgs{}, &MCPToolError{Message: "script is required", Category: observerstore.FailContractViolation}
 	}
 	return args, nil
 }
@@ -146,7 +147,7 @@ func (t *Tools) delegateShellTask(ctx context.Context, card agentsdk.AgentCard, 
 		Env        map[string]string `json:"env,omitempty"`
 	}{Script: args.Script, TimeoutSec: args.TimeoutSec, Env: args.Env})
 	if err != nil {
-		return nil, &MCPToolError{Message: err.Error()}
+		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailUnknown}
 	}
 	resp, err := t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
 		TargetID:       card.AgentID,
@@ -155,7 +156,7 @@ func (t *Tools) delegateShellTask(ctx context.Context, card agentsdk.AgentCard, 
 		TimeoutSeconds: args.TimeoutSec,
 	})
 	if err != nil {
-		return nil, &MCPToolError{Message: "delegate " + skill + " task: " + err.Error()}
+		return nil, &MCPToolError{Message: "delegate " + skill + " task: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
 	}
 	wait := false
 	if args.Wait != nil {
@@ -210,7 +211,7 @@ func (g *getSlaveClaudePermissionsTool) Call(ctx context.Context, raw json.RawMe
 		TargetDisplayName string `json:"target_display_name"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, &MCPToolError{Message: "invalid args: " + err.Error()}
+		return nil, &MCPToolError{Message: "invalid args: " + err.Error(), Category: observerstore.FailContractViolation}
 	}
 	return g.t.delegatePermissionTask(ctx, g.Name(), args.TargetAgentID, args.TargetDisplayName, `{"op":"get"}`)
 }
@@ -245,7 +246,7 @@ func (u *updateSlaveClaudePermissionsTool) Call(ctx context.Context, raw json.Ra
 		DenyRemove        []string `json:"deny_remove,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, &MCPToolError{Message: "invalid args: " + err.Error()}
+		return nil, &MCPToolError{Message: "invalid args: " + err.Error(), Category: observerstore.FailContractViolation}
 	}
 	prompt, err := json.Marshal(struct {
 		Op          string   `json:"op"`
@@ -263,7 +264,7 @@ func (u *updateSlaveClaudePermissionsTool) Call(ctx context.Context, raw json.Ra
 		DenyRemove:  args.DenyRemove,
 	})
 	if err != nil {
-		return nil, &MCPToolError{Message: err.Error()}
+		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailUnknown}
 	}
 	return u.t.delegatePermissionTask(ctx, u.Name(), args.TargetAgentID, args.TargetDisplayName, string(prompt))
 }
@@ -280,7 +281,7 @@ func (t *Tools) delegatePermissionTask(ctx context.Context, toolName, targetAgen
 	case hasSkill(card, "claude_permissions"):
 		skill = "claude_permissions"
 	default:
-		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise permissions or claude_permissions"}
+		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise permissions or claude_permissions", Category: observerstore.FailStaleCapability}
 	}
 	resp, err := t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
 		TargetID: card.AgentID,
@@ -288,7 +289,7 @@ func (t *Tools) delegatePermissionTask(ctx context.Context, toolName, targetAgen
 		Prompt:   prompt,
 	})
 	if err != nil {
-		return nil, &MCPToolError{Message: "delegate " + skill + " task: " + err.Error()}
+		return nil, &MCPToolError{Message: "delegate " + skill + " task: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
 	}
 	// DelegateTask succeeded — degrade journal append failure to a log entry
 	// so we still wait on the permission task. See §1.1 #1 of the
@@ -313,11 +314,11 @@ func (t *Tools) delegatePermissionTask(ctx context.Context, toolName, targetAgen
 
 func (t *Tools) resolveAvailableAgent(ctx context.Context, targetAgentID, targetDisplayName string) (agentsdk.AgentCard, error) {
 	if targetAgentID == "" && targetDisplayName == "" {
-		return agentsdk.AgentCard{}, &MCPToolError{Message: "target_agent_id or target_display_name is required"}
+		return agentsdk.AgentCard{}, &MCPToolError{Message: "target_agent_id or target_display_name is required", Category: observerstore.FailContractViolation}
 	}
 	cards, err := t.sdk.DiscoverAgents(ctx)
 	if err != nil {
-		return agentsdk.AgentCard{}, &MCPToolError{Message: "discover agents: " + err.Error()}
+		return agentsdk.AgentCard{}, &MCPToolError{Message: "discover agents: " + err.Error(), Category: observerstore.FailSlaveDisconnect}
 	}
 	var unavailable bool
 	var matches []agentsdk.AgentCard
@@ -345,16 +346,16 @@ func (t *Tools) resolveAvailableAgent(ctx context.Context, targetAgentID, target
 		target = targetDisplayName
 	}
 	if unavailable {
-		return agentsdk.AgentCard{}, &MCPToolError{Message: "agent " + target + " is not available"}
+		return agentsdk.AgentCard{}, &MCPToolError{Message: "agent " + target + " is not available", Category: observerstore.FailSlaveDisconnect}
 	}
 	if len(matches) == 0 {
-		return agentsdk.AgentCard{}, &MCPToolError{Message: "no agent found: " + target}
+		return agentsdk.AgentCard{}, &MCPToolError{Message: "no agent found: " + target, Category: observerstore.FailWrongContext}
 	}
 	names := make([]string, 0, len(matches))
 	for _, match := range matches {
 		names = append(names, match.DisplayName)
 	}
-	return agentsdk.AgentCard{}, &MCPToolError{Message: "ambiguous target: " + fmt.Sprint(names)}
+	return agentsdk.AgentCard{}, &MCPToolError{Message: "ambiguous target: " + fmt.Sprint(names), Category: observerstore.FailWrongContext}
 }
 
 func (t *Tools) waitDelegatedTask(ctx context.Context, taskID string, timeoutSec int) (json.RawMessage, error) {
@@ -368,7 +369,7 @@ func (t *Tools) waitDelegatedTask(ctx context.Context, taskID string, timeoutSec
 	for {
 		info, err := t.sdk.GetTask(ctx, taskID, true)
 		if err != nil {
-			return nil, &MCPToolError{Message: "get task " + taskID + ": " + err.Error()}
+			return nil, &MCPToolError{Message: "get task " + taskID + ": " + err.Error(), Category: observerstore.FailSlaveDisconnect}
 		}
 		if isTerminalStatus(info.Status) {
 			isAwaiting, unwrappedOutput, question := unwrapResultMarker(info)
@@ -377,12 +378,13 @@ func (t *Tools) waitDelegatedTask(ctx context.Context, taskID string, timeoutSec
 			}
 			output := unwrappedOutput
 			if info.Status != "completed" {
-				return nil, &MCPToolError{Message: "task " + taskID + " " + info.Status + ": " + firstNonEmpty(info.FailureReason, output)}
+				// Slave-side failure; the underlying category is opaque from here.
+				return nil, &MCPToolError{Message: "task " + taskID + " " + info.Status + ": " + firstNonEmpty(info.FailureReason, output), Category: observerstore.FailUnknown}
 			}
 			return marshalDelegatedTaskOutput(taskID, info, output)
 		}
 		if time.Now().After(deadline) {
-			return nil, &MCPToolError{Message: "task " + taskID + " timeout after " + fmt.Sprintf("%d", timeoutSec) + "s; status=" + info.Status}
+			return nil, &MCPToolError{Message: "task " + taskID + " timeout after " + fmt.Sprintf("%d", timeoutSec) + "s; status=" + info.Status, Category: observerstore.FailTimeout}
 		}
 		select {
 		case <-ctx.Done():
