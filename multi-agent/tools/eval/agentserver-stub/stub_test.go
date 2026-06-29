@@ -238,3 +238,100 @@ func TestLegacyAndV1PathsAreIdentical(t *testing.T) {
 		t.Errorf("alias mismatch:\n  v1     = %s\n  legacy = %s", v1, legacy)
 	}
 }
+
+// TestLegacyAliasRegisterAndHeartbeat exercises the legacy /api/agent/* prefix
+// for register and heartbeat (whoami is covered above). The driver/slave/
+// observer binaries hardcode the legacy prefix, so a regression here would
+// break them silently.
+func TestLegacyAliasRegisterAndHeartbeat(t *testing.T) {
+	url, stop := newTestStub(t)
+	defer stop()
+
+	// Register via legacy alias.
+	legacyCreds := decodeCreds(t, postJSON(t, url+"/api/agent/register",
+		map[string]string{"role": "slave-a", "short_id": "legacy-001"}))
+	// Same body via v1 must produce identical credentials (HMAC determinism +
+	// shared handler).
+	v1Creds := decodeCreds(t, postJSON(t, url+"/api/v1/agents/register",
+		map[string]string{"role": "slave-a", "short_id": "legacy-001"}))
+	if legacyCreds != v1Creds {
+		t.Errorf("legacy/v1 register mismatch:\n  legacy = %+v\n  v1     = %+v", legacyCreds, v1Creds)
+	}
+
+	// Heartbeat via legacy alias.
+	req, _ := http.NewRequest(http.MethodPost, url+"/api/agent/heartbeat",
+		strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+legacyCreds.ProxyToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("legacy heartbeat: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("legacy heartbeat status = %d, want 204", resp.StatusCode)
+	}
+}
+
+// TestErrorStatusCodes locks in the status codes the design doc promises for
+// malformed input (405 wrong method, 400 bad JSON / missing fields, 401 missing
+// or bad bearer). Without these, an upstream resolver could misread a server
+// bug as a transient network error.
+func TestErrorStatusCodes(t *testing.T) {
+	url, stop := newTestStub(t)
+	defer stop()
+
+	// Issue one good token for the auth-required cases.
+	good := decodeCreds(t, postJSON(t, url+"/api/v1/agents/register",
+		map[string]string{"role": "driver", "short_id": "drv-err"}))
+
+	do := func(method, path, auth, body string) int {
+		var r io.Reader
+		if body != "" {
+			r = strings.NewReader(body)
+		}
+		req, _ := http.NewRequest(method, url+path, r)
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		auth   string
+		body   string
+		want   int
+	}{
+		{"register-wrong-method", http.MethodGet, "/api/v1/agents/register", "", "", http.StatusMethodNotAllowed},
+		{"whoami-wrong-method", http.MethodPost, "/api/v1/agents/whoami", "Bearer " + good.ProxyToken, "", http.StatusMethodNotAllowed},
+		{"heartbeat-wrong-method", http.MethodGet, "/api/v1/agents/heartbeat", "Bearer " + good.ProxyToken, "", http.StatusMethodNotAllowed},
+		{"healthz-wrong-method", http.MethodPost, "/healthz", "", "", http.StatusMethodNotAllowed},
+		{"register-bad-json", http.MethodPost, "/api/v1/agents/register", "", "{not-json", http.StatusBadRequest},
+		{"register-missing-role", http.MethodPost, "/api/v1/agents/register", "", `{"short_id":"x"}`, http.StatusBadRequest},
+		{"register-missing-short-id", http.MethodPost, "/api/v1/agents/register", "", `{"role":"driver"}`, http.StatusBadRequest},
+		{"whoami-no-bearer", http.MethodGet, "/api/v1/agents/whoami", "", "", http.StatusUnauthorized},
+		{"whoami-empty-bearer", http.MethodGet, "/api/v1/agents/whoami", "Bearer ", "", http.StatusUnauthorized},
+		{"whoami-non-bearer-scheme", http.MethodGet, "/api/v1/agents/whoami", "Basic dXNlcjpwYXNz", "", http.StatusUnauthorized},
+		{"whoami-unknown-token", http.MethodGet, "/api/v1/agents/whoami", "Bearer made-up-token", "", http.StatusUnauthorized},
+		{"heartbeat-no-bearer", http.MethodPost, "/api/v1/agents/heartbeat", "", `{}`, http.StatusUnauthorized},
+		{"heartbeat-unknown-token", http.MethodPost, "/api/v1/agents/heartbeat", "Bearer made-up", `{}`, http.StatusUnauthorized},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := do(tc.method, tc.path, tc.auth, tc.body)
+			if got != tc.want {
+				t.Errorf("status = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
