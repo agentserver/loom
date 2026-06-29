@@ -5,6 +5,7 @@
 package labels
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,6 +23,20 @@ const (
 	expectedWorkloadLabels = 5
 	expectedFamilyLabels   = 5 * 4
 )
+
+// knownContexts is the closed set of (agent_role, context_id) pairs documented
+// in README.md as the namespace this worktree fixes for the §F1/§F2 spec.yaml
+// join. The JSON Schema only enforces kebab-case shape, so a typo like
+// `slave-windoes-desktop` or a mis-paired `(driver, slave-linux-server)` would
+// pass schema validation and silently break the downstream
+// `required_contexts[].role` join. Enforcing the set here catches it at build
+// time. To grow the set, edit BOTH this map AND the README `context_id ↔ spec
+// coupling` table in the same PR.
+var knownContexts = map[string]map[string]struct{}{
+	"driver":  {"driver-linux-laptop": {}},
+	"slave":   {"slave-linux-server": {}, "slave-windows-desktop": {}},
+	"sandbox": {"sandbox-cloud": {}},
+}
 
 func labelsDir(t *testing.T) string {
 	t.Helper()
@@ -213,6 +228,9 @@ func TestLabelsValidateAgainstSchemas(t *testing.T) {
 			if err := gtcSchema.Validate(gtc); err != nil {
 				t.Fatalf("ground_truth_context schema violation: %v", err)
 			}
+			if err := checkKnownContext(gtc); err != nil {
+				t.Fatalf("known-context check: %v", err)
+			}
 
 			cgt, ok := m["context_ground_truth"]
 			if !ok {
@@ -270,6 +288,78 @@ func checkCredentialAliasMirror(t *testing.T, cgt any) {
 		if _, ok := fromCaps[a]; !ok {
 			t.Errorf("credential alias %q listed in credential_aliases mirror but no matching credential capability", a)
 		}
+	}
+}
+
+// checkKnownContext rejects any (agent_role, context_id) pair not in the
+// closed set documented in README.md. The schema cannot express this
+// (context_id is free-form kebab-case so contributors can extend the namespace
+// without touching the schema). Without this gate, a typo in context_id would
+// pass the build and silently fail the §F1/§F2 spec.yaml join at metric
+// extraction time, when it is much harder to diagnose.
+func checkKnownContext(gtc any) error {
+	m, ok := gtc.(map[string]any)
+	if !ok {
+		return fmt.Errorf("ground_truth_context not an object")
+	}
+	role, _ := m["agent_role"].(string)
+	cid, _ := m["context_id"].(string)
+	allowed, ok := knownContexts[role]
+	if !ok {
+		return fmt.Errorf("agent_role %q not in knownContexts (schema accepted it but the README context_id namespace does not enumerate it)", role)
+	}
+	if _, ok := allowed[cid]; !ok {
+		want := make([]string, 0, len(allowed))
+		for k := range allowed {
+			want = append(want, k)
+		}
+		sort.Strings(want)
+		return fmt.Errorf("context_id %q not allowed for role %q; allowed: %v (update knownContexts + README in the same PR if intentional)", cid, role, want)
+	}
+	return nil
+}
+
+// TestKnownContextRejectsTypoAndMismatch is the negative test for the closed
+// set above: a typo'd context_id (right shape, wrong identity) and a swapped
+// role/context_id pairing must both be rejected. Without this, future
+// refactors could silently drop the check and the schema-only validation
+// would not catch the regression.
+func TestKnownContextRejectsTypoAndMismatch(t *testing.T) {
+	cases := []struct {
+		name string
+		gtc  map[string]any
+	}{
+		{
+			name: "typo in context_id",
+			gtc: map[string]any{
+				"agent_role": "slave",
+				"context_id": "slave-windoes-desktop", // missing 'w', kebab-case shape still passes the regex
+				"rationale":  "ignored",
+			},
+		},
+		{
+			name: "role/context_id mismatch",
+			gtc: map[string]any{
+				"agent_role": "driver",
+				"context_id": "slave-linux-server",
+				"rationale":  "ignored",
+			},
+		},
+		{
+			name: "unknown context_id with right kebab shape",
+			gtc: map[string]any{
+				"agent_role": "sandbox",
+				"context_id": "sandbox-on-prem",
+				"rationale":  "ignored",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := checkKnownContext(tc.gtc); err == nil {
+				t.Fatalf("expected checkKnownContext to reject %v, got nil", tc.gtc)
+			}
+		})
 	}
 }
 
