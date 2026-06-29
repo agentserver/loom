@@ -1,0 +1,4 @@
+# pip install -e drops this; we don't ship it
+*.egg-info/
+__pycache__/
+.pytest_cache/
