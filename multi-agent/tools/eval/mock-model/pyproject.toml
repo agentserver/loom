@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mock-model"
+version = "0.1.0.dev0"
+description = "Deterministic mock OpenAI-compatible model server for loom reproducibility tests"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "agentserver" }]
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+  "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-timeout>=2.3",
+  "anyio>=4.0",
+  "httpx>=0.28",
+]
+
+[project.scripts]
+mock-model = "mock_model.server:_cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mock_model*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+timeout = 30
