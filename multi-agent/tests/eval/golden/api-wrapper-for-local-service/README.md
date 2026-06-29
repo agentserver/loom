@@ -51,3 +51,15 @@ snake_case lowercase (e.g. `X-Loom-Trace` → `x_loom_trace`). This
 convention is also recorded in `_shared/openapi.yaml` under
 `paths./echo/headers.get.description` so anyone building the固化 MCP from
 the spec lands on the same key naming as the fixtures expect.
+
+Additionally, the `local_echo_call` wrapper filters `/echo/headers`
+response bodies down to only those headers the caller explicitly set in
+the request — transport headers added by the underlying HTTP client
+(`host`, `user-agent`, `accept-encoding`, `content-length`, …) are
+stripped before the `body` map is returned to the MCP caller. This is
+what lets `acceptance/cases.jsonl::happy_path_headers` and
+`reuse-2/expected/response.json` deep-equal against
+`body: {"x_loom_trace": "..."}` without an extra `required_keys` carve-
+out. The wrapper does NOT filter the other three endpoints — `/echo`
+and `/echo/json` pass the body through unchanged, and `/healthz` uses
+the `required_keys`-only carve-out already documented above.

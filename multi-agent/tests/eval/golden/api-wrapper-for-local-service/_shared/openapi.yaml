@@ -9,6 +9,18 @@ info:
     `base_url` (string, optional — overrides the default `servers[0].url`
     so acceptance/negative tests can point the wrapper at a deliberately
     unreachable address without coordinating a service stop).
+
+    Wrapper response shape: `{status, body}`. For `/echo/headers`
+    specifically, the wrapper filters the upstream response down to
+    only those headers the caller explicitly set in the request —
+    transport headers added by the HTTP client (`host`, `user-agent`,
+    `accept-encoding`, `content-length`, …) are stripped before the
+    `body` map is returned. Without this filter, deep-equal of `body`
+    against a literal `{"x_loom_trace": "t-1"}` would be impossible
+    against any real client. The wrapper does NOT filter `/echo`,
+    `/echo/json`, or `/healthz`: those endpoints' responses pass
+    through unchanged (with `/healthz` acceptance using `required_keys`
+    for partial match on `uptime_s`).
 servers:
   - url: http://localhost:8080
 paths:
