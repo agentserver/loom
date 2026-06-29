@@ -1,0 +1,46 @@
+server:
+  url: http://agentserver:8080
+  name: slave-cloud-dev
+
+credentials:
+  sandbox_id: ""
+  tunnel_token: ""
+  proxy_token: ""
+  workspace_id: ""
+  short_id: ""
+
+agent:
+  kind: claude
+  bin: claude
+  workdir: /tmp/slave-cloud-dev
+  # codex_home: ""  # per-agent CODEX_HOME override; default derives from loom_home + short_id
+  # loom_home: ""   # state root for per-agent codex_home (defaults: $LOOM_HOME or $HOME/.cache/multi-agent)
+
+discovery:
+  display_name: slave-cloud-dev
+  # Tier label: cloud sandbox slave (§C1 four-node fleet — Linux
+  # laptop driver + Linux headless server slave + Windows desktop
+  # slave + cloud sandbox slave). The runtime detector overlays
+  # detected shells (bash on Linux, powershell on Windows). The
+  # `sandbox` skill is the routing hint capability-discovery needs to
+  # tell driver "this is the ephemeral cloud tier", not local laptop.
+  skills:
+    - chat
+    - mcp
+    - sandbox
+
+observer:
+  enabled: true
+  telemetry_enabled: false
+  url: http://observer:8080
+  workspace_id: dev
+  agent_id: slave-cloud-dev
+  api_key: ak_dev_shared_secret
+  token_state_path: /tmp/observer-slave-cloud-dev.token
+
+resources:
+  memory_gb: 8
+  tags:
+    - cloud
+    - sandbox
+    - ephemeral

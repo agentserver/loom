@@ -37,7 +37,9 @@ func TestDistributedComposeScaffold(t *testing.T) {
 		"./configs/driver.yaml:/config/config.yaml",
 		"./configs/slave-a.yaml:/config/config.yaml",
 		"./configs/slave-b.yaml:/config/config.yaml",
+		"./configs/slave-cloud.yaml:/config/config.yaml",
 		"./configs/observer.yaml:/config/config.yaml",
+		"slave-cloud:",
 		"go run ./cmd/driver-agent serve-mcp --config /config/config.yaml",
 		"go run ./cmd/observer-server --config /config/config.yaml",
 		"restart: unless-stopped",
@@ -53,6 +55,7 @@ func TestDistributedComposeExampleConfigsLoad(t *testing.T) {
 		"../../dev/configs/master.example.yaml",
 		"../../dev/configs/slave-a.example.yaml",
 		"../../dev/configs/slave-b.example.yaml",
+		"../../dev/configs/slave-cloud.example.yaml",
 	} {
 		if _, err := agentconfig.Load(path); err != nil {
 			t.Fatalf("load %s: %v", path, err)

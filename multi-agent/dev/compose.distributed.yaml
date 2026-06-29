@@ -90,6 +90,28 @@ services:
     command: zsh -lc "go run ./cmd/slave-agent /config/config.yaml"
     restart: unless-stopped
 
+  # slave-cloud is the cloud-sandbox tier in the §C1 four-node fleet
+  # (Linux laptop driver + Linux headless server slave + Windows
+  # desktop slave + cloud sandbox slave). It is a regular slave-agent
+  # container with a distinct config that advertises sandbox-style
+  # resources/skills, so a local `docker compose up` already exercises
+  # the multi-tier capability-discovery path that prod will see across
+  # physical machines. The real Windows node is handled by
+  # deploy/windows/*/install.ps1 (cannot ship in Linux compose).
+  slave-cloud:
+    build:
+      context: ..
+      dockerfile: dev/agent-runtime/Dockerfile
+    working_dir: /workspace/multi-agent
+    volumes:
+      - ../:/workspace/multi-agent
+      - ./configs/slave-cloud.yaml:/config/config.yaml
+    environment:
+      ANTHROPIC_BASE_URL: https://code.ai.cs.ac.cn
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    command: zsh -lc "go run ./cmd/slave-agent /config/config.yaml"
+    restart: unless-stopped
+
   observer:
     build:
       context: ..
