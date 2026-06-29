@@ -14,7 +14,6 @@ collector never panics on a missing repo.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import socket
 import sys
@@ -86,7 +85,12 @@ def _format(schema: CommitMetaSchema, fmt: str) -> str:
         # yaml.safe_dump is fine — every value is a primitive or dict thereof.
         return yaml.safe_dump(schema.model_dump(), sort_keys=False).rstrip("\n")
     if fmt == "json":
-        return json.dumps(schema.model_dump(), indent=2)
+        # Defer to schema.to_json so CLI output and the canonical schema
+        # serialization can never drift; Phase 1 consumers reading the
+        # artifact see exactly what from_json(schema.to_json()) produced.
+        return schema.to_json()
+    # argparse choices= guards against this in practice; keep the explicit
+    # raise as a defense for direct callers.
     raise ValueError(f"unknown format: {fmt!r}")
 
 

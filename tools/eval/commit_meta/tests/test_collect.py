@@ -202,6 +202,36 @@ def test_missing_default_path_preserved_in_na_string(
             )
 
 
+def test_cli_json_roundtrips_through_schema(tiny_repo: Path, tmp_path: Path) -> None:
+    """CLI's json output must round-trip cleanly through
+    CommitMetaSchema.from_json() / .to_json(), so Phase 1 can consume
+    the artifact without reformatting. Guards against future drift
+    between CLI _format and schema.to_json.
+    """
+    from commit_meta.schema import CommitMetaSchema
+
+    missing = tmp_path / "missing"
+    proc = _run_cli(
+        "--loom",
+        str(tiny_repo),
+        "--agentserver",
+        str(missing),
+        "--modelserver",
+        str(missing),
+        "--app",
+        str(missing),
+    )
+    assert proc.returncode == 0, proc.stderr
+    schema = CommitMetaSchema.from_json(proc.stdout)
+    # to_json output should re-parse identically and produce the same string
+    # when fed back through from_json/to_json.
+    second = CommitMetaSchema.from_json(schema.to_json())
+    assert schema.model_dump() == second.model_dump()
+    # CLI stdout (minus trailing newline) must equal schema.to_json() — they
+    # are both supposed to be canonical JSON of the same payload.
+    assert proc.stdout.rstrip("\n") == schema.to_json()
+
+
 def test_loom_defaults_to_cwd_git_root(tiny_repo: Path, tmp_path: Path) -> None:
     # No --loom => collector finds git root from cwd.
     missing = tmp_path / "missing"
