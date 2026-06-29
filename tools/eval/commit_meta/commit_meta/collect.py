@@ -43,16 +43,23 @@ def _resolve_loom(cli_value: Optional[str]) -> Optional[str]:
     root = find_git_root(os.getcwd())
     if root:
         return root
-    return _DEFAULTS["loom"] if os.path.isdir(_DEFAULTS["loom"]) else None
+    # Hand back the default path even if it does not exist; get_commit will
+    # render a "N/A: not present at /root/multi-agent" string instead of the
+    # uninformative "<unset>" we used to emit.
+    return _DEFAULTS["loom"]
 
 
 def _resolve(cli_value: Optional[str], env_var: str, default: str) -> Optional[str]:
+    # Always return *some* path string so the resulting N/A message names
+    # where we actually looked. Returning None here would erase the default
+    # path and yield "N/A: not present at <unset>", which is unhelpful when
+    # debugging missing-repo eval runs.
     if cli_value:
         return cli_value
     env = os.environ.get(env_var)
     if env:
         return env
-    return default if os.path.isdir(default) else None
+    return default
 
 
 def _build(args: argparse.Namespace) -> CommitMetaSchema:

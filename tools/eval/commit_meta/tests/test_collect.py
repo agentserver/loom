@@ -158,6 +158,50 @@ def test_default_format_is_json(tiny_repo: Path, tmp_path: Path) -> None:
     json.loads(proc.stdout)  # raises if not valid JSON
 
 
+def test_missing_default_path_preserved_in_na_string(
+    tiny_repo: Path, tmp_path: Path
+) -> None:
+    """When all CLI flags and env vars are unset and the /root/<repo>
+    defaults don't exist, the N/A string must name the path we actually
+    tried (the default), not ``<unset>`` — otherwise the user has no clue
+    where the collector looked. Documented in README's default-search table.
+    """
+    # Clear inherited env vars so we exercise the pure default-fallback path.
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "commit_meta.collect",
+            "--loom",
+            str(tiny_repo),
+        ],
+        cwd=str(tmp_path),
+        env={
+            "PYTHONPATH": str(PKG_ROOT)
+            + os.pathsep
+            + os.environ.get("PYTHONPATH", ""),
+            "PATH": os.environ.get("PATH", ""),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    # On a host where /root/{agentserver,modelserver,app} are missing,
+    # every N/A string should embed the attempted default path.
+    for field, default in [
+        ("agentserver_commit", "/root/agentserver"),
+        ("modelserver_commit", "/root/modelserver"),
+        ("app_commit", "/root/app"),
+    ]:
+        if payload[field].startswith("N/A:"):
+            assert default in payload[field], (
+                f"{field} N/A string lost path info: {payload[field]!r}; "
+                f"expected '{default}' to appear"
+            )
+
+
 def test_loom_defaults_to_cwd_git_root(tiny_repo: Path, tmp_path: Path) -> None:
     # No --loom => collector finds git root from cwd.
     missing = tmp_path / "missing"
