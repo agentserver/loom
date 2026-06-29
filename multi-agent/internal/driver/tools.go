@@ -16,6 +16,7 @@ import (
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/yourorg/multi-agent/internal/commandiface"
 	"github.com/yourorg/multi-agent/internal/observer"
+	"github.com/yourorg/multi-agent/internal/observerstore"
 	"github.com/yourorg/multi-agent/internal/orchestration"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
@@ -169,7 +170,7 @@ func (t *Tools) recordDelegatedTask(rec delegatedTaskRecord) error {
 		Wait:              rec.Wait,
 		TimeoutSec:        rec.TimeoutSec,
 	}); err != nil {
-		return &MCPToolError{Message: fmt.Sprintf("task %s was created but driver failed to record it in driver-tasks.jsonl: %v", rec.Response.TaskID, err)}
+		return &MCPToolError{Message: fmt.Sprintf("task %s was created but driver failed to record it in driver-tasks.jsonl: %v", rec.Response.TaskID, err), Category: observerstore.FailUnknown}
 	}
 	return nil
 }
@@ -286,7 +287,7 @@ func (t *Tools) observerRelay() *ObserverRelay {
 func (t *Tools) resolveTarget(ctx context.Context, override string) (id, displayName, shortID, role string, err error) {
 	cards, err := t.sdk.DiscoverAgents(ctx)
 	if err != nil {
-		return "", "", "", "", &MCPToolError{Message: "discover agents: " + err.Error()}
+		return "", "", "", "", &MCPToolError{Message: "discover agents: " + err.Error(), Category: observerstore.FailUnknown}
 	}
 	if override == "" {
 		override = t.cfg.DriverDefaults.TargetDisplayName
@@ -303,9 +304,13 @@ func (t *Tools) resolveTarget(ctx context.Context, override string) (id, display
 			}
 		}
 		if unavailable {
-			return "", "", "", "", &MCPToolError{Message: "agent named " + override + " is not available"}
+			// agentAvailable returns false for both "busy" (alive, full) and
+			// "offline" (genuinely disconnected). Tagging both as
+			// slave_disconnect mis-attributes capacity events as infra; the
+			// branch here cannot tell them apart without inspecting Status.
+			return "", "", "", "", &MCPToolError{Message: "agent named " + override + " is not available", Category: observerstore.FailUnknown}
 		}
-		return "", "", "", "", &MCPToolError{Message: "no agent named: " + override}
+		return "", "", "", "", &MCPToolError{Message: "no agent named: " + override, Category: observerstore.FailWrongContext}
 	}
 	var matches []agentsdk.AgentCard
 	for _, c := range cards {
@@ -320,14 +325,14 @@ func (t *Tools) resolveTarget(ctx context.Context, override string) (id, display
 		}
 	}
 	if len(matches) == 0 {
-		return "", "", "", "", &MCPToolError{Message: "no fanout-skilled agent available; pass target_display_name"}
+		return "", "", "", "", &MCPToolError{Message: "no fanout-skilled agent available; pass target_display_name", Category: observerstore.FailStaleCapability}
 	}
 	if len(matches) > 1 {
 		names := []string{}
 		for _, m := range matches {
 			names = append(names, m.DisplayName)
 		}
-		return "", "", "", "", &MCPToolError{Message: "ambiguous target: " + strings.Join(names, ", ") + " (pass target_display_name)"}
+		return "", "", "", "", &MCPToolError{Message: "ambiguous target: " + strings.Join(names, ", ") + " (pass target_display_name)", Category: observerstore.FailWrongContext}
 	}
 	return matches[0].AgentID, matches[0].DisplayName, cardShortID(matches[0]), observerRoleForCard(matches[0]), nil
 }
@@ -393,12 +398,12 @@ func (l *listAgentsTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	}
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &args); err != nil {
-			return nil, &MCPToolError{Message: "invalid args: " + err.Error()}
+			return nil, &MCPToolError{Message: "invalid args: " + err.Error(), Category: observerstore.FailContractViolation}
 		}
 	}
 	cards, err := l.t.sdk.DiscoverAgents(ctx)
 	if err != nil {
-		return nil, &MCPToolError{Message: err.Error()}
+		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailUnknown}
 	}
 	type out struct {
 		AgentID           string                          `json:"agent_id"`
@@ -456,7 +461,7 @@ func (l *listDriverTasksTool) Call(_ context.Context, raw json.RawMessage) (json
 	}
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &args); err != nil {
-			return nil, &MCPToolError{Message: "invalid args: " + err.Error()}
+			return nil, &MCPToolError{Message: "invalid args: " + err.Error(), Category: observerstore.FailContractViolation}
 		}
 	}
 	if l.t.taskJournal == nil {
@@ -464,7 +469,7 @@ func (l *listDriverTasksTool) Call(_ context.Context, raw json.RawMessage) (json
 	}
 	records, warnings, err := l.t.taskJournal.RecentWithWarnings(args.Limit, args.TaskID)
 	if err != nil {
-		return nil, &MCPToolError{Message: err.Error()}
+		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailUnknown}
 	}
 	return json.Marshal(map[string]interface{}{"journal_path": l.t.taskJournal.Path(), "tasks": records, "warnings": warnings})
 }
@@ -508,10 +513,10 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		TimeoutSec        int    `json:"timeout_sec"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, &MCPToolError{Message: "invalid args: " + err.Error()}
+		return nil, &MCPToolError{Message: "invalid args: " + err.Error(), Category: observerstore.FailContractViolation}
 	}
 	if args.Prompt == "" {
-		return nil, &MCPToolError{Message: "prompt is required"}
+		return nil, &MCPToolError{Message: "prompt is required", Category: observerstore.FailContractViolation}
 	}
 
 	skill := args.Skill
@@ -519,7 +524,7 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		skill = "fanout"
 	}
 	if jsonPromptSkill(skill) && (len(args.ReadPaths) > 0 || len(args.WritePaths) > 0) {
-		return nil, &MCPToolError{Message: "skill " + skill + " takes JSON-only prompts; read_paths/write_paths cannot be conveyed"}
+		return nil, &MCPToolError{Message: "skill " + skill + " takes JSON-only prompts; read_paths/write_paths cannot be conveyed", Category: observerstore.FailContractViolation}
 	}
 
 	// === capture-and-fail-fast guard ===
@@ -530,7 +535,7 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	if isParentLinkDelegation(skill) {
 		pid, err := s.t.requireBoundThread()
 		if err != nil {
-			return nil, &MCPToolError{Message: err.Error()}
+			return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailWrongContext}
 		}
 		parentThreadID = pid
 	}
@@ -540,18 +545,18 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	for _, p := range args.ReadPaths {
 		absP, err := filepath.Abs(p)
 		if err != nil {
-			return nil, &MCPToolError{Message: "invalid path " + p + ": " + err.Error()}
+			return nil, &MCPToolError{Message: "invalid path " + p + ": " + err.Error(), Category: observerstore.FailContractViolation}
 		}
 		info, err := os.Lstat(absP)
 		if err != nil {
-			return nil, &MCPToolError{Message: "stat " + absP + ": " + err.Error()}
+			return nil, &MCPToolError{Message: "stat " + absP + ": " + err.Error(), Category: observerstore.FailMissingFile}
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return nil, &MCPToolError{Message: "symlinks not allowed: " + absP}
+			return nil, &MCPToolError{Message: "symlinks not allowed: " + absP, Category: observerstore.FailPolicyViolation}
 		}
 		if info.IsDir() {
 			if s.t.useObserverRelay() {
-				return nil, &MCPToolError{Message: "observer_lazy directory read_paths are not implemented yet; use file paths or artifact_transport=peer_proxy"}
+				return nil, &MCPToolError{Message: "observer_lazy directory read_paths are not implemented yet; use file paths or artifact_transport=peer_proxy", Category: observerstore.FailStaleCapability}
 			}
 			tok := s.t.reg.RegisterDir(absP)
 			s.t.audit.Log(AuditEvent{Event: "register_read_dir", Path: absP})
@@ -565,7 +570,7 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		} else {
 			sha, size, mt, err := s.t.reg.RegisterFile(absP)
 			if err != nil {
-				return nil, &MCPToolError{Message: err.Error()}
+				return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailMissingFile}
 			}
 			s.t.audit.Log(AuditEvent{Event: "register_read", Path: absP, SHA256: sha, Bytes: size})
 			entry := FileEntry{
@@ -581,7 +586,7 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 					Path: absP, Kind: "file", MIME: mt, Bytes: size, SHA256: sha, Mode: "lazy",
 				})
 				if err != nil {
-					return nil, &MCPToolError{Message: "observer register file: " + err.Error()}
+					return nil, &MCPToolError{Message: "observer register file: " + err.Error(), Category: observerstore.FailUnknown}
 				}
 				s.t.reg.RegisterObserverArtifact(relayResp.ArtifactID, absP, "file")
 				entry.URL = relayResp.URL
@@ -595,10 +600,10 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	for _, w := range args.WritePaths {
 		absP, err := filepath.Abs(w.Path)
 		if err != nil {
-			return nil, &MCPToolError{Message: "invalid write path: " + err.Error()}
+			return nil, &MCPToolError{Message: "invalid write path: " + err.Error(), Category: observerstore.FailContractViolation}
 		}
 		if err := AssertWritableTarget(absP, s.t.cfg.DriverDefaults.DisableUIDCheck); err != nil {
-			return nil, &MCPToolError{Message: err.Error()}
+			return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailPolicyViolation}
 		}
 		tok := s.t.reg.RegisterWrite(absP, w.Overwrite, "")
 		writeTokens = append(writeTokens, tok)
@@ -609,7 +614,7 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 				TaskID: "__pending__", Path: absP, Overwrite: w.Overwrite,
 			})
 			if err != nil {
-				return nil, &MCPToolError{Message: "observer create write: " + err.Error()}
+				return nil, &MCPToolError{Message: "observer create write: " + err.Error(), Category: observerstore.FailUnknown}
 			}
 			observerWriteIDs = append(observerWriteIDs, relayResp.WriteID)
 			putURL = relayResp.PutURL
@@ -659,7 +664,10 @@ func (s *submitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		TimeoutSeconds: timeout,
 	})
 	if err != nil {
-		return nil, &MCPToolError{Message: "delegate: " + err.Error()}
+		// agentsdk DelegateTask wraps multiple failure modes (transport,
+		// auth, version, deadline) into a string-only error today; keep
+		// FailUnknown until the SDK exposes a typed error.
+		return nil, &MCPToolError{Message: "delegate: " + err.Error(), Category: observerstore.FailUnknown}
 	}
 
 	// From this point on, the task is running on the slave. Any helper-step
@@ -746,14 +754,14 @@ func (g *getTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMe
 		IncludeSubtasks bool   `json:"include_subtasks"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, &MCPToolError{Message: err.Error()}
+		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailContractViolation}
 	}
 	if strings.TrimSpace(args.TaskID) == "" {
-		return nil, &MCPToolError{Message: "task_id is required"}
+		return nil, &MCPToolError{Message: "task_id is required", Category: observerstore.FailContractViolation}
 	}
 	info, err := g.t.sdk.GetTask(ctx, args.TaskID, true)
 	if err != nil {
-		return nil, &MCPToolError{Message: err.Error()}
+		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailUnknown}
 	}
 	taskID := info.TaskID
 	if taskID == "" {
@@ -861,10 +869,10 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 		TimeoutSec      int    `json:"timeout_sec"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, &MCPToolError{Message: err.Error()}
+		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailContractViolation}
 	}
 	if strings.TrimSpace(args.TaskID) == "" {
-		return nil, &MCPToolError{Message: "task_id is required"}
+		return nil, &MCPToolError{Message: "task_id is required", Category: observerstore.FailContractViolation}
 	}
 	if args.PollIntervalSec == 0 {
 		args.PollIntervalSec = 3
@@ -876,7 +884,7 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 	for {
 		info, err := w.t.sdk.GetTask(ctx, args.TaskID, true)
 		if err != nil {
-			return nil, &MCPToolError{Message: err.Error()}
+			return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailUnknown}
 		}
 		switch info.Status {
 		case "completed", "failed", "cancelled":
@@ -979,7 +987,7 @@ func (w *waitTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.RawM
 			})
 		}
 		if time.Now().After(deadline) {
-			return nil, &MCPToolError{Message: "wait_task timeout after " + fmt.Sprintf("%d", args.TimeoutSec) + "s; status=" + info.Status}
+			return nil, &MCPToolError{Message: "wait_task timeout after " + fmt.Sprintf("%d", args.TimeoutSec) + "s; status=" + info.Status, Category: observerstore.FailTimeout}
 		}
 		select {
 		case <-ctx.Done():
@@ -1115,7 +1123,7 @@ func (ts *tailSubtasksTool) Call(ctx context.Context, raw json.RawMessage) (json
 		MasterDisplayName string `json:"master_display_name"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, &MCPToolError{Message: err.Error()}
+		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailContractViolation}
 	}
 	if args.MaxWaitSec == 0 {
 		args.MaxWaitSec = 30
@@ -1125,7 +1133,7 @@ func (ts *tailSubtasksTool) Call(ctx context.Context, raw json.RawMessage) (json
 	}
 	cards, err := ts.t.sdk.DiscoverAgents(ctx)
 	if err != nil {
-		return nil, &MCPToolError{Message: err.Error()}
+		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailUnknown}
 	}
 
 	// Resolve master with the same auto-pick / ambiguity rules as submit_task.
@@ -1142,7 +1150,7 @@ func (ts *tailSubtasksTool) Call(ctx context.Context, raw json.RawMessage) (json
 			}
 		}
 		if masterShort == "" {
-			return nil, &MCPToolError{Message: "no agent named: " + override}
+			return nil, &MCPToolError{Message: "no agent named: " + override, Category: observerstore.FailWrongContext}
 		}
 	} else {
 		var matches []agentsdk.AgentCard
@@ -1155,14 +1163,14 @@ func (ts *tailSubtasksTool) Call(ctx context.Context, raw json.RawMessage) (json
 			}
 		}
 		if len(matches) == 0 {
-			return nil, &MCPToolError{Message: "no fanout-skilled agent visible; pass master_display_name"}
+			return nil, &MCPToolError{Message: "no fanout-skilled agent visible; pass master_display_name", Category: observerstore.FailStaleCapability}
 		}
 		if len(matches) > 1 {
 			names := []string{}
 			for _, m := range matches {
 				names = append(names, m.DisplayName)
 			}
-			return nil, &MCPToolError{Message: "ambiguous master: " + strings.Join(names, ", ") + " (pass master_display_name)"}
+			return nil, &MCPToolError{Message: "ambiguous master: " + strings.Join(names, ", ") + " (pass master_display_name)", Category: observerstore.FailWrongContext}
 		}
 		masterShort = cardShortID(matches[0])
 	}
@@ -1172,7 +1180,7 @@ func (ts *tailSubtasksTool) Call(ctx context.Context, raw json.RawMessage) (json
 		path := "/tasks/" + args.TaskID + "/children"
 		resp, err := ts.t.sdk.PeerProxy(ctx, "GET", masterShort, path, nil)
 		if err != nil {
-			return nil, &MCPToolError{Message: "peer-proxy: " + err.Error()}
+			return nil, &MCPToolError{Message: "peer-proxy: " + err.Error(), Category: observerstore.FailUnknown}
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
@@ -1223,11 +1231,11 @@ func (c *cancelTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		TaskID string `json:"task_id"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, &MCPToolError{Message: err.Error()}
+		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailContractViolation}
 	}
 	info, err := c.t.sdk.GetTask(ctx, args.TaskID, false)
 	if err != nil {
-		return nil, &MCPToolError{Message: err.Error()}
+		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailUnknown}
 	}
 	return json.Marshal(map[string]interface{}{
 		"ok":     false,
@@ -1260,10 +1268,10 @@ func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		TimeoutSec int    `json:"timeout_sec"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, &MCPToolError{Message: "invalid args: " + err.Error()}
+		return nil, &MCPToolError{Message: "invalid args: " + err.Error(), Category: observerstore.FailContractViolation}
 	}
 	if args.LastTaskID == "" || args.Answer == "" {
-		return nil, &MCPToolError{Message: "last_task_id and answer are required"}
+		return nil, &MCPToolError{Message: "last_task_id and answer are required", Category: observerstore.FailContractViolation}
 	}
 
 	// === NEW: unconditional bind guard.
@@ -1272,13 +1280,13 @@ func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	// Runs BEFORE GetTask so unbound resumes don't even consume an RPC.
 	parentThreadID, err := r.t.requireBoundThread()
 	if err != nil {
-		return nil, &MCPToolError{Message: err.Error()}
+		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailWrongContext}
 	}
 	// === END guard ===
 
 	info, err := r.t.sdk.GetTask(ctx, args.LastTaskID, true)
 	if err != nil {
-		return nil, &MCPToolError{Message: "get_task: " + err.Error()}
+		return nil, &MCPToolError{Message: "get_task: " + err.Error(), Category: observerstore.FailUnknown}
 	}
 	// Validate: status == completed AND kind == awaiting_user. The marker
 	// can live in info.Output (string), info.Result (legacy json.RawMessage),
@@ -1308,7 +1316,7 @@ func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	}
 	if info.Status != "completed" || kw.Kind != "awaiting_user" {
 		return nil, &MCPToolError{Message: fmt.Sprintf(
-			"not awaiting_user; status=%s, kind=%s", info.Status, kw.Kind)}
+			"not awaiting_user; status=%s, kind=%s", info.Status, kw.Kind), Category: observerstore.FailWrongContext}
 	}
 	// kw.SessionID is the slave's backend-native id (codex thread / claude
 	// session / opencode session) extracted from the slave's kind marker.
@@ -1316,7 +1324,7 @@ func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 	// the agentserver bridge id, which the backend cannot resume against —
 	// this was the issue #29 bug. The fix: error out instead of guessing.
 	if kw.SessionID == "" {
-		return nil, &MCPToolError{Message: "resume failed: slave never reported a backend session id; bridge id alone cannot resume a codex/claude conversation"}
+		return nil, &MCPToolError{Message: "resume failed: slave never reported a backend session id; bridge id alone cannot resume a codex/claude conversation", Category: observerstore.FailWrongContext}
 	}
 	slaveShortID := ""
 	if r.t.taskJournal != nil {
@@ -1356,7 +1364,7 @@ func (r *resumeTaskTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		TimeoutSeconds: timeout,
 	})
 	if err != nil {
-		return nil, &MCPToolError{Message: "delegate chat_resume: " + err.Error()}
+		return nil, &MCPToolError{Message: "delegate chat_resume: " + err.Error(), Category: observerstore.FailUnknown}
 	}
 	// Recover ChildAgentID from the prior delegation journal record so the
 	// resume record carries the same agent shortID. Falls through to "" if the

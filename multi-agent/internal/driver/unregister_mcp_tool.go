@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
+	"github.com/yourorg/multi-agent/internal/observerstore"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
@@ -33,24 +34,24 @@ func (u *unregisterSlaveMCPTool) Call(ctx context.Context, raw json.RawMessage) 
 		TimeoutSec        int    `json:"timeout_sec,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, &MCPToolError{Message: "invalid args: " + err.Error()}
+		return nil, &MCPToolError{Message: "invalid args: " + err.Error(), Category: observerstore.FailContractViolation}
 	}
 	if args.Name == "" {
-		return nil, &MCPToolError{Message: "name is required"}
+		return nil, &MCPToolError{Message: "name is required", Category: observerstore.FailContractViolation}
 	}
 	card, err := u.t.resolveAvailableAgent(ctx, args.TargetAgentID, args.TargetDisplayName)
 	if err != nil {
 		return nil, err
 	}
 	if !hasSkill(card, "unregister_mcp") {
-		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise unregister_mcp"}
+		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise unregister_mcp", Category: observerstore.FailStaleCapability}
 	}
 	prompt, err := json.Marshal(struct {
 		Name      string `json:"name"`
 		IfPresent bool   `json:"if_present"`
 	}{Name: args.Name, IfPresent: args.IfPresent})
 	if err != nil {
-		return nil, &MCPToolError{Message: err.Error()}
+		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailUnknown}
 	}
 	resp, err := u.t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
 		TargetID:       card.AgentID,
@@ -59,7 +60,7 @@ func (u *unregisterSlaveMCPTool) Call(ctx context.Context, raw json.RawMessage) 
 		TimeoutSeconds: args.TimeoutSec,
 	})
 	if err != nil {
-		return nil, &MCPToolError{Message: "delegate unregister_mcp task: " + err.Error()}
+		return nil, &MCPToolError{Message: "delegate unregister_mcp task: " + err.Error(), Category: observerstore.FailUnknown}
 	}
 	// DelegateTask succeeded — degrade journal append failure to a log entry
 	// so we still wait on the slave task. See §1.1 #1 of the 2026-06-13 review.

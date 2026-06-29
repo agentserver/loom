@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
+	"github.com/yourorg/multi-agent/internal/observerstore"
 )
 
 // bindThreadTool exposes Tools.BindThread over MCP. The Tools-level method
@@ -45,11 +47,14 @@ func (b *bindThreadTool) Call(ctx context.Context, raw json.RawMessage) (json.Ra
 		ThreadID string `json:"thread_id"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, &MCPToolError{Message: "invalid args: " + err.Error()}
+		return nil, &MCPToolError{Message: "invalid args: " + err.Error(), Category: observerstore.FailContractViolation}
 	}
 	result, err := b.t.BindThread(ctx, args.ThreadID)
 	if err != nil {
-		return nil, &MCPToolError{Message: err.Error()}
+		// BindThread can fail for several reasons (validation, downstream
+		// state checks). Leave untagged until BindThread itself returns
+		// typed errors a tag can be inferred from.
+		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailUnknown}
 	}
 	return json.Marshal(result)
 }

@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"runtime"
 	"time"
+
+	"github.com/yourorg/multi-agent/internal/observerstore"
 )
 
 type PowerShellConfig struct {
@@ -61,25 +63,25 @@ func (e *PowerShellExecutor) Run(ctx context.Context, t Task, sink Sink) (Result
 	defer sink.Close()
 	var req PowerShellRequest
 	if err := json.Unmarshal([]byte(t.Prompt), &req); err != nil {
-		return Result{}, fmt.Errorf("powershell prompt must be JSON: %w", err)
+		return Result{}, observerstore.Categorize(fmt.Errorf("powershell prompt must be JSON: %w", err), observerstore.FailContractViolation)
 	}
 	if req.Script == "" {
-		return Result{}, fmt.Errorf("powershell script is required")
+		return Result{}, observerstore.Categorize(fmt.Errorf("powershell script is required"), observerstore.FailContractViolation)
 	}
 	workdir := e.cfg.WorkDir
 	if workdir == "" {
 		var err error
 		workdir, err = os.Getwd()
 		if err != nil {
-			return Result{}, err
+			return Result{}, observerstore.Categorize(err, observerstore.FailUnknown)
 		}
 	}
 	if err := os.MkdirAll(workdir, 0o755); err != nil {
-		return Result{}, err
+		return Result{}, observerstore.Categorize(err, categorizeFSErr(err))
 	}
 	bin, err := e.resolveBin()
 	if err != nil {
-		return Result{}, err
+		return Result{}, observerstore.Categorize(err, observerstore.FailStaleCapability)
 	}
 
 	runCtx := ctx
@@ -115,16 +117,17 @@ func (e *PowerShellExecutor) Run(ctx context.Context, t Task, sink Sink) (Result
 	}
 	body, marshalErr := json.Marshal(result)
 	if marshalErr != nil {
-		return Result{}, marshalErr
+		return Result{}, observerstore.Categorize(marshalErr, observerstore.FailUnknown)
 	}
 	sink.Write("chunk", string(body))
 	if err != nil {
 		if runCtx.Err() == context.DeadlineExceeded {
-			return Result{Summary: string(body)}, fmt.Errorf("powershell timeout")
+			return Result{Summary: string(body)}, observerstore.Categorize(fmt.Errorf("powershell timeout"), observerstore.FailTimeout)
 		}
 		if _, ok := err.(*exec.ExitError); !ok {
-			return Result{Summary: string(body)}, fmt.Errorf("powershell start: %w", err)
+			return Result{Summary: string(body)}, observerstore.Categorize(fmt.Errorf("powershell start: %w", err), observerstore.FailStaleCapability)
 		}
+		// Non-zero exit from user script is content failure (see bash.go).
 		return Result{Summary: string(body)}, fmt.Errorf("powershell exit code %d", exitCode)
 	}
 	return Result{Summary: string(body)}, nil

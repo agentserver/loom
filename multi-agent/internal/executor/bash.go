@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"time"
+
+	"github.com/yourorg/multi-agent/internal/observerstore"
 )
 
 type BashConfig struct {
@@ -41,21 +43,23 @@ func (e *BashExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, erro
 	defer sink.Close()
 	var req BashRequest
 	if err := json.Unmarshal([]byte(t.Prompt), &req); err != nil {
-		return Result{}, fmt.Errorf("bash prompt must be JSON: %w", err)
+		return Result{}, observerstore.Categorize(fmt.Errorf("bash prompt must be JSON: %w", err), observerstore.FailContractViolation)
 	}
 	if req.Script == "" {
-		return Result{}, fmt.Errorf("bash script is required")
+		return Result{}, observerstore.Categorize(fmt.Errorf("bash script is required"), observerstore.FailContractViolation)
 	}
 	workdir := e.cfg.WorkDir
 	if workdir == "" {
 		var err error
 		workdir, err = os.Getwd()
 		if err != nil {
-			return Result{}, err
+			// Getwd failures (deleted cwd, lost permission to read it) don't
+			// fit any infrastructure category cleanly; leave unknown.
+			return Result{}, observerstore.Categorize(err, observerstore.FailUnknown)
 		}
 	}
 	if err := os.MkdirAll(workdir, 0o755); err != nil {
-		return Result{}, err
+		return Result{}, observerstore.Categorize(err, categorizeFSErr(err))
 	}
 
 	runCtx := ctx
@@ -100,13 +104,16 @@ func (e *BashExecutor) Run(ctx context.Context, t Task, sink Sink) (Result, erro
 	}
 	body, marshalErr := json.Marshal(result)
 	if marshalErr != nil {
-		return Result{}, marshalErr
+		return Result{}, observerstore.Categorize(marshalErr, observerstore.FailUnknown)
 	}
 	sink.Write("chunk", string(body))
 	if err != nil {
 		if runCtx.Err() == context.DeadlineExceeded {
-			return Result{Summary: string(body)}, fmt.Errorf("bash timeout")
+			return Result{Summary: string(body)}, observerstore.Categorize(fmt.Errorf("bash timeout"), observerstore.FailTimeout)
 		}
+		// Non-zero exit from the user-supplied script is a content failure,
+		// not a system one — leave it untagged (FailUnknown) so analytics
+		// don't bucket "user's grep returned 1" with infrastructure faults.
 		return Result{Summary: string(body)}, fmt.Errorf("bash exit code %d", exitCode)
 	}
 	return Result{Summary: string(body)}, nil
