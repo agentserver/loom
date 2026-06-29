@@ -28,7 +28,10 @@ func main() {
 
 func runServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	listen := fs.String("listen", ":18080", "listen address; loopback recommended (NOT FOR PRODUCTION)")
+	// Default to loopback: register has no auth, so an all-interfaces bind
+	// would let anyone on the network mint tokens. Override explicitly
+	// (e.g. --listen 0.0.0.0:18080) if you really want non-loopback.
+	listen := fs.String("listen", "127.0.0.1:18080", "listen address; loopback by default (NOT FOR PRODUCTION)")
 	workspace := fs.String("workspace-id", "auto", `default workspace_id for registrations; "auto" => "ws-eval-auto"`)
 	_ = fs.Parse(args)
 

@@ -29,8 +29,9 @@ go build -o bin/agentserver-stub ./tools/eval/agentserver-stub
 ## CLI
 
 ```bash
-# Start the server (foreground; default :18080, default workspace ws-eval-auto)
-agentserver-stub --listen :18080 --workspace-id auto
+# Start the server (foreground; default 127.0.0.1:18080, default workspace ws-eval-auto)
+agentserver-stub --listen 127.0.0.1:18080 --workspace-id auto
+# Override --listen 0.0.0.0:18080 only on a sealed eval host (register has no auth).
 
 # Issue credentials for one agent against a running server
 agentserver-stub issue --server http://127.0.0.1:18080 \
@@ -40,9 +41,11 @@ agentserver-stub issue --server http://127.0.0.1:18080 \
 #           "short_id":"drv-001"}
 ```
 
-Default listen port `18080` is chosen to avoid the `18091–18094` range that
-`tests/prod_test/E2E_RUNBOOK.md` reserves for client agent loopback. Bind to
-`127.0.0.1` in any setup where the host isn't a sealed eval VM.
+Default listen address `127.0.0.1:18080` is loopback-only on purpose — `register`
+has no authentication and an all-interfaces bind would let anyone on the network
+mint tokens. Port `18080` avoids the `18091–18094` range that
+`tests/prod_test/E2E_RUNBOOK.md` reserves for client agent loopback. Pass an
+explicit `--listen 0.0.0.0:...` only on a sealed eval host.
 
 ## HTTP surface
 
@@ -85,6 +88,7 @@ trap "kill $STUB_PID 2>/dev/null" EXIT
 until curl -fsS http://127.0.0.1:18080/healthz >/dev/null; do sleep 0.1; done
 
 # Sign one set of credentials per agent and inject them into each YAML.
+mkdir -p creds
 for role in driver slave-a slave-b observer; do
   agentserver-stub issue --server http://127.0.0.1:18080 \
     --role "$role" --short-id "${role}-001" > "creds/${role}.json"
@@ -109,7 +113,7 @@ agentserver-stub/
 ├── main.go              CLI: serve (default) + `issue` subcommand
 ├── server.go            handlers + mux wiring; both path schemes
 ├── tokens.go            HMAC-based deterministic token derivation
-├── stub_test.go         5 required tests + alias smoke
+├── stub_test.go         5 required tests + alias smoke + error-code coverage
 ├── README.md            this file
 └── examples/
     └── eval-bootstrap.sh   self-check used in PR validation
