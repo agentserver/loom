@@ -41,4 +41,13 @@ tools/eval/runner --spec tests/eval/golden/api-wrapper-for-local-service/first-t
 
 Oracle compares the MCP tool's structured response against
 `expected/response.json` per task; for `/healthz` the comparison ignores
-fields not in `expected.required_keys`.
+fields not in `expected.required_keys`. The same `required_keys` key is
+used in `acceptance/cases.jsonl` for the `happy_path_healthz` case — both
+oracle paths share one vocabulary so B3's `--cases` runner and the
+per-task runner can reuse the same partial-match helper.
+
+The `/echo/headers` endpoint normalizes response header names to
+snake_case lowercase (e.g. `X-Loom-Trace` → `x_loom_trace`). This
+convention is also recorded in `_shared/openapi.yaml` under
+`paths./echo/headers.get.description` so anyone building the固化 MCP from
+the spec lands on the same key naming as the fixtures expect.

@@ -559,6 +559,66 @@ func TestAcceptanceCaseInputsAreSelfContained(t *testing.T) {
 	}
 }
 
+// TestAcceptanceExpectedKeyVocabularyMatchesDocs guards a third-pass-found
+// drift: the top-level README and per-family READMEs commit to the
+// `required_keys`-only carve-out for partial-match comparison (api-wrapper
+// `/healthz`). Any acceptance case using a different synonym for the same
+// idea (e.g. `body_has`, `has_keys`, `body.required_keys`) means the B3
+// runner has to guess which convention to honor. Pin one: anything that
+// looks like a partial-match hint in an `expected` body must use the
+// `required_keys` key the docs commit to.
+//
+// We currently look for the two synonyms that showed up in earlier drafts.
+// Add more if review surfaces them.
+func TestAcceptanceExpectedKeyVocabularyMatchesDocs(t *testing.T) {
+	forbiddenSynonyms := []string{"body_has", "has_keys", "requiredKeys"}
+	for _, fam := range expectedFamilies {
+		fam := fam
+		t.Run(fam, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join(goldenRoot(t), fam, "acceptance", "cases.jsonl"))
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			for i, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+				if strings.TrimSpace(line) == "" {
+					continue
+				}
+				var c acceptanceCase
+				if err := json.Unmarshal([]byte(line), &c); err != nil {
+					t.Errorf("line %d: parse: %v", i+1, err)
+					continue
+				}
+				if len(c.Expected) == 0 {
+					continue
+				}
+				// Walk the expected blob's top-level keys AND its `body`
+				// subobject (where the drift was found) for any forbidden
+				// synonym.
+				var exp map[string]json.RawMessage
+				if err := json.Unmarshal(c.Expected, &exp); err != nil {
+					// non-object expected is fine (e.g. scalar) — nothing to scan.
+					continue
+				}
+				scan := func(obj map[string]json.RawMessage, where string) {
+					for _, syn := range forbiddenSynonyms {
+						if _, hit := obj[syn]; hit {
+							t.Errorf("%s: expected%s uses forbidden synonym %q — README commits to `required_keys` for partial-match hints; rename to keep B3 runner unambiguous",
+								c.Name, where, syn)
+						}
+					}
+				}
+				scan(exp, "")
+				if rawBody, ok := exp["body"]; ok {
+					var body map[string]json.RawMessage
+					if err := json.Unmarshal(rawBody, &body); err == nil {
+						scan(body, ".body")
+					}
+				}
+			}
+		})
+	}
+}
+
 func sortedKeys(m map[string]bool) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

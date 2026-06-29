@@ -43,6 +43,13 @@ paths:
   /echo/headers:
     get:
       summary: Return all received request headers as a JSON object.
+      description: |
+        Header names in the response are normalized to snake_case lowercase
+        (e.g. request `X-Loom-Trace: abc` is echoed as
+        `{"x_loom_trace": "abc"}`). This is the固化 MCP wrapper's
+        convention so downstream consumers (and the acceptance gate) can
+        match keys without per-call case folding. Hyphens become
+        underscores; ASCII letters are lowercased.
       responses:
         "200":
           description: headers
