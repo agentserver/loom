@@ -142,6 +142,107 @@ async def test_healthz(client: httpx.AsyncClient) -> None:
     assert resp.json() == {"status": "ok"}
 
 
+@pytest.mark.anyio
+async def test_chat_completions_stream_true_returns_sse(
+    client: httpx.AsyncClient,
+) -> None:
+    """`stream: true` must return text/event-stream chunks ending with `data: [DONE]`.
+
+    Codex CLI with `wire_api = "chat"` hard-codes `stream: true` (see
+    openai/codex#3513) and will not parse a non-stream JSON response. Without
+    this, the README's "wire into codex" example silently breaks.
+    """
+    import json
+
+    async with client:
+        async with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer x"},
+            json={
+                "model": "mock-glm-5.2",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": True,
+            },
+        ) as resp:
+            assert resp.status_code == 200
+            ctype = resp.headers.get("content-type", "")
+            assert "text/event-stream" in ctype, ctype
+            body = b""
+            async for chunk in resp.aiter_bytes():
+                body += chunk
+
+    text = body.decode("utf-8")
+    # Final sentinel
+    assert text.rstrip().endswith("data: [DONE]")
+    # At least one delta chunk with shape {"object":"chat.completion.chunk", ...}
+    data_lines = [
+        line[len("data: "):]
+        for line in text.splitlines()
+        if line.startswith("data: ") and line != "data: [DONE]"
+    ]
+    assert data_lines, "expected at least one streamed chunk"
+    chunks = [json.loads(d) for d in data_lines]
+    # All chunks share the same id and model
+    assert all(c["id"].startswith("chatcmpl-mock-") for c in chunks)
+    assert all(c["object"] == "chat.completion.chunk" for c in chunks)
+    assert all(c["model"] == "mock-glm-5.2" for c in chunks)
+    # The concatenated content delta must equal the same deterministic body the
+    # non-stream path returns — so reproducibility holds across stream modes.
+    content = "".join(
+        c["choices"][0]["delta"].get("content", "") for c in chunks
+    )
+    assert content.startswith("MOCK[") and content.endswith("]")
+    # And one chunk should carry a finish_reason
+    assert any(c["choices"][0].get("finish_reason") == "stop" for c in chunks)
+
+
+@pytest.mark.anyio
+async def test_chat_completions_stream_matches_nonstream_content(
+    client: httpx.AsyncClient,
+) -> None:
+    """Stream and non-stream paths must produce byte-identical content for the same input.
+
+    Otherwise a reproducibility re-run that flips stream-mode would diverge.
+    """
+    import json
+
+    payload_nonstream = {
+        "model": "mock-glm-5.2",
+        "messages": [{"role": "user", "content": "ping"}],
+        "stream": False,
+    }
+    payload_stream = {**payload_nonstream, "stream": True}
+
+    async with client:
+        a = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer x"},
+            json=payload_nonstream,
+        )
+        async with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer x"},
+            json=payload_stream,
+        ) as resp:
+            body = b""
+            async for chunk in resp.aiter_bytes():
+                body += chunk
+
+    non_stream_content = a.json()["choices"][0]["message"]["content"]
+    data_lines = [
+        line[len("data: "):]
+        for line in body.decode("utf-8").splitlines()
+        if line.startswith("data: ") and line != "data: [DONE]"
+    ]
+    streamed_content = "".join(
+        json.loads(d)["choices"][0]["delta"].get("content", "")
+        for d in data_lines
+    )
+    assert streamed_content == non_stream_content
+
+
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"

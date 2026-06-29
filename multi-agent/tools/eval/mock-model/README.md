@@ -35,7 +35,7 @@ randomness to seed.
 
 | Method | Path                    | Auth         | Notes                                          |
 |-------:|-------------------------|--------------|------------------------------------------------|
-| `POST` | `/v1/chat/completions`  | `Bearer ...` | OpenAI subset; **no streaming**, `created: 0` |
+| `POST` | `/v1/chat/completions`  | `Bearer ...` | OpenAI subset; `stream: true` returns SSE, `created: 0` |
 | `GET`  | `/v1/models`            | `Bearer ...` | Fixed list of three mock model ids             |
 | `GET`  | `/healthz`              | none         | Liveness probe                                 |
 
@@ -80,6 +80,13 @@ model          = "mock-glm-5.2"
 model_provider = "modelserver"
 ```
 
+> **codex version note.** `wire_api = "chat"` was removed from `openai/codex`
+> in 0.96 (Feb 2026); the last release supporting it is `0.93.0`. For
+> ablation runs against newer codex CLIs, drive the mock through eval-runner
+> (which talks raw `/v1/chat/completions`) rather than through codex.
+> codex's chat path always hard-codes `stream: true`
+> (openai/codex#3513), which this server now emits as SSE.
+
 ## Tests
 
 ```bash
@@ -92,7 +99,10 @@ uvicorn subprocess.
 
 ## Out of scope
 
-- Streaming (`stream: true`) — §D6a does not require it; real experiments use
-  the real gateway.
+- Streaming `usage` chunks — the SSE stream we emit covers role + content +
+  finish + `[DONE]` so codex-style clients parse it, but we do **not** emit a
+  trailing `usage` chunk (codex's chat path doesn't send
+  `stream_options.include_usage = true` anyway; openai/codex#3513). Use the
+  non-stream path for accurate token counts.
 - Token-accurate billing — `usage.{prompt,completion}_tokens` use a plain
   `len(.split())` and are stable, not OpenAI-tokenizer-exact.

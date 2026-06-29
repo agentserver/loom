@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import StreamingResponse
 
 from .deterministic import DEFAULT_CONTENT_PREFIX, deterministic_digest
 from .models import (
@@ -67,11 +69,11 @@ def _build_app() -> FastAPI:
         _require_bearer(authorization)
         return ModelList(data=[ModelInfo(id=mid) for mid in MOCK_MODEL_IDS])
 
-    @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
+    @app.post("/v1/chat/completions")
     async def chat_completions(
         req: ChatCompletionRequest,
         authorization: Optional[str] = Header(default=None),
-    ) -> ChatCompletionResponse:
+    ):
         _require_bearer(authorization)
         messages_payload = [m.model_dump() for m in req.messages]
         # Compute the digest once and derive both content and id from it.
@@ -83,6 +85,22 @@ def _build_app() -> FastAPI:
         prompt_text = "\n".join(m.content for m in req.messages)
         prompt_tokens = _count_tokens(prompt_text)
         completion_tokens = _count_tokens(content)
+
+        if req.stream:
+            # Codex CLI with `wire_api = "chat"` hard-codes `stream: true`
+            # (openai/codex#3513). We emit a minimal but spec-shaped SSE
+            # stream: role chunk, content chunk, finish chunk, `[DONE]`.
+            # The concatenated content equals the non-stream `content` body
+            # so reproducibility holds across stream modes.
+            return StreamingResponse(
+                _sse_chunks(
+                    chat_id=f"chatcmpl-mock-{hash_slice}",
+                    model=req.model,
+                    content=content,
+                ),
+                media_type="text/event-stream",
+            )
+
         return ChatCompletionResponse(
             id=f"chatcmpl-mock-{hash_slice}",
             model=req.model,
@@ -101,6 +119,47 @@ def _build_app() -> FastAPI:
         )
 
     return app
+
+
+def _sse_chunk(payload: dict) -> bytes:
+    """Format one OpenAI-style SSE event: `data: <compact-json>\\n\\n`.
+
+    Compact JSON (sort_keys + no whitespace) so the byte stream itself is
+    deterministic — concatenating two reproducibility-run streams should
+    diff cleanly.
+    """
+    line = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return f"data: {line}\n\n".encode("utf-8")
+
+
+async def _sse_chunks(
+    *, chat_id: str, model: str, content: str
+) -> AsyncIterator[bytes]:
+    """Emit role → content → finish → `[DONE]` chunks.
+
+    Each chunk has `object: "chat.completion.chunk"` and `created: 0` for the
+    same no-wall-clock-leak reason the non-stream path uses.
+    """
+    base = {
+        "id": chat_id,
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": model,
+    }
+    # 1. Role delta
+    yield _sse_chunk(
+        {**base, "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]}
+    )
+    # 2. Content delta (single chunk — keeps the stream deterministic and tiny)
+    yield _sse_chunk(
+        {**base, "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": None}]}
+    )
+    # 3. Finish delta
+    yield _sse_chunk(
+        {**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+    )
+    # 4. Sentinel
+    yield b"data: [DONE]\n\n"
 
 
 app = _build_app()
