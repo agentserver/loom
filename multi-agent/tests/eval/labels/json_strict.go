@@ -6,6 +6,7 @@ package labels
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 func jsonUnmarshalStrict(b []byte, out any) error {
@@ -14,11 +15,11 @@ func jsonUnmarshalStrict(b []byte, out any) error {
 	if err := dec.Decode(out); err != nil {
 		return err
 	}
-	// Reject trailing tokens so accidental concatenation surfaces.
+	// Reject trailing tokens so accidental concatenation surfaces — the
+	// previous version swallowed the second Decode's error, defeating the
+	// point of the check.
 	if dec.More() {
-		// Drain to produce a meaningful error.
-		var tail any
-		_ = dec.Decode(&tail)
+		return fmt.Errorf("unexpected trailing token at offset %d", dec.InputOffset())
 	}
 	return nil
 }
