@@ -15,8 +15,8 @@ slim while still exercising the schema.
 
 | Path | Role |
 |---|---|
-| `first-task/`              | 1×1 PNG — minimal happy case |
-| `reuse-1/`, `reuse-2/`, `reuse-3/` | 2×1, 3×2, 4×4 PNGs of varying color modes |
+| `first-task/`              | 1×1 LA PNG — minimal happy case |
+| `reuse-1/`, `reuse-2/`, `reuse-3/` | 2×1 LA, 3×2 RGBA, 4×4 RGBA PNGs |
 | `acceptance/cases.jsonl`   | Stage B固化 gate (includes a corrupt-file negative) |
 
 ## Running once the MCP exists

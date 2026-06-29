@@ -19,6 +19,8 @@
 package golden
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -279,6 +281,165 @@ func TestAcceptanceCasesAreValid(t *testing.T) {
 				}
 				sort.Strings(keys)
 				t.Errorf("%s acceptance: expected exactly one tool per family, got %v", fam, keys)
+			}
+		})
+	}
+}
+
+// TestAcceptanceToolMatchesSpec catches the case where a family's
+// acceptance/cases.jsonl names tool "X" but the spec.yaml files declare
+// capability_requirements.tools=[Y] — i.e., the固化 tool name drifted on
+// one side and not the other. Stage C lookup would then miss every reuse
+// task even though both files individually parse fine.
+func TestAcceptanceToolMatchesSpec(t *testing.T) {
+	root := goldenRoot(t)
+	for _, fam := range expectedFamilies {
+		fam := fam
+		t.Run(fam, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join(root, fam, "acceptance", "cases.jsonl"))
+			if err != nil {
+				t.Fatalf("read acceptance: %v", err)
+			}
+			acceptTool := ""
+			for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+				if strings.TrimSpace(line) == "" {
+					continue
+				}
+				var c acceptanceCase
+				if err := json.Unmarshal([]byte(line), &c); err != nil {
+					t.Fatalf("parse acceptance line: %v", err)
+				}
+				if acceptTool == "" {
+					acceptTool = c.Tool
+				}
+			}
+			if acceptTool == "" {
+				t.Fatalf("acceptance cases empty")
+			}
+			for _, sub := range requiredTaskDirs {
+				specPath := filepath.Join(root, fam, sub, "spec.yaml")
+				sraw, err := os.ReadFile(specPath)
+				if err != nil {
+					t.Errorf("read %s: %v", specPath, err)
+					continue
+				}
+				var s taskSpec
+				if err := yaml.Unmarshal(sraw, &s); err != nil {
+					t.Errorf("parse %s: %v", specPath, err)
+					continue
+				}
+				found := false
+				for _, tool := range s.CapabilityRequirements.Tools {
+					if tool == acceptTool {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("%s/%s spec.tools=%v does not include acceptance tool %q",
+						fam, sub, s.CapabilityRequirements.Tools, acceptTool)
+				}
+			}
+		})
+	}
+}
+
+// pngIHDR parses a PNG header and returns (width, height, color-type byte, ok).
+func pngIHDR(data []byte) (uint32, uint32, byte, bool) {
+	if len(data) < 33 {
+		return 0, 0, 0, false
+	}
+	sig := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}
+	for i, b := range sig {
+		if data[i] != b {
+			return 0, 0, 0, false
+		}
+	}
+	if string(data[12:16]) != "IHDR" {
+		return 0, 0, 0, false
+	}
+	w := uint32(data[16])<<24 | uint32(data[17])<<16 | uint32(data[18])<<8 | uint32(data[19])
+	h := uint32(data[20])<<24 | uint32(data[21])<<16 | uint32(data[22])<<8 | uint32(data[23])
+	return w, h, data[25], true
+}
+
+// pngColorMode maps PNG IHDR color-type bytes to the PIL/Pillow-style
+// label that image_metadata returns. Only the modes our fixtures use are
+// covered; anything else returns "" so the test fails loudly.
+func pngColorMode(ct byte) string {
+	switch ct {
+	case 0:
+		return "L"
+	case 2:
+		return "RGB"
+	case 3:
+		return "P"
+	case 4:
+		return "LA"
+	case 6:
+		return "RGBA"
+	default:
+		return ""
+	}
+}
+
+// TestImageMetadataMatchesPNGFile cross-checks expected/metadata.json
+// against the actual PNG on disk for every task in image-metadata-extractor.
+// This catches the easy class of bug where someone hand-edits metadata.json
+// (or swaps the .png) without re-running the extractor.
+func TestImageMetadataMatchesPNGFile(t *testing.T) {
+	famDir := filepath.Join(goldenRoot(t), "image-metadata-extractor")
+	for _, sub := range requiredTaskDirs {
+		sub := sub
+		t.Run(sub, func(t *testing.T) {
+			pngPath := filepath.Join(famDir, sub, "input", "photo.png")
+			pngBytes, err := os.ReadFile(pngPath)
+			if err != nil {
+				t.Fatalf("read png: %v", err)
+			}
+			w, h, ct, ok := pngIHDR(pngBytes)
+			if !ok {
+				t.Fatalf("not a PNG: %s", pngPath)
+			}
+			mode := pngColorMode(ct)
+			if mode == "" {
+				t.Fatalf("unmapped PNG color-type %d in %s", ct, pngPath)
+			}
+			sum := sha256.Sum256(pngBytes)
+			actualSHA := hex.EncodeToString(sum[:])
+
+			metaRaw, err := os.ReadFile(filepath.Join(famDir, sub, "expected", "metadata.json"))
+			if err != nil {
+				t.Fatalf("read metadata: %v", err)
+			}
+			var meta struct {
+				Width     uint32 `json:"width"`
+				Height    uint32 `json:"height"`
+				Format    string `json:"format"`
+				ColorMode string `json:"color_mode"`
+				Bytes     int    `json:"bytes"`
+				SHA256    string `json:"sha256"`
+			}
+			if err := json.Unmarshal(metaRaw, &meta); err != nil {
+				t.Fatalf("parse metadata: %v", err)
+			}
+			if meta.Width != w {
+				t.Errorf("%s: meta.width=%d, png IHDR=%d", sub, meta.Width, w)
+			}
+			if meta.Height != h {
+				t.Errorf("%s: meta.height=%d, png IHDR=%d", sub, meta.Height, h)
+			}
+			if meta.Format != "PNG" {
+				t.Errorf("%s: meta.format=%q want PNG", sub, meta.Format)
+			}
+			if meta.ColorMode != mode {
+				t.Errorf("%s: meta.color_mode=%q, but PNG IHDR color-type=%d → %q", sub, meta.ColorMode, ct, mode)
+			}
+			if meta.Bytes != len(pngBytes) {
+				t.Errorf("%s: meta.bytes=%d, file size=%d", sub, meta.Bytes, len(pngBytes))
+			}
+			if !strings.EqualFold(meta.SHA256, actualSHA) {
+				t.Errorf("%s: meta.sha256=%s, actual=%s", sub, meta.SHA256, actualSHA)
 			}
 		})
 	}
