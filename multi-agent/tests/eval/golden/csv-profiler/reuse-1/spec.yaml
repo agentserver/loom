@@ -1,0 +1,18 @@
+family: csv-profiler
+id: csv-profiler/reuse-1
+kind: reuse
+intent:
+  goal: Profile a survey-response CSV with mixed nulls.
+  success_criteria:
+    - "rows == 4"
+    - "cols == 4"
+    - "column 'age' nulls == 1"
+inputs:
+  - path: input/survey.csv
+expected:
+  artifacts:
+    - path: expected/profile.json
+capability_requirements:
+  skills: []
+  tools:
+    - csv_profile

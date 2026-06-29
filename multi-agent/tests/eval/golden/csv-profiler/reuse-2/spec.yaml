@@ -1,0 +1,18 @@
+family: csv-profiler
+id: csv-profiler/reuse-2
+kind: reuse
+intent:
+  goal: Profile a sensor-readings CSV with a single numeric column.
+  success_criteria:
+    - "rows == 6"
+    - "cols == 2"
+    - "column 'reading' max == 100.0"
+inputs:
+  - path: input/sensors.csv
+expected:
+  artifacts:
+    - path: expected/profile.json
+capability_requirements:
+  skills: []
+  tools:
+    - csv_profile

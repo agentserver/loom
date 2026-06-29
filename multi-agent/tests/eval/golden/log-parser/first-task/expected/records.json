@@ -1,0 +1,5 @@
+[
+  {"remote": "10.0.0.1", "ts": "2026-06-29T09:00:00Z", "method": "GET",  "path": "/index.html",  "status": 200, "bytes": 1024},
+  {"remote": "10.0.0.2", "ts": "2026-06-29T09:00:05Z", "method": "POST", "path": "/api/login",   "status": 401, "bytes": 256},
+  {"remote": "10.0.0.3", "ts": "2026-06-29T09:00:10Z", "method": "GET",  "path": "/missing",     "status": 404, "bytes": 128}
+]

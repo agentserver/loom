@@ -1,0 +1,10 @@
+{
+  "rows": 4,
+  "cols": 4,
+  "columns": [
+    {"name": "id", "dtype": "string", "nulls": 0},
+    {"name": "age", "dtype": "int", "nulls": 1, "min": 21, "max": 34, "mean": 28.0},
+    {"name": "score", "dtype": "float", "nulls": 0, "min": 6.0, "max": 9.5, "mean": 7.75},
+    {"name": "group", "dtype": "string", "nulls": 0}
+  ]
+}

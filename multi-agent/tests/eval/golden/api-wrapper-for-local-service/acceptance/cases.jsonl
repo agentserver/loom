@@ -1,0 +1,7 @@
+{"name": "happy_path_echo_text", "tool": "local_echo_call", "input": {"method": "echo", "body": "ping"}, "expected": {"status": 200, "body": "ping"}}
+{"name": "happy_path_echo_json", "tool": "local_echo_call", "input": {"method": "echo_json", "body": {"k": "v"}}, "expected": {"status": 200, "body": {"k": "v"}}}
+{"name": "happy_path_headers", "tool": "local_echo_call", "input": {"method": "echo_headers", "headers": {"X-Loom-Trace": "t-1"}}, "expected": {"status": 200, "body": {"x_loom_trace": "t-1"}}}
+{"name": "happy_path_healthz", "tool": "local_echo_call", "input": {"method": "health"}, "expected": {"status": 200, "body_has": ["status"]}}
+{"name": "boundary_empty_body", "tool": "local_echo_call", "input": {"method": "echo", "body": ""}, "expected": {"status": 200, "body": ""}}
+{"name": "error_unknown_method", "tool": "local_echo_call", "input": {"method": "delete_database"}, "expected_error": "unknown method"}
+{"name": "negative_service_down", "tool": "local_echo_call", "input": {"method": "echo", "body": "x", "base_url": "http://127.0.0.1:1"}, "expected_error": "connection refused"}

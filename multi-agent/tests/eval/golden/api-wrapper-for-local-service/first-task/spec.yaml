@@ -1,0 +1,18 @@
+family: api-wrapper-for-local-service
+id: api-wrapper-for-local-service/first-task
+kind: first
+intent:
+  goal: Call the local /echo endpoint with a plain-text body and capture the response.
+  success_criteria:
+    - "status == 200"
+    - "body == 'hello loom'"
+inputs:
+  - path: input/request.json
+expected:
+  artifacts:
+    - path: expected/response.json
+capability_requirements:
+  skills:
+    - run_slave_bash
+  tools:
+    - local_echo_call

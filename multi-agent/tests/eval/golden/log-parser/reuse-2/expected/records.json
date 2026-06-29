@@ -1,0 +1,4 @@
+[
+  {"remote": "127.0.0.1", "user": "alice", "ts": "2026-06-29T11:00:00Z", "method": "GET",  "path": "/home",   "status": 200, "bytes": 4096},
+  {"remote": "127.0.0.1", "user": "alice", "ts": "2026-06-29T11:00:02Z", "method": "POST", "path": "/submit", "status": 500, "bytes": 64}
+]

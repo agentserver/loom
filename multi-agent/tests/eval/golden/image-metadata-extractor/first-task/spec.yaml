@@ -1,0 +1,18 @@
+family: image-metadata-extractor
+id: image-metadata-extractor/first-task
+kind: first
+intent:
+  goal: Extract width/height/format/sha256 from a 1×1 PNG.
+  success_criteria:
+    - "width == 1 and height == 1"
+    - "format == 'PNG'"
+inputs:
+  - path: input/photo.png
+expected:
+  artifacts:
+    - path: expected/metadata.json
+capability_requirements:
+  skills:
+    - run_slave_bash
+  tools:
+    - image_metadata

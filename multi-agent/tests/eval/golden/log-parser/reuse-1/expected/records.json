@@ -1,0 +1,4 @@
+[
+  {"remote": "192.168.10.7", "ts": "2026-06-29T10:11:00Z", "method": "GET", "path": "/health",  "status": 200, "bytes": 2},
+  {"remote": "192.168.10.7", "ts": "2026-06-29T10:11:30Z", "method": "GET", "path": "/metrics", "status": 200, "bytes": 8192}
+]

@@ -1,0 +1,17 @@
+family: log-parser
+id: log-parser/reuse-2
+kind: reuse
+intent:
+  goal: Parse an apache-common log (different format) — tests format=apache-common.
+  success_criteria:
+    - "len(records) == 2"
+    - "records[1].status == 500"
+inputs:
+  - path: input/access.log
+expected:
+  artifacts:
+    - path: expected/records.json
+capability_requirements:
+  skills: []
+  tools:
+    - parse_access_log

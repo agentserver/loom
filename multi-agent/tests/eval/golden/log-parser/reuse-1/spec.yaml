@@ -1,0 +1,17 @@
+family: log-parser
+id: log-parser/reuse-1
+kind: reuse
+intent:
+  goal: Parse a second nginx-combined log; verify the固化 tool handles a different host.
+  success_criteria:
+    - "len(records) == 2"
+    - "all records remote == 192.168.10.7"
+inputs:
+  - path: input/access.log
+expected:
+  artifacts:
+    - path: expected/records.json
+capability_requirements:
+  skills: []
+  tools:
+    - parse_access_log

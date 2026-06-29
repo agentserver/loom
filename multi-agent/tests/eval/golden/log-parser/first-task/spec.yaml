@@ -1,0 +1,19 @@
+family: log-parser
+id: log-parser/first-task
+kind: first
+intent:
+  goal: Parse a small nginx-combined access log into structured records.
+  success_criteria:
+    - "len(records) == 3"
+    - "records[0].status == 200"
+    - "records[2].status == 404"
+inputs:
+  - path: input/access.log
+expected:
+  artifacts:
+    - path: expected/records.json
+capability_requirements:
+  skills:
+    - run_slave_bash
+  tools:
+    - parse_access_log

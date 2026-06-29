@@ -1,0 +1,58 @@
+openapi: 3.0.3
+info:
+  title: local-echo
+  version: "0.1.0"
+servers:
+  - url: http://localhost:8080
+paths:
+  /echo:
+    post:
+      summary: Echo a plain-text body back.
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema: {type: string}
+      responses:
+        "200":
+          description: echoed
+          content:
+            text/plain:
+              schema: {type: string}
+  /echo/json:
+    post:
+      summary: Echo a JSON payload back unchanged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: true}
+      responses:
+        "200":
+          description: echoed
+          content:
+            application/json:
+              schema: {type: object}
+  /echo/headers:
+    get:
+      summary: Return all received request headers as a JSON object.
+      responses:
+        "200":
+          description: headers
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: {type: string}}
+  /healthz:
+    get:
+      summary: Liveness probe.
+      responses:
+        "200":
+          description: alive
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: {type: string, enum: [ok]}
+                  uptime_s: {type: number}

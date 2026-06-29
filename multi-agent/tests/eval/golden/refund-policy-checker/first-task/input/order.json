@@ -1,0 +1,8 @@
+{
+  "order_id": "O-100",
+  "delivered_at": "2026-05-01T00:00:00Z",
+  "category": "electronics",
+  "damaged_on_arrival": false,
+  "amount": 199.0,
+  "as_of": "2026-06-29T00:00:00Z"
+}

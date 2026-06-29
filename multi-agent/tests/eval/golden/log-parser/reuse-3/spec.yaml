@@ -1,0 +1,17 @@
+family: log-parser
+id: log-parser/reuse-3
+kind: reuse
+intent:
+  goal: Parse a JSON-lines structured access log — tests format=json-lines.
+  success_criteria:
+    - "len(records) == 2"
+    - "records[0].path == /api/v2/items"
+inputs:
+  - path: input/access.jsonl
+expected:
+  artifacts:
+    - path: expected/records.json
+capability_requirements:
+  skills: []
+  tools:
+    - parse_access_log

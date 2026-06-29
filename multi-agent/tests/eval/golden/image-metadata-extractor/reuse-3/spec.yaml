@@ -1,0 +1,16 @@
+family: image-metadata-extractor
+id: image-metadata-extractor/reuse-3
+kind: reuse
+intent:
+  goal: 4×4 RGBA PNG — slightly larger sample.
+  success_criteria:
+    - "width == 4 and height == 4"
+inputs:
+  - path: input/photo.png
+expected:
+  artifacts:
+    - path: expected/metadata.json
+capability_requirements:
+  skills: []
+  tools:
+    - image_metadata

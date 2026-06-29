@@ -1,0 +1,17 @@
+family: csv-profiler
+id: csv-profiler/reuse-3
+kind: reuse
+intent:
+  goal: Profile a 1-row CSV (boundary — minimum non-empty case).
+  success_criteria:
+    - "rows == 1"
+    - "cols == 3"
+inputs:
+  - path: input/singleton.csv
+expected:
+  artifacts:
+    - path: expected/profile.json
+capability_requirements:
+  skills: []
+  tools:
+    - csv_profile

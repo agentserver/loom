@@ -1,0 +1,6 @@
+{"name": "happy_path_nginx_combined", "tool": "parse_access_log", "input": {"path": "tests/eval/golden/log-parser/first-task/input/access.log", "format": "nginx-combined"}, "expected": {"count": 3, "first_status": 200}}
+{"name": "happy_path_apache_common", "tool": "parse_access_log", "input": {"path": "tests/eval/golden/log-parser/reuse-2/input/access.log", "format": "apache-common"}, "expected": {"count": 2, "last_status": 500}}
+{"name": "happy_path_json_lines", "tool": "parse_access_log", "input": {"path": "tests/eval/golden/log-parser/reuse-3/input/access.jsonl", "format": "json-lines"}, "expected": {"count": 2}}
+{"name": "edge_empty_log", "tool": "parse_access_log", "input": {"path": "tests/eval/golden/log-parser/acceptance/fixtures/empty.log", "format": "nginx-combined"}, "expected": {"count": 0}}
+{"name": "error_unknown_format", "tool": "parse_access_log", "input": {"path": "tests/eval/golden/log-parser/first-task/input/access.log", "format": "syslog-rfc5424"}, "expected_error": "unsupported format"}
+{"name": "negative_garbage_line", "tool": "parse_access_log", "input": {"path": "tests/eval/golden/log-parser/acceptance/fixtures/garbage.log", "format": "nginx-combined"}, "expected_error": "parse failed at line 1"}

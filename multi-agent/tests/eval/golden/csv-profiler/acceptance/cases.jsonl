@@ -1,0 +1,6 @@
+{"name": "happy_path_small_sales", "tool": "csv_profile", "input": {"path": "tests/eval/golden/csv-profiler/first-task/input/sales.csv"}, "expected": {"rows": 5, "cols": 3}}
+{"name": "edge_nulls_present", "tool": "csv_profile", "input": {"path": "tests/eval/golden/csv-profiler/reuse-1/input/survey.csv"}, "expected": {"rows": 4, "cols": 4, "any_nulls": true}}
+{"name": "boundary_single_row", "tool": "csv_profile", "input": {"path": "tests/eval/golden/csv-profiler/reuse-3/input/singleton.csv"}, "expected": {"rows": 1, "cols": 3}}
+{"name": "error_missing_file", "tool": "csv_profile", "input": {"path": "/tmp/does-not-exist-fb73.csv"}, "expected_error": "file not found"}
+{"name": "negative_not_a_csv", "tool": "csv_profile", "input": {"path": "tests/eval/golden/csv-profiler/acceptance/cases.jsonl"}, "expected_error": "not a valid CSV"}
+{"name": "boundary_empty_file", "tool": "csv_profile", "input": {"path": "tests/eval/golden/csv-profiler/acceptance/fixtures/empty.csv"}, "expected_error": "empty file"}
