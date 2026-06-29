@@ -1,0 +1,29 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://loom.local/eval/labels/ground_truth_context.schema.json",
+  "title": "GroundTruthContext",
+  "description": "Per-task ground-truth annotation for the §F4 RoutingAccuracy metric. Each task has exactly ONE correct target context (singular form), keyed by an agent_role and a context_id that must appear in the workload/family spec.yaml required_contexts[] block.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["agent_role", "context_id", "rationale"],
+  "properties": {
+    "agent_role": {
+      "type": "string",
+      "description": "Which agent role the task must be dispatched to.",
+      "enum": ["driver", "slave", "sandbox"]
+    },
+    "context_id": {
+      "type": "string",
+      "description": "Stable id matching required_contexts[].role in the workload/family spec.yaml. Free-form kebab-case (e.g. slave-linux-server, slave-windows-desktop, sandbox-cloud).",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "minLength": 3,
+      "maxLength": 64
+    },
+    "rationale": {
+      "type": "string",
+      "description": "Human-readable justification for why this is the unique correct context. Used by reviewers to audit annotation quality.",
+      "minLength": 8,
+      "maxLength": 512
+    }
+  }
+}

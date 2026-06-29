@@ -1,0 +1,18 @@
+{
+  "task_id": "refund-policy-checker-reuse-3",
+  "ground_truth_context": {
+    "agent_role": "sandbox",
+    "context_id": "sandbox-cloud",
+    "rationale": "Reuse on live tickets again with a refreshed credential alias; demonstrates the registered checker reuses cleanly across credential rotations without re-scaffolding."
+  },
+  "context_ground_truth": {
+    "required_capabilities": [
+      {"kind": "tool", "name": "node", "min_version": "20"},
+      {"kind": "platform", "os": "linux"},
+      {"kind": "network", "reach": "internet"},
+      {"kind": "credential", "alias": "payments_gateway_readonly_v2"}
+    ],
+    "forbidden_capabilities": [],
+    "credential_aliases": ["payments_gateway_readonly_v2"]
+  }
+}

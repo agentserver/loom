@@ -1,0 +1,21 @@
+{
+  "task_id": "windows-only-artifact",
+  "ground_truth_context": {
+    "agent_role": "slave",
+    "context_id": "slave-windows-desktop",
+    "rationale": "Artifact build needs native PowerShell + signtool.exe and a Windows-only SDK; cross-compiling from linux cannot satisfy the signature oracle. slave-windows-desktop is the only context with the required toolchain."
+  },
+  "context_ground_truth": {
+    "required_capabilities": [
+      {"kind": "tool", "name": "powershell", "min_version": "7.4"},
+      {"kind": "tool", "name": "signtool"},
+      {"kind": "tool", "name": "msbuild"},
+      {"kind": "platform", "os": "windows", "arch": "amd64"},
+      {"kind": "file", "kind_detail": "repo", "path_pattern": "fixtures/win-artifact"}
+    ],
+    "forbidden_capabilities": [
+      {"kind": "platform", "os": "linux"}
+    ],
+    "credential_aliases": []
+  }
+}

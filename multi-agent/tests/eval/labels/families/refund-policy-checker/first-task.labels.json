@@ -1,0 +1,18 @@
+{
+  "task_id": "refund-policy-checker-first-task",
+  "ground_truth_context": {
+    "agent_role": "driver",
+    "context_id": "driver-linux-laptop",
+    "rationale": "Stage A: the policy DSL is novel; the driver must scaffold the checker, walk the user through the rule schema, and only then register the MCP. Routing to a slave would skip the user review step that the lifecycle claim depends on."
+  },
+  "context_ground_truth": {
+    "required_capabilities": [
+      {"kind": "tool", "name": "node", "min_version": "20"},
+      {"kind": "tool", "name": "jq"},
+      {"kind": "platform", "os": "linux"},
+      {"kind": "file", "kind_detail": "fixture", "path_pattern": "fixtures/refund-policy/rules.json"}
+    ],
+    "forbidden_capabilities": [],
+    "credential_aliases": []
+  }
+}

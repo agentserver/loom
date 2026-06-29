@@ -1,0 +1,18 @@
+{
+  "task_id": "refund-policy-checker-reuse-1",
+  "ground_truth_context": {
+    "agent_role": "sandbox",
+    "context_id": "sandbox-cloud",
+    "rationale": "Reuse exercises checking real refund payloads against a credential-bound payments gateway; sandbox-cloud is the only context allowed to broker the gateway credential."
+  },
+  "context_ground_truth": {
+    "required_capabilities": [
+      {"kind": "tool", "name": "node", "min_version": "20"},
+      {"kind": "platform", "os": "linux"},
+      {"kind": "network", "reach": "internet"},
+      {"kind": "credential", "alias": "payments_gateway_readonly"}
+    ],
+    "forbidden_capabilities": [],
+    "credential_aliases": ["payments_gateway_readonly"]
+  }
+}

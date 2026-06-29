@@ -1,0 +1,18 @@
+{
+  "task_id": "log-parser-reuse-2",
+  "ground_truth_context": {
+    "agent_role": "slave",
+    "context_id": "slave-windows-desktop",
+    "rationale": "Second reuse exercises cross-platform applicability: same MCP must satisfy a Windows event log path. Driver / linux-server cannot read native Windows event logs without exporting first."
+  },
+  "context_ground_truth": {
+    "required_capabilities": [
+      {"kind": "tool", "name": "python", "min_version": "3.10"},
+      {"kind": "tool", "name": "regex"},
+      {"kind": "platform", "os": "windows", "arch": "amd64"},
+      {"kind": "file", "kind_detail": "dataset", "path_pattern": "C:/Windows/System32/winevt/Logs/*.evtx"}
+    ],
+    "forbidden_capabilities": [],
+    "credential_aliases": []
+  }
+}
