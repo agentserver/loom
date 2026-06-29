@@ -90,7 +90,7 @@
 19 ← 09
 ```
 
-Soft edges are noted per-item under **Soft deps**. The earlier draft had two contradictions, both fixed: (1) `11 → 12` was a cycle since item 11 also listed 12 as preferred — 12 now depends on 09, and 11 and 12 are siblings whose order is operator-chosen; (2) `09 → 10` was tagged "soft-precedes" in the graph while item 10 listed 09 as Hard — now a hard edge consistent with item 10. Items 17, 18, 21 are explicitly independent (no hard deps).
+Soft edges are noted per-item under **Soft deps**. The earlier draft had two contradictions, both fixed: (1) `11 → 12` was a cycle since item 11 also listed 12 as preferred — 12 now depends on 09, and 11 and 12 are siblings whose order is operator-chosen; (2) `09 → 10` was tagged "soft-precedes" in the graph while item 10 listed 09 as Hard — now a hard edge consistent with item 10. Items 16, 17, 18, 21 are explicitly independent (no hard deps); 16/17/18 soft-prefer 01.
 
 ## Phase Tracks
 
@@ -197,7 +197,10 @@ Items run on three parallel **tracks**, not sequential phases. Track labels repl
 
 **Acceptance:**
 
-- `rg "json.Unmarshal\\(.*Card|parseAgentCard|parseAgentCapabilities|agentsJSON|ExtractFromAgentCard"` outside `internal/agentcard/` matches only test files. (`internal/capability/types.go:40` either moves into the new package or becomes a thin wrapper that delegates to it; either way the canonical schema lives in one place.)
+- All ad-hoc card-schema parsing is consolidated into `internal/agentcard`. Specifically:
+  - `rg "json.Unmarshal\\(.*Card|parseAgentCard|parseAgentCapabilities"` outside `internal/agentcard/` matches only `_test.go` fixtures.
+  - `internal/capability/types.go:40 ExtractFromAgentCard` either moves into `internal/agentcard` or is reduced to a body that delegates to `agentcard.Parse(card)` (acceptance: `rg "json.Unmarshal" internal/capability/types.go` returns no hits — wrapper is fine, but it must not re-parse).
+  - `internal/planner/prompts.go agentsJSON` is allowed to keep its name as a production prompt formatter, but its body must consume `agentcard.Parsed` (acceptance: `rg "json.Unmarshal" internal/planner/prompts.go` returns no hits).
 - Unit tests cover missing/null/malformed cards and known field extraction.
 - No behavior regression in `list_agents`, planner prompts, dry-run, route validation (existing tests for those flows still pass unchanged).
 
@@ -250,7 +253,9 @@ Items run on three parallel **tracks**, not sequential phases. Track labels repl
 
 - Dry-run and actual dispatch produce identical eligibility verdicts for the same `(card, req)` pair (table-driven test).
 - Missing reasons include field-specific entries such as `skill:bash`, `mcp_server:foo`, `data.kind:finance`.
-- After PR 2: the legacy skill-only matcher in `internal/orchestrator/route.go` (today: `agentHasRequiredSkills` at line 121, called from `selectAgentForTask` at line 98, reading `card.Skills`) is deleted, and `rg "agentHasRequiredSkills|card\.Skills" multi-agent/internal/orchestrator/` returns no hits outside `_test.go`.
+- After PR 2: no production code path performs skill-only matching outside `internal/agentcard.Match`. Concretely:
+  - The legacy `agentHasRequiredSkills` helper (today at `internal/orchestrator/route.go:121`, called from `selectAgentForTask` at line 98) is deleted regardless of whether 03 has already moved or removed `internal/orchestrator/`. Phrased as a repo-wide assertion that survives the move: `rg "agentHasRequiredSkills" multi-agent/ --glob '!**/*_test.go'` returns zero hits.
+  - The unified route selector — wherever it lives after 03 (`internal/orchestration/...` or the surviving location) — calls `agentcard.Match` and not raw `card.Skills` membership checks. Acceptance: `rg "\\.Skills\\b" multi-agent/internal/{orchestration,orchestrator,dispatch,driver}/ --glob '!**/*_test.go'` either returns zero hits or only the lines inside `internal/agentcard` itself (paths that no longer exist are simply skipped by `rg`, which is fine — the invariant is "no skill-only matcher anywhere in dispatch", not "this specific file still exists").
 
 **Hard deps:** 04, 05.
 **Soft deps:** none.
@@ -412,7 +417,7 @@ Items run on three parallel **tracks**, not sequential phases. Track labels repl
 - Backward compatibility aliases are documented in `CHANGELOG.md` if kept.
 
 **Hard deps:** 09.
-**Soft deps:** 02 (master-only already normalized).
+**Soft deps:** 02 (master-only already normalized), 08 (data-setup tool names known — the "≤ 14 tools after data setup tools are included" target assumes 08a's `scan_slave_data` / `commit_data_assets` are either landed or have agreed-on names; if 10 ships before 08, drop the "after data setup" qualifier from the budget).
 
 ### 11. Remove codex app-server unsafe humanloop gate
 
