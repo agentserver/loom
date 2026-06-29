@@ -11,7 +11,7 @@ from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException
 
-from .deterministic import DEFAULT_CONTENT_PREFIX, deterministic_content
+from .deterministic import DEFAULT_CONTENT_PREFIX, deterministic_digest
 from .models import (
     MOCK_MODEL_IDS,
     ChatCompletionRequest,
@@ -74,10 +74,12 @@ def _build_app() -> FastAPI:
     ) -> ChatCompletionResponse:
         _require_bearer(authorization)
         messages_payload = [m.model_dump() for m in req.messages]
-        content = deterministic_content(req.model, messages_payload, prefix=_prefix())
-        # Build a deterministic id from the same payload so callers can cache.
-        # The hash slice in `content` is already stable, so reuse it.
-        hash_slice = content[len(_prefix()) + 1 : -1]
+        # Compute the digest once and derive both content and id from it.
+        # Avoids re-reading the prefix env var (which would race if changed
+        # between the two reads) and the prior `content[len(prefix)+1:-1]`
+        # slice, which was fragile if the prefix happened to contain `[`.
+        hash_slice = deterministic_digest(req.model, messages_payload)
+        content = f"{_prefix()}[{hash_slice}]"
         prompt_text = "\n".join(m.content for m in req.messages)
         prompt_tokens = _count_tokens(prompt_text)
         completion_tokens = _count_tokens(content)

@@ -2,7 +2,26 @@
 
 from __future__ import annotations
 
-from mock_model.deterministic import canonical_json, deterministic_content
+from mock_model.deterministic import (
+    canonical_json,
+    deterministic_content,
+    deterministic_digest,
+)
+
+
+def test_digest_matches_content_slice() -> None:
+    """`deterministic_digest` must equal the 16-hex slice inside `<prefix>[...]`.
+
+    Locks in the contract the server now relies on (it formats the response
+    `id` from the bare digest rather than slicing the content string).
+    """
+    model = "mock-glm-5.2"
+    messages = [{"role": "user", "content": "hi"}]
+    digest = deterministic_digest(model, messages)
+    content = deterministic_content(model, messages)
+    assert content == f"MOCK[{digest}]"
+    assert len(digest) == 16
+    assert all(c in "0123456789abcdef" for c in digest)
 
 
 def test_same_input_returns_same_content() -> None:

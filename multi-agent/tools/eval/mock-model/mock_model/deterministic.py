@@ -23,6 +23,18 @@ def canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def deterministic_digest(model: str, messages: Sequence[Any]) -> str:
+    """Return the 16-hex-char sha256 slice of `(model, messages)`.
+
+    Split out so callers (e.g. the server) can reuse the digest as both the
+    response `content` body and a stable `id` without re-parsing a formatted
+    string. Equal-by-value inputs produce equal digests because we canonicalize
+    via `canonical_json`.
+    """
+    payload = model + canonical_json(list(messages))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
 def deterministic_content(
     model: str,
     messages: Sequence[Any],
@@ -32,9 +44,6 @@ def deterministic_content(
     """Return `<prefix>[<16 hex chars>]` keyed on (model, messages).
 
     `messages` is whatever the caller has — typically a list of dicts or
-    Pydantic models converted to dicts. We canonicalize via `canonical_json`
-    so equal-by-value inputs produce equal digests.
+    Pydantic models converted to dicts.
     """
-    payload = model + canonical_json(list(messages))
-    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
-    return f"{prefix}[{digest}]"
+    return f"{prefix}[{deterministic_digest(model, messages)}]"
