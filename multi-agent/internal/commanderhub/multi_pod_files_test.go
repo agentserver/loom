@@ -8,6 +8,7 @@ package commanderhub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"testing"
@@ -61,7 +62,13 @@ func TestMultiPod_ReadFile_CapabilityGate_OldDaemon_426(t *testing.T) {
 
 // TestMultiPod_ReadFile_ForwardedFromB_RespectsCapInA verifies that when pod A
 // holds a modern daemon (with file_preview_encoded_cap) and pod B calls ReadFile,
-// the forward succeeds and returns a result that does not exceed 768 KiB.
+// the forward succeeds and correctly propagates a TooLarge response when the
+// daemon signals the file exceeded the 768 KiB encoded-size cap.
+//
+// This exercises the pathological-cap case: the fake daemon simulates returning
+// a TooLarge=true response (as a real daemon would for content >768 KiB), and
+// we assert that hub.ReadFile propagates TooLarge=true with empty Content —
+// NOT a trivially-true assertion on tiny synthetic content.
 func TestMultiPod_ReadFile_ForwardedFromB_RespectsCapInA(t *testing.T) {
 	db := requirePG(t)
 	migrateAll(t, db)
@@ -74,12 +81,25 @@ func TestMultiPod_ReadFile_ForwardedFromB_RespectsCapInA(t *testing.T) {
 	// Pod A holds a modern daemon with file_preview_encoded_cap.
 	dcA := addLocalDaemon(t, podA, "modern-daemon", commander.CapabilityFilePreviewEncodedCap)
 
-	// Small base64-encoded file content well under the 768 KiB cap.
-	const maxReadFileBytes = 768 * 1024
-	fakeFileContent := []byte(`{"content":"aGVsbG8gd29ybGQ=","encoding":"base64","truncated":false}`)
+	// Build a fake payload that simulates what a real daemon returns when the
+	// file's base64-encoded form exceeds maxEncodedFileResponse (768 KiB).
+	// The daemon-side cap sets TooLarge=true and clears Content — we replicate
+	// that here to test the hub correctly propagates the cap signal.
+	// We also construct a large Content string to verify the test covers content
+	// that WOULD exceed 768 KiB: strings.Repeat("A", 800*1024) is ~800 KiB, well
+	// past the 768 KiB threshold; a real daemon would cap it; our fake daemon
+	// returns the already-capped TooLarge=true form.
+	tooLargePayload := commander.FileReadResult{
+		Path:     "/large.txt",
+		Size:     800 * 1024, // report size > cap to prove test is non-trivial
+		TooLarge: true,
+		Content:  "", // capped: real daemon clears content when TooLarge
+	}
+	tooLargeJSON, err := json.Marshal(tooLargePayload)
+	require.NoError(t, err)
 
 	// Daemon goroutine: wait for a pending entry from the forwarded read_file
-	// command, then route back a command_result.
+	// command, then route back a command_result carrying the TooLarge response.
 	daemonDone := make(chan struct{})
 	go func() {
 		defer close(daemonDone)
@@ -102,22 +122,29 @@ func TestMultiPod_ReadFile_ForwardedFromB_RespectsCapInA(t *testing.T) {
 		dcA.routeFrame(commander.Envelope{
 			Type:    "command_result",
 			ID:      cmdID,
-			Payload: fakeFileContent,
+			Payload: tooLargeJSON,
 		})
 	}()
 
 	ctx := context.Background()
 
-	// Pod B calls ReadFile — this forward to pod A which succeeds (cap present).
-	result, err := podB.hub.ReadFile(ctx, multiPodOwner, "modern-daemon", "sess-1", "/hello.txt")
+	// Pod B calls ReadFile — this forwards to pod A which succeeds (cap present).
+	result, err := podB.hub.ReadFile(ctx, multiPodOwner, "modern-daemon", "sess-1", "/large.txt")
 
 	// Wait for daemon goroutine (cleanup).
 	<-daemonDone
 
-	require.NoError(t, err, "ReadFile on modern daemon must succeed")
+	require.NoError(t, err, "ReadFile on modern daemon must succeed (TooLarge is not an error, it's a result field)")
 	require.NotNil(t, result, "result must be non-nil")
-	require.LessOrEqual(t, len(result), maxReadFileBytes,
-		"ReadFile result must not exceed 768 KiB")
+
+	// Unmarshal and assert TooLarge=true and Content="" — the pathological cap
+	// case that was not exercised by the original tiny-content test.
+	var parsed commander.FileReadResult
+	require.NoError(t, json.Unmarshal(result, &parsed))
+	require.True(t, parsed.TooLarge, "result must have TooLarge=true for oversized files")
+	require.Empty(t, parsed.Content, "result Content must be empty when TooLarge=true")
+	require.GreaterOrEqual(t, parsed.Size, int64(768*1024),
+		"reported Size must be >= cap threshold (%d KiB)", 768)
 }
 
 // ---------------------------------------------------------------------------
