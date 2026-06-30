@@ -15,12 +15,14 @@ import (
 
 // Writer is the per-run sink for D1 evaluation rows. Implementations
 // must be safe for single-goroutine use; concurrent use is not part of
-// the contract (the eval-runner is single-threaded). Mutation of
-// DisableTelemetry concurrent with Insert is undefined.
+// the contract (the eval-runner is single-threaded). Ablation flags
+// (e.g. DisableTelemetry on the default SQLWriter) are implementation
+// concerns — the interface contract is "validate then write or drop".
 type Writer interface {
-	// Insert validates s and writes one row, OR (when DisableTelemetry
-	// is true) logs an audit line and returns nil. Validation runs in
-	// both modes — see spec §7(c).
+	// Insert validates s and either writes one row or — at the
+	// implementation's discretion under ablation — drops the row.
+	// Validation MUST run in both modes so ablations cannot mask
+	// schema violations.
 	Insert(ctx context.Context, s Schema) error
 	// Close releases writer-side resources. The default SQLWriter is a
 	// no-op — the *sql.DB is owned by the caller and MUST be closed
@@ -93,28 +95,38 @@ const insertSQL = `INSERT INTO runs (
 	observer_trace_path, model_trace_id
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
+// ColumnNames returns the canonical ordered list of 24 column names
+// (sourced from the same expectedColumns slice the drift guard uses).
+// Exported so out-of-package callers (notably cmd/evalrun-export) can
+// pin their CSV header / SELECT projection to the same SOT, ruling
+// out the "test passes because both sides updated identically" trap.
+// Returns a fresh copy each call.
+func ColumnNames() []string {
+	out := make([]string, len(expectedColumns))
+	for i, c := range expectedColumns {
+		out[i] = c.name
+	}
+	return out
+}
+
 // NewSQLWriter wraps *sql.DB into a Writer that targets the runs table.
 // Returns ErrSchemaDrift (wrapped) if the runs table is absent or its
 // column descriptors do not match the expected 24-column layout.
 func NewSQLWriter(db *sql.DB) (Writer, error) {
-	if err := CheckSchema(db); err != nil {
+	if err := CheckSchemaDrift(db); err != nil {
 		return nil, err
 	}
 	return &SQLWriter{db: db}, nil
 }
 
-// CheckSchema runs the schema-drift guard against db's runs table
-// without constructing a Writer. Useful for read-only consumers
-// (e.g. the evalrun-export CLI) that need the same up-front
-// validation guarantee — without that, a CLI reading a drifted DB
-// would crash mid-stream with a low-level driver error rather than
-// refuse to start.
-func CheckSchema(db *sql.DB) error { return checkSchemaDrift(db) }
-
-// Insert validates s, then either writes one row or (when
-// DisableTelemetry is true) logs the drop and returns nil. Validation
-// runs in BOTH modes so NoObserver cannot mask schema violations
-// (spec §7 (c)).
+// Insert (the SQLWriter implementation) validates s, then either
+// writes one row OR — when the package-level DisableTelemetry is
+// true — logs a `[ablation] NoObserver: dropped run_id=<id>` audit
+// line and returns nil. Validation runs in BOTH modes so the
+// NoObserver ablation cannot mask schema violations (spec §7(c)).
+// DisableTelemetry is package state, not Writer state: alternative
+// Writer implementations (mocks, in-memory) are not required to
+// observe it.
 func (w *SQLWriter) Insert(ctx context.Context, s Schema) error {
 	// Repeat the init-time registration warning on first Insert so an
 	// operator running with stderr suppressed at startup still sees
@@ -307,27 +319,31 @@ func (s Schema) validate() error {
 	return nil
 }
 
-// expectedCheckSubstrings lists CHECK-constraint fragments that MUST
+// expectedCheckSubstring is the CHECK-constraint fragment that MUST
 // appear in the verbatim CREATE TABLE SQL stored in sqlite_master.
 // PRAGMA table_info does not surface CHECK clauses, so without this
 // belt-and-braces lookup a drift that drops the success_oracle_result
 // CHECK would pass the descriptor comparison silently — and any future
 // caller that bypasses the Go-side oracle validation would write
-// garbage that the DB would have rejected pre-drift.
-var expectedCheckSubstrings = []string{
-	"CHECK(success_oracle_result IN ('pass','fail','timeout'))",
-}
+// garbage that the DB would have rejected pre-drift. If a second
+// CHECK constraint is ever added to the runs table, lift this to a
+// []string at that time (not before — YAGNI).
+const expectedCheckSubstring = "CHECK(success_oracle_result IN ('pass','fail','timeout'))"
 
-// checkSchemaDrift runs the §5 algorithm against db's runs table.
+// CheckSchemaDrift runs the §5 algorithm against db's runs table.
+// Useful as both the writer-construction guard and the read-only
+// CLI's startup guard: without an up-front check, a drifted DB
+// crashes export mid-stream with a low-level driver error rather
+// than refusing to start.
 //
 // Returns:
 //   - nil if PRAGMA table_info(runs) returns a column list whose
 //     ordered descriptor sequence exactly matches expectedColumns AND
-//     the verbatim CREATE TABLE text in sqlite_master contains every
-//     expectedCheckSubstrings entry.
+//     the verbatim CREATE TABLE text in sqlite_master contains the
+//     expectedCheckSubstring fragment.
 //   - ErrSchemaDrift (wrapped) with a message naming the missing
 //     table, mismatched position, missing CHECK clause, or column count.
-func checkSchemaDrift(db *sql.DB) error {
+func CheckSchemaDrift(db *sql.DB) error {
 	rows, err := db.Query("PRAGMA table_info(runs)")
 	if err != nil {
 		return fmt.Errorf("evalrun: PRAGMA table_info(runs): %w", err)
@@ -433,21 +449,22 @@ func checkSchemaDrift(db *sql.DB) error {
 	// (extra spaces inside parens, after commas) would false-positive
 	// against the unspaced needle. Stripping all whitespace makes the
 	// match invariant to any reformatting that doesn't change tokens.
-	gotStripped := stripASCIIWhitespace(createSQL.String)
-	for _, want := range expectedCheckSubstrings {
-		wantStripped := stripASCIIWhitespace(want)
-		if !strings.Contains(gotStripped, wantStripped) {
-			return fmt.Errorf("%w: missing CHECK clause %q in runs CREATE SQL", ErrSchemaDrift, want)
-		}
+	gotStripped := stripAllWhitespace(createSQL.String)
+	wantStripped := stripAllWhitespace(expectedCheckSubstring)
+	if !strings.Contains(gotStripped, wantStripped) {
+		return fmt.Errorf("%w: missing CHECK clause %q in runs CREATE SQL", ErrSchemaDrift, expectedCheckSubstring)
 	}
 	return nil
 }
 
-// stripASCIIWhitespace drops every Unicode whitespace rune. Used by
-// the CHECK-clause drift cross-check so semantically-identical DDL
+// stripAllWhitespace drops every Unicode whitespace rune (uses
+// unicode.IsSpace — catches ASCII space/tab/newline AND non-breaking
+// space, ideographic space, line/paragraph separators). Used by the
+// CHECK-clause drift cross-check so semantically-identical DDL
 // reformatting (extra spaces around parens / commas, tabs vs spaces,
-// newlines) does not trip a false-positive ErrSchemaDrift.
-func stripASCIIWhitespace(s string) string {
+// newlines, copy-pasted NBSP from a wiki) does not trip a
+// false-positive ErrSchemaDrift.
+func stripAllWhitespace(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {

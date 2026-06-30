@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/yourorg/multi-agent/internal/ablation"
+	"github.com/yourorg/multi-agent/internal/observerstore"
 )
 
 // sampleSchema returns a Schema with every field filled to a value the
@@ -79,6 +80,18 @@ var expectedColumnNames = []string{
 	"artifact_hashes",
 	"observer_trace_path",
 	"model_trace_id",
+}
+
+// Test 0b: failureCategoryUnknown stays pinned to observerstore.FailUnknown.
+// Belt-and-braces for the `var failureCategoryUnknown = string(...)`
+// pinning: if a future refactor accidentally drops the cross-package
+// reference (e.g. someone hard-codes "unknown" again), this test
+// trips the moment observerstore.FailUnknown is ever renamed.
+func TestFailureCategoryUnknown_PinnedToObserverstore(t *testing.T) {
+	if failureCategoryUnknown != string(observerstore.FailUnknown) {
+		t.Fatalf("failureCategoryUnknown=%q must equal observerstore.FailUnknown=%q",
+			failureCategoryUnknown, observerstore.FailUnknown)
+	}
 }
 
 // Test 15: TestRegisteredOnAblation — package init() registered NoObserver.

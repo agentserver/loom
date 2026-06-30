@@ -11,12 +11,28 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/yourorg/multi-agent/internal/evalrun"
 	_ "modernc.org/sqlite"
 )
+
+// Test 0: cross-package column-name SOT consistency. The CLI's
+// columnNames and the production evalrun.ColumnNames() MUST match
+// exactly in order; otherwise a future schema column add that updates
+// one but forgets the other would silently scramble the CSV / JSONL
+// header without any drift test catching it (both halves of the test
+// suite would update in lockstep with what they import).
+func TestColumnNames_MatchProductionSOT(t *testing.T) {
+	got := columnNames
+	want := evalrun.ColumnNames()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("cmd/evalrun-export.columnNames must equal evalrun.ColumnNames(); got %v want %v", got, want)
+	}
+}
 
 // binPath is built once in TestMain and shared across the CLI exec
 // tests. Avoids `go build` per test.

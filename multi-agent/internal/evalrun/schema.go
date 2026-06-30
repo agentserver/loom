@@ -100,9 +100,11 @@ var validOracleResults = map[string]struct{}{
 
 // failureCategoryUnknown is the universal escape hatch defined by
 // observerstore.FailUnknown — used when a fail/timeout site cannot be
-// confidently classified. Kept as a Go string here so the validate
-// path doesn't pay the package-boundary conversion cost per row.
-const failureCategoryUnknown = "unknown"
+// confidently classified. Pinned at init to the actual constant from
+// observerstore so a future rename of FailUnknown (e.g. to
+// "unclassified") cannot silently drift evalrun's accepted-values set
+// out of step with the canonical taxonomy.
+var failureCategoryUnknown = string(observerstore.FailUnknown)
 
 // isAcceptedFailureCategory reports whether c is the empty string,
 // one of the 11 stable observerstore.AllCategories() values, or the

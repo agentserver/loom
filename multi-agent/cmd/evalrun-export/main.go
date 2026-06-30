@@ -110,7 +110,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	// producing a half-truncated output file. The check is cheap and
 	// gives the operator a clear "refresh the schema, then retry"
 	// message at start instead.
-	if err := evalrun.CheckSchema(db); err != nil {
+	if err := evalrun.CheckSchemaDrift(db); err != nil {
 		return &runtimeError{err: fmt.Errorf("schema check on %q: %w", dbPath, err)}
 	}
 	// Output target. We explicitly close --out files AFTER serialising
@@ -219,8 +219,14 @@ type runRow struct {
 
 func scanOneRow(rows *sql.Rows) (*runRow, error) {
 	var (
-		r          runRow
-		humanCount int
+		r runRow
+		// int64 (not int) so a row written with
+		// human_intervention_count > 2^31 on a 32-bit build doesn't
+		// silently truncate to a negative number. SQLite INTEGER is
+		// up to 8 bytes signed; the column NOT NULL DEFAULT 0 means
+		// Scan never sees NULL — drift guard catches the NULL-able
+		// drift variant separately.
+		humanCount int64
 		// 24 dest pointers in the canonical order.
 		dest [24]any
 	)
@@ -234,7 +240,7 @@ func scanOneRow(rows *sql.Rows) (*runRow, error) {
 	if err := rows.Scan(dest[:]...); err != nil {
 		return nil, err
 	}
-	r.values[humanCountIdx] = strconv.Itoa(humanCount)
+	r.values[humanCountIdx] = strconv.FormatInt(humanCount, 10)
 	return &r, nil
 }
 

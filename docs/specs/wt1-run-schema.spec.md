@@ -171,14 +171,25 @@ slice is unactionable):
 
 ```go
 var (
-    ErrInvalidRunID            = errors.New("evalrun: invalid run_id format")
-    ErrInvalidArtifactHash     = errors.New("evalrun: invalid artifact_hashes entry (must be sha256 hex)")
-    ErrOversizedField          = errors.New("evalrun: field exceeds 8 KiB limit")
-    ErrInvalidOracleResult     = errors.New("evalrun: success_oracle_result must be pass|fail|timeout")
-    ErrInvalidTime             = errors.New("evalrun: start_time/end_time must be non-zero")
-    ErrSchemaDrift             = errors.New("evalrun: runs table schema does not match expected layout")
+    ErrInvalidRunID           = errors.New("evalrun: invalid run_id format")
+    ErrInvalidArtifactHash    = errors.New("evalrun: invalid artifact_hashes entry (must be sha256 hex)")
+    ErrTooManyArtifactHashes  = errors.New("evalrun: artifact_hashes slice length exceeds cap")
+    ErrOversizedField         = errors.New("evalrun: field exceeds 8 KiB limit")
+    ErrInvalidUTF8            = errors.New("evalrun: string field is not valid UTF-8")
+    ErrInvalidOracleResult    = errors.New("evalrun: success_oracle_result must be pass|fail|timeout")
+    ErrInvalidTime            = errors.New("evalrun: start_time/end_time must be non-zero")
+    ErrInvalidFailureCategory = errors.New("evalrun: failure_category must satisfy result/category invariant and be a known D4 taxonomy value (or 'unknown')")
+    ErrSchemaDrift            = errors.New("evalrun: runs table schema does not match expected layout")
 )
 ```
+
+The `failure_category` invariant has two parts: (1) compatibility —
+empty iff `result == "pass"` (so a pass-row carries no stale category
+AND a non-pass row carries one — use `"unknown"` /
+`observerstore.FailUnknown` when the failure site is unclassifiable);
+(2) taxonomy membership — when non-empty, the value MUST be one of
+the 11 stable entries returned by `observerstore.AllCategories()` or
+the `"unknown"` sentinel. Both produce `ErrInvalidFailureCategory`.
 
 Format and length limits (enforced in `Insert` BEFORE the SQL exec):
 
