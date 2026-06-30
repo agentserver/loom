@@ -218,3 +218,20 @@ CREATE TABLE IF NOT EXISTS runs (
     model_trace_id            TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_runs_experiment ON runs(experiment_id, workload_id);
+
+-- WT-1-routing-trace: per-Dispatch decision trace.
+-- Captures why one agent was selected over the others; consumed by
+-- RoutingLatencyP50P95 (decision_duration_ns) and routing-correctness audits.
+CREATE TABLE IF NOT EXISTS route_reasons (
+    decision_id           TEXT PRIMARY KEY,
+    conversation_id       TEXT NOT NULL,
+    selected_agent_id     TEXT NOT NULL DEFAULT '',
+    reason_code           TEXT NOT NULL,
+    reason_text           TEXT NOT NULL DEFAULT '',
+    candidates_json       TEXT NOT NULL DEFAULT '[]',
+    decision_started_at   TEXT NOT NULL,
+    decision_ended_at     TEXT NOT NULL,
+    decision_duration_ns  INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_route_reasons_conv
+    ON route_reasons(conversation_id, decision_started_at);
