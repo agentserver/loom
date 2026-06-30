@@ -165,9 +165,26 @@ func (h *Hub) ListFiles(ctx context.Context, o owner, daemonID, sessionID, path 
 	return h.SendCommand(ctx, o, daemonID, "list_files", args)
 }
 
-func (h *Hub) ReadFile(ctx context.Context, o owner, daemonID, sessionID, path string) (json.RawMessage, error) {
+func (h *Hub) ReadFile(ctx context.Context, o owner, shortID, sessionID, path string) (json.RawMessage, error) {
+	// In shared mode, gate locally-owned daemons on file_preview_encoded_cap
+	// before forwarding. Peer-owned daemons are not in the local registry;
+	// forwardHandler on the owning pod runs the same check.
+	if h.sharedReg != nil {
+		if dc, ok := h.reg.lookup(o, shortID); ok {
+			dc.metaMu.Lock()
+			has := dc.capabilities[commander.CapabilityFilePreviewEncodedCap]
+			dc.metaMu.Unlock()
+			if !has {
+				return nil, &DaemonError{
+					Code:    commander.ErrCodeDaemonUpgradeRequired,
+					Message: "daemon binary too old; upgrade required for file preview in cluster mode",
+				}
+			}
+		}
+		// Peer-owned: forwardHandler on owning pod runs same check.
+	}
 	args, _ := json.Marshal(commander.FileReadArgs{ID: sessionID, Path: path})
-	return h.SendCommand(ctx, o, daemonID, "read_file", args)
+	return h.SendCommand(ctx, o, shortID, "read_file", args)
 }
 
 // DaemonSessions is one row of the fan-out GET /sessions result.
