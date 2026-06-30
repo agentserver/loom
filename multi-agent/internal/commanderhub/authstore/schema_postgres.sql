@@ -69,3 +69,69 @@ CREATE TABLE IF NOT EXISTS commander_sessions (
 
 CREATE INDEX IF NOT EXISTS commander_sessions_expires_idx
     ON commander_sessions (expires_at);
+
+CREATE TABLE IF NOT EXISTS commander_daemons (
+    user_id              text        NOT NULL,
+    workspace_id         text        NOT NULL,
+    short_id             text        NOT NULL,
+    connection_id        text        NOT NULL,
+    display_name         text        NOT NULL DEFAULT '',
+    kind                 text        NOT NULL DEFAULT '',
+    driver_version       text        NOT NULL DEFAULT '',
+    capabilities         jsonb       NOT NULL DEFAULT '[]'::jsonb,
+    owning_instance_url  text        NOT NULL,
+    last_seen_at         timestamptz NOT NULL DEFAULT now(),
+    created_at           timestamptz NOT NULL DEFAULT now(),
+
+    PRIMARY KEY (user_id, workspace_id, short_id),
+    CONSTRAINT commander_daemons_user_id_nonempty       CHECK (length(user_id) > 0),
+    CONSTRAINT commander_daemons_workspace_id_nonempty  CHECK (length(workspace_id) > 0),
+    CONSTRAINT commander_daemons_short_id_nonempty      CHECK (length(short_id) > 0),
+    CONSTRAINT commander_daemons_conn_id_nonempty       CHECK (length(connection_id) > 0),
+    CONSTRAINT commander_daemons_owning_url_nonempty    CHECK (length(owning_instance_url) > 0)
+);
+CREATE INDEX IF NOT EXISTS commander_daemons_owner_idx
+    ON commander_daemons (user_id, workspace_id);
+CREATE INDEX IF NOT EXISTS commander_daemons_last_seen_idx
+    ON commander_daemons (last_seen_at);
+
+CREATE TABLE IF NOT EXISTS commander_turns (
+    user_id            text        NOT NULL,
+    workspace_id       text        NOT NULL,
+    short_id           text        NOT NULL,
+    session_id         text        NOT NULL,
+    state              text        NOT NULL,
+    awaiting_approval  boolean     NOT NULL DEFAULT false,
+    active_worker      boolean     NOT NULL DEFAULT false,
+    message            text        NOT NULL DEFAULT '',
+    updated_at         timestamptz NOT NULL DEFAULT now(),
+
+    PRIMARY KEY (user_id, workspace_id, short_id, session_id),
+    CONSTRAINT commander_turns_state_enum CHECK (
+        state IN ('idle','queued','answering','awaiting_approval','done','error','disconnected')
+    )
+);
+CREATE INDEX IF NOT EXISTS commander_turns_owner_idx
+    ON commander_turns (user_id, workspace_id, short_id);
+CREATE INDEX IF NOT EXISTS commander_turns_updated_idx
+    ON commander_turns (updated_at);
+
+CREATE TABLE IF NOT EXISTS commander_forward_nonces (
+    nonce       text        PRIMARY KEY,
+    received_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS commander_forward_nonces_received_idx
+    ON commander_forward_nonces (received_at);
+
+CREATE TABLE IF NOT EXISTS commander_telemetry_buckets (
+    workspace_id      text             NOT NULL,
+    agent_id          text             NOT NULL,
+    telemetry_key_id  text             NOT NULL,
+    tokens            double precision NOT NULL,
+    last_refilled     timestamptz      NOT NULL DEFAULT now(),
+    updated_at        timestamptz      NOT NULL DEFAULT now(),
+
+    PRIMARY KEY (workspace_id, agent_id, telemetry_key_id)
+);
+CREATE INDEX IF NOT EXISTS commander_telemetry_buckets_updated_idx
+    ON commander_telemetry_buckets (updated_at);
