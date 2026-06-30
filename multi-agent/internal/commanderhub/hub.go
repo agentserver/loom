@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -77,6 +78,14 @@ type Hub struct {
 	// this bounds daemon work that never sends a terminal frame. Defaults to
 	// defaultTurnTimeout (10 min); a caller may override it after NewHub.
 	TurnTimeout time.Duration
+
+	// testHookPostUpsert, if non-nil, is called immediately after a successful
+	// connectUpsert and before the admitMu critical section. Tests use this hook
+	// to inject a draining=true transition inside the race window, verifying that
+	// the draining-rejection branch correctly removes the shared row. Must be nil
+	// in production (zero value). Not exported; set only from _test.go files in
+	// this package.
+	testHookPostUpsert func()
 }
 
 // NewHub builds a Hub backed by resolver for bearer-token → Identity resolution.
@@ -208,6 +217,11 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			conn.Close()
 			return
 		}
+		// Test hook: injected in _test.go to open the race window between
+		// connectUpsert and the admitMu critical section. Always nil in production.
+		if h.testHookPostUpsert != nil {
+			h.testHookPostUpsert()
+		}
 	}
 
 	routingID := dc.routingID()
@@ -220,6 +234,19 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.admitMu.Unlock()
 		// We passed the fast pre-check but Close raced us here. Reject the
 		// upgrade: send a close frame and close the connection.
+		//
+		// If connectUpsert already wrote a shared row for this daemon, remove it
+		// now — before closing the WS — so sibling pods don't see a ghost daemon
+		// that was never admitted to the local registry. The sweep TTL is the
+		// fallback if remove fails; log the error but don't block shutdown.
+		if h.sharedReg != nil {
+			rmCtx, rmCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := h.sharedReg.remove(rmCtx, dc.owner, dc.shortID, dc.id); err != nil {
+				log.Printf("commanderhub: draining-reject remove short_id=%s conn_id=%s err=%v (sweep is fallback)",
+					dc.shortID, dc.id, err)
+			}
+			rmCancel()
+		}
 		dc.writeMu.Lock()
 		_ = conn.WriteControl(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseServiceRestart, "observer draining"),

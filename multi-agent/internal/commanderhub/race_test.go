@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
 
@@ -233,4 +234,107 @@ func TestHub_Close_RaceVsAdmission(t *testing.T) {
 	// No assertion needed — if a connection hangs here the 2s deadline will
 	// surface it. The -race detector catches any data races on the way.
 	t.Logf("admitted=%d total_upgraded=%d", atomic.LoadInt64(&admitted), len(conns))
+}
+
+// TestHub_Admission_RejectedAfterUpsert_RemovesSharedRow is the race-detector
+// regression test for D-fix4 MAJOR #1: when a daemon is rejected in the
+// draining-rejection branch of ServeHTTP (after connectUpsert succeeded but
+// before h.reg.add), the shared registry row must be removed so sibling pods
+// do not see a ghost daemon until the sweep TTL.
+//
+// Arrangement:
+//   - A sqlmock DB records the exact SQL calls in order.
+//   - hub.testHookPostUpsert flips h.draining=true between connectUpsert and
+//     the admitMu critical section, deterministically opening the race window
+//     without real scheduling non-determinism.
+//   - The test asserts that sqlmock sees BOTH the connectUpsert and the remove
+//     SQL in that order, confirming the fix is exercised.
+//
+// Run as: go test -run TestHub_Admission_RejectedAfterUpsert_RemovesSharedRow -race -count=5
+func TestHub_Admission_RejectedAfterUpsert_RemovesSharedRow(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{
+		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
+	}}
+
+	// Set up a sqlmock DB with exact-match SQL.
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+
+	const advertiseURL = "http://pod-a:8091"
+
+	// Expect 1: connectUpsert (INSERT ... ON CONFLICT DO UPDATE).
+	mock.ExpectExec(connectUpsertSQL).
+		WithArgs(
+			sqlmock.AnyArg(), // user_id
+			sqlmock.AnyArg(), // workspace_id
+			sqlmock.AnyArg(), // short_id
+			sqlmock.AnyArg(), // connection_id
+			sqlmock.AnyArg(), // display_name
+			sqlmock.AnyArg(), // kind
+			sqlmock.AnyArg(), // driver_version
+			sqlmock.AnyArg(), // capabilities (json)
+			advertiseURL,     // owning_instance_url
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	// Expect 2: remove (DELETE with ownership guard) called from the draining-
+	// rejection branch before closing the WS.
+	mock.ExpectExec(removeSQL).
+		WithArgs(
+			sqlmock.AnyArg(), // user_id
+			sqlmock.AnyArg(), // workspace_id
+			sqlmock.AnyArg(), // short_id
+			advertiseURL,     // owning_instance_url
+			sqlmock.AnyArg(), // connection_id
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	hub := NewHub(resolver)
+	sr := newSharedRegistry(db, advertiseURL)
+	hub.attachSharedRegistry(ClusterRuntime{DB: db, AdvertiseURL: advertiseURL}, sr, nil, nil)
+
+	// Install the race-window hook: flip draining=true between connectUpsert and
+	// the admitMu critical section. This is the exact race the fix must handle.
+	hub.testHookPostUpsert = func() {
+		hub.admitMu.Lock()
+		hub.draining.Store(true)
+		hub.admitMu.Unlock()
+	}
+
+	srv := httptest.NewServer(hub)
+	t.Cleanup(srv.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/daemon-link"
+	conn, _, err := websocket.DefaultDialer.DialContext(context.Background(), wsURL, wsDialHeader("tok-alice"))
+	require.NoError(t, err)
+	defer conn.Close()
+
+	// Register: the hub will upsert, call the hook (draining=true), then reject.
+	regPayload, _ := json.Marshal(commander.RegisterPayload{
+		SchemaVersion: commander.SchemaVersion,
+		Kind:          "claude",
+		DisplayName:   "race-daemon",
+		ShortID:       "agent-race",
+	})
+	require.NoError(t, conn.WriteJSON(commander.Envelope{Type: "register", Payload: regPayload}))
+
+	// The server must close the WS (draining rejection). Drain until error.
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			break // expected: server closed
+		}
+	}
+
+	// Give the remove call time to complete (it runs synchronously in ServeHTTP
+	// before the WS close, so it must already have landed, but be defensive).
+	require.Eventually(t, func() bool {
+		return mock.ExpectationsWereMet() == nil
+	}, 2*time.Second, 10*time.Millisecond,
+		"sqlmock expectations not met: connectUpsert and remove must both be called")
+
+	// Local registry must be empty — the daemon was rejected before reg.add.
+	o := owner{userID: "alice", workspaceID: "W1"}
+	require.Empty(t, hub.reg.daemons(o), "local registry must be empty: daemon was rejected before add")
 }
