@@ -674,18 +674,39 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task A4: Rename `registry` → `localRegistry`; add `removeIf`; key by `short_id`; switch `DaemonInfo.DaemonID` to expose short_id; add `Hub.sharedReg` field
+### Task A4: Rename `registry` → `localRegistry`; add `removeIf`; key by routing-id; routing-id fallback for empty short_id; update `ServeHTTP` teardown to use the new key
 
 **Files:**
-- Modify: `multi-agent/internal/commanderhub/registry.go:59-83` (`daemonConn.info()` — emit `shortID` as `DaemonInfo.DaemonID`)
+- Modify: `multi-agent/internal/commanderhub/registry.go:59-83` (`daemonConn.info()` — emit `routingID()` as `DaemonInfo.DaemonID`)
 - Modify: `multi-agent/internal/commanderhub/registry.go:85-141` (type + constructor + methods)
-- Modify: `multi-agent/internal/commanderhub/registry.go:39-57` (`daemonConn` adds `ownershipLost atomic.Bool`)
-- Modify: `multi-agent/internal/commanderhub/registry_test.go` (append 3 tests)
-- Modify: `multi-agent/internal/commanderhub/hub.go:27-40` (Hub.reg field type + ADD `sharedReg *sharedRegistry` field — type defined in Phase B Task B1 but field is declared here so all later tasks can reference it without circular dependency)
+- Modify: `multi-agent/internal/commanderhub/registry.go:39-57` (`daemonConn` adds `ownershipLost atomic.Bool`; add `routingID() string` method)
+- Modify: `multi-agent/internal/commanderhub/registry_test.go` (append 4 tests)
+- Modify: `multi-agent/internal/commanderhub/hub.go:27-40` (Hub.reg field type only — `*registry` → `*localRegistry`. NOT adding sharedReg/forwardCli/turns here; those land in the tasks that define their types.)
 - Modify: `multi-agent/internal/commanderhub/hub.go:47` (`newRegistry()` → `newLocalRegistry()`)
-- Modify: existing `*_test.go` literals that construct `daemonConn{}` — add `shortID:` field (sentinel = existing `id` value for parity)
+- Modify: `multi-agent/internal/commanderhub/hub.go::ServeHTTP` (UPDATE today's `defer h.reg.remove(o, dc.id)` and `defer h.invalidateDaemonSessions(o, dc.id)` to use `dc.routingID()` — without this, A4 leaks stale entries until B4 rewrites the teardown)
+- Modify: existing `*_test.go` literals that construct `daemonConn{}` — add `shortID:` field where parity test fixtures need it; old fixtures with only `id:` continue to work via the routingID fallback
 
-**Single-pod regression invariant:** in single-pod mode (`h.sharedReg == nil`), `DaemonInfo.DaemonID` MUST continue to be a string that round-trips through the URL → `lookup` path. Today's code emits `dc.id` (per-connection); v2 emits `dc.shortID` (stable across reconnects). For existing tests that construct `daemonConn{id: "x"}` without `shortID`, the test fixture update in Step 6 sets `shortID: "x"` so the URL value still works. **Verification:** Step 7 runs full `commanderhub` test suite to catch any test that asserts the OLD `DaemonInfo.DaemonID = dc.id` contract.
+**Routing-ID fallback (codex round-2 BLOCKER #3):** `RegisterPayload.ShortID` is documented as optional in `commander/protocol.go:43` and spec v19 keeps it optional in single-pod mode (only cluster mode requires it; B4 rejects empty there). To preserve old-daemon single-pod behavior, add a method:
+
+```go
+// routingID returns the key used by localRegistry.{add,lookup,remove}
+// AND by DaemonInfo.DaemonID. In cluster mode shortID is mandatory;
+// for single-pod legacy daemons connecting with empty shortID it falls
+// back to the per-connection id (today's behavior, byte-exact).
+func (dc *daemonConn) routingID() string {
+	if dc.shortID != "" {
+		return dc.shortID
+	}
+	return dc.id
+}
+```
+
+This guarantees:
+- New cluster daemons (with shortID): keyed/displayed as `shortID`. UI URLs survive reconnect.
+- Old single-pod daemons (no shortID): keyed/displayed as `dc.id` (per-connection hex) — **bit-exact preservation of v0.0.9 behavior**.
+- Cluster-mode admission (B4) still rejects empty `shortID` so the fallback only fires for single-pod.
+
+**Single-pod regression invariant:** existing single-pod deployments running v0.0.9 daemons see `DaemonInfo.DaemonID = dc.id` — UNCHANGED post-A4 because their `shortID` is empty and `routingID()` falls back to `dc.id`. **Verification:** Step 7 runs the full test suite; any test that constructs `daemonConn{id: "x"}` without `shortID` continues to see `DaemonID: "x"` via fallback.
 
 **Interfaces:**
 - Produces:
@@ -781,7 +802,9 @@ func newLocalRegistry() *localRegistry {
 	return &localRegistry{conns: make(map[owner]map[string]*daemonConn)}
 }
 
-// add indexes dc by its owner + shortID. dc.shortID, dc.id, dc.owner must be set.
+// add indexes dc by its owner + routingID(). dc.id (always set) and either
+// dc.shortID (cluster mode) or fallback to dc.id (single-pod legacy)
+// determine the key. dc.owner must be set.
 func (r *localRegistry) add(dc *daemonConn) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -790,20 +813,21 @@ func (r *localRegistry) add(dc *daemonConn) {
 		m = make(map[string]*daemonConn)
 		r.conns[dc.owner] = m
 	}
-	m[dc.shortID] = dc
+	m[dc.routingID()] = dc
 }
 
 // remove unconditionally deletes the entry. Kept for tests and code paths
 // where the caller is certain no concurrent reconnect can have placed a
-// newer entry. Production WS-teardown uses removeIf.
-func (r *localRegistry) remove(o owner, shortID string) {
+// newer entry. Production WS-teardown uses removeIf. The string arg is
+// the routingID (shortID OR fallback dc.id; see daemonConn.routingID).
+func (r *localRegistry) remove(o owner, routingID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	m := r.conns[o]
 	if m == nil {
 		return
 	}
-	delete(m, shortID)
+	delete(m, routingID)
 	if len(m) == 0 {
 		delete(r.conns, o)
 	}
@@ -811,28 +835,33 @@ func (r *localRegistry) remove(o owner, shortID string) {
 
 // removeIf deletes only when the stored conn's per-connection id matches
 // connectionID. Defends same-pod fast reconnect: old WS's deferred remove
-// must NOT delete the newly-placed entry.
-func (r *localRegistry) removeIf(o owner, shortID, connectionID string) {
+// must NOT delete the newly-placed entry. The routingID arg is shortID
+// (cluster mode) OR fallback dc.id (single-pod legacy).
+func (r *localRegistry) removeIf(o owner, routingID, connectionID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	m := r.conns[o]
 	if m == nil {
 		return
 	}
-	dc := m[shortID]
+	dc := m[routingID]
 	if dc == nil || dc.id != connectionID {
 		return
 	}
-	delete(m, shortID)
+	delete(m, routingID)
 	if len(m) == 0 {
 		delete(r.conns, o)
 	}
 }
 
-func (r *localRegistry) lookup(o owner, shortID string) (*daemonConn, bool) {
+// lookup keys by routingID (shortID in cluster mode; fallback dc.id in
+// single-pod legacy). Callers pass whatever they got from the URL or
+// from DaemonInfo.DaemonID; the registry's add() used routingID() too,
+// so the round-trip closes.
+func (r *localRegistry) lookup(o owner, routingID string) (*daemonConn, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	dc := r.conns[o][shortID]
+	dc := r.conns[o][routingID]
 	return dc, dc != nil
 }
 
@@ -906,12 +935,17 @@ type daemonConn struct {
 	// pod claimed). Read by SendCommand[Stream] before write; set by
 	// Phase B's confirmOwnership. Zero value is false (no extra init).
 	ownershipLost atomic.Bool
+
+	// heartbeatErrCount: rate-limit counter for transient PG errors in
+	// runHeartbeat (see Phase B Task B2). Atomic so the heartbeat
+	// goroutine and any future observer don't race.
+	heartbeatErrCount int64
 }
 ```
 
 Add `"sync/atomic"` to imports if missing (`grep '"sync/atomic"' internal/commanderhub/registry.go` — if absent, add it).
 
-- [ ] **Step 5a: Update `daemonConn.info()` to expose shortID as DaemonInfo.DaemonID**
+- [ ] **Step 5a: Update `daemonConn.info()` to expose routingID() as DaemonInfo.DaemonID**
 
 In `internal/commanderhub/registry.go`, find `(dc *daemonConn) info()` (currently around lines 59-83):
 
@@ -927,11 +961,11 @@ return DaemonInfo{
 }
 ```
 
-Replace `DaemonID: dc.id` with `DaemonID: dc.shortID`. The full block becomes:
+Replace `DaemonID: dc.id` with `DaemonID: dc.routingID()`. The full block becomes:
 
 ```go
 return DaemonInfo{
-    DaemonID:      dc.shortID, // v5: stable short_id so UI bookmarks survive reconnect
+    DaemonID:      dc.routingID(), // cluster: stable short_id (UI bookmarks survive reconnect); single-pod legacy: dc.id (preserved bit-exactly)
     ShortID:       dc.shortID,
     DisplayName:   dc.displayName,
     Kind:          dc.kind,
@@ -941,65 +975,59 @@ return DaemonInfo{
 }
 ```
 
-- [ ] **Step 5b: Update Hub field declarations + constructor**
+- [ ] **Step 5b: Update Hub.reg field type and constructor (registry rename only)**
 
-In `internal/commanderhub/hub.go`, find the `Hub` struct (around lines 27-40). Replace:
+In `internal/commanderhub/hub.go`, find:
 
 ```go
-type Hub struct {
-	resolver     identity.Resolver
-	upgrader     websocket.Upgrader
 	reg          *registry
-	turns        *turnStateStore
-	sessionCache *sessionListCache
-	cmdSeq       atomic.Int64 // generates per-command IDs (see proxy.go)
-
-	// TurnTimeout is the observer-side safety max applied to a session_turn
-	// command. Turns continue draining after the browser/SSE client disconnects;
-	// this bounds daemon work that never sends a terminal frame. Defaults to
-	// defaultTurnTimeout (10 min); a caller may override it after NewHub.
-	TurnTimeout time.Duration
-}
 ```
 
-with:
+Replace with:
 
 ```go
-type Hub struct {
-	resolver     identity.Resolver
-	upgrader     websocket.Upgrader
 	reg          *localRegistry
-	sharedReg    *sharedRegistry // nil in single-pod mode; populated by attachSharedRegistry (Phase D Task D1)
-	forwardCli   *forwardClient  // nil iff sharedReg == nil; populated by attachSharedRegistry
-	turns        turnStateBackend
-	sessionCache *sessionListCache // nil in shared mode (cluster-wide disabled; see Phase D Task D1)
-	cmdSeq       atomic.Int64      // generates per-command IDs (see proxy.go)
-
-	// TurnTimeout is the observer-side safety max applied to a session_turn
-	// command. Turns continue draining after the browser/SSE client disconnects;
-	// this bounds daemon work that never sends a terminal frame. Defaults to
-	// defaultTurnTimeout (10 min); a caller may override it after NewHub.
-	TurnTimeout time.Duration
-}
 ```
-
-(`sharedRegistry` and `forwardClient` types are defined in Phase B Task B1 and Phase C Task C3 respectively. Declaring the fields here, in A4, lets all later tasks reference them without circular dependency. Field defaults to `nil`; in single-pod mode it stays nil and nothing dereferences it.)
 
 Find:
 
 ```go
 		reg:          newRegistry(),
-		turns:        newTurnStateStore(),
 ```
 
 Replace with:
 
 ```go
 		reg:          newLocalRegistry(),
-		turns:        newMemTurnStore(),
 ```
 
-(`newMemTurnStore` is defined in Task A5; A5 runs in the same Phase. If executing tasks strictly serially, do A5 first so this compiles. If parallel, both edits land in the same `Hub` constructor — coordinate.)
+**Do NOT add `sharedReg`/`forwardCli` here.** Those fields land in Task B1 (`sharedReg *sharedRegistry` after the sharedRegistry struct is declared in that task) and Task C3 (`forwardCli *forwardClient`). The `turns` field rewires to interface type in Task A5 (which adds the `turnStateBackend` declaration). Go has no forward declarations — A4 only changes what types exist already.
+
+**Coordination with A5:** if A4 and A5 are executed in the same commit batch, the Hub constructor change (`newRegistry()` → `newLocalRegistry()`) and the `newTurnStateStore()` → `newMemTurnStore()` change land together. If A4 lands first, A5's `newMemTurnStore` rename is a separate small follow-up edit to the same constructor.
+
+- [ ] **Step 5c: Update `ServeHTTP` teardown to use routingID() (codex round-2 BLOCKER #2)**
+
+Today's teardown in `hub.go::ServeHTTP` (around lines 130-134):
+
+```go
+h.reg.add(dc)
+defer h.reg.remove(o, dc.id)
+defer h.invalidateDaemonSessions(o, dc.id)
+defer close(dc.done)
+defer dc.failAllPending()
+```
+
+Replace the two `dc.id` references with `dc.routingID()` so the teardown key matches the add key (otherwise `add` indexes by `routingID()` but `remove` tries to delete by `dc.id`; in the cluster case those differ and the entry leaks):
+
+```go
+h.reg.add(dc)
+defer h.reg.remove(o, dc.routingID())
+defer h.invalidateDaemonSessions(o, dc.routingID())
+defer close(dc.done)
+defer dc.failAllPending()
+```
+
+This is a minimal change that B4 will later supersede with the full `removeIf` + `sharedReg.remove` defer chain. A4 must do it because A4 changes the `add` key.
 
 - [ ] **Step 6: Fix existing test fixtures (daemonConn literals + register payloads in WS tests)**
 
@@ -1582,6 +1610,7 @@ Builds the Postgres-backed registry layer. Tasks B1–B5 are sequential (B2 need
 **Files:**
 - Create: `multi-agent/internal/commanderhub/registry_shared.go`
 - Create: `multi-agent/internal/commanderhub/registry_shared_test.go` (sqlmock-driven)
+- Modify: `multi-agent/internal/commanderhub/hub.go` (ADD `sharedReg *sharedRegistry` field to `Hub` struct now that the type exists)
 
 **Interfaces:**
 - Produces (in package `commanderhub`):
@@ -1996,17 +2025,53 @@ func (s *sharedRegistry) listAll(ctx context.Context, o owner) ([]DaemonInfo, er
 }
 ```
 
-- [ ] **Step 4: Run; expect pass**
+- [ ] **Step 4: Add `sharedReg` field to Hub struct**
+
+In `internal/commanderhub/hub.go`, find the Hub struct (post-A4 shape):
+
+```go
+type Hub struct {
+	resolver     identity.Resolver
+	upgrader     websocket.Upgrader
+	reg          *localRegistry
+	turns        turnStateBackend   // (added by A5)
+	sessionCache *sessionListCache
+	cmdSeq       atomic.Int64
+
+	TurnTimeout time.Duration
+}
+```
+
+Add `sharedReg *sharedRegistry` after `reg`:
+
+```go
+type Hub struct {
+	resolver     identity.Resolver
+	upgrader     websocket.Upgrader
+	reg          *localRegistry
+	sharedReg    *sharedRegistry // B1: nil in single-pod; populated by attachSharedRegistry (Phase B B4)
+	turns        turnStateBackend
+	sessionCache *sessionListCache
+	cmdSeq       atomic.Int64
+
+	TurnTimeout time.Duration
+}
+```
+
+`NewHub` constructor remains unchanged; `sharedReg` defaults to nil.
+
+- [ ] **Step 5: Run; expect pass**
 
 ```sh
 go test ./internal/commanderhub -run TestSharedRegistry_ -count=1 -race
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```sh
 git add internal/commanderhub/registry_shared.go \
-        internal/commanderhub/registry_shared_test.go
+        internal/commanderhub/registry_shared_test.go \
+        internal/commanderhub/hub.go
 git commit -m "feat(commanderhub): add sharedRegistry SQL layer (connectUpsert, heartbeat, remove, lookupRemote, listAll)
 
 Postgres-backed registry of online daemons. connectUpsert claims
@@ -2039,13 +2104,17 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 Append to `internal/commanderhub/registry_shared_test.go`:
 
 ```go
-func TestSharedRegistry_HeartbeatExitsOnCtxCancel(t *testing.T) {
+// To avoid timer-based race conditions, the production runHeartbeat is
+// factored to expose runHeartbeatOnce(ctx, dc) which executes EXACTLY
+// one tick body. Tests call it directly; runHeartbeat is just the for-
+// loop wrapper.
+
+func TestSharedRegistry_HeartbeatOnce_StillOwn(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
 	require.NoError(t, err)
 	defer db.Close()
 
 	s := newSharedRegistry(db, "http://10.0.0.42:8091")
-	s.heartbeatEvery = 10 * time.Millisecond // fast for test
 	dc := &daemonConn{
 		id: "conn-1", shortID: "agent-A",
 		owner:         owner{userID: "alice", workspaceID: "W1"},
@@ -2056,42 +2125,27 @@ func TestSharedRegistry_HeartbeatExitsOnCtxCancel(t *testing.T) {
 		WithArgs("alice", "W1", "agent-A", "conn-1", "alice-mac", "claude", "0.0.10", sqlmock.AnyArg(), "http://10.0.0.42:8091").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { defer close(done); s.runHeartbeat(ctx, dc) }()
-
-	time.Sleep(25 * time.Millisecond) // one tick
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("runHeartbeat did not exit within 1s after ctx cancel")
-	}
+	keepRunning := s.runHeartbeatOnce(context.Background(), dc)
+	require.True(t, keepRunning, "stillOwn should let the loop continue")
+	require.False(t, dc.ownershipLost.Load())
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestSharedRegistry_HeartbeatForceClosesOnOwnershipLoss(t *testing.T) {
+func TestSharedRegistry_HeartbeatOnce_ForceClosesOnOwnershipLoss(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
 	require.NoError(t, err)
 	defer db.Close()
 
 	s := newSharedRegistry(db, "http://10.0.0.42:8091")
-	s.heartbeatEvery = 5 * time.Millisecond
 	dc := newOwnershipTestDaemonConn(t, "conn-1", "agent-A", owner{userID: "alice", workspaceID: "W1"})
 
-	// First tick: stillOwn=false (sibling claimed)
 	mock.ExpectExec(heartbeatUpsertSQL).
 		WithArgs("alice", "W1", "agent-A", "conn-1", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "http://10.0.0.42:8091").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
-	done := make(chan struct{})
-	go func() { defer close(done); s.runHeartbeat(context.Background(), dc) }()
-
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("runHeartbeat should exit after ownership loss")
-	}
-	require.True(t, dc.ownershipLost.Load(), "ownershipLost must be sticky-true after loss")
+	keepRunning := s.runHeartbeatOnce(context.Background(), dc)
+	require.False(t, keepRunning, "ownership loss must signal stop")
+	require.True(t, dc.ownershipLost.Load(), "ownershipLost must be sticky-true")
 	require.True(t, ownershipTestConnIsClosed(dc), "WS conn must be force-closed on ownership loss")
 }
 ```
@@ -2167,49 +2221,65 @@ func ownershipTestConnIsClosed(dc *daemonConn) bool {
 ```go
 import (
 	"log"
+	"sync/atomic"
 )
 
-// runHeartbeat ticks every s.heartbeatEvery, calling heartbeatUpsert.
-// On stillOwn=false: marks dc.ownershipLost (sticky), force-closes the
-// WS conn so the read loop exits and ServeHTTP defers run, then returns.
-// On err: logs at most once per 5 consecutive failures (rate-limited
-// noise), continues. Exits on ctx cancel.
+// runHeartbeatOnce executes one tick body: heartbeatUpsert + handle
+// result. Returns false when the loop must stop (ownership lost OR
+// ctx canceled). Returns true otherwise (still own, or transient PG
+// error — caller continues looping).
+//
+// Exposed as a method (not a closure) so tests can call it directly
+// without relying on timer races.
+func (s *sharedRegistry) runHeartbeatOnce(ctx context.Context, dc *daemonConn) bool {
+	hbCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	stillOwn, err := s.heartbeatUpsert(hbCtx, dc)
+	switch {
+	case err != nil:
+		// Transient PG error — rate-limited log; caller continues looping.
+		n := atomic.AddInt64(&dc.heartbeatErrCount, 1)
+		if n%5 == 1 {
+			log.Printf("commanderhub: heartbeatUpsert short_id=%s conn_id=%s pod=%s err=%v",
+				dc.shortID, dc.id, s.advertiseURL, err)
+		}
+		return true
+	case !stillOwn:
+		log.Printf("commanderhub: heartbeat ownership lost short_id=%s conn_id=%s pod=%s; force-closing WS",
+			dc.shortID, dc.id, s.advertiseURL)
+		dc.ownershipLost.Store(true)
+		// Force-close so the read loop wakes with io.EOF; ServeHTTP
+		// defers then run localReg.removeIf + sharedReg.remove,
+		// neither of which delete the new owner's state (both are
+		// connection_id-guarded).
+		_ = dc.conn.Close()
+		return false
+	default:
+		atomic.StoreInt64(&dc.heartbeatErrCount, 0)
+		return true
+	}
+}
+
+// runHeartbeat ticks every s.heartbeatEvery, calling runHeartbeatOnce.
+// Exits on ctx cancel OR when runHeartbeatOnce returns false (ownership
+// loss).
 func (s *sharedRegistry) runHeartbeat(ctx context.Context, dc *daemonConn) {
 	ticker := time.NewTicker(s.heartbeatEvery)
 	defer ticker.Stop()
-	errCount := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		}
-		hbCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		stillOwn, err := s.heartbeatUpsert(hbCtx, dc)
-		cancel()
-		switch {
-		case err != nil:
-			errCount++
-			if errCount%5 == 1 {
-				log.Printf("commanderhub: heartbeatUpsert short_id=%s conn_id=%s pod=%s err=%v",
-					dc.shortID, dc.id, s.advertiseURL, err)
-			}
-		case !stillOwn:
-			log.Printf("commanderhub: heartbeat ownership lost short_id=%s conn_id=%s pod=%s; force-closing WS",
-				dc.shortID, dc.id, s.advertiseURL)
-			dc.ownershipLost.Store(true)
-			// Force-close so the read loop wakes with io.EOF; ServeHTTP
-			// defers then run localReg.removeIf + sharedReg.remove,
-			// neither of which delete the new owner's state (both are
-			// connection_id-guarded).
-			_ = dc.conn.Close()
+		if !s.runHeartbeatOnce(ctx, dc) {
 			return
-		default:
-			errCount = 0
 		}
 	}
 }
 ```
+
+This requires `daemonConn` to gain a `heartbeatErrCount int64` field (Task A4 should also add it alongside `ownershipLost`). Append to A4 Step 4 the field; if A4 has shipped without it, add it as a separate small edit in B2.
 
 - [ ] **Step 4: Run; expect pass**
 
@@ -2220,7 +2290,9 @@ go test ./internal/commanderhub -run TestSharedRegistry_ -count=1 -race
 - [ ] **Step 5: Commit**
 
 ```sh
-git add internal/commanderhub/registry_shared.go internal/commanderhub/registry_shared_test.go
+git add internal/commanderhub/registry_shared.go \
+        internal/commanderhub/registry_shared_test.go \
+        internal/commanderhub/registry_shared_helpers_test.go
 git commit -m "feat(commanderhub): runHeartbeat goroutine with ownership-loss force-close
 
 Periodically refreshes commander_daemons.last_seen_at; on stillOwn=false
@@ -2268,7 +2340,6 @@ import (
 	"context"
 	"database/sql"
 	"testing"
-	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/require"
@@ -2487,7 +2558,6 @@ For ServeHTTP admission gating, the test requires a working sharedRegistry. Use 
 package commanderhub
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http/httptest"
@@ -2821,25 +2891,21 @@ func TestSharedRegistry_SweepDeletesOldDaemons(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestSharedRegistry_RunSweepRunsAllThree(t *testing.T) {
+func TestSharedRegistry_RunSweepOnceRunsAllThree(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
 	require.NoError(t, err)
 	defer db.Close()
 
 	s := newSharedRegistry(db, "http://10.0.0.42:8091")
-	s.sweepEvery = 5 * time.Millisecond
 	mock.MatchExpectationsInOrder(false)
 	mock.ExpectExec(sweepDaemonsSQL).WithArgs(sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(sweepNoncesSQL).WithArgs(sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(sweepTelemetryBucketsSQL).WithArgs(sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 0))
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { defer close(done); s.runSweep(ctx) }()
-
-	time.Sleep(15 * time.Millisecond)
-	cancel()
-	<-done
+	// runSweepOnce runs one cycle of all three sweeps without any timer
+	// dependency — tests assert SQL was issued without race-sensitive
+	// sleeps against the ticker.
+	s.runSweepOnce(context.Background())
 
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -2869,8 +2935,24 @@ func (s *sharedRegistry) sweepTelemetryBuckets(ctx context.Context) error {
 	return err
 }
 
-// runSweep ticks every s.sweepEvery and runs all three sweeps. Errors
-// are logged but the goroutine continues. Exits on ctx cancel.
+// runSweepOnce executes one cycle of all three sweeps. Exposed as a
+// method so tests can call it directly without timer races.
+func (s *sharedRegistry) runSweepOnce(ctx context.Context) {
+	swCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := s.sweep(swCtx); err != nil {
+		log.Printf("commanderhub: sweep commander_daemons err=%v", err)
+	}
+	if err := s.sweepNonces(swCtx); err != nil {
+		log.Printf("commanderhub: sweep commander_forward_nonces err=%v", err)
+	}
+	if err := s.sweepTelemetryBuckets(swCtx); err != nil {
+		log.Printf("commanderhub: sweep commander_telemetry_buckets err=%v", err)
+	}
+}
+
+// runSweep ticks every s.sweepEvery and calls runSweepOnce. Exits on
+// ctx cancel.
 func (s *sharedRegistry) runSweep(ctx context.Context) {
 	t := time.NewTicker(s.sweepEvery)
 	defer t.Stop()
@@ -2880,17 +2962,7 @@ func (s *sharedRegistry) runSweep(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		swCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		if err := s.sweep(swCtx); err != nil {
-			log.Printf("commanderhub: sweep commander_daemons err=%v", err)
-		}
-		if err := s.sweepNonces(swCtx); err != nil {
-			log.Printf("commanderhub: sweep commander_forward_nonces err=%v", err)
-		}
-		if err := s.sweepTelemetryBuckets(swCtx); err != nil {
-			log.Printf("commanderhub: sweep commander_telemetry_buckets err=%v", err)
-		}
-		cancel()
+		s.runSweepOnce(ctx)
 	}
 }
 ```
