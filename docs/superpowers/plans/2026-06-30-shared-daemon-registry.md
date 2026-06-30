@@ -469,7 +469,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Modify: `multi-agent/internal/commanderhub/authstore/schema_postgres.sql` (append 4 CREATE TABLE blocks)
 - Create: `multi-agent/internal/commanderhub/authstore/schema_postgres_rollback.sql`
 - Modify: `multi-agent/internal/commanderhub/authstore/postgres_test.go` (append 1 env-skipped test)
-- Modify: `multi-agent/go.mod` + `multi-agent/go.sum` — add `github.com/DATA-DOG/go-sqlmock` for upcoming sqlmock tests in Phase B/D
+- (go-sqlmock dependency is added in Phase B Task B1, its first importer; A3 doesn't need it.)
 
 **Interfaces:**
 - Produces: four PG tables visible to phases B/C/D (`commander_daemons`, `commander_turns`, `commander_forward_nonces`, `commander_telemetry_buckets`). All idempotent (`CREATE TABLE IF NOT EXISTS`). All created by `MigratePostgres(db)`.
@@ -2111,8 +2111,12 @@ row is owned by another advertiseURL; listAll returns fresh rows for
 all pods. SQL statements live as exported consts so sqlmock tests can
 assert exact shape via QueryMatcherEqual.
 
-Heartbeat is a plain UPDATE (not UPSERT) so a sweep-deleted dead row
-STAYS deleted; reconnect re-claims via connectUpsert.
+Heartbeat is an UPSERT with ownership-guarded WHERE clause (per spec
+v19): SET fires only when commander_daemons.owning_instance_url AND
+connection_id match the heartbeat's intent. 0 rows ⇒ sibling/newer
+connection took over (caller's runHeartbeatOnce force-closes WS).
+INSERT path fires when the row is missing (long PG outage + sweep) so
+the heartbeat self-heals by re-claiming.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
