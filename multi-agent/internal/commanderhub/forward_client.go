@@ -124,13 +124,10 @@ func (fc *forwardClient) send(ctx context.Context, peerURL string, req forwardRe
 	keys := fc.keysToTry()
 	for i, key := range keys {
 		result, err := fc.doSend(ctx, peerURL, body, key)
-		if err == ErrDaemonGone && i == 0 && len(keys) > 1 {
-			// 403 with current secret — retry with previous secret.
-			// But we only know it was 403 if the error is a sentinel from
-			// doSend with a specific marker. We handle this differently:
-			// doSend returns (nil, errForward403) for 403 so we can retry.
-			continue
-		}
+		// Retry ONLY on HTTP 403 (doSend returns errForward403) from the first
+		// attempt when a previous secret is available. A 5xx maps to ErrDaemonGone
+		// via mapResponse and must NOT trigger a retry — the peer is unhealthy,
+		// not rotating keys.
 		if err == errForward403 && i == 0 && len(keys) > 1 {
 			continue
 		}

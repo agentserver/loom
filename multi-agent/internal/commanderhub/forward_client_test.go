@@ -400,6 +400,49 @@ func TestForwardClient_Send_LoopRefused_LoopbackURL(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// TestForwardClient_Send_5xxWithPrevSecret_NoRetry — C3 follow-up
+// ---------------------------------------------------------------------------
+
+// TestForwardClient_Send_5xxWithPrevSecret_NoRetry verifies that when a peer
+// returns 503, the forwardClient makes exactly ONE request even when PrevSecret
+// is configured. A 5xx must not trigger key-rotation retry (only 403 should).
+func TestForwardClient_Send_5xxWithPrevSecret_NoRetry(t *testing.T) {
+	callCount := 0
+	srv := makeForwardServer(t, func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+	})
+	defer srv.Close()
+
+	// Redirect all traffic from a fake non-loopback hostname to the test server.
+	// This lets us call send() with a non-loopback peer URL while still hitting
+	// the httptest server (which binds to 127.0.0.1).
+	fc := newForwardClient([]byte("new-secret"), []byte("old-secret"), "http://self-pod:8091")
+	fc.httpClient = &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			// Rewrite the target host to the test server while preserving path.
+			req2 := req.Clone(req.Context())
+			req2.URL.Host = srv.Listener.Addr().String()
+			req2.URL.Scheme = "http"
+			return http.DefaultTransport.RoundTrip(req2)
+		}),
+	}
+
+	req := forwardRequest{UserID: "u", WorkspaceID: "w", DaemonID: "d", Command: "list_sessions"}
+	// peer URL is non-loopback so wouldLoop returns false.
+	_, err := fc.send(context.Background(), "http://peer-pod:8091", req)
+
+	require.ErrorIs(t, err, ErrDaemonGone, "5xx must map to ErrDaemonGone")
+	require.Equal(t, 1, callCount, "5xx must not trigger retry: exactly 1 request expected, got %d", callCount)
+}
+
+// roundTripFunc is an http.RoundTripper implemented by a function.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// ---------------------------------------------------------------------------
 // Additional: 5xx → ErrDaemonGone
 // ---------------------------------------------------------------------------
 
