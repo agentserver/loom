@@ -2,7 +2,7 @@
 
 **Issue:** [#49](https://github.com/agentserver/loom/issues/49) — commanderhub daemon registry not shared across observer instances; the commander UI shows daemons intermittently when the observer scales horizontally.
 
-> Revision history: v1 (initial), v2 (post-Claude adversarial review — fixes B1–B4, M1–M11, m1–m10), v3 (post-Codex review — fixes additional 9 BLOCKERs + 14 MAJORs), v4 (post-Codex round-2 — fixes 7 BLOCKERs + 9 MAJORs), v5 (post-Codex round-3 — fixes 4 BLOCKERs + 4 MAJORs), v6 (post-Codex round-4 — fixes 1 BLOCKER + 5 MAJORs), v7 (post-Codex round-5 — fixes 0 BLOCKERs + 4 MAJORs), v8 (post-Codex round-6 — fixes 0 BLOCKERs + 3 MAJORs), v9 (post-Codex round-7 — fixes 0 BLOCKERs + 2 MAJORs), v10 (post-comment 4839308595 — extends scope to cover three additional cross-pod consistency bugs), v11 (post-Codex v10-round-1 — fixes 0 BLOCKERs + 4 MAJORs), v12 (post-Codex v11-round-2 — fixes 0 BLOCKERs + 5 MAJORs), v13 (post-issue-#49 final audit — adds Finding E: telemetry rate limiter), v14 (post-Codex v13 — fixes 2 BLOCKERs + 5 MAJORs), v15 (post-Codex v14 — fixes 0 BLOCKERs + 5 MAJORs), v16 (post-Codex v15 — fixes 0 BLOCKERs + 3 MAJORs), **v17 (post-Codex v16 — fixes 0 BLOCKERs + 3 MAJORs: secret.yaml fresh_ttl render now conditional + explicit production yaml snippet + revocation has separate enable flag for Helm opt-out)**.
+> Revision history: v1 (initial), v2 (post-Claude adversarial review — fixes B1–B4, M1–M11, m1–m10), v3 (post-Codex review — fixes additional 9 BLOCKERs + 14 MAJORs), v4 (post-Codex round-2 — fixes 7 BLOCKERs + 9 MAJORs), v5 (post-Codex round-3 — fixes 4 BLOCKERs + 4 MAJORs), v6 (post-Codex round-4 — fixes 1 BLOCKER + 5 MAJORs), v7 (post-Codex round-5 — fixes 0 BLOCKERs + 4 MAJORs), v8 (post-Codex round-6 — fixes 0 BLOCKERs + 3 MAJORs), v9 (post-Codex round-7 — fixes 0 BLOCKERs + 2 MAJORs), v10 (post-comment 4839308595 — extends scope to cover three additional cross-pod consistency bugs), v11 (post-Codex v10-round-1 — fixes 0 BLOCKERs + 4 MAJORs), v12 (post-Codex v11-round-2 — fixes 0 BLOCKERs + 5 MAJORs), v13 (post-issue-#49 final audit — adds Finding E: telemetry rate limiter), v14 (post-Codex v13 — fixes 2 BLOCKERs + 5 MAJORs), v15 (post-Codex v14 — fixes 0 BLOCKERs + 5 MAJORs), v16 (post-Codex v15 — fixes 0 BLOCKERs + 3 MAJORs), v17 (post-Codex v16 — fixes 0 BLOCKERs + 3 MAJORs), **v18 (post-Codex v17 — fixes 0 BLOCKERs + 3 MAJORs: revocationChannel becomes an enum `auto|enabled|disabled` with default `auto`; secret.yaml v3 section explicitly shows conditional fresh_ttl/revocation_channel; chart tests assert renders)**.
 
 ## Context
 
@@ -188,7 +188,7 @@ Also fix the §"Component map" identity row reference if you read this in implem
 | Public listener streaming-safe timeout fix          | `cmd/observer-server/main.go::newHTTPServer`                            | pre-existing bug: `WriteTimeout: 60s` is incompatible with 10-min SSE turns. Split into `newPublicHTTPServer` (no `WriteTimeout`, retains `ReadHeaderTimeout`+`IdleTimeout`) and `newInternalHTTPServer` (same posture). Public-listener change is needed regardless of this PR but folded in to avoid divergent posture |
 | Helm chart values                                    | `deploy/charts/observer/values.yaml`                                    | new `cluster:` block; flip dev `replicaCount` 2 → 1                          |
 | Helm chart values-production (v16)                   | `deploy/charts/observer/values-production.example.yaml`                 | `cluster.enabled: true`; doc `cluster-secret` key in `existingSecret`; **v16 explicitly adds `config.identity.agentserver.freshTTL: "30s"` AND `config.identity.agentserver.revocationChannel: "postgres"`** so production existingSecret deployments actually opt into the shorter TTL and the LISTEN/NOTIFY channel. Chart test asserts these render into both `observer.nonsecret.yaml` (ConfigMap) and `observer.yaml` (Secret, when secret.create=true). |
-| Helm chart values default (v16/v17)                  | `deploy/charts/observer/values.yaml`                                    | **v16 flips default `config.identity.agentserver.freshTTL` from `"180s"` to `""`** so the binary's pointer-nil check fires and applies the cluster-aware default (30s shared, 180s single-pod). Single-pod operators upgrading from existing values keep 180s because the binary still applies that default when `cluster.enabled=false`. Same `""` default for `revocationChannel`. **v17 adds `revocationChannelEnabled: false`** as a separate boolean so operators can explicitly opt OUT of revocation channel in shared mode (set true to opt in, false to disable the cluster-mode auto-default). ConfigMap renders `revocation_channel: ""` (disables) when `revocationChannelEnabled=false`, the `revocationChannel` value when `=true`, omits when missing (binary defaults). |
+| Helm chart values default (v16/v17/v18)              | `deploy/charts/observer/values.yaml`                                    | **v16 flips default `config.identity.agentserver.freshTTL` from `"180s"` to `""`** so the binary's pointer-nil check fires and applies the cluster-aware default (30s shared, 180s single-pod). **v18 replaces the v17 `revocationChannel` string + `revocationChannelEnabled` boolean with a single enum** `config.identity.agentserver.revocationChannel` with allowed values `auto` (default — binary applies cluster.enabled-dependent default), `enabled` (force on, value `"postgres"`), `disabled` (force off, value `""`). Default in `values.yaml` is `"auto"`. ConfigMap render: only emits `revocation_channel: "<value>"` when the operator-chosen value differs from `auto` (auto means "let the binary decide"). The pointer-nullable trick fails for Helm representation because Helm has no clean way to convey "explicit nil" in YAML; an enum is the canonical Helm pattern. |
 | Helm chart secret.yaml fresh_ttl render (v17)        | `deploy/charts/observer/templates/secret.yaml:54`                       | **v17 codex MAJOR #1:** today's template hard-codes `fresh_ttl: {{ default "180s" .Values.config.identity.agentserver.freshTTL | quote }}`, which renders `180s` even when chart default is `""`. v17 changes to conditional emission matching the configmap pattern: `{{- if .Values.config.identity.agentserver.freshTTL }}{{ "\n        fresh_ttl: " }}{{ .Values.config.identity.agentserver.freshTTL | quote }}{{- end }}`. Same conditional for `revocation_channel`. This way chart-managed Secret deployments also let the binary's pointer-nullable default fire when the operator hasn't explicitly set a value. |
 | Helm chart secret + deployment                       | `deploy/charts/observer/templates/{secret.yaml,deployment.yaml}`        | render `cluster:` into observer.yaml (only inside the `secret.create && !existingSecret` gate, where observer.yaml lives); wire `POD_IP` + `OBSERVER_CLUSTER_SECRET` env vars; internal port |
 | Helm chart **validation template** (always rendered) | `deploy/charts/observer/templates/validate.yaml` (new, **no underscore**) | top-level `{{- fail }}` guards for: (1) `replicaCount > 1 && !cluster.enabled` (2) `replicaCount > 1 && store.driver != "postgres"` — sqlite single-pod-only (3) `cluster.enabled && secret.create && !secret.clusterSecret` (4) `cluster.enabled && secret.create && len(secret.clusterSecret) < 32`. Runs regardless of `secret.create` / `existingSecret` because it's a separate template, not gated inside secret.yaml. Comment-only body (no resource emitted; `kubectl apply` ignores). |
@@ -977,20 +977,18 @@ cluster:
 config:
   identity:
     agentserver:
-      # v17: explicit shared-mode defaults. Without these, the binary's
-      # pointer-nullable post-merge defaulting would also produce these
-      # values, but rendering them here makes the production posture
-      # visible at chart-render time AND ensures `secret.create=true`
-      # deployments (which DO render templates/secret.yaml) get them too.
+      # v18: explicit shared-mode opt-in. revocationChannel enum:
+      #   auto     → let binary decide (cluster.enabled=true → postgres)
+      #   enabled  → force "postgres" regardless of cluster.enabled
+      #   disabled → force off (operator override)
       freshTTL: "30s"
-      revocationChannel: "postgres"
-      revocationChannelEnabled: true   # v17: distinguishes "operator wants
-                                       # revocation off" (set to false +
-                                       # leave channel = "") from "operator
-                                       # didn't say" (omit both).
+      revocationChannel: "enabled"  # explicit opt-in even if cluster
+                                    # auto-default would also enable it;
+                                    # makes the production posture visible
+                                    # at chart-render time AND ensures
+                                    # `secret.create=true` deployments
+                                    # also get it via templates/secret.yaml.
 ```
-
-(See v17 fix below for `revocationChannelEnabled` rationale.)
 
 #### `templates/validate.yaml` (always-rendered, no underscore prefix)
 
@@ -1051,7 +1049,7 @@ Codex flagged: `templates/secret.yaml` is fully gated by `{{- if and .Values.sec
 The `cluster:` config is **non-secret** by design — `secret_env`/`prev_secret_env`/`advertise_url_env` are env var *names*, and `internal_listen_addr` is a port string. The actual secret VALUES live in the existingSecret's `cluster-secret`/`cluster-secret-prev` keys. So the safe move is:
 
 1. **Cluster config block moves into `templates/configmap.yaml`'s `observer.nonsecret.yaml`** (always rendered, regardless of `secret.create`). This file mounts at `/etc/observer/nonsecret/`. The observer config loader is extended to merge `nonsecret/observer.nonsecret.yaml` on top of the main `observer.yaml` (new behavior).
-2. **`observer.yaml` (in the Secret when `secret.create=true`) is unchanged** — operators managing observer.yaml externally simply add the `cluster:` block themselves; the chart documentation in `values-production.example.yaml` includes the exact YAML snippet to add.
+2. **`observer.yaml` (in the Secret when `secret.create=true`) gains v17/v18 conditional renders for `fresh_ttl` and `revocation_channel`** — `templates/secret.yaml` lines around `fresh_ttl: …` (currently line 54) change from hard-coded `default "180s"` to conditional emission (see v17 chart-fix below). This way `secret.create=true` cluster deployments ALSO let the binary's pointer-nullable default fire when the value is `""`/`"auto"`. Operators managing observer.yaml externally simply add the `cluster:`/identity fields themselves; the chart documentation in `values-production.example.yaml` includes the exact YAML snippet to add.
 3. **Init container reads OBSERVER_CLUSTER_SECRET from whichever Secret is in play** — the `secretKeyRef.name` template uses `{{ default (include "observer.configSecretName" .) .Values.existingSecret }}` (already done correctly in v3 §"Deployment template").
 
 `templates/configmap.yaml` v4 (extends today's `observer.nonsecret.yaml` block at `configmap.yaml:11-26`):
@@ -1074,16 +1072,18 @@ The `cluster:` config is **non-secret** by design — `secret_env`/`prev_secret_
         {{- if .Values.config.identity.agentserver.freshTTL }}
         fresh_ttl: {{ .Values.config.identity.agentserver.freshTTL | quote }}
         {{- end }}
-        {{- /* v17: revocationChannelEnabled is the OPT-IN/OPT-OUT toggle.
-              - true  → emit revocation_channel: "<value>" (defaults to "postgres" if value empty)
-              - false → emit revocation_channel: "" (explicit opt-out; binary sees pointer-to-"" and does NOT default)
-              - unset (hasKey false) → omit; binary's post-merge default fires per cluster.enabled */ -}}
-        {{- if hasKey .Values.config.identity.agentserver "revocationChannelEnabled" }}
-          {{- if .Values.config.identity.agentserver.revocationChannelEnabled }}
-        revocation_channel: {{ default "postgres" .Values.config.identity.agentserver.revocationChannel | quote }}
-          {{- else }}
+        {{- /* v18: revocationChannel is an enum "auto" | "enabled" | "disabled".
+              - "auto"      (default) → omit field; binary applies cluster.enabled-dependent default
+              - "enabled"   → emit revocation_channel: "postgres"
+              - "disabled"  → emit revocation_channel: "" (explicit opt-out)
+              Helm chart MUST default to "auto" so the binary's defaulting fires for upgrades. */ -}}
+        {{- $rc := default "auto" .Values.config.identity.agentserver.revocationChannel -}}
+        {{- if eq $rc "enabled" }}
+        revocation_channel: "postgres"
+        {{- else if eq $rc "disabled" }}
         revocation_channel: ""
-          {{- end }}
+        {{- else if and (ne $rc "auto") }}
+        {{- fail (printf "config.identity.agentserver.revocationChannel must be auto|enabled|disabled; got %q" $rc) }}
         {{- end }}
     store:
       driver: {{ .Values.config.store.driver | quote }}
@@ -1120,7 +1120,27 @@ func loadConfig(path string) (*Config, error) {
 }
 ```
 
-`templates/secret.yaml` additions are confined to **secret data keys** only (no observer.yaml changes there):
+`templates/secret.yaml` v17/v18 changes:
+
+(a) Identity-cache lines (`templates/secret.yaml:54-58`) change from hard-coded defaults to conditional emission so the binary's pointer-nullable post-merge default fires when operators don't explicitly set:
+
+```gotemplate
+        {{- if .Values.config.identity.agentserver.freshTTL }}
+        fresh_ttl: {{ .Values.config.identity.agentserver.freshTTL | quote }}
+        {{- end }}
+        {{- $rc := default "auto" .Values.config.identity.agentserver.revocationChannel -}}
+        {{- if eq $rc "enabled" }}
+        revocation_channel: "postgres"
+        {{- else if eq $rc "disabled" }}
+        revocation_channel: ""
+        {{- else if and (ne $rc "auto") }}
+        {{- fail (printf "config.identity.agentserver.revocationChannel must be auto|enabled|disabled; got %q" $rc) }}
+        {{- end }}
+```
+
+(`stale_grace`, `request_timeout`, `cache_capacity`, `startup_probe` stay as today.)
+
+(b) New secret data keys (still gated by `secret.create && !existingSecret`):
 
 ```gotemplate
   {{- if and .Values.cluster.enabled .Values.secret.create (not .Values.existingSecret) }}
@@ -1382,6 +1402,57 @@ if helm template observer-test "$CHART_DIR" --set replicaCount=2 \
 else
   echo "expected fail-fast on replicaCount=2 without cluster.enabled" >&2
   exit 1
+fi
+
+# 4. v18: existingSecret + production values render fresh_ttl + revocation_channel
+#    into ConfigMap (observer.nonsecret.yaml), and ABSENT from chart-managed
+#    Secret (which is not rendered when existingSecret is set).
+prod="$(helm template observer-test "$CHART_DIR" \
+  --set existingSecret=observer-prod-secret \
+  -f "$CHART_DIR/values-production.example.yaml")"
+configmap="$(awk '/^---$/{p=0} /kind: ConfigMap/{p=1} p' <<<"$prod")"
+grep -q 'fresh_ttl: "30s"'         <<<"$configmap"
+grep -q 'revocation_channel: "postgres"' <<<"$configmap"
+# Secret was NOT rendered (existingSecret in use):
+! grep -q 'kind: Secret' <<<"$prod" || {
+  echo "Secret should not render when existingSecret is set" >&2; exit 1; }
+
+# 5. v18: secret.create=true + cluster.enabled renders fresh_ttl +
+#    revocation_channel into the chart-managed Secret too.
+secret="$(helm template observer-test "$CHART_DIR" \
+  --set replicaCount=2 --set cluster.enabled=true --set secret.create=true \
+  --set secret.clusterSecret=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA \
+  --set secret.databaseUrl='postgres://x' \
+  --set secret.s3AccessKey=x --set secret.s3SecretKey=x \
+  --set secret.telemetryKeys.telemetry-global-key=x \
+  --set config.identity.legacyAPIKeys.enabled=true \
+  --set config.apiKeys[0].id=test --set config.apiKeys[0].key=test \
+  --set config.identity.agentserver.freshTTL='30s' \
+  --set config.identity.agentserver.revocationChannel='enabled')"
+secret_yaml="$(awk '/^---$/{p=0} /kind: Secret/{p=1} p' <<<"$secret")"
+grep -q 'fresh_ttl: "30s"'         <<<"$secret_yaml"
+grep -q 'revocation_channel: "postgres"' <<<"$secret_yaml"
+
+# 6. v18: revocationChannel=disabled emits explicit ""
+disabled="$(helm template observer-test "$CHART_DIR" \
+  --set replicaCount=2 --set cluster.enabled=true \
+  --set secret.create=true --set secret.clusterSecret=$(head -c 48 /dev/urandom | base64 | tr -d '+/=' | head -c 48) \
+  --set secret.databaseUrl='postgres://x' \
+  --set secret.s3AccessKey=x --set secret.s3SecretKey=x \
+  --set secret.telemetryKeys.telemetry-global-key=x \
+  --set config.identity.legacyAPIKeys.enabled=true \
+  --set config.apiKeys[0].id=test --set config.apiKeys[0].key=test \
+  --set config.identity.agentserver.revocationChannel='disabled')"
+grep -q 'revocation_channel: ""' <<<"$disabled"
+
+# 7. v18: invalid revocationChannel value fails fast
+if helm template observer-test "$CHART_DIR" --set replicaCount=2 \
+    --set cluster.enabled=true \
+    --set config.identity.agentserver.revocationChannel='bogus' \
+    2>&1 | grep -q 'must be auto|enabled|disabled'; then
+  echo "revocationChannel enum fail-fast OK"
+else
+  echo "expected fail on revocationChannel=bogus" >&2; exit 1
 fi
 ```
 
