@@ -3,6 +3,7 @@ package commanderhub
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -383,8 +384,17 @@ func sendOrDrop(ch chan commander.Envelope, env commander.Envelope, terminal boo
 }
 
 // nextCmdID returns a hub-unique command id (used by proxy.go).
+// SINGLE-POD path (h.sharedReg == nil) emits base36 sequence only (bit-exact v0.0.9 behavior).
+// SHARED MODE (h.sharedReg != nil) emits <podHash>-<base36> where podHash is the
+// first 4 hex chars of SHA256(advertiseURL).
 func (h *Hub) nextCmdID() string {
-	return strconv.FormatInt(h.cmdSeq.Add(1), 36)
+	seq := strconv.FormatInt(h.cmdSeq.Add(1), 36)
+	if h.sharedReg == nil {
+		return seq // bit-exact preservation of v0.0.9 behavior
+	}
+	sum := sha256.Sum256([]byte(h.sharedReg.advertiseURL))
+	podHash := hex.EncodeToString(sum[:])[:4]
+	return podHash + "-" + seq
 }
 
 // --- shared utils (bearerToken also used by auth.go) ---

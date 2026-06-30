@@ -380,3 +380,64 @@ func TestServeHTTP_ClusterMode_RefusesWSOnUpsertFailure(t *testing.T) {
 
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+// TestNextCmdID_SinglePod_ByteExactLegacy tests that single-pod mode returns
+// base36 sequences without pod prefix (bit-exact v0.0.9 behavior).
+func TestNextCmdID_SinglePod_ByteExactLegacy(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{
+		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
+	}}
+	hub := NewHub(resolver)
+	// Ensure sharedReg is nil (single-pod mode).
+	require.Nil(t, hub.sharedReg)
+
+	// First 5 calls should return "1", "2", "3", "4", "5" exactly.
+	expectedSeqs := []string{"1", "2", "3", "4", "5"}
+	for i, expected := range expectedSeqs {
+		got := hub.nextCmdID()
+		require.Equal(t, expected, got, "call %d: expected base36 %q but got %q", i+1, expected, got)
+	}
+}
+
+// TestNextCmdID_SharedMode_PodPrefix tests that shared mode includes a 4-hex
+// pod prefix derived from the advertiseURL.
+func TestNextCmdID_SharedMode_PodPrefix(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{
+		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
+	}}
+	hub := NewHub(resolver)
+
+	// Set up shared mode with a known advertiseURL.
+	advertiseURL := "http://10.0.0.42:8091"
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	_ = mock // unused in this test
+
+	hub.sharedReg = newSharedRegistry(db, advertiseURL)
+
+	// First call should return <4hex>-1.
+	firstID := hub.nextCmdID()
+	parts := strings.Split(firstID, "-")
+	require.Len(t, parts, 2, "shared mode ID should have format <hash>-<seq>")
+
+	podHash := parts[0]
+	seqPart := parts[1]
+
+	// Pod hash should be exactly 4 hex characters.
+	require.Len(t, podHash, 4, "pod hash should be 4 hex chars")
+	for _, c := range podHash {
+		require.True(t, (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'),
+			"pod hash should contain only hex chars, got %c", c)
+	}
+
+	// Sequence part should be "1".
+	require.Equal(t, "1", seqPart, "first sequence should be 1")
+
+	// Second call should have the same pod hash but sequence "2".
+	secondID := hub.nextCmdID()
+	parts2 := strings.Split(secondID, "-")
+	require.Len(t, parts2, 2)
+	require.Equal(t, podHash, parts2[0], "pod hash should be consistent")
+	require.Equal(t, "2", parts2[1], "second sequence should be 2")
+}
