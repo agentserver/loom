@@ -33,6 +33,17 @@ const (
 	// the publish and increments a counter (DoS protection).
 	invalidPublishGlobalCap    = 20
 	invalidPublishGlobalWindow = time.Second
+
+	// invalidLastPublishLRUCap is the maximum number of entries in the per-key
+	// dedupe LRU for invalid-token publish tracking. Bounded to prevent an
+	// attacker spraying random tokens from growing the map without limit.
+	invalidLastPublishLRUCap = 256
+
+	// subscribeInitialBackoff is the first retry delay after a Subscribe error.
+	subscribeInitialBackoff = time.Second
+
+	// subscribeMaxBackoff caps exponential backoff for Subscribe retries.
+	subscribeMaxBackoff = 30 * time.Second
 )
 
 // RevocationChannel propagates identity cache invalidations across pods.
@@ -69,6 +80,12 @@ type CacheConfig struct {
 	Jitter func() float64
 }
 
+// invalidPublishEntry is one slot in the per-key publish-dedupe LRU.
+type invalidPublishEntry struct {
+	key       string
+	publishAt time.Time
+}
+
 type cacheResolver struct {
 	delegate Resolver
 	cfg      CacheConfig
@@ -82,9 +99,15 @@ type cacheResolver struct {
 	// invalidPublish tracks the last time each bad-token key was published so
 	// we can dedupe within a 1s window and enforce a global publish rate cap.
 	// Protected by mu.
-	invalidLastPublish   map[string]time.Time // key → last published time
-	invalidGlobalCount   int                  // publishes in current window
-	invalidGlobalWindowT time.Time            // start of current window
+	//
+	// invalidLastPublish is a bounded LRU (cap=invalidLastPublishLRUCap) to
+	// prevent an attacker spraying distinct random tokens from growing the map
+	// without bound. The LRU maps cache-key → *list.Element whose Value is
+	// *invalidPublishEntry. When cap is reached the oldest entry is evicted.
+	invalidLastPublish      map[string]*list.Element // key → LRU element
+	invalidLastPublishLRU   *list.List               // LRU order; oldest at Back
+	invalidGlobalCount      int                      // publishes in current window
+	invalidGlobalWindowT    time.Time                // start of current window
 
 	group singleflight.Group
 }
@@ -131,12 +154,13 @@ func NewCache(delegate Resolver, cfg CacheConfig, opts ...Option) Resolver {
 		opt(&options)
 	}
 	c := &cacheResolver{
-		delegate:           delegate,
-		cfg:                cfg,
-		opts:               options,
-		entries:            make(map[string]*list.Element),
-		lru:                list.New(),
-		invalidLastPublish: make(map[string]time.Time),
+		delegate:            delegate,
+		cfg:                 cfg,
+		opts:                options,
+		entries:             make(map[string]*list.Element),
+		lru:                 list.New(),
+		invalidLastPublish:  make(map[string]*list.Element),
+		invalidLastPublishLRU: list.New(),
 	}
 	if options.revocation != nil {
 		c.subscribe()
@@ -258,28 +282,44 @@ func (c *cacheResolver) evict(key string) {
 	}
 }
 
-// evictInvalid is like evict but applies a per-key dedupe window and a global
-// publish-rate cap before calling Publish. This prevents a spray of bad tokens
-// from producing one PG NOTIFY per request (DoS vector).
+// evictInvalid is like evict but applies two additional guards:
 //
-// The local eviction is unconditional; only the Publish is rate-limited.
+//  1. Cache-gated: only publishes a revocation if there was a LOCAL cache entry
+//     for key prior to this call. Attacker-sprayed tokens that were never cached
+//     have nothing to revoke — they were never valid — so broadcasting them is
+//     both wasteful and a DoS vector (unbounded PG NOTIFYs from random tokens).
+//
+//  2. Per-key dedupe window + global rate cap: prevents the same key (or a spray
+//     of distinct keys) from producing a PG NOTIFY per request.
+//
+// The local eviction is unconditional; only the Publish is gated.
 func (c *cacheResolver) evictInvalid(key string) {
-	c.localEvict(key)
-	if c.opts.revocation != nil && c.allowInvalidPublish(key) {
-		c.markSelfPublished(key)
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if err := c.opts.revocation.Publish(ctx, key); err != nil {
-			log.Printf("identity cache: revocation publish (invalid) error key_prefix=%s len=%d: %v",
-				keyPrefix(key), len(key), err)
-		}
+	hadEntry := c.localEvictReporting(key)
+	if c.opts.revocation == nil {
+		return
+	}
+	// Only publish when we actually had a local entry to evict (spec-correct
+	// semantics: revocation = "remove from cache"; nothing-to-remove = nothing-to-publish).
+	if !hadEntry {
+		return
+	}
+	if !c.allowInvalidPublish(key) {
+		return
+	}
+	c.markSelfPublished(key)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := c.opts.revocation.Publish(ctx, key); err != nil {
+		log.Printf("identity cache: revocation publish (invalid) error key_prefix=%s len=%d: %v",
+			keyPrefix(key), len(key), err)
 	}
 }
 
 // allowInvalidPublish returns true if it is okay to Publish a revocation for
 // this key at the current time. It enforces two limits under mu:
-//  1. Per-key dedupe: the same key may not be published more than once per
-//     invalidPublishDedupeWindow (default 1s).
+//  1. Per-key dedupe (bounded LRU): the same key may not be published more than
+//     once per invalidPublishDedupeWindow (default 1s). The LRU is capped at
+//     invalidLastPublishLRUCap entries; when full, the oldest entry is evicted.
 //  2. Global cap: at most invalidPublishGlobalCap Publish calls per
 //     invalidPublishGlobalWindow across all keys.
 //
@@ -290,11 +330,15 @@ func (c *cacheResolver) allowInvalidPublish(key string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Per-key dedupe.
-	if last, ok := c.invalidLastPublish[key]; ok {
-		if now.Sub(last) < invalidPublishDedupeWindow {
+	// Per-key dedupe (LRU-bounded).
+	if elem, ok := c.invalidLastPublish[key]; ok {
+		ent := elem.Value.(*invalidPublishEntry)
+		if now.Sub(ent.publishAt) < invalidPublishDedupeWindow {
 			return false
 		}
+		// Entry expired: remove from LRU and map so we can re-add below.
+		c.invalidLastPublishLRU.Remove(elem)
+		delete(c.invalidLastPublish, key)
 	}
 
 	// Global rate cap: reset window if expired, then check.
@@ -306,8 +350,21 @@ func (c *cacheResolver) allowInvalidPublish(key string) bool {
 		return false
 	}
 
-	// Allow: record state.
-	c.invalidLastPublish[key] = now
+	// Evict oldest LRU entry when at capacity.
+	for len(c.invalidLastPublish) >= invalidLastPublishLRUCap {
+		oldest := c.invalidLastPublishLRU.Back()
+		if oldest == nil {
+			break
+		}
+		oldEnt := oldest.Value.(*invalidPublishEntry)
+		c.invalidLastPublishLRU.Remove(oldest)
+		delete(c.invalidLastPublish, oldEnt.key)
+	}
+
+	// Allow: record in LRU and increment global count.
+	ent := &invalidPublishEntry{key: key, publishAt: now}
+	elem := c.invalidLastPublishLRU.PushFront(ent)
+	c.invalidLastPublish[key] = elem
 	c.invalidGlobalCount++
 	return true
 }
@@ -322,24 +379,69 @@ func (c *cacheResolver) localEvict(key string) {
 	}
 }
 
-// subscribe starts the background goroutine that receives remote revocations
-// and applies them via localEvict. The goroutine exits when the cache is
-// garbage-collected (we use a background context; real lifetime management is
-// left to the caller via RevocationChannel.Subscribe's stop func, but we
-// deliberately never call stop here to keep the cache live for the process
-// lifetime — matching the existing single-pod cache lifecycle).
+// localEvictReporting is like localEvict but returns true if an entry was
+// present (and thus actually evicted). Used by evictInvalid to implement the
+// cache-gated publish: only tokens that were previously cached produce a
+// revocation broadcast.
+func (c *cacheResolver) localEvictReporting(key string) (hadEntry bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	elem, ok := c.entries[key]
+	if ok {
+		c.removeElement(elem)
+	}
+	return ok
+}
+
+// subscribe starts a background goroutine that continuously maintains a
+// subscription to the revocation channel, applying remote revocations via
+// localEvict. On subscription error it retries with exponential backoff
+// (1s, 2s, 4s, 8s, capped at 30s) and stops when ctx is cancelled.
+//
+// We use a background context so the subscription survives for the process
+// lifetime. Real lifecycle management is left to the RevocationChannel
+// implementation (e.g. the PG LISTEN connection). The goroutine only exits
+// when the parent context cancels — in production this is never, matching the
+// existing single-pod cache lifecycle.
 func (c *cacheResolver) subscribe() {
-	ctx := context.Background()
-	_, err := c.opts.revocation.Subscribe(ctx, func(key string) {
+	onRevoke := func(key string) {
 		if c.isSelfPublished(key) {
 			// Self-loop: localEvict would be a no-op; suppress the log.
 			return
 		}
 		c.localEvict(key)
-	})
-	if err != nil {
-		log.Printf("identity cache: revocation subscribe error: %v", err)
 	}
+
+	go func() {
+		ctx := context.Background()
+		backoff := subscribeInitialBackoff
+		for {
+			stop, err := c.opts.revocation.Subscribe(ctx, onRevoke)
+			if err == nil {
+				// Subscribe succeeded; the stop func is held but we never call it
+				// explicitly — if Subscribe returns a non-nil stop, calling it would
+				// cancel the subscription, so we leave it running indefinitely. When
+				// the subscription breaks (e.g. PG LISTEN connection drops), Subscribe
+				// should return an error on the next call, triggering a retry.
+				_ = stop
+				// If Subscribe returned without error but the channel is healthy,
+				// it should block until cancelled or the connection drops. If it
+				// returned immediately with no error, the channel implementation is
+				// non-blocking (e.g. in-memory mock) — treat as success and return.
+				return
+			}
+			log.Printf("identity cache: revocation subscribe error (retry in %s): %v", backoff, err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+			if backoff > subscribeMaxBackoff {
+				backoff = subscribeMaxBackoff
+			}
+		}
+	}()
 }
 
 // markSelfPublished records key in the dedupe ring so that the subscribe

@@ -225,27 +225,42 @@ func (f *countingRevocationChannel) total() int {
 }
 
 // TestCache_ErrInvalid_RateLimit_DedupesSameKeyWithin1s verifies that a spray
-// of ErrInvalid responses for the same bad token results in only ONE Publish
-// call within a 1s window (per-key dedupe).
+// of ErrInvalid responses for the same previously-cached token results in only
+// ONE Publish call within a 1s window (per-key dedupe).
+// The token must be cached first (cache-gated: only cached tokens produce Publish).
 func TestCache_ErrInvalid_RateLimit_DedupesSameKeyWithin1s(t *testing.T) {
 	now := time.Unix(1000, 0)
+	firstCall := true
 	delegate := resolverFunc(func(context.Context, string) (Identity, error) {
+		if firstCall {
+			firstCall = false
+			return Identity{WorkspaceID: "ws1"}, nil
+		}
 		return Identity{}, ErrInvalid
 	})
 	rev := newCountingRevocationChannel()
 	resolver := NewCache(delegate, CacheConfig{
-		FreshTTL: time.Second,
-		Capacity: 10,
-		Now:      func() time.Time { return now },
-		Jitter:   func() float64 { return 1 },
+		FreshTTL:   time.Second,
+		StaleGrace: time.Minute, // non-zero so stale() keeps entry while we call delegate
+		Capacity:   10,
+		Now:        func() time.Time { return now },
+		Jitter:     func() float64 { return 1 },
 	}, WithRevocationChannel(rev))
 
-	// Resolve the same bad token many times within the same second.
+	// First call: successfully caches the token.
+	_, _ = resolver.Resolve(context.Background(), "bad-token")
+	// Advance past FreshTTL but within StaleGrace so stale() returns entry without evicting it.
+	// evictInvalid → localEvictReporting finds the stale entry → hadEntry=true → publish allowed.
+	now = now.Add(time.Second + time.Millisecond)
+
+	// Resolve the same token many times. The first finds the stale entry (cache-gate passes),
+	// evicts it, and publishes (count=1). All subsequent calls find no entry (already evicted)
+	// → no publish.
 	for i := 0; i < 50; i++ {
 		_, _ = resolver.Resolve(context.Background(), "bad-token")
 	}
 
-	// Only 1 Publish should have been made (the rest deduped).
+	// Only 1 Publish should have been made (the rest had no cached entry to evict).
 	count := rev.count(tokenKey("bad-token"))
 	require.Equal(t, 1, count, "expected exactly 1 publish for same bad key within dedupe window, got %d", count)
 }
@@ -254,25 +269,46 @@ func TestCache_ErrInvalid_RateLimit_DedupesSameKeyWithin1s(t *testing.T) {
 // invalidPublishGlobalCap is enforced across distinct keys: after
 // invalidPublishGlobalCap distinct keys are published in a single window,
 // additional keys are silently dropped.
+// Tokens must be pre-cached (cache-gate: only cached tokens may publish).
 func TestCache_ErrInvalid_RateLimit_GlobalCapAcrossKeys(t *testing.T) {
 	now := time.Unix(2000, 0)
-	// Use a delegate that always returns ErrInvalid for any token.
+	// Track which tokens have been cached (first call = success, subsequent = ErrInvalid).
+	cached := make(map[string]bool)
 	delegate := resolverFunc(func(_ context.Context, token string) (Identity, error) {
+		if !cached[token] {
+			cached[token] = true
+			return Identity{WorkspaceID: "ws-" + token}, nil
+		}
 		return Identity{}, ErrInvalid
 	})
 	rev := newCountingRevocationChannel()
 	resolver := NewCache(delegate, CacheConfig{
-		FreshTTL: time.Second,
-		Capacity: 1000,
-		Now:      func() time.Time { return now },
-		Jitter:   func() float64 { return 1 },
+		FreshTTL:   time.Second,
+		StaleGrace: time.Minute, // non-zero so stale() keeps entry for evictInvalid's cache-gate
+		Capacity:   1000,
+		Now:        func() time.Time { return now },
+		Jitter:     func() float64 { return 1 },
 	}, WithRevocationChannel(rev))
 
-	// Send more distinct bad tokens than the global cap allows in one window.
 	total := invalidPublishGlobalCap + 10
+	tokens := make([]string, total)
 	for i := 0; i < total; i++ {
-		token := fmt.Sprintf("bad-token-%d", i)
-		_, _ = resolver.Resolve(context.Background(), token)
+		tokens[i] = fmt.Sprintf("bad-token-%d", i)
+	}
+
+	// Step 1: Cache all tokens successfully.
+	for _, tok := range tokens {
+		_, _ = resolver.Resolve(context.Background(), tok)
+	}
+
+	// Step 2: Advance past FreshTTL so all entries go stale.
+	now = now.Add(time.Second + time.Millisecond)
+
+	// Step 3: Re-resolve all tokens — each finds a stale entry, calls delegate
+	// (ErrInvalid), evicts the local entry (cache-gate passes), and attempts to
+	// publish. The global cap must prevent more than invalidPublishGlobalCap publishes.
+	for _, tok := range tokens {
+		_, _ = resolver.Resolve(context.Background(), tok)
 	}
 
 	// Total publishes must be capped at invalidPublishGlobalCap.
@@ -282,30 +318,59 @@ func TestCache_ErrInvalid_RateLimit_GlobalCapAcrossKeys(t *testing.T) {
 }
 
 // TestCache_ErrInvalid_RateLimit_AllowsAfterWindowExpires verifies that after
-// the dedupe window expires the same bad key is allowed to publish again.
+// the dedupe window expires the same previously-cached bad key is allowed to
+// publish again.
+//
+// The token is cached on the first call (success), then we drive two ErrInvalid
+// events: one at t=0 (publishes), one after the dedupe window (publishes again).
+// Between the two ErrInvalid events the token must be re-cached (success) so
+// that the cache-gate allows the second publish.
 func TestCache_ErrInvalid_RateLimit_AllowsAfterWindowExpires(t *testing.T) {
 	now := time.Unix(3000, 0)
+	callN := 0
 	delegate := resolverFunc(func(context.Context, string) (Identity, error) {
-		return Identity{}, ErrInvalid
+		callN++
+		switch callN {
+		case 1: // cache the token
+			return Identity{WorkspaceID: "ws1"}, nil
+		case 2: // first ErrInvalid — evicts the entry
+			return Identity{}, ErrInvalid
+		case 3: // re-cache the token so the cache-gate allows the next ErrInvalid
+			return Identity{WorkspaceID: "ws1"}, nil
+		default: // second ErrInvalid after dedupe window
+			return Identity{}, ErrInvalid
+		}
 	})
 	rev := newCountingRevocationChannel()
 	resolver := NewCache(delegate, CacheConfig{
-		FreshTTL: time.Second,
-		Capacity: 10,
-		Now:      func() time.Time { return now },
-		Jitter:   func() float64 { return 1 },
+		FreshTTL:   time.Second,
+		StaleGrace: time.Minute, // non-zero so stale() keeps entry for evictInvalid's cache-gate
+		Capacity:   10,
+		Now:        func() time.Time { return now },
+		Jitter:     func() float64 { return 1 },
 	}, WithRevocationChannel(rev))
 
-	// First request: allowed.
+	// Call 1: cache the token (delegate returns success).
 	_, _ = resolver.Resolve(context.Background(), "bad-token")
-	require.Equal(t, 1, rev.count(tokenKey("bad-token")), "first request should publish")
 
-	// Advance clock past dedupe window.
-	now = now.Add(invalidPublishDedupeWindow + time.Millisecond)
+	// Advance past FreshTTL so the cache entry goes stale.
+	now = now.Add(time.Second + time.Millisecond)
 
-	// Second request after window: allowed again.
+	// Call 2: delegate returns ErrInvalid → entry evicted → publish (count=1).
 	_, _ = resolver.Resolve(context.Background(), "bad-token")
-	require.Equal(t, 2, rev.count(tokenKey("bad-token")), "second request after window should publish")
+	require.Equal(t, 1, rev.count(tokenKey("bad-token")), "first ErrInvalid should publish")
+
+	// Call 3: re-cache the token (advance time to ensure a fresh resolve runs).
+	// We advance past dedupe window so the next resolve can publish.
+	now = now.Add(time.Second + time.Millisecond)
+	_, _ = resolver.Resolve(context.Background(), "bad-token") // success re-caches
+
+	// Advance past FreshTTL again AND past the dedupe window.
+	now = now.Add(time.Second + time.Millisecond + invalidPublishDedupeWindow)
+
+	// Call 4: delegate returns ErrInvalid again → entry evicted → publish (count=2).
+	_, _ = resolver.Resolve(context.Background(), "bad-token")
+	require.Equal(t, 2, rev.count(tokenKey("bad-token")), "second ErrInvalid after window should publish")
 }
 
 // TestCache_ErrRevoked_NotRateLimited verifies that legitimate revocations
@@ -345,4 +410,163 @@ func TestCache_ErrRevoked_NotRateLimited(t *testing.T) {
 	count := rev.count(key)
 	// Each ErrRevoked triggers evict → Publish (no rate limit). At least 2.
 	require.GreaterOrEqual(t, count, 2, "ErrRevoked must always publish, got %d", count)
+}
+
+// ---------------------------------------------------------------------------
+// D-fix2 Finding-4 tests
+// ---------------------------------------------------------------------------
+
+// TestCache_ErrInvalid_NotCached_DoesNotPublish verifies that a token returning
+// ErrInvalid that was NEVER cached does NOT produce a Publish call. Cache-gated
+// publish: nothing-to-evict means nothing-to-broadcast.
+func TestCache_ErrInvalid_NotCached_DoesNotPublish(t *testing.T) {
+	now := time.Unix(5000, 0)
+	delegate := resolverFunc(func(context.Context, string) (Identity, error) {
+		return Identity{}, ErrInvalid
+	})
+	rev := newCountingRevocationChannel()
+	resolver := NewCache(delegate, CacheConfig{
+		FreshTTL: time.Second,
+		Capacity: 10,
+		Now:      func() time.Time { return now },
+		Jitter:   func() float64 { return 1 },
+	}, WithRevocationChannel(rev))
+
+	// Spray 30 distinct attacker tokens — none were ever cached.
+	for i := 0; i < 30; i++ {
+		token := fmt.Sprintf("attacker-token-%d", i)
+		_, _ = resolver.Resolve(context.Background(), token)
+	}
+
+	// No Publish calls should have been made.
+	require.Equal(t, 0, rev.total(),
+		"attacker tokens that were never cached must not produce Publish calls, got %d", rev.total())
+}
+
+// TestCache_InvalidLastPublishLRUBound verifies that the per-key publish-dedupe
+// LRU is bounded at invalidLastPublishLRUCap entries. Spraying more than the cap
+// of distinct keys must not grow the internal LRU beyond the cap.
+func TestCache_InvalidLastPublishLRUBound(t *testing.T) {
+	now := time.Unix(6000, 0)
+	// Delegate always succeeds on first call to populate cache, then returns ErrInvalid.
+	firstCall := make(map[string]bool)
+	delegate := resolverFunc(func(_ context.Context, token string) (Identity, error) {
+		if !firstCall[token] {
+			firstCall[token] = true
+			return Identity{WorkspaceID: "ws-" + token}, nil
+		}
+		return Identity{}, ErrInvalid
+	})
+	rev := newCountingRevocationChannel()
+	cr := NewCache(delegate, CacheConfig{
+		FreshTTL: time.Nanosecond, // expire immediately so delegate is called on every resolve
+		Capacity: 10000,
+		Now:      func() time.Time { return now },
+		Jitter:   func() float64 { return 1 },
+	}, WithRevocationChannel(rev)).(*cacheResolver)
+
+	// Populate cache entries, then advance time so they become stale.
+	for i := 0; i < invalidLastPublishLRUCap+100; i++ {
+		token := fmt.Sprintf("tok-%d", i)
+		_, _ = cr.Resolve(context.Background(), token)
+	}
+
+	// Advance time so FreshTTL expires, forcing re-resolve with ErrInvalid.
+	now = now.Add(time.Second * 2)
+
+	// Re-resolve all tokens — each has a cache entry, so publish is attempted.
+	// Spread across multiple time windows so global cap doesn't interfere.
+	for i := 0; i < invalidLastPublishLRUCap+100; i++ {
+		token := fmt.Sprintf("tok-%d", i)
+		_, _ = cr.Resolve(context.Background(), token)
+		// Advance time per key to avoid per-key dedupe AND global cap.
+		now = now.Add(invalidPublishDedupeWindow + time.Millisecond)
+		// Reset global window every few iterations.
+		if i%invalidPublishGlobalCap == 0 {
+			now = now.Add(invalidPublishGlobalWindow)
+		}
+	}
+
+	// The LRU must not exceed the cap.
+	cr.mu.Lock()
+	lruSize := len(cr.invalidLastPublish)
+	cr.mu.Unlock()
+	require.LessOrEqual(t, lruSize, invalidLastPublishLRUCap,
+		"invalidLastPublish LRU must be bounded at %d, got %d", invalidLastPublishLRUCap, lruSize)
+}
+
+// TestCache_Subscribe_RetriesOnError verifies that when Subscribe returns an
+// error, the cache retries with backoff. We use a test RevocationChannel that
+// fails the first N Subscribe calls, then succeeds. The resolver must still
+// function (Resolve calls work regardless) and the subscribe goroutine must
+// eventually succeed.
+func TestCache_Subscribe_RetriesOnError(t *testing.T) {
+	now := time.Unix(7000, 0)
+	delegate := resolverFunc(func(context.Context, string) (Identity, error) {
+		return Identity{WorkspaceID: "ws1"}, nil
+	})
+
+	const failCount = 3
+	attempts := make(chan struct{}, failCount+2)
+	subscribeSuccess := make(chan struct{})
+	rev := &retryTestRevocationChannel{
+		failCount:       failCount,
+		attempts:        attempts,
+		subscribeSuccess: subscribeSuccess,
+	}
+
+	_ = NewCache(delegate, CacheConfig{
+		FreshTTL: time.Minute,
+		Capacity: 10,
+		Now:      func() time.Time { return now },
+		Jitter:   func() float64 { return 1 },
+	}, WithRevocationChannel(rev))
+
+	// Wait for the subscribe goroutine to succeed (after failCount retries).
+	select {
+	case <-subscribeSuccess:
+		// expected
+	case <-time.After(10 * time.Second):
+		t.Fatal("subscribe goroutine did not eventually succeed within 10s")
+	}
+
+	// Total Subscribe attempts must be > failCount (retries happened).
+	require.GreaterOrEqual(t, len(attempts), failCount+1,
+		"expected at least %d Subscribe attempts (including retries)", failCount+1)
+}
+
+// retryTestRevocationChannel is a test RevocationChannel that fails the first
+// failCount Subscribe calls, then succeeds. It records all attempts.
+type retryTestRevocationChannel struct {
+	mu              sync.Mutex
+	callCount       int
+	failCount       int
+	attempts        chan struct{}
+	subscribeSuccess chan struct{}
+}
+
+func (r *retryTestRevocationChannel) Subscribe(_ context.Context, _ func(string)) (func(), error) {
+	r.mu.Lock()
+	r.callCount++
+	count := r.callCount
+	r.mu.Unlock()
+
+	select {
+	case r.attempts <- struct{}{}:
+	default:
+	}
+
+	if count <= r.failCount {
+		return nil, fmt.Errorf("subscribe failed (attempt %d/%d)", count, r.failCount)
+	}
+	// Success: signal and return nil stop func.
+	select {
+	case r.subscribeSuccess <- struct{}{}:
+	default:
+	}
+	return func() {}, nil
+}
+
+func (r *retryTestRevocationChannel) Publish(_ context.Context, _ string) error {
+	return nil
 }

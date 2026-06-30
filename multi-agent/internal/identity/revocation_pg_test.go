@@ -242,6 +242,13 @@ func TestCache_WithRevocationChannel_RemoteRevokeEvicts(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int32(1), calls.Load())
 
+	// subscribe() now starts a goroutine; wait for it to register the callback.
+	require.Eventually(t, func() bool {
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		return len(fake.subs) > 0
+	}, time.Second, 5*time.Millisecond, "subscribe goroutine must register callback")
+
 	// Simulate remote revocation arriving via Subscribe callback.
 	key := tokenKey("tok2")
 	// Deliver via the fake channel's registered subscribers.
