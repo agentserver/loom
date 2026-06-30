@@ -7,6 +7,7 @@ package commanderhub
 import (
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -44,6 +45,16 @@ type daemonConn struct {
 	kind          string
 	driverVersion string
 
+	// ownershipLost is set to true when the shared Postgres registry records a
+	// different owning_instance_url for this daemon's shortID (i.e., a faster
+	// pod won the registration race). The heartbeat loop checks this flag and
+	// terminates the connection so the winning pod takes over cleanly.
+	ownershipLost bool
+
+	// heartbeatErrCount counts consecutive heartbeat write failures. The
+	// heartbeat loop terminates the connection after a threshold is reached.
+	heartbeatErrCount atomic.Int32
+
 	metaMu       sync.Mutex
 	capabilities map[string]bool
 	lastSeenAt   time.Time
@@ -54,6 +65,19 @@ type daemonConn struct {
 	pending   map[string]*pendingEntry
 	done      chan struct{} // closed when the read loop exits
 	hub       *Hub
+}
+
+// routingID returns the stable identity used as the registry key and in
+// DaemonInfo.DaemonID. When the daemon registered with a non-empty ShortID
+// (multi-pod shared-registry mode), that ShortID is used so reconnects from
+// the same physical daemon keep the same key. For legacy single-pod daemons
+// that register with an empty ShortID, it falls back to the ephemeral dc.id
+// — preserving existing behavior bit-exactly.
+func (dc *daemonConn) routingID() string {
+	if dc.shortID != "" {
+		return dc.shortID
+	}
+	return dc.id
 }
 
 func (dc *daemonConn) info() DaemonInfo {
@@ -72,7 +96,7 @@ func (dc *daemonConn) info() DaemonInfo {
 	dc.metaMu.Unlock()
 
 	return DaemonInfo{
-		DaemonID:      dc.id,
+		DaemonID:      dc.routingID(),
 		ShortID:       dc.shortID,
 		DisplayName:   dc.displayName,
 		Kind:          dc.kind,
@@ -82,18 +106,21 @@ func (dc *daemonConn) info() DaemonInfo {
 	}
 }
 
-// registry maps owner → daemonID → *daemonConn. All methods are goroutine-safe.
-type registry struct {
+// localRegistry maps owner → routingID → *daemonConn. All methods are
+// goroutine-safe. Keys are routingID values (dc.routingID()), which equal
+// dc.shortID when set and dc.id otherwise (legacy fallback).
+type localRegistry struct {
 	mu    sync.Mutex
 	conns map[owner]map[string]*daemonConn
 }
 
-func newRegistry() *registry {
-	return &registry{conns: make(map[owner]map[string]*daemonConn)}
+func newLocalRegistry() *localRegistry {
+	return &localRegistry{conns: make(map[owner]map[string]*daemonConn)}
 }
 
-// add indexes dc by its own owner + id. dc.id and dc.owner must be set.
-func (r *registry) add(dc *daemonConn) {
+// add indexes dc by its owner + routingID(). dc.id, dc.shortID, and dc.owner
+// must be set before calling add.
+func (r *localRegistry) add(dc *daemonConn) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	m := r.conns[dc.owner]
@@ -101,30 +128,52 @@ func (r *registry) add(dc *daemonConn) {
 		m = make(map[string]*daemonConn)
 		r.conns[dc.owner] = m
 	}
-	m[dc.id] = dc
+	m[dc.routingID()] = dc
 }
 
-func (r *registry) remove(o owner, daemonID string) {
+func (r *localRegistry) remove(o owner, routingID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	m := r.conns[o]
 	if m == nil {
 		return
 	}
-	delete(m, daemonID)
+	delete(m, routingID)
 	if len(m) == 0 {
 		delete(r.conns, o)
 	}
 }
 
-func (r *registry) lookup(o owner, daemonID string) (*daemonConn, bool) {
+// removeIf removes the entry at (o, routingID) only when pred(existing)
+// returns true. This prevents a reconnecting daemon from evicting its
+// successor: the deferred teardown passes a predicate that matches the
+// specific *daemonConn it owns, so a new conn that already wrote to the same
+// slot is left intact.
+func (r *localRegistry) removeIf(o owner, routingID string, pred func(*daemonConn) bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	dc := r.conns[o][daemonID]
+	m := r.conns[o]
+	if m == nil {
+		return
+	}
+	existing, ok := m[routingID]
+	if !ok || !pred(existing) {
+		return
+	}
+	delete(m, routingID)
+	if len(m) == 0 {
+		delete(r.conns, o)
+	}
+}
+
+func (r *localRegistry) lookup(o owner, routingID string) (*daemonConn, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	dc := r.conns[o][routingID]
 	return dc, dc != nil
 }
 
-func (r *registry) daemons(o owner) []DaemonInfo {
+func (r *localRegistry) daemons(o owner) []DaemonInfo {
 	r.mu.Lock()
 	m := r.conns[o]
 	conns := make([]*daemonConn, 0, len(m))

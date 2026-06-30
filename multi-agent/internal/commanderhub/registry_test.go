@@ -9,9 +9,10 @@ import (
 )
 
 func TestRegistry_AddLookupRemove(t *testing.T) {
-	r := newRegistry()
+	r := newLocalRegistry()
 	o := owner{userID: "alice", workspaceID: "W1"}
-	dc := &daemonConn{id: "d1", owner: o, displayName: "mac", kind: "claude", driverVersion: "v1"}
+	// shortID is empty → routingID() falls back to dc.id ("d1").
+	dc := &daemonConn{id: "d1", shortID: "", owner: o, displayName: "mac", kind: "claude", driverVersion: "v1"}
 
 	r.add(dc)
 
@@ -29,10 +30,11 @@ func TestRegistry_AddLookupRemove(t *testing.T) {
 }
 
 func TestRegistry_DaemonsSnapshot(t *testing.T) {
-	r := newRegistry()
+	r := newLocalRegistry()
 	o := owner{userID: "alice", workspaceID: "W1"}
-	r.add(&daemonConn{id: "d1", owner: o, displayName: "mac", kind: "claude", driverVersion: "v1"})
-	r.add(&daemonConn{id: "d2", owner: o, displayName: "linux", kind: "codex", driverVersion: "v2"})
+	// shortID empty → routingID() == dc.id → keyed as "d1", "d2"
+	r.add(&daemonConn{id: "d1", shortID: "", owner: o, displayName: "mac", kind: "claude", driverVersion: "v1"})
+	r.add(&daemonConn{id: "d2", shortID: "", owner: o, displayName: "linux", kind: "codex", driverVersion: "v2"})
 
 	infos := r.daemons(o)
 	require.Len(t, infos, 2)
@@ -48,10 +50,11 @@ func TestRegistry_DaemonsSnapshot(t *testing.T) {
 }
 
 func TestRegistryDaemonInfoIncludesCapabilities(t *testing.T) {
-	r := newRegistry()
+	r := newLocalRegistry()
 	o := owner{userID: "alice", workspaceID: "W1"}
 	r.add(&daemonConn{
 		id:           "d1",
+		shortID:      "d1",
 		owner:        o,
 		displayName:  "prod-codex",
 		kind:         "codex",
@@ -64,9 +67,10 @@ func TestRegistryDaemonInfoIncludesCapabilities(t *testing.T) {
 }
 
 func TestRegistry_RemoveCleansEmptyOwner(t *testing.T) {
-	r := newRegistry()
+	r := newLocalRegistry()
 	o := owner{userID: "alice", workspaceID: "W1"}
-	r.add(&daemonConn{id: "d1", owner: o})
+	// shortID empty → routingID() == "d1"
+	r.add(&daemonConn{id: "d1", shortID: "", owner: o})
 	r.remove(o, "d1")
 
 	_, ok := r.lookup(o, "d1")

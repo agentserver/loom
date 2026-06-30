@@ -656,7 +656,7 @@ func TestHTTP_TurnPreStreamDaemonGoneLeavesStoreDisconnected(t *testing.T) {
 	ident := identity.Identity{UserID: "alice", WorkspaceID: "W1"}
 	o := owner{userID: ident.UserID, workspaceID: ident.WorkspaceID}
 	cookie := &http.Cookie{Name: sessionCookieName, Value: auth.putSession("tok-alice", ident)}
-	hub.reg.add(&daemonConn{id: "gone", owner: o, done: closedDone(), pending: map[string]*pendingEntry{}})
+	hub.reg.add(&daemonConn{id: "gone", shortID: "gone", owner: o, done: closedDone(), pending: map[string]*pendingEntry{}})
 
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/commander/daemons/gone/sessions/s1/turn", strings.NewReader(`{"prompt":"go"}`))
 	req.Header.Set("Content-Type", "application/json")

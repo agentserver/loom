@@ -194,8 +194,8 @@ func TestHub_DaemonsListsOnlyOwnOwner(t *testing.T) {
 
 	// Simulate two admitted daemons by adding directly (admission path tested
 	// above; here we test the registry snapshot an HTTP handler would call).
-	hub.reg.add(&daemonConn{id: "a1", owner: owner{"alice", "W1"}, displayName: "alice-mac", kind: "claude"})
-	hub.reg.add(&daemonConn{id: "b1", owner: owner{"bob", "W1"}, displayName: "bob-laptop", kind: "codex"})
+	hub.reg.add(&daemonConn{id: "a1", shortID: "a1", owner: owner{"alice", "W1"}, displayName: "alice-mac", kind: "claude"})
+	hub.reg.add(&daemonConn{id: "b1", shortID: "b1", owner: owner{"bob", "W1"}, displayName: "bob-laptop", kind: "codex"})
 
 	infos := hub.reg.daemons(owner{"alice", "W1"})
 	require.Len(t, infos, 1)

@@ -27,7 +27,7 @@ const (
 type Hub struct {
 	resolver     identity.Resolver
 	upgrader     websocket.Upgrader
-	reg          *registry
+	reg          *localRegistry
 	turns        *turnStateStore
 	sessionCache *sessionListCache
 	cmdSeq       atomic.Int64 // generates per-command IDs (see proxy.go)
@@ -44,7 +44,7 @@ func NewHub(resolver identity.Resolver) *Hub {
 	return &Hub{
 		resolver:     resolver,
 		upgrader:     websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }},
-		reg:          newRegistry(),
+		reg:          newLocalRegistry(),
 		turns:        newTurnStateStore(),
 		sessionCache: newSessionListCache(10 * time.Second),
 		TurnTimeout:  defaultTurnTimeout,
@@ -128,8 +128,10 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	dc.metaMu.Unlock()
 
 	h.reg.add(dc)
-	defer h.reg.remove(o, dc.id)
-	defer h.invalidateDaemonSessions(o, dc.id)
+	// Use removeIf so that if a new connection with the same routingID has
+	// already replaced this slot (reconnect race), we do not evict it.
+	defer h.reg.removeIf(o, dc.routingID(), func(existing *daemonConn) bool { return existing == dc })
+	defer h.invalidateDaemonSessions(o, dc.routingID())
 	defer close(dc.done)
 	defer dc.failAllPending()
 
