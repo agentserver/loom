@@ -173,6 +173,27 @@ Before bringing up a cluster (or scaling from 1 to 2+ replicas):
 The deployment uses `RollingUpdate` with `maxUnavailable: 0` so at least one
 pod always serves traffic during a rollout.
 
+### internal_listen_addr host constraint
+
+`cluster.internal_listen_addr` must bind to a **wildcard or loopback** interface.
+The preStop drain hook always contacts `127.0.0.1:<port>` — binding to a
+specific non-loopback IP (e.g. `10.1.2.3:8091`) would make the hook get
+`connection refused` and silently skip the drain.
+
+Accepted host forms (the part before the colon):
+
+| Form | Example | Meaning |
+|------|---------|---------|
+| absent | `:8091` | wildcard — all interfaces |
+| `0.0.0.0` | `0.0.0.0:8091` | explicit IPv4 wildcard |
+| `127.0.0.1` | `127.0.0.1:8091` | IPv4 loopback only (single-pod repro only) |
+| `::` | `[::]:8091` | IPv6 wildcard |
+| `::1` | `[::1]:8091` | IPv6 loopback only (single-pod repro only) |
+
+Symbolic hostnames (`localhost`, `eth0`, etc.) and non-loopback IPs
+(`10.x`, `192.168.x`, etc.) are **rejected at startup**. The chart always
+renders `:8091` (wildcard) by default.
+
 ### Three-phase cluster-secret rotation
 
 To rotate the cluster secret without a service interruption:

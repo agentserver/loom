@@ -321,6 +321,41 @@ func TestValidateClusterConfig_RejectsLoopbackInternalWithRemoteAdvertise(t *tes
 	require.Contains(t, err.Error(), "loopback")
 }
 
+// --- E-fix2 Finding 2: non-wildcard/non-loopback internal_listen_addr ---
+
+// TestValidateClusterConfig_RejectsNonLoopbackInternalAddr verifies that
+// internal_listen_addr hosts other than wildcards (empty/"0.0.0.0"/"::") or
+// loopback (127.0.0.1/::1) are rejected. runDrainLocal contacts 127.0.0.1 so
+// binding to a specific non-loopback IP (e.g. 10.x.x.x) silently breaks drain.
+func TestValidateClusterConfig_RejectsNonLoopbackInternalAddr(t *testing.T) {
+	cases := []struct {
+		addr    string
+		wantErr bool
+		desc    string
+	}{
+		{addr: ":8091", wantErr: false, desc: "wildcard port only — ok"},
+		{addr: "0.0.0.0:8091", wantErr: false, desc: "explicit wildcard — ok"},
+		{addr: "127.0.0.1:8091", wantErr: true, desc: "loopback only bind — rejected (drain won't reach non-loopback advertise)"},
+		{addr: "[::]:8091", wantErr: false, desc: "IPv6 wildcard — ok"},
+		{addr: "[::1]:8091", wantErr: true, desc: "IPv6 loopback only — rejected (drain won't reach non-loopback advertise)"},
+		{addr: "10.1.2.3:8091", wantErr: true, desc: "specific non-loopback IP — REJECTED"},
+		{addr: "eth0:8091", wantErr: true, desc: "symbolic hostname — REJECTED"},
+		{addr: "localhost:8091", wantErr: true, desc: "localhost hostname — REJECTED (require literal IP)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			c := minimalValidClusterConfig()
+			c.InternalListenAddr = tc.addr
+			err := validateClusterConfig(&c, "postgres")
+			if tc.wantErr {
+				require.Error(t, err, "expected error for addr %q", tc.addr)
+			} else {
+				require.NoError(t, err, "expected no error for addr %q", tc.addr)
+			}
+		})
+	}
+}
+
 // --- Finding 1: env-indirection fields ---
 
 // TestClusterConfig_EnvFields_Resolved verifies that when advertise_url_env /

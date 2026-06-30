@@ -970,16 +970,29 @@ func validateClusterConfig(c *ClusterConfig, storeDriver string) error {
 		return fmt.Errorf("cluster.advertise_url must not use a loopback address (got %q)", advertiseHost)
 	}
 
-	// Reject the combination of a loopback internal_listen_addr paired with a
-	// non-loopback advertise_url. In this configuration the pod would advertise
-	// an address that peers cannot reach — the internal listener is bound only
-	// to the loopback interface (127.x.x.x) while the advertised URL routes to
-	// the pod from outside. Peer pods would fail to forward to this pod.
+	// internal_listen_addr must bind to a wildcard or loopback-only interface.
+	// runDrainLocal always contacts 127.0.0.1:<port>; if the listener is bound
+	// to a specific non-loopback IP (e.g. 10.x.x.x) the preStop drain silently
+	// gets connection-refused and daemons are not drained.  Hostname binds like
+	// "localhost" are also disallowed — require literal IP for predictability.
+	//
+	// Allowed hosts: "" (wildcard ":port"), "0.0.0.0", "127.0.0.1", "::", "::1".
+	// Everything else, including symbolic hostnames and non-loopback IPs, is fatal.
 	internalHost, _, _ := net.SplitHostPort(c.InternalListenAddr)
-	if internalHost != "" && internalHost != "0.0.0.0" && internalHost != "::" {
-		if internalHost == "localhost" || strings.HasPrefix(internalHost, "127.") || internalHost == "::1" {
-			return fmt.Errorf("cluster.internal_listen_addr binds to loopback (%q) but cluster.advertise_url (%q) is non-loopback — peers cannot reach this pod", c.InternalListenAddr, c.AdvertiseURL)
-		}
+	switch internalHost {
+	case "", "0.0.0.0", "127.0.0.1", "::", "::1":
+		// accepted: wildcard or explicit loopback
+	default:
+		return fmt.Errorf(
+			"cluster.internal_listen_addr host %q is not a wildcard or loopback address "+
+				"(accepted: empty/:port, 0.0.0.0, 127.0.0.1, ::, ::1); "+
+				"runDrainLocal contacts 127.0.0.1 so non-wildcard non-loopback binds break preStop drain",
+			internalHost)
+	}
+	// Additionally reject loopback-only binds paired with a non-loopback advertise_url
+	// because peers would advertise an address they cannot reach internally.
+	if internalHost == "127.0.0.1" || internalHost == "::1" {
+		return fmt.Errorf("cluster.internal_listen_addr binds to loopback (%q) but cluster.advertise_url (%q) is non-loopback — peers cannot reach this pod", c.InternalListenAddr, c.AdvertiseURL)
 	}
 
 	// Validate secret: must be hex-decodable and at least 32 bytes (256-bit).
