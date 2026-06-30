@@ -3,19 +3,25 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/yourorg/multi-agent/internal/commanderhub"
 	"github.com/yourorg/multi-agent/internal/commanderhub/authstore"
 	"github.com/yourorg/multi-agent/internal/identity"
 	agentidentity "github.com/yourorg/multi-agent/internal/identity/agentserver"
@@ -35,7 +41,27 @@ type Config struct {
 	ObjectStore ObjectStoreConfig `yaml:"object_store"`
 	Telemetry   TelemetryConfig   `yaml:"telemetry"`
 	Identity    IdentityConfig    `yaml:"identity"`
+	Cluster     ClusterConfig     `yaml:"cluster"`
 	Production  bool              `yaml:"production"`
+}
+
+// ClusterConfig configures multi-pod cluster mode for the observer-server.
+// When Enabled is false all other fields are ignored. When Enabled is true
+// the server starts a second internal HTTP listener on InternalListenAddr and
+// registers itself in the shared Postgres registry via AdvertiseURL.
+type ClusterConfig struct {
+	Enabled             bool          `yaml:"enabled"`
+	AdvertiseURL        string        `yaml:"advertise_url"`
+	InternalListenAddr  string        `yaml:"internal_listen_addr"`
+	Secret              string        `yaml:"secret"`
+	PrevSecret          string        `yaml:"prev_secret,omitempty"`
+	HeartbeatInterval   time.Duration `yaml:"heartbeat_interval"`
+	HeartbeatJitter     time.Duration `yaml:"heartbeat_jitter"`
+	SweepInterval       time.Duration `yaml:"sweep_interval"`
+	DaemonExpiryAfter   time.Duration `yaml:"daemon_expiry_after"`
+	ForwardTimeout      time.Duration `yaml:"forward_timeout"`
+	DrainTimeout        time.Duration `yaml:"drain_timeout"`
+	SessionListCacheTTL time.Duration `yaml:"session_list_cache_ttl"`
 }
 
 type APIKeyConfig struct {
@@ -235,8 +261,7 @@ func main() {
 	opts := observerWebOptions(cfg, objects)
 	if cfg.Telemetry.Enabled && cfg.Store.Driver == "postgres" {
 		// Use the shared-Postgres token-bucket limiter so rate-limit state is
-		// consistent across pods. Phase D D5 will additionally gate this on
-		// cluster.enabled; for now any Postgres+telemetry deployment gets the
+		// consistent across pods. Any Postgres+telemetry deployment gets the
 		// durable limiter (safe: single-pod Postgres deployments benefit too).
 		observerweb.SetPGTelemetryLimiter(
 			&opts,
@@ -253,12 +278,69 @@ func main() {
 		opts.AuthStore = authStore
 	}
 
+	// Wire cluster mode: when enabled, build the ClusterRuntime and provide an
+	// internalMux for the dual-listener setup.
+	if cfg.Cluster.Enabled {
+		secret, _ := hex.DecodeString(cfg.Cluster.Secret)
+		var prevSecret []byte
+		if cfg.Cluster.PrevSecret != "" {
+			prevSecret, _ = hex.DecodeString(cfg.Cluster.PrevSecret)
+		}
+		opts.Cluster = commanderhub.ClusterRuntime{
+			DB:                 st.DB(),
+			AdvertiseURL:       cfg.Cluster.AdvertiseURL,
+			Secret:             secret,
+			PrevSecret:         prevSecret,
+			InternalListenAddr: cfg.Cluster.InternalListenAddr,
+		}
+		opts.InternalMux = http.NewServeMux()
+	}
+
 	log.Printf("observer-server listening on %s", cfg.ListenAddr)
 	app := observerweb.NewWithResolverOptions(st, usHandler, resolver, opts)
-	srv := newHTTPServer(cfg.ListenAddr, withHealth(app, func(ctx context.Context) error {
+	publicSrv := newHTTPServer(cfg.ListenAddr, withHealth(app, func(ctx context.Context) error {
 		return st.DB().PingContext(ctx)
 	}))
-	log.Fatal(srv.ListenAndServe())
+
+	var internalSrv *http.Server
+	if cfg.Cluster.Enabled && opts.InternalMux != nil {
+		log.Printf("observer-server cluster mode enabled; internal listener on %s (advertise=%s)",
+			cfg.Cluster.InternalListenAddr, cfg.Cluster.AdvertiseURL)
+		internalSrv = newHTTPServer(cfg.Cluster.InternalListenAddr, opts.InternalMux)
+		go func() {
+			if err := internalSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("observer-server internal listener error: %v", err)
+			}
+		}()
+	}
+
+	go func() {
+		if err := publicSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("observer-server public listener error: %v", err)
+		}
+	}()
+
+	// Wait for termination signal.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+	log.Printf("observer-server shutting down")
+
+	drainTimeout := cfg.Cluster.DrainTimeout
+	if drainTimeout <= 0 {
+		drainTimeout = 10 * time.Second
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), drainTimeout+5*time.Second)
+	defer cancel()
+
+	if err := publicSrv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("observer-server public server shutdown: %v", err)
+	}
+	if internalSrv != nil {
+		if err := internalSrv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("observer-server internal server shutdown: %v", err)
+		}
+	}
 }
 
 func runMigrationsOnly(cfg *Config) error {
@@ -521,6 +603,27 @@ func loadConfig(path string) (*Config, error) {
 	if cfg.Telemetry.RetentionDays == 0 {
 		cfg.Telemetry.RetentionDays = 30
 	}
+	// Cluster defaults — applied before validation so rules can use them.
+	if cfg.Cluster.Enabled {
+		if cfg.Cluster.HeartbeatInterval == 0 {
+			cfg.Cluster.HeartbeatInterval = 30 * time.Second
+		}
+		if cfg.Cluster.HeartbeatJitter == 0 {
+			cfg.Cluster.HeartbeatJitter = 5 * time.Second
+		}
+		if cfg.Cluster.SweepInterval == 0 {
+			cfg.Cluster.SweepInterval = 60 * time.Second
+		}
+		if cfg.Cluster.DaemonExpiryAfter == 0 {
+			cfg.Cluster.DaemonExpiryAfter = 90 * time.Second
+		}
+		if cfg.Cluster.ForwardTimeout == 0 {
+			cfg.Cluster.ForwardTimeout = 5 * time.Second
+		}
+		if cfg.Cluster.DrainTimeout == 0 {
+			cfg.Cluster.DrainTimeout = 10 * time.Second
+		}
+	}
 	if err := validateConfig(&cfg); err != nil {
 		return nil, err
 	}
@@ -628,7 +731,73 @@ func validateConfig(cfg *Config) error {
 		return fmt.Errorf("telemetry.max_body_bytes must be <= 1048576")
 	}
 
+	if err := validateClusterConfig(&cfg.Cluster, cfg.Store.Driver); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// validateClusterConfig validates the cluster configuration block.
+// It is fail-closed: any inconsistency returns an error rather than silently
+// disabling cluster mode. Must be called after defaults are applied.
+func validateClusterConfig(c *ClusterConfig, storeDriver string) error {
+	if !c.Enabled {
+		return nil
+	}
+	if c.AdvertiseURL == "" {
+		return fmt.Errorf("cluster.advertise_url is required when cluster.enabled is true")
+	}
+	if c.InternalListenAddr == "" {
+		return fmt.Errorf("cluster.internal_listen_addr is required when cluster.enabled is true")
+	}
+	if c.Secret == "" {
+		return fmt.Errorf("cluster.secret is required when cluster.enabled is true")
+	}
+
+	// Validate AdvertiseURL is a well-formed http/https URL and not localhost.
+	u, err := url.Parse(c.AdvertiseURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("cluster.advertise_url must be an http or https URL")
+	}
+	host := u.Hostname()
+	if host == "localhost" || strings.HasPrefix(host, "127.") || host == "::1" {
+		return fmt.Errorf("cluster.advertise_url must not use a loopback address (got %q)", host)
+	}
+
+	// Validate secret: must be hex-decodable and at least 32 bytes (256-bit).
+	secretBytes, err := hex.DecodeString(c.Secret)
+	if err != nil || len(secretBytes) < 32 {
+		return fmt.Errorf("cluster.secret is empty or too short (must be at least 64 hex chars / 32 bytes)")
+	}
+
+	// Validate prev_secret if set.
+	if c.PrevSecret != "" {
+		prevBytes, err := hex.DecodeString(c.PrevSecret)
+		if err != nil || len(prevBytes) < 32 {
+			return fmt.Errorf("cluster.prev_secret is invalid (must be at least 64 hex chars / 32 bytes)")
+		}
+	}
+
+	// Heartbeat must beat expiry.
+	if c.HeartbeatInterval >= c.DaemonExpiryAfter {
+		return fmt.Errorf("cluster.heartbeat_interval (%s) must be less than cluster.daemon_expiry_after (%s)",
+			c.HeartbeatInterval, c.DaemonExpiryAfter)
+	}
+
+	// Cluster registry requires Postgres.
+	if storeDriver != "postgres" {
+		return fmt.Errorf("cluster.enabled requires store.driver=postgres (got %q)", storeDriver)
+	}
+
+	return nil
+}
+
+// advertiseHash returns a 4-hex-char prefix of the SHA-256 of the advertise
+// URL. Used by hub.go::nextCmdID to make command IDs unique across pods.
+func advertiseHash(rawURL string) string {
+	sum := sha256.Sum256([]byte(rawURL))
+	return hex.EncodeToString(sum[:])[:4]
 }
 
 func buildIdentityResolver(cfg *Config, st observerstore.ManagedStore) (identity.Resolver, error) {

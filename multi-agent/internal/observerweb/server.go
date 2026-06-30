@@ -63,6 +63,17 @@ type Options struct {
 	// TelemetryRateLimit is ignored. When nil, NewWithResolverOptions builds
 	// the in-memory limiter from TelemetryRateLimit as before.
 	TelemetryLimiter telemetryAllower
+
+	// Cluster enables multi-pod cluster mode. When Cluster.AdvertiseURL != "",
+	// NewWithResolverOptions passes it to commanderhub.MountAll which wires the
+	// shared registry and forward client and populates InternalMux with the
+	// internal forwarding/drain endpoints.
+	Cluster commanderhub.ClusterRuntime
+
+	// InternalMux, when non-nil, receives the /api/commander/_internal/*
+	// endpoints in cluster mode. The caller is responsible for starting a
+	// separate HTTP listener on it (e.g. on cfg.Cluster.InternalListenAddr).
+	InternalMux *http.ServeMux
 }
 
 // New constructs the observerweb HTTP handler. If usHandler is non-nil,
@@ -118,9 +129,7 @@ func NewWithResolverOptions(s Store, usHandler *userspace.Handler, resolver iden
 		if opts.AuthStore == nil {
 			panic("observerweb: AuthStore is required when AgentserverURL is set (see internal/commanderhub/authstore)")
 		}
-		// internalMux is nil and ClusterRuntime is zero for now; Phase D D5 will
-		// wire cluster mode from observer-server config.
-		commanderhub.MountAll(mux, nil, resolver, opts.AgentserverURL, opts.AuthStore, commanderhub.ClusterRuntime{})
+		commanderhub.MountAll(mux, opts.InternalMux, resolver, opts.AgentserverURL, opts.AuthStore, opts.Cluster)
 	}
 	return mux
 }
