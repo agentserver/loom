@@ -1,5 +1,15 @@
 package evalrun
 
+// Test contract for this package:
+//
+// Several tests mutate package-level globals (DisableTelemetry,
+// initRegistrationErr, initWarnOnce, log.Writer) and restore them via
+// t.Cleanup. Safety relies on tests running sequentially —
+// `t.Parallel()` MUST NOT be used in this package without first
+// migrating those globals into per-Writer state or a swappable
+// accessor struct, otherwise concurrent mutation will race and the
+// `-race` detector will trip in unrelated tests.
+
 import (
 	"bytes"
 	"context"
@@ -53,34 +63,14 @@ func sampleSchema() Schema {
 	}
 }
 
-// expectedColumnNames is the canonical column ordering, used by tests
-// 1, 17, 22 to cross-pin spec §2.1 ↔ DDL §3 ↔ writer §5.
-var expectedColumnNames = []string{
-	"run_id",
-	"workload_id",
-	"claim_id",
-	"experiment_id",
-	"baseline_or_ablation",
-	"loom_commit",
-	"agentserver_commit",
-	"modelserver_commit",
-	"app_commit",
-	"machine_topology",
-	"context_ground_truth",
-	"capability_snapshot_hash",
-	"task_contract_hash",
-	"dynamic_mcp_registry_hash",
-	"selected_context",
-	"ground_truth_context",
-	"start_time",
-	"end_time",
-	"success_oracle_result",
-	"failure_category",
-	"human_intervention_count",
-	"artifact_hashes",
-	"observer_trace_path",
-	"model_trace_id",
-}
+// expectedColumnNames is the canonical column ordering used by
+// roundtrip / header tests. Sourced from ColumnNames() (which itself
+// derives from the expectedColumns descriptor SOT) so a future column
+// add cannot drift this list out of sync with production. Capturing
+// at package init is fine — ColumnNames() returns a fresh copy on
+// every call, so a test that mutates the slice cannot corrupt later
+// callers.
+var expectedColumnNames = ColumnNames()
 
 // Test 0b: failureCategoryUnknown stays pinned to observerstore.FailUnknown.
 // Belt-and-braces for the `var failureCategoryUnknown = string(...)`

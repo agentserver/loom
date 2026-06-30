@@ -345,8 +345,12 @@ func (o orderedJSONLine) MarshalJSON() ([]byte, error) {
 		buf = append(buf, ':')
 		// value
 		if i == humanCountIdx {
-			// human_intervention_count: numeric. The string was built
-			// via strconv.Itoa in scanOneRow, so direct append is safe.
+			// human_intervention_count: numeric. scanOneRow built this
+			// via strconv.FormatInt(_, 10) on an int64, so it is always
+			// a JSON-grammar-conformant decimal integer (sign + digits,
+			// no whitespace, no exponent). Direct append into the JSON
+			// stream is therefore safe — no escaping or re-encoding
+			// pass needed.
 			buf = append(buf, []byte(o.values[i])...)
 		} else {
 			vJSON, err := json.Marshal(o.values[i])
