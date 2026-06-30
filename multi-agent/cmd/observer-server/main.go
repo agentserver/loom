@@ -617,6 +617,16 @@ func loadConfig(path string) (*Config, error) {
 	if err := dec.Decode(&cfg); err != nil {
 		return nil, err
 	}
+	// v4: also merge a sibling nonsecret/observer.nonsecret.yaml when present.
+	// This allows the cluster: block and identity cache overrides to be
+	// delivered via ConfigMap rather than Secret, which is required for
+	// existingSecret deployments where secret.create=false.
+	nonsecretPath := filepath.Join(filepath.Dir(path), "nonsecret", "observer.nonsecret.yaml")
+	if nonsecretData, err := os.ReadFile(nonsecretPath); err == nil {
+		if err := yaml.Unmarshal(nonsecretData, &cfg); err != nil {
+			return nil, fmt.Errorf("observer.nonsecret.yaml: %w", err)
+		}
+	}
 	if cfg.Production && !yamlPathExists(data, "identity", "legacy_api_keys", "enabled") {
 		cfg.Identity.LegacyAPIKeys.Enabled = false
 	}

@@ -16,6 +16,28 @@ data:
         enabled: {{ default false .Values.config.identity.legacyAPIKeys.enabled }}
       agentserver:
         enabled: {{ default false .Values.config.identity.agentserver.enabled }}
+        {{- /* v16: emit fresh_ttl only when the values file explicitly sets
+              it (i.e. value is non-empty after default). The chart's
+              values.yaml default is "" so this is a no-op for single-pod
+              deployments; values-production.example.yaml sets "30s" and
+              the binary's pointer-nullable post-merge defaulting handles
+              the cluster-enabled fallback if both YAMLs leave it empty. */ -}}
+        {{- if .Values.config.identity.agentserver.freshTTL }}
+        fresh_ttl: {{ .Values.config.identity.agentserver.freshTTL | quote }}
+        {{- end }}
+        {{- /* v18: revocationChannel is an enum "auto" | "enabled" | "disabled".
+              - "auto"      (default) → omit field; binary applies cluster.enabled-dependent default
+              - "enabled"   → emit revocation_channel: "postgres"
+              - "disabled"  → emit revocation_channel: "" (explicit opt-out)
+              Helm chart MUST default to "auto" so the binary's defaulting fires for upgrades. */ -}}
+        {{- $rc := default "auto" .Values.config.identity.agentserver.revocationChannel -}}
+        {{- if eq $rc "enabled" }}
+        revocation_channel: "postgres"
+        {{- else if eq $rc "disabled" }}
+        revocation_channel: ""
+        {{- else if ne $rc "auto" }}
+        {{- fail (printf "config.identity.agentserver.revocationChannel must be auto|enabled|disabled; got %q" $rc) }}
+        {{- end }}
     store:
       driver: {{ .Values.config.store.driver | quote }}
     object_store:
@@ -23,3 +45,12 @@ data:
     telemetry:
       enabled: {{ .Values.config.telemetry.enabled }}
       retention_days: {{ .Values.config.telemetry.retentionDays }}
+    {{- if .Values.cluster.enabled }}
+    cluster:
+      advertise_url_env: {{ .Values.cluster.advertiseUrlEnv | quote }}
+      secret_env: {{ .Values.cluster.secretEnv | quote }}
+      {{- if .Values.cluster.prevSecretEnv }}
+      prev_secret_env: {{ .Values.cluster.prevSecretEnv | quote }}
+      {{- end }}
+      internal_listen_addr: {{ .Values.cluster.internalListenAddr | quote }}
+    {{- end }}

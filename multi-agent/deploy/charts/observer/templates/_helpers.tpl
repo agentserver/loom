@@ -41,6 +41,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-create-bucket" (include "observer.minio.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{- define "observer.headlessServiceName" -}}
+{{- default (printf "%s-headless" (include "observer.fullname" .)) .Values.cluster.headlessServiceName -}}
+{{- end -}}
+
 {{- define "observer.migrationJobName" -}}
 {{- $base := include "observer.fullname" . -}}
 {{- if .Values.migration.useHelmHook -}}

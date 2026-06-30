@@ -55,6 +55,8 @@ secret:
   s3AccessKey: ""
   s3SecretKey: ""
   telemetryKeys: {}
+  clusterSecret: ""      # required when cluster.enabled=true and secret.create=true; must be >=32 chars
+  clusterSecretPrev: ""  # optional previous cluster secret for key rotation
 
 config:
   production: true
