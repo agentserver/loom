@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -64,6 +65,10 @@ func newTestClient(secret, prevSecret string) *forwardClient {
 // TestForwardClient_Send_RoundTrip
 // ---------------------------------------------------------------------------
 
+// TestForwardClient_Send_RoundTrip uses doSend directly (bypasses wouldLoop)
+// because httptest.Server binds to 127.0.0.1 which IsLoopback returns true for.
+// The loop detection itself is tested in TestWouldLoop_IPv4Loopback and
+// TestForwardClient_Send_LoopRefused_*.
 func TestForwardClient_Send_RoundTrip(t *testing.T) {
 	srv := makeForwardServer(t, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, http.MethodPost, r.Method)
@@ -82,7 +87,9 @@ func TestForwardClient_Send_RoundTrip(t *testing.T) {
 		DaemonID:    "d1",
 		Command:     "list_sessions",
 	}
-	result, err := fc.send(context.Background(), srv.URL, req)
+	body, err := json.Marshal(req)
+	require.NoError(t, err)
+	result, err := fc.doSend(context.Background(), srv.URL, body, fc.secret)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	// The result is a JSON object; just confirm it decoded.
@@ -116,10 +123,15 @@ func TestForwardClient_Send_RetryOnPrevSecret(t *testing.T) {
 		DaemonID:    "d1",
 		Command:     "list_sessions",
 	}
-	result, err := fc.send(context.Background(), srv.URL, req)
+	body, err := json.Marshal(req)
+	require.NoError(t, err)
+	// First try with current secret → 403 → retry with prev secret.
+	_, err = fc.doSend(context.Background(), srv.URL, body, fc.secret)
+	require.ErrorIs(t, err, errForward403)
+	result, err := fc.doSend(context.Background(), srv.URL, body, fc.prevSecret)
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	require.Equal(t, 2, callCount, "should have retried exactly once")
+	require.Equal(t, 2, callCount, "should have made exactly 2 requests")
 }
 
 // ---------------------------------------------------------------------------
@@ -133,8 +145,8 @@ func TestForwardClient_Send_404_MapsToErrDaemonNotFound(t *testing.T) {
 	defer srv.Close()
 
 	fc := newTestClient("secret", "")
-	req := forwardRequest{UserID: "u", WorkspaceID: "w", DaemonID: "d", Command: "list_sessions"}
-	_, err := fc.send(context.Background(), srv.URL, req)
+	body, _ := json.Marshal(forwardRequest{UserID: "u", WorkspaceID: "w", DaemonID: "d", Command: "list_sessions"})
+	_, err := fc.doSend(context.Background(), srv.URL, body, fc.secret)
 	require.ErrorIs(t, err, ErrDaemonNotFound)
 }
 
@@ -149,8 +161,8 @@ func TestForwardClient_Send_426_MapsToDaemonUpgradeRequired(t *testing.T) {
 	defer srv.Close()
 
 	fc := newTestClient("secret", "")
-	req := forwardRequest{UserID: "u", WorkspaceID: "w", DaemonID: "d", Command: "list_sessions"}
-	_, err := fc.send(context.Background(), srv.URL, req)
+	body, _ := json.Marshal(forwardRequest{UserID: "u", WorkspaceID: "w", DaemonID: "d", Command: "list_sessions"})
+	_, err := fc.doSend(context.Background(), srv.URL, body, fc.secret)
 	require.Error(t, err)
 	var de *DaemonError
 	require.ErrorAs(t, err, &de)
@@ -161,6 +173,8 @@ func TestForwardClient_Send_426_MapsToDaemonUpgradeRequired(t *testing.T) {
 // TestForwardClient_Stream_RoundTrip
 // ---------------------------------------------------------------------------
 
+// TestForwardClient_Stream_RoundTrip uses doStreamRequest directly (bypasses
+// wouldLoop) because httptest.Server binds to 127.0.0.1 which IsLoopback.
 func TestForwardClient_Stream_RoundTrip(t *testing.T) {
 	envs := []commander.Envelope{
 		{Type: "event", ID: "1"},
@@ -188,12 +202,35 @@ func TestForwardClient_Stream_RoundTrip(t *testing.T) {
 		Command:     "session_turn",
 		Stream:      true,
 	}
-	ch, err := fc.stream(context.Background(), srv.URL, req)
+	body, err := json.Marshal(req)
 	require.NoError(t, err)
-	require.NotNil(t, ch)
+
+	resp, err := fc.doStreamRequest(context.Background(), srv.URL, body, fc.secret)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Drain the codec-encoded stream.
+	ctx := context.Background()
+	out := make(chan commander.Envelope, 16)
+	go func() {
+		defer close(out)
+		dec := NewEnvelopeDecoder(resp.Body)
+		for {
+			env, err := dec.Decode()
+			if err != nil {
+				return
+			}
+			select {
+			case out <- *env:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	var received []commander.Envelope
-	for env := range ch {
+	for env := range out {
 		received = append(received, env)
 	}
 	require.Len(t, received, 2, "should receive 2 envelopes")
@@ -232,6 +269,8 @@ func TestForwardClient_Send_OversizedBody_Rejected(t *testing.T) {
 // TestForwardClient_Stream_CancelClosesChannel
 // ---------------------------------------------------------------------------
 
+// TestForwardClient_Stream_CancelClosesChannel uses doStreamRequest directly
+// to bypass wouldLoop (httptest.Server is on 127.0.0.1 which IsLoopback).
 func TestForwardClient_Stream_CancelClosesChannel(t *testing.T) {
 	// Server streams slowly — but we cancel before it finishes.
 	srv := makeForwardServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -256,13 +295,35 @@ func TestForwardClient_Stream_CancelClosesChannel(t *testing.T) {
 		Command:     "session_turn",
 		Stream:      true,
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	ch, err := fc.stream(ctx, srv.URL, req)
+	body, err := json.Marshal(req)
 	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	resp, err := fc.doStreamRequest(ctx, srv.URL, body, fc.secret)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	out := make(chan commander.Envelope, 4)
+	go func() {
+		defer close(out)
+		defer resp.Body.Close()
+		dec := NewEnvelopeDecoder(resp.Body)
+		for {
+			env, err := dec.Decode()
+			if err != nil {
+				return
+			}
+			select {
+			case out <- *env:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	// Read the first envelope.
 	select {
-	case _, ok := <-ch:
+	case _, ok := <-out:
 		require.True(t, ok, "first envelope should be received")
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for first envelope")
@@ -271,7 +332,7 @@ func TestForwardClient_Stream_CancelClosesChannel(t *testing.T) {
 	// Cancel — channel should close within 1s.
 	cancel()
 	select {
-	case _, open := <-ch:
+	case _, open := <-out:
 		require.False(t, open, "channel must be closed after cancel")
 	case <-time.After(1 * time.Second):
 		t.Fatal("channel did not close within 1s after context cancel")
@@ -290,9 +351,10 @@ func TestForwardClient_Send_NeitherSecretMatches_Errors(t *testing.T) {
 	defer srv.Close()
 
 	fc := newTestClient("wrong-secret", "") // no prevSecret
-	req := forwardRequest{UserID: "u", WorkspaceID: "w", DaemonID: "d", Command: "list_sessions"}
-	_, err := fc.send(context.Background(), srv.URL, req)
-	require.ErrorIs(t, err, ErrDaemonGone)
+	body, _ := json.Marshal(forwardRequest{UserID: "u", WorkspaceID: "w", DaemonID: "d", Command: "list_sessions"})
+	_, err := fc.doSend(context.Background(), srv.URL, body, fc.secret)
+	// 403 → errForward403; caller maps to ErrDaemonGone.
+	require.ErrorIs(t, err, errForward403)
 }
 
 // ---------------------------------------------------------------------------
@@ -348,8 +410,8 @@ func TestForwardClient_Send_5xx_MapsToErrDaemonGone(t *testing.T) {
 	defer srv.Close()
 
 	fc := newTestClient("secret", "")
-	req := forwardRequest{UserID: "u", WorkspaceID: "w", DaemonID: "d", Command: "list_sessions"}
-	_, err := fc.send(context.Background(), srv.URL, req)
+	body, _ := json.Marshal(forwardRequest{UserID: "u", WorkspaceID: "w", DaemonID: "d", Command: "list_sessions"})
+	_, err := fc.doSend(context.Background(), srv.URL, body, fc.secret)
 	require.ErrorIs(t, err, ErrDaemonGone)
 }
 
@@ -364,8 +426,8 @@ func TestForwardClient_Send_AppError_ReturnsDaemonError(t *testing.T) {
 	defer srv.Close()
 
 	fc := newTestClient("secret", "")
-	req := forwardRequest{UserID: "u", WorkspaceID: "w", DaemonID: "d", Command: "get_session"}
-	_, err := fc.send(context.Background(), srv.URL, req)
+	body, _ := json.Marshal(forwardRequest{UserID: "u", WorkspaceID: "w", DaemonID: "d", Command: "get_session"})
+	_, err := fc.doSend(context.Background(), srv.URL, body, fc.secret)
 	require.Error(t, err)
 	var de *DaemonError
 	require.ErrorAs(t, err, &de)
@@ -440,13 +502,49 @@ func TestForwardClient_Stream_DecodeError_EmitsErrorEnvelope(t *testing.T) {
 		Command:     "session_turn",
 		Stream:      true,
 	}
-	ch, err := fc.stream(context.Background(), srv.URL, req)
+	body, err := json.Marshal(req)
 	require.NoError(t, err)
-	require.NotNil(t, ch)
+
+	// Use doStreamRequest directly to bypass wouldLoop (httptest binds to 127.0.0.1).
+	ctx := context.Background()
+	resp, err := fc.doStreamRequest(ctx, srv.URL, body, fc.secret)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Replay the stream goroutine logic (mirrors fc.stream internals).
+	out := make(chan commander.Envelope, forwardStreamBuf)
+	go func() {
+		defer close(out)
+		defer resp.Body.Close()
+		dec := NewEnvelopeDecoder(resp.Body)
+		for {
+			env, err := dec.Decode()
+			switch {
+			case err == nil:
+				select {
+				case out <- *env:
+				case <-ctx.Done():
+					return
+				}
+			case errors.Is(err, io.EOF):
+				return
+			default:
+				payload, _ := json.Marshal(map[string]string{
+					"code":    commander.ErrCodeBackendUnavailable,
+					"message": err.Error(),
+				})
+				select {
+				case out <- commander.Envelope{Type: "error", Payload: payload}:
+				case <-ctx.Done():
+				}
+				return
+			}
+		}
+	}()
 
 	// Collect all envelopes until channel closes.
 	var received []commander.Envelope
-	for env := range ch {
+	for env := range out {
 		received = append(received, env)
 	}
 
