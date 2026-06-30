@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os/exec"
 	"strings"
 	"time"
@@ -85,39 +84,21 @@ func RunSubprocess(ctx context.Context, opts SubprocessOpts) (SubprocessResult, 
 	cmd.Env = append([]string{}, opts.Env...) // defensive copy
 	setupProcGroup(cmd)
 
-	// Read stdout through a LimitReader-equivalent capped at max+1. If we
-	// see max+1 bytes, the child has tripped Security §7(f); kill the
-	// group and surface ErrOracleOutputTooLarge.
-	stdoutBuf := &bytes.Buffer{}
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return SubprocessResult{}, fmt.Errorf("stdout pipe: %w", err)
-	}
+	// Assign stdout/stderr to bounded writers and let exec.Cmd own the
+	// copy goroutines. This avoids the StdoutPipe()+Wait() race where
+	// Wait closes the pipe fd while a user-side drain goroutine is still
+	// inside io.CopyN — that race surfaced as
+	// `oracle stdout drain: read |0: file already closed` on healthy
+	// fast-exit oracles (PR #53 review P0).
+	stdoutWriter := newBoundedWriter(max)
 	stderrBuf := &bytes.Buffer{}
+	cmd.Stdout = stdoutWriter
 	cmd.Stderr = stderrBuf
 
 	if err := cmd.Start(); err != nil {
 		return SubprocessResult{}, fmt.Errorf("start %s: %w", opts.Cmd[0], err)
 	}
 	pid := cmd.Process.Pid
-
-	// Drain stdout in a goroutine; signal back when (a) we hit the cap,
-	// (b) the pipe closes naturally, or (c) we hit a read error.
-	type drainResult struct {
-		overflow bool
-		err      error
-	}
-	drainCh := make(chan drainResult, 1)
-	go func() {
-		// CopyN(max+1) lets us discover whether the producer wrote
-		// strictly more than max bytes (overflow == true).
-		n, err := io.CopyN(stdoutBuf, stdoutPipe, int64(max)+1)
-		if err != nil && err != io.EOF {
-			drainCh <- drainResult{overflow: false, err: err}
-			return
-		}
-		drainCh <- drainResult{overflow: n > int64(max), err: nil}
-	}()
 
 	// Set up timeout. We don't rely on exec.CommandContext alone because
 	// its kill signals only the leaf — we want the whole group.
@@ -131,56 +112,76 @@ func RunSubprocess(ctx context.Context, opts SubprocessOpts) (SubprocessResult, 
 	waitCh := make(chan error, 1)
 	go func() { waitCh <- cmd.Wait() }()
 
-	// Three terminal events: overflow → kill+drain+wait; timeout →
-	// kill+drain+wait; natural exit → wait for drain to finish then return.
-	// We always wait for `drainCh` before reading stdoutBuf because the
-	// drain goroutine writes to it concurrently — touching the buffer
-	// before drain returns is a data race.
-	for {
-		select {
-		case d := <-drainCh:
-			drainCh = nil
-			if d.overflow {
-				killGroup(pid)
-				<-waitCh
-				return SubprocessResult{PID: pid}, ErrOracleOutputTooLarge
-			}
-			if d.err != nil {
-				killGroup(pid)
-				<-waitCh
-				return SubprocessResult{PID: pid}, fmt.Errorf("oracle stdout drain: %w", d.err)
-			}
-			// Stdout closed; wait for cmd to exit.
-		case <-timeoutCh:
-			timeoutCh = nil
+	// Two terminal events:
+	//   * timeout fires → kill the group, wait for cmd.Wait to reap (it
+	//     also drains stdout/stderr because exec owns those goroutines)
+	//   * cmd exits → check whether the bounded writer tripped overflow
+	//     during the run, otherwise return the normal result.
+	select {
+	case <-timeoutCh:
+		killGroup(pid)
+		<-waitCh
+		return SubprocessResult{
+			Stdout: stdoutWriter.bytes(),
+			Stderr: stderrBuf.Bytes(),
+			PID:    pid,
+		}, ErrSubprocessTimeout
+	case waitErr := <-waitCh:
+		if stdoutWriter.overflowed() {
+			// The bounded writer returned errStdoutOverflow on the
+			// max+1 byte; exec.Cmd surfaces that to Wait() as the
+			// non-nil err. We still kill the group defensively in
+			// case a sibling process in the group lingered, then
+			// return the security-§7(f) sentinel.
 			killGroup(pid)
-			// Drain may still be live — block on it before reading.
-			if drainCh != nil {
-				<-drainCh
-				drainCh = nil
-			}
-			<-waitCh
-			return SubprocessResult{
-				Stdout: stdoutBuf.Bytes(),
-				Stderr: stderrBuf.Bytes(),
-				PID:    pid,
-			}, ErrSubprocessTimeout
-		case waitErr := <-waitCh:
-			// Cmd exited — drain may still be live until the pipe
-			// flushes its tail; block.
-			if drainCh != nil {
-				<-drainCh
-			}
-			return finalize(stdoutBuf, stderrBuf, pid, waitErr), nil
+			return SubprocessResult{PID: pid}, ErrOracleOutputTooLarge
 		}
-		// Loop only continues after a clean drainCh; the next iteration
-		// waits on (timeout | waitCh) without re-arming drain.
-		if drainCh == nil && timeoutCh == nil {
-			// Both fired or neither set; block on wait.
-			waitErr := <-waitCh
-			return finalize(stdoutBuf, stderrBuf, pid, waitErr), nil
-		}
+		return finalize(stdoutWriter.buffer(), stderrBuf, pid, waitErr), nil
 	}
+}
+
+// boundedWriter is an io.Writer that accepts at most `max` bytes; the
+// (max+1)-th byte triggers errStdoutOverflow which exec.Cmd's stdout
+// goroutine propagates back to Wait().  The writer is goroutine-safe with
+// respect to a single producer (exec spawns one stdout-copier per Cmd),
+// which is the only writer.  Readers go through bytes()/buffer() AFTER
+// Wait() returns — by then the producer is done.
+type boundedWriter struct {
+	buf      *bytes.Buffer
+	max      int
+	overflow bool
+}
+
+func newBoundedWriter(max int) *boundedWriter {
+	return &boundedWriter{buf: &bytes.Buffer{}, max: max}
+}
+
+// errStdoutOverflow is the sentinel the bounded writer returns to exec's
+// stdout-copy goroutine when the cap is exceeded. Wait() propagates it
+// via *exec.ExitError; RunSubprocess maps it to ErrOracleOutputTooLarge.
+var errStdoutOverflow = errors.New("eval-runner: bounded stdout writer overflowed")
+
+func (b *boundedWriter) Write(p []byte) (int, error) {
+	remaining := b.max - b.buf.Len()
+	if remaining < 0 {
+		remaining = 0
+	}
+	if len(p) <= remaining {
+		return b.buf.Write(p)
+	}
+	// Write the part that fits, then trip overflow on the next byte.
+	if remaining > 0 {
+		_, _ = b.buf.Write(p[:remaining])
+	}
+	b.overflow = true
+	// Report short write + error so exec stops copying.
+	return remaining, errStdoutOverflow
+}
+
+func (b *boundedWriter) overflowed() bool { return b.overflow }
+func (b *boundedWriter) bytes() []byte    { return b.buf.Bytes() }
+func (b *boundedWriter) buffer() *bytes.Buffer {
+	return b.buf
 }
 
 func finalize(stdoutBuf, stderrBuf *bytes.Buffer, pid int, waitErr error) SubprocessResult {
@@ -264,8 +265,12 @@ func WhitelistEnv(parent []string, workloadID string, injected map[string]string
 		}
 		// LOOM_* passes a prefix check rather than an exact-match entry
 		// in `wanted`; this is the per-team config + test-seam namespace.
+		// Require at least one character after the prefix so a stray
+		// `LOOM_=val` from the parent env doesn't slip through (PR #53
+		// review P2).
 		_, named := wanted[k]
-		if !named && !strings.HasPrefix(k, "LOOM_") {
+		isLoomNS := len(k) > len("LOOM_") && strings.HasPrefix(k, "LOOM_")
+		if !named && !isLoomNS {
 			continue
 		}
 		out = append(out, kv)

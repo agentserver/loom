@@ -142,6 +142,18 @@ func copyTree(srcDir, dstDir string) error {
 			if !strings.HasPrefix(resolved+string(filepath.Separator), srcAbs+string(filepath.Separator)) && resolved != srcAbs {
 				return fmt.Errorf("%w: %s → %s", ErrFixtureSymlinkEscapes, p, resolved)
 			}
+			// Refuse symlinks-to-directories: copyFile would silently
+			// produce a 0-byte file at dst instead of a recursive copy
+			// (PR #53 review P2). The runner refuses rather than
+			// recursing so the failure mode is loud, not a corrupt
+			// fixture tree.
+			info, err := os.Stat(resolved)
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				return fmt.Errorf("%w: %s → %s (directory; refusing to materialise)", ErrFixtureSymlinkEscapes, p, resolved)
+			}
 			// Materialise — copy the resolved file, not the symlink.
 			return copyFile(resolved, dst)
 		default:

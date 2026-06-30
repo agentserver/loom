@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -156,15 +157,17 @@ func Run(ctx context.Context, opts Opts) Result {
 	// (Default skeleton behaviour — copy mock_workspace — was already
 	// applied during SetupWorkspace.)
 
-	// Run oracle. The oracle script is named relative to the workload
-	// directory by spec.success_oracle (canonically `./oracle.sh`). The
-	// runner's subprocess Cwd is the workspace tempdir, NOT the workload
-	// dir, so we must resolve oraclePath to absolute before passing it
-	// to exec — relative paths would be resolved against the tempdir
-	// where no oracle script exists.
-	oraclePath := filepath.Join(workloadRoot, strings.TrimPrefix(spec.SuccessOracle, "./"))
-	if abs, absErr := filepath.Abs(oraclePath); absErr == nil {
-		oraclePath = abs
+	// Resolve the oracle script path. The script is named relative to
+	// the workload directory by spec.success_oracle (canonically
+	// `./oracle.sh`); the runner's subprocess Cwd is the workspace
+	// tempdir, NOT the workload dir, so we must hand exec an absolute
+	// path. resolveOraclePath also enforces that the resolved path is
+	// contained inside workloadRoot — a spec.yaml with
+	// `success_oracle: ../../../bin/sh` would otherwise let workload
+	// authors point at arbitrary binaries (PR #53 review P1).
+	oraclePath, oraclePathErr := resolveOraclePath(workloadRoot, spec.SuccessOracle)
+	if oraclePathErr != nil {
+		return preflight(opts, fmt.Errorf("%w: %v", ErrWorkloadSpecInvalid, oraclePathErr))
 	}
 	env := WhitelistEnv(os.Environ(), spec.ID, map[string]string{
 		"AGENTSERVER_URL": stubURL,
@@ -239,9 +242,12 @@ func Run(ctx context.Context, opts Opts) Result {
 }
 
 // preflight wraps a pre-flight error (exit 2 path) and prints to stderr.
+// The sentinel errors all already carry the "eval-runner:" prefix; we
+// emit the wrapped string verbatim rather than double-prefixing it
+// (PR #53 review P2).
 func preflight(opts Opts, err error) Result {
 	if opts.Stderr != nil {
-		fmt.Fprintf(opts.Stderr, "eval-runner: %v\n", err)
+		fmt.Fprintf(opts.Stderr, "%v\n", err)
 	}
 	return Result{ExitCode: 2, Err: err}
 }
@@ -354,6 +360,28 @@ func LoadWorkloadSpec(path string) (*WorkloadSpec, error) {
 		return nil, errors.New("spec.timeout_seconds must be > 0")
 	}
 	return &s, nil
+}
+
+// resolveOraclePath joins workloadRoot with the success_oracle field and
+// rejects the result if it escapes workloadRoot. A workload author that
+// slips `success_oracle: ../../../bin/sh` past spec review would otherwise
+// be able to execute arbitrary host binaries under the runner's identity;
+// this symmetry with §7(b) symlink-escape defense closes that gap
+// (PR #53 review P1).
+func resolveOraclePath(workloadRoot, successOracle string) (string, error) {
+	if successOracle == "" {
+		return "", errors.New("spec.success_oracle is empty")
+	}
+	rootAbs, err := filepath.Abs(workloadRoot)
+	if err != nil {
+		return "", fmt.Errorf("abs(workloadRoot): %w", err)
+	}
+	joined := filepath.Join(rootAbs, strings.TrimPrefix(successOracle, "./"))
+	cleaned := filepath.Clean(joined)
+	if cleaned != rootAbs && !strings.HasPrefix(cleaned, rootAbs+string(filepath.Separator)) {
+		return "", fmt.Errorf("success_oracle escapes workload dir: %q resolves to %q", successOracle, cleaned)
+	}
+	return cleaned, nil
 }
 
 // --- agentserver-stub lifecycle ---
@@ -492,7 +520,10 @@ type oracleOutput struct {
 // in oracle_details_json.
 func parseOracleStdout(stdout []byte) oracleOutput {
 	if len(stdout) == 0 {
-		return oracleOutput{DetailsRaw: `{"reason":"oracle stdout empty"}`}
+		return oracleOutput{
+			DetailsRaw: `{"reason":"oracle stdout empty"}`,
+			MetricsRaw: "{}",
+		}
 	}
 	nl := bytes.IndexByte(stdout, '\n')
 	var line []byte
@@ -507,7 +538,10 @@ func parseOracleStdout(stdout []byte) oracleOutput {
 		Metrics json.RawMessage `json:"metrics"`
 	}
 	if err := json.Unmarshal(line, &raw); err != nil {
-		return oracleOutput{DetailsRaw: fmt.Sprintf(`{"reason":"oracle stdout not JSON: %s"}`, jsonSafe(err.Error()))}
+		return oracleOutput{
+			DetailsRaw: fmt.Sprintf(`{"reason":"oracle stdout not JSON: %s"}`, jsonSafe(err.Error())),
+			MetricsRaw: "{}",
+		}
 	}
 	out := oracleOutput{Passed: raw.Passed}
 	if len(raw.Details) > 0 {
@@ -549,6 +583,12 @@ type commitMeta struct {
 // parses the result. Override via env LOOM_EVAL_COMMIT_META_CMD (test seam).
 // Failures degrade to N/A strings rather than aborting the run.
 func collectCommitMeta(ctx context.Context, opts Opts, env []string, stderr *os.File) commitMeta {
+	// Fallback row used if commit_meta is unreachable. OS fields fall
+	// back to runtime.GOOS/GOARCH (always available — we're running
+	// in-process) rather than the empty string; the earlier behaviour
+	// wrote ",,," for os_{kernel,distro,arch} which downstream schema
+	// validators couldn't tell apart from "field missing" (PR #53
+	// review P1).
 	out := commitMeta{
 		LoomCommit:        "N/A: commit_meta unavailable",
 		AgentserverCommit: "N/A: commit_meta unavailable",
@@ -556,6 +596,9 @@ func collectCommitMeta(ctx context.Context, opts Opts, env []string, stderr *os.
 		AppCommit:         "N/A: commit_meta unavailable",
 		MachineHostname:   hostnameOrNA(),
 	}
+	out.OS.Kernel = "N/A: commit_meta unavailable"
+	out.OS.Distro = "N/A: commit_meta unavailable"
+	out.OS.Arch = runtime.GOARCH
 	cmd := []string{"python", "-m", "commit_meta.collect", "--format=json"}
 	if override := envGet(env, "LOOM_EVAL_COMMIT_META_CMD"); override != "" {
 		cmd = []string{"/bin/sh", "-c", override}
@@ -603,7 +646,13 @@ func collectGitEmails(ctx context.Context, _ Opts, env []string, stderr *os.File
 	}
 	parts := strings.SplitN(line, "|", 2)
 	if len(parts) != 2 {
-		return line, ""
+		// A shim or upstream git that omits the `|` separator would
+		// otherwise see the whole line treated as an author and pass
+		// through redact unchanged when it lacks an `@`. Surfacing
+		// this lets the operator notice a misconfigured override
+		// (PR #53 review P2).
+		fmt.Fprintf(stderr, "eval-runner: git-email output missing `|` separator: %q; recording as empty\n", line)
+		return "", ""
 	}
 	return parts[0], parts[1]
 }

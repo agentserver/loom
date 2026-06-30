@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -148,8 +149,4 @@ func writeCSV(w io.Writer, row RunRow) error {
 // Refusing rather than appending matches the operator expectation that one
 // run produces a freshly-named CSV; appending to an existing file would
 // silently change its schema-counted row count.
-var ErrCSVExists = errCSVExists{}
-
-type errCSVExists struct{}
-
-func (errCSVExists) Error() string { return "eval-runner: --out file already exists" }
+var ErrCSVExists = errors.New("eval-runner: --out file already exists")
