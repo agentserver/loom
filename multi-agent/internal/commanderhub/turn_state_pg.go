@@ -22,15 +22,33 @@ const finishTurnSQL = `UPDATE commander_turns SET state=$5, updated_at=now() WHE
 
 const failTurnSQL = `UPDATE commander_turns SET state='error', message=$5, updated_at=now() WHERE user_id=$1 AND workspace_id=$2 AND short_id=$3 AND session_id=$4`
 
-// rekeyCheckSQL checks whether the new key already has an entry (SELECT FOR UPDATE).
-// Used by the rekey transaction to decide whether to UPDATE old→new or DELETE old.
-const rekeyCheckSQL = `SELECT 1 FROM commander_turns WHERE user_id=$1 AND workspace_id=$2 AND short_id=$3 AND session_id=$4 FOR UPDATE`
-
-// rekeyUpdateSQL migrates an existing entry from oldKey to newKey.
-const rekeyUpdateSQL = `UPDATE commander_turns SET user_id=$5, workspace_id=$6, short_id=$7, session_id=$8 WHERE user_id=$1 AND workspace_id=$2 AND short_id=$3 AND session_id=$4`
-
-// rekeyDeleteOldSQL removes the old key when the new key already exists.
-const rekeyDeleteOldSQL = `DELETE FROM commander_turns WHERE user_id=$1 AND workspace_id=$2 AND short_id=$3 AND session_id=$4`
+// rekeySQL atomically migrates an existing turn entry from oldKey to newKey.
+//
+// The CTE is a single statement and therefore atomic with respect to other
+// transactions on the same rows — unlike the previous SELECT FOR UPDATE +
+// UPDATE approach which could not lock a non-existent row, letting two
+// concurrent rekeys both see "absent" and race to INSERT with a PK violation.
+//
+// Behaviour:
+//   - If oldKey exists: DELETE it (RETURNING its columns), then INSERT at
+//     newKey.  ON CONFLICT DO NOTHING means if newKey already exists (e.g.
+//     a parallel rekey beat us to it) we simply leave the existing row.
+//   - If oldKey does not exist: the CTE's deleted CTE is empty, the INSERT
+//     selects from an empty relation and inserts nothing — a silent no-op,
+//     which is the correct behaviour when the old placeholder was never
+//     written (race during forwarding).
+//
+// Parameters: $1–$4 = oldKey (user_id, workspace_id, short_id, session_id),
+//
+//	$5–$8 = newKey (user_id, workspace_id, short_id, session_id).
+const rekeySQL = `WITH deleted AS (
+  DELETE FROM commander_turns
+  WHERE (user_id, workspace_id, short_id, session_id) = ($1, $2, $3, $4)
+  RETURNING state, awaiting_approval, active_worker, message, updated_at
+)
+INSERT INTO commander_turns (user_id, workspace_id, short_id, session_id, state, awaiting_approval, active_worker, message, updated_at)
+SELECT $5, $6, $7, $8, state, awaiting_approval, active_worker, message, updated_at FROM deleted
+ON CONFLICT (user_id, workspace_id, short_id, session_id) DO NOTHING`
 
 const getTurnSQL = `SELECT state, awaiting_approval, active_worker, message, updated_at FROM commander_turns WHERE user_id=$1 AND workspace_id=$2 AND short_id=$3 AND session_id=$4`
 
@@ -102,56 +120,19 @@ func (s *pgTurnStore) fail(ctx context.Context, key turnKey, msg string) error {
 // rekey migrates a turn entry from oldKey to newKey, used when the
 // fresh-session protocol returns the real backend session ID.
 //
-// Executed as a transaction with a SELECT FOR UPDATE to avoid the race between
-// checking and updating:
-//   - If newKey does NOT exist: UPDATE old→new.
-//   - If newKey already exists (parallel rekey or reconnect): DELETE old and
-//     leave the existing newKey row intact.
-//
-// The previous implementation used `UPDATE ... ON CONFLICT DO NOTHING` which is
-// not valid PostgreSQL syntax and would have produced a runtime syntax error.
+// Uses a single atomic CTE (rekeySQL) that DELETEs the old row and INSERTs at
+// the new key in one statement, so no inter-statement race window exists.
+// Concurrent rekeys on the same old→new pair are safe: whichever lands first
+// deletes old and inserts new; the second sees no old row to delete and the
+// INSERT is a no-op (ON CONFLICT DO NOTHING).
 func (s *pgTurnStore) rekey(ctx context.Context, oldKey, newKey turnKey) error {
 	if oldKey == newKey {
 		return nil
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	// Check whether the new key already exists (lock it to prevent concurrent creation).
-	var exists int
-	err = tx.QueryRowContext(ctx, rekeyCheckSQL,
-		newKey.owner.userID, newKey.owner.workspaceID, newKey.shortID, newKey.sessionID).
-		Scan(&exists)
-	newKeyExists := err == nil // got a row
-	if errors.Is(err, sql.ErrNoRows) {
-		newKeyExists = false
-		err = nil
-	}
-	if err != nil {
-		return err
-	}
-
-	if !newKeyExists {
-		// Safe to move: UPDATE old→new.
-		_, err = tx.ExecContext(ctx, rekeyUpdateSQL,
-			oldKey.owner.userID, oldKey.owner.workspaceID, oldKey.shortID, oldKey.sessionID,
-			newKey.owner.userID, newKey.owner.workspaceID, newKey.shortID, newKey.sessionID)
-	} else {
-		// New key already exists; drop the old placeholder row.
-		_, err = tx.ExecContext(ctx, rekeyDeleteOldSQL,
-			oldKey.owner.userID, oldKey.owner.workspaceID, oldKey.shortID, oldKey.sessionID)
-	}
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
+	_, err := s.db.ExecContext(ctx, rekeySQL,
+		oldKey.owner.userID, oldKey.owner.workspaceID, oldKey.shortID, oldKey.sessionID,
+		newKey.owner.userID, newKey.owner.workspaceID, newKey.shortID, newKey.sessionID)
+	return err
 }
 
 // get returns the current snapshot for key. On sql.ErrNoRows (key doesn't

@@ -4,13 +4,18 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"os"
+	"sync"
 	"testing"
 	"time"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/yourorg/multi-agent/internal/commander"
+	"github.com/yourorg/multi-agent/internal/commanderhub/authstore"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
@@ -188,10 +193,12 @@ func TestPGTurnStore_GetExisting(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-// TestPGTurnStore_RekeyValidSQL: verifies that the rekey path issues a BEGIN
-// transaction and uses rekeyCheckSQL + rekeyUpdateSQL (never the old invalid
-// `UPDATE … ON CONFLICT DO NOTHING` form).
-func TestPGTurnStore_RekeyValidSQL(t *testing.T) {
+// TestPGTurnStore_RekeyAtomicCTE: verifies that the rekey path issues the atomic
+// CTE statement (rekeySQL) — a single Exec with 8 arguments covering both
+// oldKey and newKey. The previous multi-statement transaction (BEGIN +
+// SELECT FOR UPDATE + UPDATE/DELETE + COMMIT) could not lock a non-existent row,
+// causing a PK violation race when two rekeys raced on the same old→new pair.
+func TestPGTurnStore_RekeyAtomicCTE(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
 	require.NoError(t, err)
 	defer db.Close()
@@ -204,22 +211,21 @@ func TestPGTurnStore_RekeyValidSQL(t *testing.T) {
 		sessionID: "sess-real",
 	}
 
-	// Expect: BEGIN, check new key (not found → ErrNoRows), update old→new, COMMIT.
-	mock.ExpectBegin()
-	mock.ExpectQuery(rekeyCheckSQL).
-		WithArgs("alice", "W1", "agent-A", "sess-real").
-		WillReturnError(sql.ErrNoRows)
-	mock.ExpectExec(rekeyUpdateSQL).
-		WithArgs("alice", "W1", "agent-A", "sess-1", "alice", "W1", "agent-A", "sess-real").
+	// Expect a single Exec (the atomic CTE) — no BEGIN/COMMIT, no SELECT FOR UPDATE.
+	mock.ExpectExec(rekeySQL).
+		WithArgs(
+			"alice", "W1", "agent-A", "sess-1", // oldKey
+			"alice", "W1", "agent-A", "sess-real", // newKey
+		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectCommit()
 
 	require.NoError(t, s.rekey(context.Background(), oldKey, newKey))
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 // TestPGTurnStore_RekeyExistingTarget: when newKey already exists, rekey must
-// DELETE old (not UPDATE) and commit — leaving the existing newKey row intact.
+// still succeed (the ON CONFLICT DO NOTHING branch is transparent to the caller).
+// The CTE handles both cases in a single statement; we just verify it is issued.
 func TestPGTurnStore_RekeyExistingTarget(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
 	require.NoError(t, err)
@@ -233,16 +239,13 @@ func TestPGTurnStore_RekeyExistingTarget(t *testing.T) {
 		sessionID: "sess-real",
 	}
 
-	// Expect: BEGIN, check new key (found), delete old, COMMIT.
-	mock.ExpectBegin()
-	rows := sqlmock.NewRows([]string{"1"}).AddRow(1)
-	mock.ExpectQuery(rekeyCheckSQL).
-		WithArgs("alice", "W1", "agent-A", "sess-real").
-		WillReturnRows(rows)
-	mock.ExpectExec(rekeyDeleteOldSQL).
-		WithArgs("alice", "W1", "agent-A", "sess-1").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectCommit()
+	// Same CTE regardless of whether newKey already exists — ON CONFLICT DO NOTHING handles it.
+	mock.ExpectExec(rekeySQL).
+		WithArgs(
+			"alice", "W1", "agent-A", "sess-1", // oldKey
+			"alice", "W1", "agent-A", "sess-real", // newKey
+		).
+		WillReturnResult(sqlmock.NewResult(0, 0)) // 0 rows = ON CONFLICT path
 
 	require.NoError(t, s.rekey(context.Background(), oldKey, newKey))
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -315,4 +318,81 @@ func TestPGTurnStore_UpdateFromEnvelope_StatusAnswering(t *testing.T) {
 
 	require.NoError(t, s.updateFromEnvelope(context.Background(), key, "session_turn", env))
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestPGTurnStore_RekeyConurrentNoPKViolation spawns 16 goroutines that all
+// concurrently call rekey on the same old→new pair against a real Postgres
+// database. The atomic CTE guarantees exactly one row ends up at newKey and
+// zero PK violations occur.
+//
+// Env-gated: set OBSERVER_POSTGRES_TEST_DSN to run this test.
+func TestPGTurnStore_RekeyConurrentNoPKViolation(t *testing.T) {
+	dsn := os.Getenv(multiPodDSNEnv)
+	if dsn == "" {
+		t.Skipf("set %s to run postgres rekey concurrency test", multiPodDSNEnv)
+	}
+
+	db, err := sql.Open("pgx", dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	require.NoError(t, db.PingContext(context.Background()))
+	require.NoError(t, authstore.MigratePostgres(db), "MigratePostgres")
+
+	// Use a unique session ID per test run to avoid interference with concurrent tests.
+	runID := fmt.Sprintf("concurrent-rekey-%d", time.Now().UnixNano())
+	oldKey := turnKey{
+		owner:     owner{userID: "alice-concurrent", workspaceID: "W-concurrent"},
+		shortID:   "agent-concurrent",
+		sessionID: "old-" + runID,
+	}
+	newKey := turnKey{
+		owner:     owner{userID: "alice-concurrent", workspaceID: "W-concurrent"},
+		shortID:   "agent-concurrent",
+		sessionID: "new-" + runID,
+	}
+
+	s := newPGTurnStore(db)
+	ctx := context.Background()
+
+	// Seed the old row so there is something to rekey.
+	ok, err := s.begin(ctx, oldKey)
+	require.NoError(t, err)
+	require.True(t, ok, "begin should succeed for a fresh key")
+
+	// 16 goroutines all call rekey(old→new) concurrently.
+	const goroutines = 16
+	errs := make([]error, goroutines)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start // synchronised start
+			errs[i] = s.rekey(ctx, oldKey, newKey)
+		}(i)
+	}
+	close(start) // release all goroutines simultaneously
+	wg.Wait()
+
+	// None of the rekey calls should return an error.
+	for i, e := range errs {
+		require.NoError(t, e, "goroutine %d rekey error", i)
+	}
+
+	// Exactly one row at newKey should exist.
+	snap, err := s.get(ctx, newKey)
+	require.NoError(t, err)
+	require.NotEqual(t, turnStateIdle, snap.State,
+		"newKey must exist after concurrent rekeys (state=%s)", snap.State)
+
+	// The old key must be gone.
+	snapOld, err := s.get(ctx, oldKey)
+	require.NoError(t, err)
+	require.Equal(t, turnStateIdle, snapOld.State,
+		"oldKey must not exist after rekey (got state=%s)", snapOld.State)
+
+	// Cleanup.
+	_, _ = db.ExecContext(ctx, `DELETE FROM commander_turns WHERE user_id=$1 AND workspace_id=$2`,
+		"alice-concurrent", "W-concurrent")
 }
