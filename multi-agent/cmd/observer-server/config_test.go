@@ -389,13 +389,12 @@ cluster:
 		"direct advertise_url must take precedence over advertise_url_env")
 }
 
-// --- Finding 3: revocation_channel struct field ---
+// --- Finding 3 / E-fix2 Finding 1: revocation_channel struct field (pointer) ---
 
-// TestLoadConfig_RevocationChannel verifies that the revocation_channel field
-// is accepted by AgentserverIdentityConfig and that the three meaningful values
-// ("", "postgres", malformed) are handled correctly.
-func TestLoadConfig_RevocationChannel(t *testing.T) {
-	// "" (omitted) — auto; loadConfig must not error and field is empty.
+// TestRevocationChannel_NilIsAuto verifies that when revocation_channel is
+// absent from YAML the field is nil (auto), which enables PG revocation only
+// when store.driver=postgres.
+func TestRevocationChannel_NilIsAuto(t *testing.T) {
 	cfg := loadConfigFromString(t, `
 listen_addr: ":8090"
 store:
@@ -411,32 +410,15 @@ api_keys:
   - id: ak-default
     key: ak_secret
 `)
-	require.Equal(t, "", cfg.Identity.Agentserver.RevocationChannel,
-		"omitted revocation_channel must be empty string (auto)")
+	require.Nil(t, cfg.Identity.Agentserver.RevocationChannel,
+		"omitted revocation_channel must be nil (auto)")
+}
 
-	// "postgres" — explicit opt-in; KnownFields(true) must accept the field.
-	cfg2 := loadConfigFromString(t, `
-listen_addr: ":8090"
-store:
-  driver: postgres
-  postgres:
-    dsn_env: OBSERVER_DATABASE_URL
-identity:
-  legacy_api_keys:
-    enabled: true
-  agentserver:
-    enabled: true
-    url: https://agentserver.example.com
-    revocation_channel: "postgres"
-api_keys:
-  - id: ak-default
-    key: ak_secret
-`)
-	require.Equal(t, "postgres", cfg2.Identity.Agentserver.RevocationChannel,
-		"revocation_channel: postgres must be preserved")
-
-	// "" explicit empty string — auto fallback; KnownFields must accept the field.
-	cfg3 := loadConfigFromString(t, `
+// TestRevocationChannel_EmptyIsDisabled verifies that revocation_channel: ""
+// (explicit empty string from the chart when revocationChannel=disabled) is
+// stored as a non-nil pointer to an empty string, not confused with absent/auto.
+func TestRevocationChannel_EmptyIsDisabled(t *testing.T) {
+	cfg := loadConfigFromString(t, `
 listen_addr: ":8090"
 store:
   driver: postgres
@@ -453,8 +435,70 @@ api_keys:
   - id: ak-default
     key: ak_secret
 `)
-	require.Equal(t, "", cfg3.Identity.Agentserver.RevocationChannel,
-		"explicit empty string revocation_channel must be preserved (auto)")
+	require.NotNil(t, cfg.Identity.Agentserver.RevocationChannel,
+		"explicit empty revocation_channel must be a non-nil pointer (disabled)")
+	require.Equal(t, "", *cfg.Identity.Agentserver.RevocationChannel,
+		"explicit empty revocation_channel must point to empty string")
+}
+
+// TestRevocationChannel_PostgresIsForced verifies that
+// revocation_channel: "postgres" is stored as a non-nil pointer to "postgres"
+// and is accepted by validateConfig.
+func TestRevocationChannel_PostgresIsForced(t *testing.T) {
+	cfg := loadConfigFromString(t, `
+listen_addr: ":8090"
+store:
+  driver: postgres
+  postgres:
+    dsn_env: OBSERVER_DATABASE_URL
+identity:
+  legacy_api_keys:
+    enabled: true
+  agentserver:
+    enabled: true
+    url: https://agentserver.example.com
+    revocation_channel: "postgres"
+api_keys:
+  - id: ak-default
+    key: ak_secret
+`)
+	require.NotNil(t, cfg.Identity.Agentserver.RevocationChannel,
+		"revocation_channel: postgres must be a non-nil pointer")
+	require.Equal(t, "postgres", *cfg.Identity.Agentserver.RevocationChannel,
+		"revocation_channel: postgres must point to \"postgres\"")
+}
+
+// TestRevocationChannel_UnknownFatal verifies that an unrecognised
+// revocation_channel value is rejected by validateConfig.
+func TestRevocationChannel_UnknownFatal(t *testing.T) {
+	_, err := loadConfig(writeConfig(t, `
+listen_addr: ":8090"
+store:
+  driver: postgres
+  postgres:
+    dsn_env: OBSERVER_DATABASE_URL
+identity:
+  legacy_api_keys:
+    enabled: true
+  agentserver:
+    enabled: true
+    url: https://agentserver.example.com
+    revocation_channel: "kafka"
+api_keys:
+  - id: ak-default
+    key: ak_secret
+`))
+	require.Error(t, err, "unknown revocation_channel value must be rejected")
+	require.Contains(t, err.Error(), "revocation_channel")
+}
+
+// TestLoadConfig_RevocationChannel is kept for backwards compat but delegates
+// to the more precise pointer-semantics tests above.
+func TestLoadConfig_RevocationChannel(t *testing.T) {
+	TestRevocationChannel_NilIsAuto(t)
+	TestRevocationChannel_EmptyIsDisabled(t)
+	TestRevocationChannel_PostgresIsForced(t)
+	TestRevocationChannel_UnknownFatal(t)
 }
 
 // TestLoadConfig_RenderedChartYAML ensures the binary's ClusterConfig and

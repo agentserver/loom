@@ -154,16 +154,22 @@ type AgentserverIdentityConfig struct {
 	CacheCapacity     int            `yaml:"cache_capacity"`
 	StartupProbe      bool           `yaml:"startup_probe"`
 	// RevocationChannel controls which cross-pod revocation backend to use.
-	// Accepted values:
-	//   ""         — "auto": attach PG revocation channel when store.driver=postgres
+	// The field is a pointer so that absent (nil) and explicit-empty ("") are
+	// semantically distinct:
+	//
+	//   nil        — "auto": attach PG revocation channel when store.driver=postgres
 	//                (same as the pre-v19 behaviour; safe for single-pod deployments)
-	//   "postgres" — always attach the PG revocation channel (explicit opt-in;
+	//   ptr("")    — "disabled": never attach the PG revocation channel, even with a
+	//                Postgres store. The chart emits revocation_channel: "" when
+	//                revocationChannel=disabled so this is reliably distinguishable
+	//                from the absent/auto case.
+	//   ptr("postgres") — always attach the PG revocation channel (explicit opt-in;
 	//                required when running multi-pod without cluster.enabled but with
-	//                a shared Postgres store)
-	// The chart emits "postgres" when revocationChannel=enabled, and omits the
-	// field (auto) when revocationChannel=auto, so existing single-pod configs that
-	// do not set the field are unaffected.
-	RevocationChannel string `yaml:"revocation_channel,omitempty"`
+	//                a shared Postgres store). The chart emits
+	//                revocation_channel: "postgres" when revocationChannel=enabled.
+	//
+	// Any other non-nil value is rejected as fatal at startup.
+	RevocationChannel *string `yaml:"revocation_channel"`
 }
 
 type LegacyAPIKeysConfig struct {
@@ -911,6 +917,13 @@ func validateConfig(cfg *Config) error {
 		return fmt.Errorf("telemetry.max_body_bytes must be <= 1048576")
 	}
 
+	// Validate revocation_channel if set. nil = auto is always valid.
+	if rc := cfg.Identity.Agentserver.RevocationChannel; rc != nil {
+		if *rc != "" && *rc != "postgres" {
+			return fmt.Errorf("identity.agentserver.revocation_channel: unknown value %q (accepted: omitted/auto, empty-string/disabled, \"postgres\")", *rc)
+		}
+	}
+
 	if err := validateClusterConfig(&cfg.Cluster, cfg.Store.Driver); err != nil {
 		return err
 	}
@@ -1017,10 +1030,27 @@ func buildIdentityResolver(cfg *Config, st observerstore.ManagedStore) (identity
 		var cacheOpts []identity.Option
 		// Attach a cross-pod revocation channel so token invalidations propagate
 		// to all pods without waiting for TTL expiry.
-		// revocation_channel="postgres" (explicit): always use PG channel.
-		// revocation_channel="" (auto):             fall back to store-driver heuristic.
+		// Pointer semantics (see AgentserverIdentityConfig.RevocationChannel):
+		//   nil          → auto: enable PG revocation when store.driver=postgres
+		//   ptr("")      → disabled: never enable, even with a Postgres store
+		//   ptr("postgres") → always enable
+		//   ptr(other)   → fatal (caught by validateConfig before reaching here)
 		rc := cfg.Identity.Agentserver.RevocationChannel
-		usePGRevocation := rc == "postgres" || (rc == "" && cfg.Store.Driver == "postgres")
+		var usePGRevocation bool
+		switch {
+		case rc == nil:
+			// auto: fall back to store-driver heuristic.
+			usePGRevocation = cfg.Store.Driver == "postgres"
+		case *rc == "":
+			// explicit disabled: never use PG revocation.
+			usePGRevocation = false
+		case *rc == "postgres":
+			// explicit opt-in.
+			usePGRevocation = true
+		default:
+			// Should be caught by validateConfig; guard here defensively.
+			return nil, fmt.Errorf("identity.agentserver.revocation_channel: unknown value %q (must be empty or \"postgres\")", *rc)
+		}
 		if usePGRevocation {
 			cacheOpts = append(cacheOpts,
 				identity.WithRevocationChannel(identity.NewPGRevocationChannel(st.DB())),
