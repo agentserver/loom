@@ -25,8 +25,10 @@ Hard rules:
   library interface that the CLI binding (and every other ablation consumer)
   will later call.
 - No additions to `multi-agent/go.mod`. The package depends only on the
-  standard library (`errors`, `fmt`, `sort`, `sync`) plus the standard
-  `testing` package for tests.
+  standard library (`errors`, `sort`, `sync`) plus the standard
+  `testing` package for tests. (`fmt` is reserved for the future §2.5
+  `%w` enrichment path; v1 returns bare sentinels and does not import
+  it.)
 
 ### 1.1 Intentional divergence from the todo_list row signature
 

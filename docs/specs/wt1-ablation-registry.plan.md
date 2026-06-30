@@ -32,7 +32,7 @@ All paths are relative to the Go module root,
 | `internal/ablation/doc.go` | Package-level godoc only. Describes the registry's role and the consumer pattern from spec §5. No code. | — | (none) |
 | `internal/ablation/errors.go` | Sentinel error values. | `ErrUnknownFlag`, `ErrNilTarget`, `ErrAlreadyRegistered`, `ErrNotRegistered`, `ErrTargetAlreadyRegistered` | `errors` |
 | `internal/ablation/registry.go` | Core types, constants, methods, and `Default`. | `FlagName`, the 8 `No*` constants, `KnownFlags() []FlagName`, `Registry`, `NewRegistry()`, `(*Registry).Register`, `(*Registry).SetByName`, `(*Registry).List`, `Default` | `sort`, `sync` |
-| `internal/ablation/registry_test.go` | Functional + security test matrix. `package ablation` (white-box) — tests need to construct fresh `Registry` instances and pass typed `FlagName` values. | (tests) | `errors`, `runtime`, `strings`, `sync`, `sync/atomic`, `testing`, `time` |
+| `internal/ablation/registry_test.go` | Functional + security test matrix. `package ablation` (white-box) — tests need to construct fresh `Registry` instances and pass typed `FlagName` values. | (tests) | `errors`, `reflect`, `runtime`, `strings`, `sync`, `sync/atomic`, `testing`, `time` |
 
 Notes:
 
@@ -216,7 +216,7 @@ references the spec §7 security mitigations.
 | `TestSetByName_NotRegistered_ErrNotRegistered` | Known flag, no prior Register → `ErrNotRegistered`. | (b) |
 | `TestSetByName_Flips` | true → false → true cycle on a registered target. | — |
 | `TestList_Stable` | After registering an out-of-order subset (e.g. `NoObserver`, `NoDryRun`, `NoAcceptanceGate`), `List()` returns `[NoAcceptanceGate, NoDryRun, NoObserver]` — i.e. ascending string order — and a second call returns a slice equal element-by-element to the first. The expected slice is hand-rolled in the test, not derived from a second `sort.Slice` of the result. | (e) |
-| `TestKnownFlags_CopyIsolation` | Mutating the slice returned by `KnownFlags()` does not affect a subsequent `KnownFlags()` call; length is 8; element 0 is `NoCapabilityDiscovery`. | (e) — copy isolation per spec §4 last bullet |
+| `TestKnownFlags_CopyIsolation` | Asserts the returned slice is `reflect.DeepEqual` to a hand-rolled `[]FlagName{NoCapabilityDiscovery, NoTypedContracts, NoDryRun, NoContractFormalization, NoUserPromotionPath, NoAcceptanceGate, NoRegistryLookup, NoObserver}` (the const-block order), then mutates element 0 of the returned slice and re-calls `KnownFlags()` and asserts the second call is also `DeepEqual` to the same want — pins both the spec §2.2 declaration order AND the §4 copy-isolation contract. | (e) — copy isolation per spec §4 last bullet + §2.2 / §6 acceptance #4 stable order |
 | `TestConcurrent_Register_Race` | 8 goroutines, each registering a different one of the 8 known flags concurrently (`sync.WaitGroup` + `t.Parallel()`); all return nil; final `len(r.List()) == 8`. Run with `-race`. | (a) |
 | `TestConcurrent_SetByName_Race` | One known flag, 100 goroutines calling `SetByName("NoObserver", g%2==0)` concurrently; the final `*target` value is allowed to be either true or false (race semantics). Test then performs two deterministic post-`wg.Wait()` writes and asserts `*target` reflects each — catches a future refactor that silently drops the deref. | (a) + write-observed contract |
 | `TestConcurrent_RegisterSetList_Race` | Mixed workload, released via a `ready`-gate barrier so the List goroutine genuinely runs concurrently with Register/SetByName. List loop uses a 50ms wall-clock budget + `runtime.Gosched()` (so it interleaves under `GOMAXPROCS=1`) and tracks `maxSeen` via `sync/atomic`. Asserts (1) no `-race` failure, (2) `maxSeen > half` (proves concurrency was observed). | (a) |
@@ -257,7 +257,7 @@ commits make the RED/GREEN evidence reviewable).
    - Write `registry_test.go` containing only `package ablation` and an
      empty import block so the test binary compiles.
    - We deliberately do NOT add `TestSentinels_AreDistinct` here; it is
-     pulled in at step 6 as a final-pass regression smoke test, where it
+     pulled in at step 8 as a final-pass regression smoke test, where it
      belongs (it can't be a meaningful RED since "two distinct error
      values are distinct" is true the moment they are typed).
 
@@ -267,10 +267,11 @@ commits make the RED/GREEN evidence reviewable).
      and `func KnownFlags() []FlagName { return nil }` (deliberately
      broken). Empty `Registry` struct + `NewRegistry() *Registry` stub
      returning `&Registry{}`. No internal map yet.
-   - RED: write `TestKnownFlags_CopyIsolation` (asserts length 8, element
-     0 is `NoCapabilityDiscovery`, mutating the returned slice does not
-     affect a subsequent call). Run `go test` and confirm it fails on the
-     length / element assertion.
+   - RED: write `TestKnownFlags_CopyIsolation` per the §3 matrix row —
+     `reflect.DeepEqual` against the full 8-element canonical-order
+     expected slice both before AND after caller-mutation of the
+     returned slice. Run `go test` and confirm it fails on the first
+     DeepEqual (the stub returns nil, not the canonical 8-flag list).
    - GREEN: add `canonicalFlags`, `canonicalSet`, and make
      `KnownFlags` copy from `canonicalFlags`. Re-run; expect pass.
 
@@ -287,8 +288,8 @@ commits make the RED/GREEN evidence reviewable).
      check → nil target check → mutex → duplicate check → store). Re-run;
      expect all 4 to pass.
 
-3.5. **Register target-aliasing rejection** *(post-review addition; the §7
-     (c) target-aliasing arm of the security mitigation)*
+4. **Register target-aliasing rejection** *(post-review addition; the §7
+   (c) target-aliasing arm of the security mitigation)*
    - RED: extend `Register`'s test surface with
      `TestRegister_SameTargetUnderTwoNames_Rejected` and
      `TestRegister_SamePairTwice_ErrAlreadyRegistered`. The first will
@@ -306,7 +307,7 @@ commits make the RED/GREEN evidence reviewable).
    - Verify both tests now GREEN; verify the original `TestRegister_*`
      tests still GREEN.
 
-4. **SetByName + List**
+5. **SetByName + List**
    - RED: leave `SetByName` and `List` as stubs (`func (r *Registry)
      SetByName(string, bool) error { return nil }`, `func (r *Registry)
      List() []FlagName { return nil }`). Add tests in this order so the
@@ -327,10 +328,10 @@ commits make the RED/GREEN evidence reviewable).
      (mutex, copy keys, `sort.Slice` ascending). Re-run; expect all four
      to pass.
 
-5. **Concurrent / race tests** *(post-GREEN verification step — see below
+6. **Concurrent / race tests** *(post-GREEN verification step — see below
    for why this is not a fresh RED/GREEN loop)*
    - The mutex lives in `Register`, `SetByName`, and `List` from steps 3
-     and 4 because those tests' own correctness assertions require the
+     and 5 because those tests' own correctness assertions require the
      map to be coherent on a single-goroutine timeline; the race tests
      here verify that the mutex is sufficient under concurrency, not
      whether it exists. So this step is explicitly labelled
@@ -339,7 +340,7 @@ commits make the RED/GREEN evidence reviewable).
    - Add `TestConcurrent_Register_Race`, `TestConcurrent_SetByName_Race`,
      `TestConcurrent_RegisterSetList_Race`. Run under `-race`.
    - Expected outcome: GREEN on the first run. If `-race` fires or any
-     test panics, that's a real bug in the step-3/4 implementation —
+     test panics, that's a real bug in the step-3/5 implementation —
      fix in-place; do NOT weaken the test.
    - Discipline note: this is the one step in §4 that intentionally skips
      RED. The compensating control is that the security mitigations in
@@ -347,7 +348,7 @@ commits make the RED/GREEN evidence reviewable).
      sketch (mutex spans the `*target = v` write); the race tests are
      a guard, not a primary driver.
 
-6. **Default singleton**
+7. **Default singleton**
    - RED: add `TestDefault_IsRegistryAndIndependent` to the test file
      first (asserts `Default != nil`, `Default == Default` across two
      reads, `NewRegistry() != Default`). Run; expect compile failure
@@ -355,7 +356,7 @@ commits make the RED/GREEN evidence reviewable).
    - GREEN: add `var Default = NewRegistry()` to `registry.go`. Re-run;
      expect pass.
 
-7. **Final smoke tests**
+8. **Final smoke tests**
    - Add `TestSentinels_AreDistinct` as a non-RED regression smoke test
      (it cannot meaningfully fail at this point — two distinct
      `errors.New` values are distinct — and is included only to guard
@@ -368,7 +369,7 @@ commits make the RED/GREEN evidence reviewable).
      pins that contract so a future refactor that removes the nil-check
      fails here instead of in production.
 
-8. **Refactor pass**
+9. **Refactor pass**
    - Run `gofmt -w`, `go vet`, look for duplication.
    - Re-run the full command set in §3.
    - Confirm no other files in the repo changed (`git status --short`
