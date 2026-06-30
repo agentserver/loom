@@ -374,6 +374,50 @@ func TestForwardClient_Send_AppError_ReturnsDaemonError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// TestForwardClient_Stream_DecodeError_EmitsErrorEnvelope
+// ---------------------------------------------------------------------------
+
+// TestForwardClient_Stream_DecodeError_EmitsErrorEnvelope verifies that when
+// the server writes garbage bytes (not a valid length-prefixed envelope), the
+// stream goroutine emits a synthetic error envelope before closing the channel.
+func TestForwardClient_Stream_DecodeError_EmitsErrorEnvelope(t *testing.T) {
+	srv := makeForwardServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		// Write garbage that is not a valid length-prefixed envelope.
+		// This will trigger a decode error in the stream goroutine.
+		w.Write([]byte("this is not valid envelope data!!!\n"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	})
+	defer srv.Close()
+
+	fc := newTestClient("secret", "")
+	req := forwardRequest{
+		UserID:      "u",
+		WorkspaceID: "w",
+		DaemonID:    "d",
+		Command:     "session_turn",
+		Stream:      true,
+	}
+	ch, err := fc.stream(context.Background(), srv.URL, req)
+	require.NoError(t, err)
+	require.NotNil(t, ch)
+
+	// Collect all envelopes until channel closes.
+	var received []commander.Envelope
+	for env := range ch {
+		received = append(received, env)
+	}
+
+	// Must have received at least one envelope with type "error".
+	require.NotEmpty(t, received, "should receive at least one envelope on decode error")
+	last := received[len(received)-1]
+	require.Equal(t, "error", last.Type, "last envelope must be type=error on decode failure")
+}
+
+// ---------------------------------------------------------------------------
 // Compile-time check: forwardClient fields exist.
 // ---------------------------------------------------------------------------
 

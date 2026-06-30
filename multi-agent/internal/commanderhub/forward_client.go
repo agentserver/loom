@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -305,13 +307,32 @@ func (fc *forwardClient) stream(ctx context.Context, peerURL string, req forward
 		dec := NewEnvelopeDecoder(resp.Body)
 		for {
 			env, err := dec.Decode()
-			if err != nil {
-				// io.EOF or context cancel: stream is done.
+			switch {
+			case err == nil:
+				select {
+				case out <- *env:
+				case <-ctx.Done():
+					return
+				}
+			case errors.Is(err, io.EOF):
+				// Normal stream end.
 				return
-			}
-			select {
-			case out <- *env:
-			case <-ctx.Done():
+			default:
+				// Non-EOF decode error: emit a synthetic terminal error envelope
+				// so the consumer learns about the failure instead of silently
+				// receiving a closed channel.
+				payload, _ := json.Marshal(map[string]string{
+					"code":    commander.ErrCodeBackendUnavailable,
+					"message": err.Error(),
+				})
+				errEnv := commander.Envelope{
+					Type:    "error",
+					Payload: payload,
+				}
+				select {
+				case out <- errEnv:
+				case <-ctx.Done():
+				}
 				return
 			}
 		}
