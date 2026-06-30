@@ -32,6 +32,17 @@ func (h *Hub) drainHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Enter draining mode atomically under admitMu so that any WS upgrade
+	// that passed the pre-check but has not yet called h.reg.add either:
+	//   (a) sees draining=true after acquiring admitMu → rejects itself, or
+	//   (b) completed h.reg.add before we got admitMu → is included in the
+	//       drainAllLocalDaemons snapshot below.
+	// After this block, no new daemons can be admitted and all current daemons
+	// will be drained, so the pod is safe for preStop / eviction.
+	h.admitMu.Lock()
+	h.draining.Store(true)
+	h.admitMu.Unlock()
+
 	// Drain all local daemons.
 	h.drainAllLocalDaemons("observer-restart")
 	w.WriteHeader(http.StatusOK)
