@@ -121,10 +121,17 @@ func RunSubprocess(ctx context.Context, opts SubprocessOpts) (SubprocessResult, 
 	case <-timeoutCh:
 		killGroup(pid)
 		<-waitCh
+		// Use -1 for the exit code so downstream CSV consumers can
+		// tell "timed out" apart from "exit 0 (passed)". The spec
+		// §1.3 oracle contract only pins exit codes 0/1/2; we own
+		// the value for the timeout branch and `finalize()` already
+		// uses -1 for "started but no exit code" — re-use the same
+		// sentinel (PR #53 round 2 P2).
 		return SubprocessResult{
-			Stdout: stdoutWriter.bytes(),
-			Stderr: stderrBuf.Bytes(),
-			PID:    pid,
+			Stdout:   stdoutWriter.bytes(),
+			Stderr:   stderrBuf.Bytes(),
+			ExitCode: -1,
+			PID:      pid,
 		}, ErrSubprocessTimeout
 	case waitErr := <-waitCh:
 		if stdoutWriter.overflowed() {
@@ -132,9 +139,11 @@ func RunSubprocess(ctx context.Context, opts SubprocessOpts) (SubprocessResult, 
 			// max+1 byte; exec.Cmd surfaces that to Wait() as the
 			// non-nil err. We still kill the group defensively in
 			// case a sibling process in the group lingered, then
-			// return the security-§7(f) sentinel.
+			// return the security-§7(f) sentinel with ExitCode=-1
+			// so the CSV path (when called) won't read it as a
+			// real oracle status.
 			killGroup(pid)
-			return SubprocessResult{PID: pid}, ErrOracleOutputTooLarge
+			return SubprocessResult{PID: pid, ExitCode: -1}, ErrOracleOutputTooLarge
 		}
 		return finalize(stdoutWriter.buffer(), stderrBuf, pid, waitErr), nil
 	}

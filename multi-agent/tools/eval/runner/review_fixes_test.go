@@ -23,7 +23,7 @@ func TestReview_P0_RunSubprocess_StressFastExit(t *testing.T) {
 	script := writeScript(t, "#!/bin/sh\nyes x | head -c 10240\n")
 	for i := 0; i < 50; i++ {
 		res, err := RunSubprocess(context.Background(), SubprocessOpts{
-			Cmd:     []string{script},
+			Cmd:     script,
 			Timeout: 5e9, // 5s
 			Env:     []string{"PATH=/usr/bin:/bin"},
 		})
@@ -220,6 +220,159 @@ func TestReview_P2_CopyTree_SymlinkToDirRefused(t *testing.T) {
 	_, err := SetupWorkspace(src, false)
 	if !errors.Is(err, ErrFixtureSymlinkEscapes) {
 		t.Fatalf("err = %v, want ErrFixtureSymlinkEscapes (symlink-to-dir variant)", err)
+	}
+}
+
+// --- Round 2 review fixes ---
+
+// TestReviewR2_P1_TestHelper_NoETXTBSY_UnderParallelLoad — the round-2 P1
+// flake: under high parallel test load `writeScript` returned a path that
+// was exec'd directly, racing the WriteFile's still-in-flight write fd
+// across goroutines and producing `text file busy`. Switching `writeScript`
+// to return `[]string{"/bin/sh", path}` makes /bin/sh open the script as
+// data instead. Spawn 40 short subprocesses concurrently to prove the
+// helper is now stable. The test is itself flaky-test bait — a regression
+// here would surface as ETXTBSY just like the original.
+func TestReviewR2_P1_TestHelper_NoETXTBSY_UnderParallelLoad(t *testing.T) {
+	const N = 40
+	errs := make(chan error, N)
+	for i := 0; i < N; i++ {
+		go func() {
+			script := writeScript(t, "#!/bin/sh\nprintf hello\n")
+			_, err := RunSubprocess(context.Background(), SubprocessOpts{
+				Cmd:     script,
+				Timeout: 5e9,
+				Env:     []string{"PATH=/usr/bin:/bin"},
+			})
+			errs <- err
+		}()
+	}
+	for i := 0; i < N; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("subprocess #%d: %v", i, err)
+		}
+	}
+}
+
+// TestReviewR2_P2_TimeoutExitCode_NotZero — pre-fix the timeout return
+// path left ExitCode at Go zero, so CSV's oracle_exit_code column matched
+// the success contract value (0) even though passed=false. Now it's -1.
+func TestReviewR2_P2_TimeoutExitCode_NotZero(t *testing.T) {
+	script := writeScript(t, "#!/bin/sh\nsleep 30\n")
+	res, err := RunSubprocess(context.Background(), SubprocessOpts{
+		Cmd:     script,
+		Timeout: 200 * 1e6, // 200ms
+		Env:     []string{"PATH=/usr/bin:/bin"},
+	})
+	if !errors.Is(err, ErrSubprocessTimeout) {
+		t.Fatalf("err = %v, want ErrSubprocessTimeout", err)
+	}
+	if res.ExitCode == 0 {
+		t.Errorf("ExitCode = 0 on timeout; want a non-zero sentinel (e.g. -1) so CSV consumers can tell timeout apart from success")
+	}
+}
+
+// TestReviewR2_P2_OverflowExitCode_NotZero — same reasoning for the
+// stdout-overflow termination path.
+func TestReviewR2_P2_OverflowExitCode_NotZero(t *testing.T) {
+	script := writeScript(t, "#!/bin/sh\nyes x | head -c 2097152\n")
+	res, err := RunSubprocess(context.Background(), SubprocessOpts{
+		Cmd:     script,
+		Timeout: 30 * 1e9,
+		Env:     []string{"PATH=/usr/bin:/bin"},
+	})
+	if !errors.Is(err, ErrOracleOutputTooLarge) {
+		t.Fatalf("err = %v, want ErrOracleOutputTooLarge", err)
+	}
+	if res.ExitCode == 0 {
+		t.Errorf("ExitCode = 0 on overflow; want non-zero sentinel")
+	}
+}
+
+// TestReviewR2_P2_CommitMeta_PartialJSON_MergesFallback — when commit_meta
+// succeeds but omits some fields (a future commit_meta version or a
+// hand-rolled shim), the runner must per-field merge against the fallback
+// so CSV columns are never empty. Pre-fix only `MachineHostname` got the
+// merge; OS triple and the four commit SHAs went out empty.
+func TestReviewR2_P2_CommitMeta_PartialJSON_MergesFallback(t *testing.T) {
+	root := findRepoModuleRoot(t)
+	// commit_meta shim that returns valid JSON with ONLY loom_commit set;
+	// everything else is missing and must fall back to N/A / runtime arch.
+	partial := `{"loom_commit":"abc1234 (test clean)"}`
+	t.Setenv("LOOM_EVAL_COMMIT_META_CMD", commitMetaShim(t, partial))
+	t.Setenv("LOOM_EVAL_GIT_EMAIL_CMD", gitEmailShim(t, "a@b|c@d"))
+
+	outCSV := filepath.Join(t.TempDir(), "run.csv")
+	res := Run(context.Background(), Opts{
+		WorkloadID:  "cross-device-code-mod",
+		WorkloadDir: filepath.Join(root, "tests/eval/workloads"),
+		StubListen:  pickFreePort(t),
+		StubBin:     stubBinaryPath(t),
+		OutCSV:      outCSV,
+		Stderr:      discardStderr(t),
+	})
+	if res.ExitCode != 0 {
+		t.Fatalf("exit = %d", res.ExitCode)
+	}
+	rows := readCSV(t, outCSV)
+	data := rows[1]
+	// columns: 9 loom_commit, 10 agentserver_commit, 11 modelserver_commit,
+	// 12 app_commit, 13 os_kernel, 14 os_distro, 15 os_arch, 16 hostname.
+	if data[9] != "abc1234 (test clean)" {
+		t.Errorf("loom_commit = %q; want shim value", data[9])
+	}
+	for i, name := range map[int]string{
+		10: "agentserver_commit",
+		11: "modelserver_commit",
+		12: "app_commit",
+		13: "os_kernel",
+		14: "os_distro",
+		15: "os_arch",
+	} {
+		if data[i] == "" {
+			t.Errorf("%s (col %d) empty; partial-JSON merge regressed", name, i)
+		}
+	}
+}
+
+// TestReviewR2_P2_OracleAbsolutePath_Rejected — a spec.yaml with an
+// absolute `success_oracle` is rejected at pre-flight (exit 2) instead
+// of being silently rewritten under the workload dir.
+func TestReviewR2_P2_OracleAbsolutePath_Rejected(t *testing.T) {
+	parent := t.TempDir()
+	id := "abs-oracle-workload"
+	dir := filepath.Join(parent, id)
+	if err := os.MkdirAll(filepath.Join(dir, "fixtures"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	spec := `id: abs-oracle-workload
+description: tries an absolute oracle path
+required_contexts: []
+allowed_contexts: ["*"]
+inputs:
+  read_artifacts: []
+outputs:
+  write_targets: []
+success_oracle: /etc/passwd
+recovery_hint: x
+timeout_seconds: 60
+`
+	if err := os.WriteFile(filepath.Join(dir, "spec.yaml"), []byte(spec), 0o644); err != nil {
+		t.Fatalf("write spec: %v", err)
+	}
+	res := Run(context.Background(), Opts{
+		WorkloadID:  id,
+		WorkloadDir: parent,
+		StubListen:  pickFreePort(t),
+		StubBin:     stubBinaryPath(t),
+		OutCSV:      filepath.Join(t.TempDir(), "run.csv"),
+		Stderr:      discardStderr(t),
+	})
+	if res.ExitCode != 2 {
+		t.Fatalf("exit = %d, want 2", res.ExitCode)
+	}
+	if !errors.Is(res.Err, ErrWorkloadSpecInvalid) {
+		t.Fatalf("err = %v, want ErrWorkloadSpecInvalid", res.Err)
 	}
 }
 

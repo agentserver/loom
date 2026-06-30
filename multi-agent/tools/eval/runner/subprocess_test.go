@@ -110,7 +110,7 @@ func TestRunSubprocess_ExecutesScript_ReturnsStdout(t *testing.T) {
 	}
 	script := writeScript(t, "#!/bin/sh\nprintf 'hello\\n'\n")
 	res, err := RunSubprocess(context.Background(), SubprocessOpts{
-		Cmd:     []string{script},
+		Cmd:     script,
 		Timeout: 5 * time.Second,
 		Env:     []string{"PATH=/usr/bin:/bin"},
 	})
@@ -137,7 +137,7 @@ func TestOracleOutputTooLarge_Rejected(t *testing.T) {
 	// shell stops as soon as head closes the pipe.
 	script := writeScript(t, "#!/bin/sh\nyes x | head -c 2097152\n")
 	_, err := RunSubprocess(context.Background(), SubprocessOpts{
-		Cmd:     []string{script},
+		Cmd:     script,
 		Timeout: 30 * time.Second,
 		Env:     []string{"PATH=/usr/bin:/bin"},
 	})
@@ -157,7 +157,7 @@ func TestOracleOutputBelowCap_NotRejected(t *testing.T) {
 	}
 	script := writeScript(t, "#!/bin/sh\nyes x | head -c 10240\n")
 	res, err := RunSubprocess(context.Background(), SubprocessOpts{
-		Cmd:     []string{script},
+		Cmd:     script,
 		Timeout: 5 * time.Second,
 		Env:     []string{"PATH=/usr/bin:/bin"},
 	})
@@ -184,7 +184,7 @@ func TestSubprocessGroup_KilledOnTimeout(t *testing.T) {
 
 	start := time.Now()
 	_, err := RunSubprocess(context.Background(), SubprocessOpts{
-		Cmd:     []string{script},
+		Cmd:     script,
 		Timeout: 2 * time.Second,
 		Env:     []string{"PATH=/usr/bin:/bin"},
 	})
@@ -235,7 +235,7 @@ func TestRunSubprocess_ZeroTimeoutNoEnforcement(t *testing.T) {
 	}
 	script := writeScript(t, "#!/bin/sh\nsleep 0.3; echo done\n")
 	res, err := RunSubprocess(context.Background(), SubprocessOpts{
-		Cmd:     []string{script},
+		Cmd:     script,
 		Timeout: 0,
 		Env:     []string{"PATH=/usr/bin:/bin"},
 	})
@@ -249,14 +249,20 @@ func TestRunSubprocess_ZeroTimeoutNoEnforcement(t *testing.T) {
 
 // --- helpers ---
 
-func writeScript(t *testing.T, body string) string {
+// writeScript materialises a shell snippet to a tempfile and returns the
+// Cmd argv that runs it. We invoke through `/bin/sh script.sh` rather than
+// exec'ing the script file directly because under high parallel-test load
+// the kernel can return ETXTBSY when one goroutine is still flushing the
+// write while another forks to exec the same path (PR #53 round 2 P1).
+// `/bin/sh` is always loaded and reads the script as data, not text.
+func writeScript(t *testing.T, body string) []string {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "script.sh")
-	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write script: %v", err)
 	}
-	return path
+	return []string{"/bin/sh", path}
 }
 
 func contains(ss []string, want string) bool {

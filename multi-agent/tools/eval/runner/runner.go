@@ -372,6 +372,14 @@ func resolveOraclePath(workloadRoot, successOracle string) (string, error) {
 	if successOracle == "" {
 		return "", errors.New("spec.success_oracle is empty")
 	}
+	// 13_workload_spec.md §1.3 mandates `./oracle.sh` — workload-relative.
+	// Reject absolute paths up front so a typo like `success_oracle:
+	// /etc/passwd` surfaces as a clear spec error instead of being
+	// silently rewritten by filepath.Join to a non-existent path inside
+	// the workload (PR #53 round 2 P2).
+	if filepath.IsAbs(successOracle) {
+		return "", fmt.Errorf("success_oracle must be workload-relative, got absolute path %q", successOracle)
+	}
 	rootAbs, err := filepath.Abs(workloadRoot)
 	if err != nil {
 		return "", fmt.Errorf("abs(workloadRoot): %w", err)
@@ -616,6 +624,31 @@ func collectCommitMeta(ctx context.Context, opts Opts, env []string, stderr *os.
 	if err := json.Unmarshal(res.Stdout, &parsed); err != nil {
 		fmt.Fprintf(stderr, "eval-runner: commit_meta json parse: %v\n", err)
 		return out
+	}
+	// Per-field merge with the fallback `out`: a commit_meta JSON that
+	// omits any of these fields shouldn't leave the CSV column empty
+	// (PR #53 round 2 P2). The fallback already carries N/A sentinels
+	// for the four commit SHAs, the OS triple, and a real hostname.
+	if parsed.LoomCommit == "" {
+		parsed.LoomCommit = out.LoomCommit
+	}
+	if parsed.AgentserverCommit == "" {
+		parsed.AgentserverCommit = out.AgentserverCommit
+	}
+	if parsed.ModelserverCommit == "" {
+		parsed.ModelserverCommit = out.ModelserverCommit
+	}
+	if parsed.AppCommit == "" {
+		parsed.AppCommit = out.AppCommit
+	}
+	if parsed.OS.Kernel == "" {
+		parsed.OS.Kernel = out.OS.Kernel
+	}
+	if parsed.OS.Distro == "" {
+		parsed.OS.Distro = out.OS.Distro
+	}
+	if parsed.OS.Arch == "" {
+		parsed.OS.Arch = out.OS.Arch
 	}
 	if parsed.MachineHostname == "" {
 		parsed.MachineHostname = out.MachineHostname
