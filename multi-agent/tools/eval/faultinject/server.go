@@ -99,9 +99,11 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 	// Belt-and-braces: post-bind verify the listener IS on loopback (e.g.
 	// a hostname that resolved to loopback at NewServer time but somehow
-	// rebound elsewhere — paranoid but cheap).
+	// rebound elsewhere — paranoid but cheap). Fail closed: anything
+	// that is not explicitly loopback (incl. unspecified, which binds
+	// all interfaces) is rejected.
 	if a, ok := ln.Addr().(*net.TCPAddr); ok {
-		if a.IP != nil && !a.IP.IsLoopback() && !a.IP.IsUnspecified() {
+		if a.IP != nil && !a.IP.IsLoopback() {
 			ln.Close()
 			return fmt.Errorf("%w: post-bind addr %s", ErrControlPlaneMustBeLoopback, a)
 		}
@@ -287,7 +289,9 @@ func (s *Server) handleClear(w http.ResponseWriter, r *http.Request) {
 	}
 	var req clearRequest
 	body := http.MaxBytesReader(w, r.Body, maxRequestBodyLen)
-	if err := json.NewDecoder(body).Decode(&req); err != nil {
+	dec := json.NewDecoder(body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("faultinject: decode body: %v", err))
 		return
 	}
@@ -305,7 +309,15 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, fmt.Errorf("faultinject: method %s not allowed", r.Method))
 		return
 	}
-	runID := r.URL.Query().Get("run_id")
+	q := r.URL.Query()
+	// Reject ambiguous repeats — a client passing ?run_id=a&run_id=b
+	// would otherwise silently fall through to whichever value came
+	// first. Surface the ambiguity rather than picking arbitrarily.
+	if vals := q["run_id"]; len(vals) > 1 {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("faultinject: run_id query parameter must appear at most once"))
+		return
+	}
+	runID := q.Get("run_id")
 	list, err := s.store.List(runID)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)

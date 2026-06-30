@@ -436,6 +436,36 @@ func TestServer_BoundSocketIsLoopback(t *testing.T) {
 	}
 }
 
+// Extra: /clear rejects unknown JSON fields (parity with /inject).
+func TestServer_ClearRejectsUnknownFields(t *testing.T) {
+	s, addr := startTestServer(t, io.Discard)
+	_ = s
+	resp, err := http.Post("http://"+addr+"/clear", "application/json",
+		strings.NewReader(`{"run_id":"run-clrunk01","stray":"key"}`))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Errorf("status = %d, want 400 for unknown field", resp.StatusCode)
+	}
+}
+
+// Extra: /list with multiple run_id query params → 400 (ambiguity, never
+// silently pick the first).
+func TestServer_ListRejectsMultipleRunIDParams(t *testing.T) {
+	s, addr := startTestServer(t, io.Discard)
+	_ = s
+	resp, err := http.Get("http://" + addr + "/list?run_id=run-aaaa1111&run_id=run-bbbb2222")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Errorf("status = %d, want 400 for repeated run_id", resp.StatusCode)
+	}
+}
+
 // Extra: concurrent /inject from many goroutines stays under rate limit if N<=100.
 func TestServer_ConcurrentInject(t *testing.T) {
 	s, addr := startTestServer(t, io.Discard)
