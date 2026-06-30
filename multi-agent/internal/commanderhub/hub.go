@@ -187,17 +187,27 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		close(hbDone)
 	}
 
+	// Teardown defers run in LIFO order:
+	// 1st registered = last to run: remove from local registry (predicate-guarded).
+	// 2nd registered: invalidate session cache.
+	// 3rd registered: signal waiters (close dc.done).
+	// 4th registered: fail all pending commands.
+	// 5th registered = first to run: stop heartbeat, then remove from shared registry.
+	// This ordering ensures the shared row is cleaned up before the local entry is
+	// removed, and that waiters/pending are only unblocked after teardown is complete.
+	defer h.reg.removeIf(o, routingID, func(existing *daemonConn) bool { return existing.id == dc.id })
+	defer h.invalidateDaemonSessions(o, routingID)
+	defer close(dc.done)
+	defer dc.failAllPending()
 	defer func() {
 		hbCancel()
 		<-hbDone
 		if h.sharedReg != nil {
-			_ = h.sharedReg.remove(context.Background(), o, dc.shortID, dc.id)
+			rmCtx, rmCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = h.sharedReg.remove(rmCtx, o, dc.shortID, dc.id)
+			rmCancel()
 		}
-		h.reg.removeIf(o, routingID, func(existing *daemonConn) bool { return existing.id == dc.id })
 	}()
-	defer h.invalidateDaemonSessions(o, routingID)
-	defer close(dc.done)
-	defer dc.failAllPending()
 
 	// Ack: PR-2 WSClient only flips linked=true on receipt.
 	if err := dc.writeEnvelope(commander.Envelope{Type: "ack"}); err != nil {
