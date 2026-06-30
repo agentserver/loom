@@ -2255,7 +2255,6 @@ func ownershipTestConnIsClosed(dc *daemonConn) bool {
 ```go
 import (
 	"log"
-	"sync/atomic"
 )
 
 // runHeartbeatOnce executes one tick body: heartbeatUpsert + handle
