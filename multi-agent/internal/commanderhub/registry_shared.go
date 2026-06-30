@@ -30,6 +30,8 @@ const sweepNoncesSQL = `DELETE FROM commander_forward_nonces WHERE received_at <
 
 const sweepTelemetryBucketsSQL = `DELETE FROM commander_telemetry_buckets WHERE updated_at < $1`
 
+const confirmOwnershipSQL = `SELECT owning_instance_url, connection_id FROM commander_daemons WHERE user_id = $1 AND workspace_id = $2 AND short_id = $3`
+
 const (
 	defaultOnlineTTL      = 45 * time.Second
 	defaultDeleteAfter    = 5 * time.Minute

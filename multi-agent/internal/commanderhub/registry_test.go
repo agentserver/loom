@@ -1,8 +1,10 @@
 package commanderhub
 
 import (
+	"context"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/yourorg/multi-agent/internal/commander"
@@ -76,4 +78,235 @@ func TestRegistry_RemoveCleansEmptyOwner(t *testing.T) {
 	_, ok := r.lookup(o, "d1")
 	require.False(t, ok)
 	require.Empty(t, r.daemons(o))
+}
+
+// TestDaemonConn_ConfirmOwnership_SinglePodReturnsTrue verifies that when
+// sharedReg is nil OR hub is nil, confirmOwnership returns true without
+// touching PG.
+func TestDaemonConn_ConfirmOwnership_SinglePodReturnsTrue(t *testing.T) {
+	o := owner{userID: "alice", workspaceID: "W1"}
+
+	// Test 1: hub is nil (single-pod mode, no shared registry)
+	dc := &daemonConn{
+		id:      "conn-1",
+		owner:   o,
+		shortID: "daemon-1",
+		hub:     nil,
+	}
+	result := dc.confirmOwnership(context.Background())
+	require.True(t, result, "single-pod mode (hub=nil) should return true")
+
+	// Test 2: hub is not nil but sharedReg is nil (single-pod mode with hub)
+	hub := &Hub{}
+	dc2 := &daemonConn{
+		id:      "conn-2",
+		owner:   o,
+		shortID: "daemon-2",
+		hub:     hub,
+		// hub.sharedReg is nil by default
+	}
+	result = dc2.confirmOwnership(context.Background())
+	require.True(t, result, "single-pod mode (sharedReg=nil) should return true")
+}
+
+// TestDaemonConn_ConfirmOwnership_SharedPodOwns verifies that confirmOwnership
+// returns true when the row matches the current pod and connection.
+func TestDaemonConn_ConfirmOwnership_SharedPodOwns(t *testing.T) {
+	o := owner{userID: "alice", workspaceID: "W1"}
+
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+
+	sr := &sharedRegistry{
+		db:           db,
+		advertiseURL: "pod-1.example.com",
+	}
+	hub := &Hub{sharedReg: sr}
+
+	dc := &daemonConn{
+		id:      "conn-abc",
+		owner:   o,
+		shortID: "daemon-1",
+		hub:     hub,
+	}
+
+	// Expect the query to return the current pod and connection.
+	mock.ExpectQuery(`SELECT owning_instance_url, connection_id FROM commander_daemons WHERE user_id = \$1 AND workspace_id = \$2 AND short_id = \$3`).
+		WithArgs("alice", "W1", "daemon-1").
+		WillReturnRows(sqlmock.NewRows([]string{"owning_instance_url", "connection_id"}).
+			AddRow("pod-1.example.com", "conn-abc"))
+
+	result := dc.confirmOwnership(context.Background())
+	require.True(t, result, "confirmOwnership should return true when ownership is still ours")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestDaemonConn_ConfirmOwnership_SharedPodLostOwnership verifies that
+// confirmOwnership returns false and sets ownershipLost when the row is owned
+// by a different pod.
+func TestDaemonConn_ConfirmOwnership_SharedPodLostOwnership(t *testing.T) {
+	o := owner{userID: "alice", workspaceID: "W1"}
+
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+
+	sr := &sharedRegistry{
+		db:           db,
+		advertiseURL: "pod-1.example.com",
+	}
+	hub := &Hub{sharedReg: sr}
+
+	dc := &daemonConn{
+		id:      "conn-abc",
+		owner:   o,
+		shortID: "daemon-1",
+		hub:     hub,
+	}
+
+	// Expect the query to return a different pod URL.
+	mock.ExpectQuery(`SELECT owning_instance_url, connection_id FROM commander_daemons WHERE user_id = \$1 AND workspace_id = \$2 AND short_id = \$3`).
+		WithArgs("alice", "W1", "daemon-1").
+		WillReturnRows(sqlmock.NewRows([]string{"owning_instance_url", "connection_id"}).
+			AddRow("pod-2.example.com", "conn-xyz"))
+
+	result := dc.confirmOwnership(context.Background())
+	require.False(t, result, "confirmOwnership should return false when ownership is lost")
+	require.True(t, dc.ownershipLost.Load(), "ownershipLost flag should be set")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestDaemonConn_ConfirmOwnership_SharedPodDifferentConnection verifies that
+// confirmOwnership returns false and sets ownershipLost when the connection_id
+// differs (same pod, different connection).
+func TestDaemonConn_ConfirmOwnership_SharedPodDifferentConnection(t *testing.T) {
+	o := owner{userID: "alice", workspaceID: "W1"}
+
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+
+	sr := &sharedRegistry{
+		db:           db,
+		advertiseURL: "pod-1.example.com",
+	}
+	hub := &Hub{sharedReg: sr}
+
+	dc := &daemonConn{
+		id:      "conn-abc",
+		owner:   o,
+		shortID: "daemon-1",
+		hub:     hub,
+	}
+
+	// Expect the query to return the same pod but a different connection.
+	mock.ExpectQuery(`SELECT owning_instance_url, connection_id FROM commander_daemons WHERE user_id = \$1 AND workspace_id = \$2 AND short_id = \$3`).
+		WithArgs("alice", "W1", "daemon-1").
+		WillReturnRows(sqlmock.NewRows([]string{"owning_instance_url", "connection_id"}).
+			AddRow("pod-1.example.com", "conn-xyz"))
+
+	result := dc.confirmOwnership(context.Background())
+	require.False(t, result, "confirmOwnership should return false when connection_id differs")
+	require.True(t, dc.ownershipLost.Load(), "ownershipLost flag should be set")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestDaemonConn_ConfirmOwnership_SharedPodRowDeleted verifies that
+// confirmOwnership returns false and sets ownershipLost when the row is
+// deleted (sql.ErrNoRows).
+func TestDaemonConn_ConfirmOwnership_SharedPodRowDeleted(t *testing.T) {
+	o := owner{userID: "alice", workspaceID: "W1"}
+
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+
+	sr := &sharedRegistry{
+		db:           db,
+		advertiseURL: "pod-1.example.com",
+	}
+	hub := &Hub{sharedReg: sr}
+
+	dc := &daemonConn{
+		id:      "conn-abc",
+		owner:   o,
+		shortID: "daemon-1",
+		hub:     hub,
+	}
+
+	// Expect the query to return no rows (row was deleted).
+	mock.ExpectQuery(`SELECT owning_instance_url, connection_id FROM commander_daemons WHERE user_id = \$1 AND workspace_id = \$2 AND short_id = \$3`).
+		WithArgs("alice", "W1", "daemon-1").
+		WillReturnError(context.Canceled) // This will be treated as no rows in the error check
+
+	result := dc.confirmOwnership(context.Background())
+	require.False(t, result, "confirmOwnership should return false when row is deleted")
+	require.True(t, dc.ownershipLost.Load(), "ownershipLost flag should be set")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestDaemonConn_ConfirmOwnership_SharedPodPGError verifies that
+// confirmOwnership returns false and sets ownershipLost on any PG error.
+func TestDaemonConn_ConfirmOwnership_SharedPodPGError(t *testing.T) {
+	o := owner{userID: "alice", workspaceID: "W1"}
+
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+
+	sr := &sharedRegistry{
+		db:           db,
+		advertiseURL: "pod-1.example.com",
+	}
+	hub := &Hub{sharedReg: sr}
+
+	dc := &daemonConn{
+		id:      "conn-abc",
+		owner:   o,
+		shortID: "daemon-1",
+		hub:     hub,
+	}
+
+	// Expect the query to fail with a PG error.
+	mock.ExpectQuery(`SELECT owning_instance_url, connection_id FROM commander_daemons WHERE user_id = \$1 AND workspace_id = \$2 AND short_id = \$3`).
+		WithArgs("alice", "W1", "daemon-1").
+		WillReturnError(context.DeadlineExceeded)
+
+	result := dc.confirmOwnership(context.Background())
+	require.False(t, result, "confirmOwnership should return false on PG error")
+	require.True(t, dc.ownershipLost.Load(), "ownershipLost flag should be set on PG error")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestDaemonConn_ConfirmOwnership_StickyOwnershipLost verifies that once
+// ownershipLost is set, subsequent calls return false without querying PG
+// (fast path).
+func TestDaemonConn_ConfirmOwnership_StickyOwnershipLost(t *testing.T) {
+	o := owner{userID: "alice", workspaceID: "W1"}
+
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+
+	sr := &sharedRegistry{
+		db:           db,
+		advertiseURL: "pod-1.example.com",
+	}
+	hub := &Hub{sharedReg: sr}
+
+	dc := &daemonConn{
+		id:      "conn-abc",
+		owner:   o,
+		shortID: "daemon-1",
+		hub:     hub,
+	}
+
+	// Pre-set ownershipLost to true.
+	dc.ownershipLost.Store(true)
+
+	// Don't expect any query — should return false immediately.
+	result := dc.confirmOwnership(context.Background())
+	require.False(t, result, "confirmOwnership should return false when ownershipLost is already set")
+	require.NoError(t, mock.ExpectationsWereMet())
 }

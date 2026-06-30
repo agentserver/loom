@@ -5,6 +5,8 @@
 package commanderhub
 
 import (
+	"context"
+	"database/sql"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -81,6 +83,49 @@ func (dc *daemonConn) routingID() string {
 		return dc.shortID
 	}
 	return dc.id
+}
+
+// confirmOwnership checks whether this daemonConn still owns the row in the
+// shared Postgres registry. SAFE in single-pod mode (returns true when
+// dc.hub == nil || dc.hub.sharedReg == nil). In shared mode, checks the
+// sticky dc.ownershipLost flag, else issues a 500ms-bounded SELECT.
+// On any deviation OR PG error, sets ownershipLost.Store(true) and returns false.
+func (dc *daemonConn) confirmOwnership(ctx context.Context) bool {
+	// Single-pod mode: no shared registry, always own the connection.
+	if dc.hub == nil || dc.hub.sharedReg == nil {
+		return true
+	}
+
+	// Fast path: ownership already marked as lost.
+	if dc.ownershipLost.Load() {
+		return false
+	}
+
+	// Enforce 500ms deadline for the SELECT.
+	ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+
+	row := dc.hub.sharedReg.db.QueryRowContext(ctx, confirmOwnershipSQL,
+		dc.owner.userID, dc.owner.workspaceID, dc.shortID)
+	var ownerURL, connID string
+	if err := row.Scan(&ownerURL, &connID); err != nil {
+		if err == sql.ErrNoRows {
+			// Row was deleted (sweep or deliberate removal).
+			dc.ownershipLost.Store(true)
+			return false
+		}
+		// PG error — mark ownership lost and return false.
+		dc.ownershipLost.Store(true)
+		return false
+	}
+
+	// Check if the row still belongs to us (same pod + same connection).
+	if ownerURL != dc.hub.sharedReg.advertiseURL || connID != dc.id {
+		dc.ownershipLost.Store(true)
+		return false
+	}
+
+	return true
 }
 
 func (dc *daemonConn) info() DaemonInfo {
