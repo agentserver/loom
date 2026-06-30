@@ -474,13 +474,11 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 **Interfaces:**
 - Produces: four PG tables visible to phases B/C/D (`commander_daemons`, `commander_turns`, `commander_forward_nonces`, `commander_telemetry_buckets`). All idempotent (`CREATE TABLE IF NOT EXISTS`). All created by `MigratePostgres(db)`.
 
-- [ ] **Step 1: Add `go-sqlmock` dependency**
+- [ ] **Step 1: Add `go-sqlmock` dependency (deferred to first task that actually imports it)**
 
-```sh
-cd multi-agent
-go get github.com/DATA-DOG/go-sqlmock@v1.5.2
-go mod tidy
-```
+`go-sqlmock` is FIRST imported by Task B1's `registry_shared_test.go`. Running `go get … && go mod tidy` here in A3 (before any import exists) would have `go mod tidy` immediately strip the dep as unused. Add the dep in B1 instead. A3 only needs the schema + rollback file + conformance test (which doesn't use sqlmock — it uses real PG via `OBSERVER_POSTGRES_TEST_DSN`).
+
+(This step is intentionally a no-op for A3; left here as a reminder that the dep lives with B1.)
 
 - [ ] **Step 2: Write the failing test**
 
@@ -655,8 +653,7 @@ OBSERVER_POSTGRES_TEST_DSN="..." go test ./internal/commanderhub/authstore -coun
 - [ ] **Step 7: Commit**
 
 ```sh
-git add go.mod go.sum \
-        internal/commanderhub/authstore/schema_postgres.sql \
+git add internal/commanderhub/authstore/schema_postgres.sql \
         internal/commanderhub/authstore/schema_postgres_rollback.sql \
         internal/commanderhub/authstore/postgres_test.go
 git commit -m "feat(commanderhub/authstore): commander_daemons + commander_turns + commander_forward_nonces + commander_telemetry_buckets
@@ -667,7 +664,7 @@ in a separate manual rollback script (no auto-down via Helm).
 Conformance test asserts tables, PK shapes (short_id keyed; composite
 telemetry PK), and the CHECK enum on commander_turns.state.
 
-Also adds go-sqlmock dependency for upcoming SQL-shape unit tests.
+(go-sqlmock dependency is added in Phase B Task B1 — its first importer.)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
@@ -680,7 +677,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Modify: `multi-agent/internal/commanderhub/registry.go:59-83` (`daemonConn.info()` — emit `routingID()` as `DaemonInfo.DaemonID`)
 - Modify: `multi-agent/internal/commanderhub/registry.go:85-141` (type + constructor + methods)
 - Modify: `multi-agent/internal/commanderhub/registry.go:39-57` (`daemonConn` adds `ownershipLost atomic.Bool`; add `routingID() string` method)
-- Modify: `multi-agent/internal/commanderhub/registry_test.go` (append 4 tests)
+- Modify: `multi-agent/internal/commanderhub/registry_test.go` (append 4 tests: `TestLocalRegistry_RemoveIfMatchesConnectionID`, `TestLocalRegistry_LookupByShortID`, `TestDaemonConn_Info_ExposesShortIDAsDaemonID`, `TestDaemonConn_LegacyEmptyShortID_FallsBackToDcID`)
 - Modify: `multi-agent/internal/commanderhub/hub.go:27-40` (Hub.reg field type only — `*registry` → `*localRegistry`. NOT adding sharedReg/forwardCli/turns here; those land in the tasks that define their types.)
 - Modify: `multi-agent/internal/commanderhub/hub.go:47` (`newRegistry()` → `newLocalRegistry()`)
 - Modify: `multi-agent/internal/commanderhub/hub.go::ServeHTTP` (UPDATE today's `defer h.reg.remove(o, dc.id)` and `defer h.invalidateDaemonSessions(o, dc.id)` to use `dc.routingID()` — without this, A4 leaks stale entries until B4 rewrites the teardown)
@@ -771,6 +768,36 @@ func TestDaemonConn_Info_ExposesShortIDAsDaemonID(t *testing.T) {
 	}
 	if di.ShortID != "stable-agent-A" {
 		t.Fatalf("DaemonInfo.ShortID = %q; want stable-agent-A", di.ShortID)
+	}
+}
+
+// Single-pod legacy fallback (codex round-2 BLOCKER #3 + round-5 MAJOR #2):
+// a daemon connecting with EMPTY shortID (v0.0.9 behavior) must continue
+// to be addressable. routingID() falls back to dc.id; DaemonInfo.DaemonID
+// exposes that id; lookup/remove round-trip via the id; legacy
+// single-pod behavior is preserved bit-exactly.
+func TestDaemonConn_LegacyEmptyShortID_FallsBackToDcID(t *testing.T) {
+	r := newLocalRegistry()
+	o := owner{userID: "alice", workspaceID: "W1"}
+	// Legacy v0.0.9 daemon: shortID empty.
+	dc := &daemonConn{id: "legacy-conn-abc", shortID: "", owner: o, displayName: "alice-mac"}
+
+	if got := dc.routingID(); got != "legacy-conn-abc" {
+		t.Fatalf("routingID with empty shortID = %q; want fallback to dc.id (%q)", got, dc.id)
+	}
+	if di := dc.info(); di.DaemonID != "legacy-conn-abc" {
+		t.Fatalf("DaemonInfo.DaemonID for legacy daemon = %q; want %q", di.DaemonID, dc.id)
+	}
+
+	r.add(dc)
+	got, ok := r.lookup(o, "legacy-conn-abc")
+	if !ok || got != dc {
+		t.Fatalf("legacy lookup by dc.id failed: ok=%v dc=%v", ok, got)
+	}
+
+	r.removeIf(o, "legacy-conn-abc", "legacy-conn-abc")
+	if _, ok := r.lookup(o, "legacy-conn-abc"); ok {
+		t.Fatal("legacy removeIf failed to delete")
 	}
 }
 ```
@@ -1048,7 +1075,12 @@ After:
 hub.reg.add(&daemonConn{id: "a1", shortID: "a1", owner: owner{"alice", "W1"}, displayName: "alice-mac", kind: "claude"})
 ```
 
-Files to scan (from spec component map): `hub_test.go`, `proxy_test.go`, `http_test.go`, `tree_test.go`, `race_test.go`, `livelock_test.go`, `e2e_test.go`, `integration_test.go`. Tests that go through real WS handshake (`hub.ServeHTTP`) get `shortID` populated by hub.go:111 from `rp.ShortID`; verify those tests already supply a non-empty `ShortID` in their `RegisterPayload` (most do). If any WS test passes `ShortID: ""`, set it to e.g. `"agent-test"` so post-A4 `DaemonInfo.DaemonID` is non-empty.
+Files to scan (from spec component map): `hub_test.go`, `proxy_test.go`, `http_test.go`, `tree_test.go`, `race_test.go`, `livelock_test.go`, `e2e_test.go`, `integration_test.go`.
+
+WS-handshake tests: `shortID` is populated by `hub.go:111` from `rp.ShortID`. **Do NOT blindly force all WS tests to use non-empty `ShortID`** — that masks the single-pod legacy regression we explicitly preserve. Instead:
+
+- Tests that go through `hub.ServeHTTP` with `RegisterPayload.ShortID: ""` represent the legacy v0.0.9 case. Keep at least one such test (the one that's simplest to assert against) and add an assertion that `DaemonInfo.DaemonID` equals the per-connection `dc.id` (the routingID fallback). This locks in the legacy contract.
+- For tests where `DaemonInfo.DaemonID` value is asserted explicitly against a literal string, either (a) supply a non-empty `ShortID` and assert against THAT, or (b) capture the daemonConn (via `hub.reg.daemons(o)[0].DaemonID` after admission) and use the returned value in subsequent assertions. Don't hardcode the per-connection hex.
 
 - [ ] **Step 7: Run; expect pass**
 
@@ -1589,9 +1621,25 @@ Builds the Postgres-backed registry layer. Tasks B1–B5 are sequential (B2 need
 ### Task B1: `*sharedRegistry` Go type + SQL (`connectUpsert`, `heartbeatUpsert`, `remove`, `lookupRemote`, `listAll`)
 
 **Files:**
+- Modify: `multi-agent/go.mod`, `multi-agent/go.sum` (add `github.com/DATA-DOG/go-sqlmock`)
 - Create: `multi-agent/internal/commanderhub/registry_shared.go`
 - Create: `multi-agent/internal/commanderhub/registry_shared_test.go` (sqlmock-driven)
 - Modify: `multi-agent/internal/commanderhub/hub.go` (ADD `sharedReg *sharedRegistry` field to `Hub` struct now that the type exists)
+
+- [ ] **Step 0: Add the `go-sqlmock` dependency**
+
+```sh
+cd multi-agent
+go get github.com/DATA-DOG/go-sqlmock@v1.5.2
+# Don't run `go mod tidy` yet — the test file added in Step 2 must exist
+# first, otherwise tidy will treat the new dep as unused and strip it.
+```
+
+After Step 2 lands (test file imports `sqlmock`), commit the `go.mod`/`go.sum` changes with the test:
+
+```sh
+go mod tidy
+```
 
 **Interfaces:**
 - Produces (in package `commanderhub`):
@@ -2049,7 +2097,8 @@ go test ./internal/commanderhub -run TestSharedRegistry_ -count=1 -race
 - [ ] **Step 6: Commit**
 
 ```sh
-git add internal/commanderhub/registry_shared.go \
+git add go.mod go.sum \
+        internal/commanderhub/registry_shared.go \
         internal/commanderhub/registry_shared_test.go \
         internal/commanderhub/hub.go
 git commit -m "feat(commanderhub): add sharedRegistry SQL layer (connectUpsert, heartbeat, remove, lookupRemote, listAll)
