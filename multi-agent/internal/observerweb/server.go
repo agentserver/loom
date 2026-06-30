@@ -159,12 +159,12 @@ func (h *handler) postEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	agent := agentFromIdentity(ident)
 
-	telemetryKey := strings.TrimSpace(r.Header.Get("X-Loom-Telemetry-Key"))
-	if telemetryKey == "" {
+	telemetryHeader := strings.TrimSpace(r.Header.Get("X-Loom-Telemetry-Key"))
+	if telemetryHeader == "" {
 		http.Error(w, "missing telemetry api key", http.StatusForbidden)
 		return
 	}
-	telemetryKeyID, ok, err := h.s.LookupTelemetryAPIKey(telemetryKey, agent.WorkspaceID)
+	telemetryKeyID, ok, err := h.s.LookupTelemetryAPIKey(telemetryHeader, agent.WorkspaceID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -208,7 +208,8 @@ func (h *handler) postEvent(w http.ResponseWriter, r *http.Request) {
 		}
 		allowed, err := h.telemetryLimiter.allow(key, time.Now())
 		if err != nil {
-			http.Error(w, "internal", http.StatusInternalServerError)
+			http.Error(w, "telemetry rate limit unavailable", http.StatusServiceUnavailable)
+			log.Printf("observerweb: telemetry rate limit error: %v", err)
 			return
 		}
 		if !allowed {
