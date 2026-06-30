@@ -370,3 +370,34 @@ grep -q 'internal_listen_addr:' <<<"$f1_configmap" || { echo "FAIL: internal_lis
 echo "F1.1 passed"
 
 echo "Finding 1 chart tests passed"
+
+# --- E-fix4.1: migration job and retention cronjob mount nonsecret ConfigMap ---
+echo "[test] E-fix4.1 migration job mounts nonsecret config"
+efix_out="$(helm template observer-test "$CHART_DIR" \
+  --set replicaCount=2 \
+  --set cluster.enabled=true \
+  --set migration.enabled=true \
+  --set retention.enabled=true \
+  --set secret.create=true \
+  --set "secret.clusterSecret=$(openssl rand -hex 32)" \
+  --set secret.databaseUrl='postgres://x' \
+  --set secret.s3AccessKey=x --set secret.s3SecretKey=x \
+  --set "secret.telemetryKeys.telemetry-global-key=x" \
+  --set config.identity.legacyAPIKeys.enabled=true \
+  --set "config.apiKeys[0].id=test" --set "config.apiKeys[0].key=test" \
+  --set postgresql.enabled=false \
+  --set minio.enabled=false)"
+
+# Extract just the Job manifest.
+job_yaml="$(awk '/^---$/{p=0} /kind: Job/{p=1} p' <<<"$efix_out")"
+grep -q 'observer-nonsecret-config' <<<"$job_yaml" || { echo "FAIL: observer-nonsecret-config volume missing from migration Job"; exit 1; }
+grep -q '/etc/observer/nonsecret' <<<"$job_yaml" || { echo "FAIL: /etc/observer/nonsecret mountPath missing from migration Job"; exit 1; }
+echo "E-fix4.1a migration job nonsecret mount: passed"
+
+# Extract just the CronJob manifest.
+cronjob_yaml="$(awk '/^---$/{p=0} /kind: CronJob/{p=1} p' <<<"$efix_out")"
+grep -q 'observer-nonsecret-config' <<<"$cronjob_yaml" || { echo "FAIL: observer-nonsecret-config volume missing from retention CronJob"; exit 1; }
+grep -q '/etc/observer/nonsecret' <<<"$cronjob_yaml" || { echo "FAIL: /etc/observer/nonsecret mountPath missing from retention CronJob"; exit 1; }
+echo "E-fix4.1b retention cronjob nonsecret mount: passed"
+
+echo "E-fix4.1 passed"

@@ -48,6 +48,9 @@ spec:
               mountPath: /etc/observer/observer.yaml
               subPath: observer.yaml
               readOnly: true
+            - name: observer-nonsecret-config
+              mountPath: /etc/observer/nonsecret
+              readOnly: true
           {{- with .Values.migration.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -56,4 +59,7 @@ spec:
         - name: observer-config
           secret:
             secretName: {{ include "observer.configSecretName" . }}
+        - name: observer-nonsecret-config
+          configMap:
+            name: {{ include "observer.fullname" . }}-config
 {{- end }}
