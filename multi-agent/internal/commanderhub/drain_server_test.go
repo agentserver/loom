@@ -107,7 +107,10 @@ func TestDrainHandler_LoopbackBypass(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, "loopback drain should return 200 OK")
 }
 
-// TestDrainHandler_NonLoopbackRequiresAuth tests that non-loopback requires auth.
+// TestDrainHandler_NonLoopbackRequiresAuth tests that non-loopback requests
+// are rejected when the hub is not in cluster mode (sharedReg == nil).
+// The expected status is 503 — consistent with forwardHandler step-0 guard —
+// because the drain endpoint can only be authenticated in cluster mode.
 func TestDrainHandler_NonLoopbackRequiresAuth(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/commander/_internal/drain", nil)
 	req.RemoteAddr = "10.0.0.5:12345"
@@ -115,9 +118,10 @@ func TestDrainHandler_NonLoopbackRequiresAuth(t *testing.T) {
 	w := httptest.NewRecorder()
 	h := NewHub(&fakeResolver{mu: map[string]identity.Identity{}})
 
-	// Should fail because non-loopback and no HMAC.
+	// Should fail because non-loopback and not in cluster mode (sharedReg == nil).
+	// Returns 503 (backend_unavailable) matching forwardHandler step-0.
 	h.drainHandler(w, req)
-	require.Equal(t, http.StatusForbidden, w.Code, "non-loopback without HMAC should return 403")
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, "non-loopback without cluster mode must return 503")
 }
 
 // TestDrainHandler_MethodNotAllowed tests that invalid methods are rejected.
@@ -203,6 +207,31 @@ func TestDrain_ReplayForwardRequest_Rejected(t *testing.T) {
 	// HMAC mismatch due to purpose prefix → 403 before any nonce insert.
 	require.Equal(t, http.StatusForbidden, w.Code, "forward-signed request must be rejected at /drain (purpose mismatch)")
 	// No nonce insert expectation means sqlmock would fail if insertNonce was called.
+}
+
+// TestDrain_NilDB_503 verifies that a Hub with sharedReg set but db == nil
+// returns 503 (not a panic) when a non-loopback drain request arrives.
+// This is the C5 follow-up guard that mirrors forwardHandler step 0.
+func TestDrain_NilDB_503(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{}}
+	h := NewHub(resolver)
+	// Attach a sharedRegistry whose db field is explicitly nil.
+	sr := &sharedRegistry{db: nil, advertiseURL: "http://self-pod:9000"}
+	h.attachSharedRegistry(sr)
+	h.cluster = ClusterRuntime{
+		Secret:       []byte("some-secret"),
+		AdvertiseURL: "http://self-pod:9000",
+	}
+
+	// Non-loopback request → verifyDrainAuth is called → must hit the nil-DB guard.
+	req := httptest.NewRequest(http.MethodPost, "/api/commander/_internal/drain", nil)
+	req.RemoteAddr = "10.0.0.5:12345"
+
+	w := httptest.NewRecorder()
+	// Must not panic.
+	h.drainHandler(w, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, "nil DB must return 503 not panic")
 }
 
 // TestDrain_NoncePGError_503 verifies that when insertNonce returns a PG error,

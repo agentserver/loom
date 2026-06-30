@@ -55,9 +55,16 @@ func isLoopbackRemoteAddr(addr string) bool {
 // It reads the body (drain body is empty or {}), validates timestamp/nonce/HMAC,
 // and returns true on success. On failure, it writes an error response and returns false.
 func (h *Hub) verifyDrainAuth(w http.ResponseWriter, r *http.Request) bool {
-	// Shared-mode guard: if not in shared mode or secrets not set, fail.
-	if h.sharedReg == nil || len(h.cluster.Secret) == 0 {
-		http.Error(w, "forbidden", http.StatusForbidden)
+	// Shared-mode guard: if not in shared mode, secrets not set, or DB unavailable, fail.
+	// Mirrors the forwardHandler step-0 guard to prevent panic in insertNonce on nil DB.
+	if h.sharedReg == nil || len(h.cluster.Secret) == 0 || h.sharedReg.db == nil {
+		log.Printf("commanderhub: drain.received.503.not_shared_mode remote=%s", r.RemoteAddr)
+		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{
+			"error": map[string]any{
+				"code":    "backend_unavailable",
+				"message": "observer is not in cluster mode",
+			},
+		})
 		return false
 	}
 
@@ -118,12 +125,12 @@ func (h *Hub) verifyDrainAuth(w http.ResponseWriter, r *http.Request) bool {
 	ctx := r.Context()
 	inserted, err := insertNonce(ctx, h.sharedReg.db, nonce)
 	if err != nil {
-		log.Printf("commanderhub: drain.received.503.nonce_pg remote=%s nonce=%s err=%v", r.RemoteAddr, nonce, err)
+		log.Printf("commanderhub: drain.received.503.nonce_pg remote=%s nonce_prefix=%s err=%v", r.RemoteAddr, noncePrefix(nonce), err)
 		http.Error(w, "nonce storage unavailable", http.StatusServiceUnavailable)
 		return false
 	}
 	if !inserted {
-		log.Printf("commanderhub: drain.received.denied.replay remote=%s nonce=%s", r.RemoteAddr, nonce)
+		log.Printf("commanderhub: drain.received.denied.replay remote=%s nonce_prefix=%s", r.RemoteAddr, noncePrefix(nonce))
 		http.Error(w, "replay detected", http.StatusForbidden)
 		return false
 	}
