@@ -63,6 +63,20 @@ make multi-observer-up     # docker compose -f dev/compose.multi-observer.yaml u
 make multi-observer-down   # docker compose -f dev/compose.multi-observer.yaml down -v
 ```
 
+### Commander routes and the stub agentserver URL
+
+`dev/configs/observer.multi-pod.yaml` sets
+`identity.agentserver.url: "http://agentserver-stub:9999/dev-only"` with
+`enabled: true`. This is a **dev-only stub** — the URL is intentionally
+unreachable. The observer mounts `/api/commander/*` routes only when
+`AgentserverURL` is non-empty; pointing at an unreachable stub is enough to
+exercise the full commander surface in the multi-pod repro without a real
+agentserver running.
+
+Dev requests authenticate via `legacy_api_keys` (pre-shared `ak_dev_shared_secret`).
+Agentserver is never contacted for these requests. `startup_probe: false` ensures
+the process starts even though the stub URL is unreachable.
+
 ### Verify both pods serve the same daemon list
 
 ```bash

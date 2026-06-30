@@ -25,9 +25,12 @@ identity:
   legacy_api_keys:
     enabled: true
   agentserver:
-    enabled: false
-    # Set AGENTSERVER_URL and flip enabled=true to use agentserver identity.
-    url: ""
+    # Stub URL: non-empty so commander routes mount (AgentserverURL != "" is the
+    # gate in observerweb). The URL is intentionally unreachable — dev requests
+    # authenticate via legacy_api_keys above, not agentserver. real agentserver
+    # is NOT required for the multi-pod daemon-registry repro.
+    enabled: true
+    url: "http://agentserver-stub:9999/dev-only"
     fresh_ttl: 30s
     stale_grace: 15m
     request_timeout: 2s
