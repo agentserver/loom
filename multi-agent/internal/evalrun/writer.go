@@ -13,9 +13,17 @@ import (
 
 // Writer is the per-run sink for D1 evaluation rows. Implementations
 // must be safe for single-goroutine use; concurrent use is not part of
-// the contract (the eval-runner is single-threaded).
+// the contract (the eval-runner is single-threaded). Mutation of
+// DisableTelemetry concurrent with Insert is undefined.
 type Writer interface {
+	// Insert validates s and writes one row, OR (when DisableTelemetry
+	// is true) logs an audit line and returns nil. Validation runs in
+	// both modes — see spec §7(c).
 	Insert(ctx context.Context, s Schema) error
+	// Close releases writer-side resources. The default SQLWriter is a
+	// no-op — the *sql.DB is owned by the caller and MUST be closed
+	// separately. Callers that program to this interface MUST NOT rely
+	// on Close to clean up underlying connections.
 	Close() error
 }
 
@@ -98,6 +106,14 @@ func NewSQLWriter(db *sql.DB) (Writer, error) {
 // runs in BOTH modes so NoObserver cannot mask schema violations
 // (spec §7 (c)).
 func (w *SQLWriter) Insert(ctx context.Context, s Schema) error {
+	// Repeat the init-time registration warning on first Insert so an
+	// operator running with stderr suppressed at startup still sees
+	// that NoObserver is effectively a no-op for THIS package.
+	if initRegistrationErr != nil {
+		initWarnOnce.Do(func() {
+			log.Printf("evalrun: WARNING — NoObserver ablation is wired to a different *bool than evalrun.DisableTelemetry (init err: %v); --ablation NoObserver will NOT silence this writer", initRegistrationErr)
+		})
+	}
 	if err := s.validate(); err != nil {
 		return err
 	}
@@ -225,11 +241,22 @@ func (s Schema) validate() error {
 	if _, ok := validOracleResults[s.SuccessOracleResult]; !ok {
 		return fmt.Errorf("evalrun: success_oracle_result=%q: %w", s.SuccessOracleResult, ErrInvalidOracleResult)
 	}
+	// failure_category invariant: must be empty iff result == "pass".
+	// Catches the operator-intent mismatch where a pass-row carries a
+	// stale failure_category (or vice versa, a fail-row was reported
+	// without a category) — both would skew downstream metric buckets.
+	if (s.SuccessOracleResult == "pass") != (s.FailureCategory == "") {
+		return fmt.Errorf("evalrun: result=%q + failure_category=%q invariant violated (must be empty iff pass): %w",
+			s.SuccessOracleResult, s.FailureCategory, ErrFailureCategoryOnPass)
+	}
 	if s.StartTime.IsZero() {
 		return fmt.Errorf("evalrun: start_time is zero: %w", ErrInvalidTime)
 	}
 	if s.EndTime.IsZero() {
 		return fmt.Errorf("evalrun: end_time is zero: %w", ErrInvalidTime)
+	}
+	if len(s.ArtifactHashes) > maxArtifactHashes {
+		return fmt.Errorf("evalrun: artifact_hashes length %d > %d: %w", len(s.ArtifactHashes), maxArtifactHashes, ErrTooManyArtifactHashes)
 	}
 	for i, h := range s.ArtifactHashes {
 		if !sha256HexRe.MatchString(h) {
@@ -239,13 +266,26 @@ func (s Schema) validate() error {
 	return nil
 }
 
+// expectedCheckSubstrings lists CHECK-constraint fragments that MUST
+// appear in the verbatim CREATE TABLE SQL stored in sqlite_master.
+// PRAGMA table_info does not surface CHECK clauses, so without this
+// belt-and-braces lookup a drift that drops the success_oracle_result
+// CHECK would pass the descriptor comparison silently — and any future
+// caller that bypasses the Go-side oracle validation would write
+// garbage that the DB would have rejected pre-drift.
+var expectedCheckSubstrings = []string{
+	"CHECK(success_oracle_result IN ('pass','fail','timeout'))",
+}
+
 // checkSchemaDrift runs the §5 algorithm against db's runs table.
 //
 // Returns:
 //   - nil if PRAGMA table_info(runs) returns a column list whose
-//     ordered descriptor sequence exactly matches expectedColumns.
+//     ordered descriptor sequence exactly matches expectedColumns AND
+//     the verbatim CREATE TABLE text in sqlite_master contains every
+//     expectedCheckSubstrings entry.
 //   - ErrSchemaDrift (wrapped) with a message naming the missing
-//     table, mismatched position, or column count.
+//     table, mismatched position, missing CHECK clause, or column count.
 func checkSchemaDrift(db *sql.DB) error {
 	rows, err := db.Query("PRAGMA table_info(runs)")
 	if err != nil {
@@ -331,6 +371,25 @@ func checkSchemaDrift(db *sql.DB) error {
 		}
 		if g.pk != want.pk {
 			return fmt.Errorf("%w: column %s: pk mismatch (got %d, want %d)", ErrSchemaDrift, g.name, g.pk, want.pk)
+		}
+	}
+	// CHECK-aware pass: sqlite_master.sql preserves the verbatim
+	// CREATE TABLE statement text (verified against modernc.org/sqlite
+	// v1.50.0). We string-search for each pinned CHECK fragment; this
+	// is less brittle than a full canonical-form compare and catches
+	// the drift mode the descriptor walk cannot see.
+	var createSQL sql.NullString
+	if err := db.QueryRow("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'runs'").Scan(&createSQL); err != nil {
+		return fmt.Errorf("evalrun: read sqlite_master for runs: %w", err)
+	}
+	if !createSQL.Valid {
+		return fmt.Errorf("%w: runs table CREATE SQL missing from sqlite_master", ErrSchemaDrift)
+	}
+	// Normalise whitespace so a re-indented schema doesn't false-positive.
+	normalised := strings.Join(strings.Fields(createSQL.String), " ")
+	for _, want := range expectedCheckSubstrings {
+		if !strings.Contains(normalised, want) {
+			return fmt.Errorf("%w: missing CHECK clause %q in runs CREATE SQL", ErrSchemaDrift, want)
 		}
 	}
 	return nil

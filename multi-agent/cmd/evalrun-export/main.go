@@ -192,12 +192,18 @@ func queryRuns(ctx context.Context, db *sql.DB, filterExperiment string) (*sql.R
 	return db.QueryContext(ctx, selectRunsFilterSQL, filterExperiment)
 }
 
-// scanRunRow scans one row into a 24-element string slice + one int.
-// human_intervention_count is the only non-string column; we keep it
-// separate so CSV/JSONL writers can emit it correctly typed.
+// humanCountIdx is the canonical position of human_intervention_count
+// in the 24-column ordering. The CSV path treats this column like the
+// others (string round-trip via strconv); the JSONL path emits it as
+// a JSON number.
+const humanCountIdx = 20
+
+// runRow holds one scanned row as 24 string cells. human_intervention_count
+// is the only non-string column; it's converted to its decimal string
+// form in scanOneRow so CSV/JSONL writers can decide whether to quote
+// or emit as a number.
 type runRow struct {
-	values        [24]string
-	humanCountIdx int // always 20 — kept as a constant for readability
+	values [24]string
 }
 
 func scanOneRow(rows *sql.Rows) (*runRow, error) {
@@ -207,9 +213,8 @@ func scanOneRow(rows *sql.Rows) (*runRow, error) {
 		// 24 dest pointers in the canonical order.
 		dest [24]any
 	)
-	r.humanCountIdx = 20
 	for i := 0; i < 24; i++ {
-		if i == 20 {
+		if i == humanCountIdx {
 			dest[i] = &humanCount
 		} else {
 			dest[i] = &r.values[i]
@@ -218,7 +223,7 @@ func scanOneRow(rows *sql.Rows) (*runRow, error) {
 	if err := rows.Scan(dest[:]...); err != nil {
 		return nil, err
 	}
-	r.values[20] = strconv.Itoa(humanCount)
+	r.values[humanCountIdx] = strconv.Itoa(humanCount)
 	return &r, nil
 }
 
@@ -322,7 +327,7 @@ func (o orderedJSONLine) MarshalJSON() ([]byte, error) {
 		buf = append(buf, keyJSON...)
 		buf = append(buf, ':')
 		// value
-		if i == 20 {
+		if i == humanCountIdx {
 			// human_intervention_count: numeric. The string was built
 			// via strconv.Itoa in scanOneRow, so direct append is safe.
 			buf = append(buf, []byte(o.values[i])...)

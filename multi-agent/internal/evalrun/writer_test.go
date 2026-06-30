@@ -368,6 +368,50 @@ func TestNewSQLWriter_DetectsSchemaDriftMissingTable(t *testing.T) {
 	}
 }
 
+// Test 12f: drift — runs table CREATE TABLE missing the success_oracle_result CHECK clause.
+// PRAGMA table_info doesn't surface CHECK constraints, so a DDL that
+// dropped the CHECK would pass the descriptor walk silently. The
+// sqlite_master.sql cross-check must catch it.
+func TestNewSQLWriter_DetectsSchemaDriftMissingCheck(t *testing.T) {
+	db := freshEmptyDB(t)
+	// Same DDL as production, but the CHECK on success_oracle_result is dropped.
+	if _, err := db.Exec(`CREATE TABLE runs (
+		run_id TEXT PRIMARY KEY,
+		workload_id TEXT NOT NULL,
+		claim_id TEXT NOT NULL,
+		experiment_id TEXT NOT NULL,
+		baseline_or_ablation TEXT NOT NULL,
+		loom_commit TEXT NOT NULL,
+		agentserver_commit TEXT NOT NULL,
+		modelserver_commit TEXT NOT NULL,
+		app_commit TEXT NOT NULL,
+		machine_topology TEXT NOT NULL,
+		context_ground_truth TEXT NOT NULL,
+		capability_snapshot_hash TEXT NOT NULL DEFAULT '',
+		task_contract_hash TEXT NOT NULL DEFAULT '',
+		dynamic_mcp_registry_hash TEXT NOT NULL DEFAULT '',
+		selected_context TEXT NOT NULL,
+		ground_truth_context TEXT NOT NULL,
+		start_time TEXT NOT NULL,
+		end_time TEXT NOT NULL,
+		success_oracle_result TEXT NOT NULL,
+		failure_category TEXT NOT NULL DEFAULT '',
+		human_intervention_count INTEGER NOT NULL DEFAULT 0,
+		artifact_hashes TEXT NOT NULL DEFAULT '[]',
+		observer_trace_path TEXT NOT NULL DEFAULT '',
+		model_trace_id TEXT NOT NULL DEFAULT ''
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	_, err := NewSQLWriter(db)
+	if !errors.Is(err, ErrSchemaDrift) {
+		t.Fatalf("want ErrSchemaDrift, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "CHECK") {
+		t.Fatalf("error must mention the missing CHECK clause: %v", err)
+	}
+}
+
 // Test 14: clean schema passes.
 func TestNewSQLWriter_CleanSchemaPasses(t *testing.T) {
 	db := freshDB(t)

@@ -413,8 +413,9 @@ Notes:
 
 ### 4.4 Database open mode
 
-The CLI opens the SQLite file in **read-only** mode
-(`file:<path>?mode=ro&_journal=OFF`). This is defence-in-depth: the
+The CLI opens the SQLite file in **read-only** mode (`mode=ro` in the
+DSN; SQLite read-only open implicitly disables journal updates, so no
+explicit `_journal=OFF` is needed). This is defence-in-depth: the
 export tool has no business mutating the observer DB, and a typo'd
 `--db` pointing at an in-use writable DB would otherwise risk lock
 contention with the live observer process. If the file does not exist,

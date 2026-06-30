@@ -27,15 +27,21 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
+	// os.Exit skips deferred functions, so the temp dir cleanup MUST
+	// happen explicitly between m.Run() and os.Exit. The defer is kept
+	// belt-and-braces in case a future edit moves the os.Exit call.
 	defer os.RemoveAll(tmp)
 	binPath = filepath.Join(tmp, "evalrun-export")
 	cmd := exec.Command("go", "build", "-o", binPath, ".")
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stdout
 	if err := cmd.Run(); err != nil {
+		_ = os.RemoveAll(tmp)
 		panic("go build evalrun-export: " + err.Error())
 	}
-	os.Exit(m.Run())
+	rc := m.Run()
+	_ = os.RemoveAll(tmp)
+	os.Exit(rc)
 }
 
 // schemaSQLPath walks up to find observerstore/schema.sql.
@@ -515,8 +521,15 @@ func TestExportCSV_OutFile(t *testing.T) {
 	}
 	st, _ := os.Stat(outPath)
 	mode := st.Mode().Perm()
-	if mode != 0644 {
-		t.Fatalf("filemode %v want 0644", mode)
+	// Asserting the exact 0644 bit pattern is umask-dependent: hardened
+	// hosts with umask 0027/0077 produce 0640/0600. Check the property
+	// we actually care about: owner has read+write, and no exec bits
+	// anywhere. The 0644-vs-umask interplay is OS policy, not ours.
+	if mode&0600 != 0600 {
+		t.Fatalf("filemode %v missing owner rw", mode)
+	}
+	if mode&0111 != 0 {
+		t.Fatalf("filemode %v should not have exec bits", mode)
 	}
 }
 

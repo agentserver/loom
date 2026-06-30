@@ -91,6 +91,91 @@ func TestRegisteredOnAblation(t *testing.T) {
 	if !found {
 		t.Fatalf("ablation.Default.List() does not contain NoObserver; got %v", ablation.Default.List())
 	}
+	// Successful init implies InitError() == nil for the test binary.
+	if err := InitError(); err != nil {
+		t.Fatalf("InitError() should be nil after a clean init, got %v", err)
+	}
+}
+
+// Test 15a: TestRegistrationCollision_DetectableByOtherPackage.
+// Mirrors the failure mode the fresh-review flagged: if a second
+// package competes for the same FlagName, ablation.Default rejects the
+// second Register. We can't replay package init in-process, but we can
+// prove the registry surfaces ErrAlreadyRegistered, which is what
+// initRegistrationErr would capture if a colliding init had run first.
+func TestRegistrationCollision_DetectableByOtherPackage(t *testing.T) {
+	// Register a fresh target into Default for NoObserver — must
+	// collide with this package's existing registration.
+	var competing bool
+	err := ablation.Default.Register(ablation.NoObserver, &competing)
+	if !errors.Is(err, ablation.ErrAlreadyRegistered) {
+		t.Fatalf("expected ErrAlreadyRegistered for second registration, got %v", err)
+	}
+}
+
+// Test 16a: ArtifactHashes slice length cap.
+func TestInsert_RejectsTooManyArtifactHashes(t *testing.T) {
+	w, _ := newTestWriter(t)
+	hashes := make([]string, maxArtifactHashes+1)
+	for i := range hashes {
+		hashes[i] = strings.Repeat("a", 64)
+	}
+	s := sampleSchema()
+	s.ArtifactHashes = hashes
+	err := w.Insert(context.Background(), s)
+	if !errors.Is(err, ErrTooManyArtifactHashes) {
+		t.Fatalf("want ErrTooManyArtifactHashes, got %v", err)
+	}
+	// Boundary: exactly maxArtifactHashes is accepted.
+	hashes = hashes[:maxArtifactHashes]
+	s.RunID = "run-cap-boundary-12345"
+	s.ArtifactHashes = hashes
+	if err := w.Insert(context.Background(), s); err != nil {
+		t.Fatalf("boundary length must be accepted, got %v", err)
+	}
+}
+
+// Test 6a: failure_category invariant — must be empty iff result==pass.
+func TestInsert_RejectsFailureCategoryPassMismatch(t *testing.T) {
+	w, _ := newTestWriter(t)
+	t.Run("pass_with_category", func(t *testing.T) {
+		s := sampleSchema()
+		s.RunID = "run-fc-pass-with-cat"
+		s.SuccessOracleResult = "pass"
+		s.FailureCategory = "FailNetwork"
+		err := w.Insert(context.Background(), s)
+		if !errors.Is(err, ErrFailureCategoryOnPass) {
+			t.Fatalf("want ErrFailureCategoryOnPass, got %v", err)
+		}
+	})
+	t.Run("fail_without_category", func(t *testing.T) {
+		s := sampleSchema()
+		s.RunID = "run-fc-fail-no-cat"
+		s.SuccessOracleResult = "fail"
+		s.FailureCategory = ""
+		err := w.Insert(context.Background(), s)
+		if !errors.Is(err, ErrFailureCategoryOnPass) {
+			t.Fatalf("want ErrFailureCategoryOnPass (same sentinel covers the inverse), got %v", err)
+		}
+	})
+	t.Run("fail_with_category_ok", func(t *testing.T) {
+		s := sampleSchema()
+		s.RunID = "run-fc-fail-with-cat"
+		s.SuccessOracleResult = "fail"
+		s.FailureCategory = "FailNetwork"
+		if err := w.Insert(context.Background(), s); err != nil {
+			t.Fatalf("fail+category must be accepted, got %v", err)
+		}
+	})
+	t.Run("pass_without_category_ok", func(t *testing.T) {
+		s := sampleSchema()
+		s.RunID = "run-fc-pass-no-cat"
+		s.SuccessOracleResult = "pass"
+		s.FailureCategory = ""
+		if err := w.Insert(context.Background(), s); err != nil {
+			t.Fatalf("pass+empty must be accepted, got %v", err)
+		}
+	})
 }
 
 // Test 4: TestInsert_RejectsBadRunIDFormat.
@@ -211,10 +296,17 @@ func TestInsert_RejectsBadOracleResult(t *testing.T) {
 	for _, good := range []string{"pass", "fail", "timeout"} {
 		t.Run("good_"+good, func(t *testing.T) {
 			// Use a unique RunID per case so the second/third inserts
-			// don't collide on PRIMARY KEY.
+			// don't collide on PRIMARY KEY. The failure_category
+			// invariant requires a non-empty category for fail/timeout
+			// (and an empty one for pass).
 			s := sampleSchema()
 			s.RunID = "run-" + good + "-1234567"
 			s.SuccessOracleResult = good
+			if good == "pass" {
+				s.FailureCategory = ""
+			} else {
+				s.FailureCategory = "FailNetwork"
+			}
 			if err := w.Insert(context.Background(), s); err != nil {
 				t.Fatalf("oracle=%q must be accepted, got %v", good, err)
 			}
