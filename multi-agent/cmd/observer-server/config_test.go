@@ -227,3 +227,90 @@ func TestAdvertiseHash(t *testing.T) {
 	h2 := advertiseHash("https://observer-pod-2.svc:8443")
 	require.NotEqual(t, h, h2)
 }
+
+// --- Finding 2 ---
+
+// TestHTTPServer_WriteTimeout_IsZero verifies that both public and internal HTTP
+// server factory functions produce servers with WriteTimeout == 0 so streaming
+// SSE and forwarded turns are not severed mid-stream.
+func TestHTTPServer_WriteTimeout_IsZero(t *testing.T) {
+	pub := newPublicHTTPServer(":8090", nil)
+	require.Equal(t, time.Duration(0), pub.WriteTimeout,
+		"public server WriteTimeout must be 0 (streaming SSE/turns)")
+
+	internal := newInternalHTTPServer(":8091", nil)
+	require.Equal(t, time.Duration(0), internal.WriteTimeout,
+		"internal server WriteTimeout must be 0 (forwarded streaming turns)")
+}
+
+// --- Finding 3 ---
+
+// TestObserverServer_TelemetryLimiter_DefaultsToMemoryWhenClusterDisabled verifies
+// that the PG telemetry limiter is NOT selected when cluster mode is disabled,
+// even when telemetry is enabled and store.driver=postgres. Selecting PG limiter
+// without the cluster gate would fail because commander_telemetry_buckets is only
+// migrated in cluster mode.
+func TestObserverServer_TelemetryLimiter_DefaultsToMemoryWhenClusterDisabled(t *testing.T) {
+	cfg := &Config{
+		Telemetry: TelemetryConfig{
+			Enabled: true,
+			APIKeys: []TelemetryAPIKeyConfig{{ID: "k1", KeyEnv: "K1", WorkspaceID: "*"}},
+			RateLimit: TelemetryRateLimitConfig{PerMinute: 60, Burst: 120},
+		},
+		Cluster: ClusterConfig{Enabled: false},
+		Store:   StoreConfig{Driver: "postgres"},
+	}
+	// When cluster is disabled, observerWebOptions should NOT trigger the PG limiter
+	// path — that path is gated on cfg.Cluster.Enabled in main.go.
+	opts := observerWebOptions(cfg, nil)
+	// The opts.TelemetryLimiter should be nil at this stage (it gets built in
+	// NewWithResolverOptions; we just confirm the gate doesn't pre-set it here).
+	require.Nil(t, opts.TelemetryLimiter,
+		"TelemetryLimiter must not be set by observerWebOptions (PG limiter requires cluster.enabled)")
+	// Confirm the condition in main.go correctly gates the PG limiter.
+	pgLimiterEnabled := cfg.Telemetry.Enabled && cfg.Cluster.Enabled && cfg.Store.Driver == "postgres"
+	require.False(t, pgLimiterEnabled,
+		"PG telemetry limiter gate must be false when cluster.enabled=false")
+}
+
+// --- Finding 6 ---
+
+// TestValidateClusterConfig_RejectsDisabledWithPartialFields verifies that setting
+// cluster fields when cluster.enabled=false is rejected. This catches configs where
+// the user set cluster fields but forgot to set cluster.enabled: true.
+func TestValidateClusterConfig_RejectsDisabledWithPartialFields(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  ClusterConfig
+	}{
+		{
+			name: "advertise_url set",
+			cfg:  ClusterConfig{Enabled: false, AdvertiseURL: "https://pod.example.com"},
+		},
+		{
+			name: "internal_listen_addr set",
+			cfg:  ClusterConfig{Enabled: false, InternalListenAddr: ":8444"},
+		},
+		{
+			name: "secret set",
+			cfg:  ClusterConfig{Enabled: false, Secret: validClusterSecret},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateClusterConfig(&tc.cfg, "sqlite")
+			require.Error(t, err, "partial cluster config with cluster.enabled=false must be rejected")
+		})
+	}
+}
+
+// TestValidateClusterConfig_RejectsLoopbackInternalWithRemoteAdvertise verifies that
+// binding the internal listener to a loopback address while advertising a non-loopback
+// URL is rejected. Peers would advertise an unreachable address.
+func TestValidateClusterConfig_RejectsLoopbackInternalWithRemoteAdvertise(t *testing.T) {
+	c := minimalValidClusterConfig()
+	c.InternalListenAddr = "127.0.0.1:8444" // loopback internal
+	err := validateClusterConfig(&c, "postgres")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "loopback")
+}

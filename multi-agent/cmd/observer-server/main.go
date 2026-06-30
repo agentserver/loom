@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -209,6 +210,17 @@ func main() {
 	}
 	log.Printf("observer-server loaded %d api_keys", len(specs))
 
+	// Run authstore migration BEFORE building the identity resolver.
+	// The PG revocation channel (LISTEN/NOTIFY) requires the
+	// commander_identity_revocations table to exist at subscribe time. If we
+	// migrate after building the resolver, the subscribe call fails once (fresh
+	// DB) and is never retried — resulting in no cross-pod revocations.
+	if cfg.Store.Driver == "postgres" && strings.TrimSpace(cfg.Identity.Agentserver.URL) != "" {
+		if err := authstore.MigratePostgres(st.DB()); err != nil {
+			log.Fatalf("commanderhub authstore migrate (pre-resolver): %v", err)
+		}
+	}
+
 	resolver, err := buildIdentityResolver(cfg, st)
 	if err != nil {
 		log.Fatal(err)
@@ -253,16 +265,17 @@ func main() {
 	}
 
 	// Only build the auth store + apply commander DDL when commander is
-	// actually being mounted. observerweb.NewWithResolverOptions guards the
+	// actually being mounted. observerweb.NewWithResolverOptionsHub guards the
 	// MountAll call by AgentserverURL != "" (see internal/observerweb/server.go),
 	// so a non-commander Postgres deployment has no use for commander_logins /
 	// commander_sessions and shouldn't pay the migration cost or be coupled to
 	// new DDL during rollouts.
 	opts := observerWebOptions(cfg, objects)
-	if cfg.Telemetry.Enabled && cfg.Store.Driver == "postgres" {
-		// Use the shared-Postgres token-bucket limiter so rate-limit state is
-		// consistent across pods. Any Postgres+telemetry deployment gets the
-		// durable limiter (safe: single-pod Postgres deployments benefit too).
+	if cfg.Telemetry.Enabled && cfg.Cluster.Enabled && cfg.Store.Driver == "postgres" {
+		// Use the shared-Postgres token-bucket limiter only in cluster mode.
+		// The commander_telemetry_buckets table is only migrated behind the cluster
+		// gate; a single-pod Postgres deployment lacks the table and would get 503s.
+		// Single-pod deployments keep the in-memory limiter.
 		observerweb.SetPGTelemetryLimiter(
 			&opts,
 			st.DB(),
@@ -271,6 +284,8 @@ func main() {
 		)
 	}
 	if opts.AgentserverURL != "" {
+		// buildCommanderAuthStore may migrate again (idempotent) but skips it
+		// if already done above (postgres: IF NOT EXISTS DDL is idempotent).
 		authStore, err := buildCommanderAuthStore(cfg, st.DB())
 		if err != nil {
 			log.Fatal(err)
@@ -278,8 +293,8 @@ func main() {
 		opts.AuthStore = authStore
 	}
 
-	// Wire cluster mode: when enabled, build the ClusterRuntime and provide an
-	// internalMux for the dual-listener setup.
+	// Wire cluster mode: when enabled, build the ClusterRuntime (with timing
+	// overrides) and provide an internalMux for the dual-listener setup.
 	if cfg.Cluster.Enabled {
 		secret, _ := hex.DecodeString(cfg.Cluster.Secret)
 		var prevSecret []byte
@@ -292,13 +307,21 @@ func main() {
 			Secret:             secret,
 			PrevSecret:         prevSecret,
 			InternalListenAddr: cfg.Cluster.InternalListenAddr,
+			// Propagate timing config values so they are used by sharedRegistry /
+			// forwardClient instead of their hardcoded defaults.
+			HeartbeatInterval: cfg.Cluster.HeartbeatInterval,
+			SweepInterval:     cfg.Cluster.SweepInterval,
+			DaemonExpiryAfter: cfg.Cluster.DaemonExpiryAfter,
+			ForwardTimeout:    cfg.Cluster.ForwardTimeout,
 		}
 		opts.InternalMux = http.NewServeMux()
 	}
 
 	log.Printf("observer-server listening on %s", cfg.ListenAddr)
-	app := observerweb.NewWithResolverOptions(st, usHandler, resolver, opts)
-	publicSrv := newHTTPServer(cfg.ListenAddr, withHealth(app, func(ctx context.Context) error {
+	// Use NewWithResolverOptionsHub so we can call hub.Close during shutdown
+	// to drain daemon WebSocket connections before stopping the listeners.
+	app, hub := observerweb.NewWithResolverOptionsHub(st, usHandler, resolver, opts)
+	publicSrv := newPublicHTTPServer(cfg.ListenAddr, withHealth(app, func(ctx context.Context) error {
 		return st.DB().PingContext(ctx)
 	}))
 
@@ -306,7 +329,7 @@ func main() {
 	if cfg.Cluster.Enabled && opts.InternalMux != nil {
 		log.Printf("observer-server cluster mode enabled; internal listener on %s (advertise=%s)",
 			cfg.Cluster.InternalListenAddr, cfg.Cluster.AdvertiseURL)
-		internalSrv = newHTTPServer(cfg.Cluster.InternalListenAddr, opts.InternalMux)
+		internalSrv = newInternalHTTPServer(cfg.Cluster.InternalListenAddr, opts.InternalMux)
 		go func() {
 			if err := internalSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Printf("observer-server internal listener error: %v", err)
@@ -332,6 +355,14 @@ func main() {
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), drainTimeout+5*time.Second)
 	defer cancel()
+
+	// Drain hub BEFORE stopping HTTP servers: closes daemon WebSocket connections
+	// and removes shared-registry rows so peer pods see them as gone immediately.
+	if hub != nil {
+		if err := hub.Close(shutdownCtx); err != nil {
+			log.Printf("observer-server hub close: %v", err)
+		}
+	}
 
 	if err := publicSrv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("observer-server public server shutdown: %v", err)
@@ -743,6 +774,18 @@ func validateConfig(cfg *Config) error {
 // disabling cluster mode. Must be called after defaults are applied.
 func validateClusterConfig(c *ClusterConfig, storeDriver string) error {
 	if !c.Enabled {
+		// Reject partial cluster config when cluster is disabled to catch
+		// misconfigurations where the user set cluster fields but forgot
+		// to set cluster.enabled: true.
+		if c.AdvertiseURL != "" {
+			return fmt.Errorf("cluster.advertise_url is set but cluster.enabled is false")
+		}
+		if c.InternalListenAddr != "" {
+			return fmt.Errorf("cluster.internal_listen_addr is set but cluster.enabled is false")
+		}
+		if c.Secret != "" {
+			return fmt.Errorf("cluster.secret is set but cluster.enabled is false")
+		}
 		return nil
 	}
 	if c.AdvertiseURL == "" {
@@ -760,9 +803,21 @@ func validateClusterConfig(c *ClusterConfig, storeDriver string) error {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return fmt.Errorf("cluster.advertise_url must be an http or https URL")
 	}
-	host := u.Hostname()
-	if host == "localhost" || strings.HasPrefix(host, "127.") || host == "::1" {
-		return fmt.Errorf("cluster.advertise_url must not use a loopback address (got %q)", host)
+	advertiseHost := u.Hostname()
+	if advertiseHost == "localhost" || strings.HasPrefix(advertiseHost, "127.") || advertiseHost == "::1" {
+		return fmt.Errorf("cluster.advertise_url must not use a loopback address (got %q)", advertiseHost)
+	}
+
+	// Reject the combination of a loopback internal_listen_addr paired with a
+	// non-loopback advertise_url. In this configuration the pod would advertise
+	// an address that peers cannot reach — the internal listener is bound only
+	// to the loopback interface (127.x.x.x) while the advertised URL routes to
+	// the pod from outside. Peer pods would fail to forward to this pod.
+	internalHost, _, _ := net.SplitHostPort(c.InternalListenAddr)
+	if internalHost != "" && internalHost != "0.0.0.0" && internalHost != "::" {
+		if internalHost == "localhost" || strings.HasPrefix(internalHost, "127.") || internalHost == "::1" {
+			return fmt.Errorf("cluster.internal_listen_addr binds to loopback (%q) but cluster.advertise_url (%q) is non-loopback — peers cannot reach this pod", c.InternalListenAddr, c.AdvertiseURL)
+		}
 	}
 
 	// Validate secret: must be hex-decodable and at least 32 bytes (256-bit).
@@ -818,8 +873,15 @@ func buildIdentityResolver(cfg *Config, st observerstore.ManagedStore) (identity
 				identity.WithRevocationChannel(identity.NewPGRevocationChannel(st.DB())),
 			)
 		}
+		freshTTL := cfg.Identity.Agentserver.FreshTTL.Duration()
+		// In cluster mode, use 30s FreshTTL (per v19 spec §identity cache TTLs)
+		// when the user has not set an explicit value. The default of 180s is
+		// too long for multi-pod revocation propagation scenarios.
+		if cfg.Cluster.Enabled && freshTTL == 180*time.Second {
+			freshTTL = 30 * time.Second
+		}
 		resolvers = append(resolvers, identity.NewCache(upstream, identity.CacheConfig{
-			FreshTTL:   cfg.Identity.Agentserver.FreshTTL.Duration(),
+			FreshTTL:   freshTTL,
 			StaleGrace: cfg.Identity.Agentserver.StaleGrace.Duration(),
 			Capacity:   cfg.Identity.Agentserver.CacheCapacity,
 		}, cacheOpts...))
@@ -906,13 +968,35 @@ func withHealth(app http.Handler, ready func(context.Context) error) http.Handle
 	return mux
 }
 
-func newHTTPServer(addr string, h http.Handler) *http.Server {
+// newPublicHTTPServer creates the public-facing HTTP server. WriteTimeout is 0
+// because SSE and streaming turns can run for 10+ minutes; rely on per-request
+// context deadlines and ReadHeaderTimeout to bound slow/stuck clients.
+func newPublicHTTPServer(addr string, h http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              addr,
 		Handler:           h,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      60 * time.Second,
+		WriteTimeout:      0, // streaming SSE / forwarded turns have no fixed bound
 		IdleTimeout:       120 * time.Second,
 	}
+}
+
+// newInternalHTTPServer creates the internal (cluster-only) HTTP server.
+// WriteTimeout is 0 because forwarded streaming turns have no fixed duration.
+func newInternalHTTPServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      0, // forwarded streaming turns have no fixed duration
+		IdleTimeout:       120 * time.Second,
+	}
+}
+
+// newHTTPServer is kept for compatibility with tests that use it directly.
+// New code should prefer newPublicHTTPServer or newInternalHTTPServer.
+func newHTTPServer(addr string, h http.Handler) *http.Server {
+	return newPublicHTTPServer(addr, h)
 }
