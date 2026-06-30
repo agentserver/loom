@@ -214,7 +214,7 @@ func (h *Hub) refreshSessionRows(ctx context.Context, o owner, info DaemonInfo) 
 	}
 	rows := make([]SessionRow, 0, len(body.Sessions))
 	for _, sess := range body.Sessions {
-		snap := h.turns.get(turnKey{owner: o, daemonID: info.DaemonID, sessionID: sess.ID})
+		snap := h.turns.get(turnKey{owner: o, shortID: info.DaemonID, sessionID: sess.ID})
 		rows = append(rows, sessionRowFromBackend(info.DaemonID, info.ShortID, sess, snap))
 	}
 	sortSessionRows(rows)
@@ -223,7 +223,7 @@ func (h *Hub) refreshSessionRows(ctx context.Context, o owner, info DaemonInfo) 
 
 func (h *Hub) mergeCurrentTurnState(o owner, daemonID string, rows []SessionRow) {
 	for i := range rows {
-		snap := h.turns.get(turnKey{owner: o, daemonID: daemonID, sessionID: rows[i].SessionID})
+		snap := h.turns.get(turnKey{owner: o, shortID: daemonID, sessionID: rows[i].SessionID})
 		state := string(snap.State)
 		if state == "" {
 			state = string(turnStateIdle)

@@ -1,8 +1,11 @@
 package commanderhub
 
 import (
+	"context"
 	"sync"
 	"time"
+
+	"github.com/yourorg/multi-agent/internal/commander"
 )
 
 const maxTurnStateEntries = 1024
@@ -21,7 +24,7 @@ const (
 
 type turnKey struct {
 	owner     owner
-	daemonID  string
+	shortID   string
 	sessionID string
 }
 
@@ -34,16 +37,37 @@ type turnSnapshot struct {
 	updatedAt        time.Time
 }
 
-type turnStateStore struct {
+// turnStateBackend is the storage interface for turn state. The in-process
+// implementation is *memTurnStore; Phase D will add a *pgTurnStore that
+// persists state across pod restarts.
+type turnStateBackend interface {
+	begin(key turnKey) bool
+	set(key turnKey, state turnState)
+	finish(key turnKey, state turnState)
+	fail(key turnKey, msg string)
+	rekey(oldKey, newKey turnKey)
+	get(key turnKey) turnSnapshot
+	// updateFromEnvelope persists envelope-derived state changes in backends
+	// that require it (e.g. pgTurnStore). memTurnStore is a no-op because
+	// the callers in http.go call begin/set/finish/fail directly.
+	updateFromEnvelope(ctx context.Context, key turnKey, command string, env commander.Envelope) error
+	// cleanupOrphans removes turn-state entries older than the given duration
+	// whose associated daemon is no longer connected. Used by the periodic
+	// sweeper in Phase D. memTurnStore is a no-op (in-memory state evicts
+	// itself via pruneLocked).
+	cleanupOrphans(ctx context.Context, older time.Duration) error
+}
+
+type memTurnStore struct {
 	mu sync.Mutex
 	m  map[turnKey]turnSnapshot
 }
 
-func newTurnStateStore() *turnStateStore {
-	return &turnStateStore{m: make(map[turnKey]turnSnapshot)}
+func newMemTurnStore() *memTurnStore {
+	return &memTurnStore{m: make(map[turnKey]turnSnapshot)}
 }
 
-func (s *turnStateStore) begin(key turnKey) bool {
+func (s *memTurnStore) begin(key turnKey) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cur := s.m[key]
@@ -55,7 +79,7 @@ func (s *turnStateStore) begin(key turnKey) bool {
 	return true
 }
 
-func (s *turnStateStore) set(key turnKey, state turnState) {
+func (s *memTurnStore) set(key turnKey, state turnState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cur := s.m[key]
@@ -65,7 +89,7 @@ func (s *turnStateStore) set(key turnKey, state turnState) {
 	s.m[key] = cur
 }
 
-func (s *turnStateStore) finish(key turnKey, state turnState) {
+func (s *memTurnStore) finish(key turnKey, state turnState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cur := s.m[key]
@@ -77,7 +101,7 @@ func (s *turnStateStore) finish(key turnKey, state turnState) {
 	s.pruneLocked()
 }
 
-func (s *turnStateStore) fail(key turnKey, msg string) {
+func (s *memTurnStore) fail(key turnKey, msg string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cur := s.m[key]
@@ -95,7 +119,7 @@ func (s *turnStateStore) fail(key turnKey, msg string) {
 // this is a no-op; when newKey already exists, the existing entry is
 // preserved (the caller's subsequent finish/fail then writes the
 // terminal state under newKey).
-func (s *turnStateStore) rekey(oldKey, newKey turnKey) {
+func (s *memTurnStore) rekey(oldKey, newKey turnKey) {
 	if oldKey == newKey {
 		return
 	}
@@ -112,7 +136,7 @@ func (s *turnStateStore) rekey(oldKey, newKey turnKey) {
 	}
 }
 
-func (s *turnStateStore) get(key turnKey) turnSnapshot {
+func (s *memTurnStore) get(key turnKey) turnSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if snap, ok := s.m[key]; ok {
@@ -121,7 +145,19 @@ func (s *turnStateStore) get(key turnKey) turnSnapshot {
 	return turnSnapshot{State: turnStateIdle}
 }
 
-func (s *turnStateStore) pruneLocked() {
+// updateFromEnvelope is a no-op for memTurnStore. Phase D's pgTurnStore
+// will use this to persist envelope-derived state changes.
+func (s *memTurnStore) updateFromEnvelope(_ context.Context, _ turnKey, _ string, _ commander.Envelope) error {
+	return nil
+}
+
+// cleanupOrphans is a no-op for memTurnStore. In-memory state is bounded
+// by pruneLocked; pgTurnStore will implement periodic SQL cleanup here.
+func (s *memTurnStore) cleanupOrphans(_ context.Context, _ time.Duration) error {
+	return nil
+}
+
+func (s *memTurnStore) pruneLocked() {
 	for len(s.m) > maxTurnStateEntries {
 		var oldestKey turnKey
 		var oldest turnSnapshot
@@ -141,4 +177,23 @@ func (s *turnStateStore) pruneLocked() {
 		}
 		delete(s.m, oldestKey)
 	}
+}
+
+// snapshotForTest returns the raw map entry for key. Only for use in tests
+// that need to inspect or manipulate internal state directly. Not for
+// production use.
+func (s *memTurnStore) snapshotForTest(key turnKey) (turnSnapshot, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snap, ok := s.m[key]
+	return snap, ok
+}
+
+// setForTest writes snap directly into the map under key. Only for use in
+// tests that need to pre-populate state without going through begin/set/finish.
+// Not for production use.
+func (s *memTurnStore) setForTest(key turnKey, snap turnSnapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.m[key] = snap
 }

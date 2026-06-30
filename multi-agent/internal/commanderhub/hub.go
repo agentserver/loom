@@ -28,7 +28,7 @@ type Hub struct {
 	resolver     identity.Resolver
 	upgrader     websocket.Upgrader
 	reg          *localRegistry
-	turns        *turnStateStore
+	turns        turnStateBackend
 	sessionCache *sessionListCache
 	cmdSeq       atomic.Int64 // generates per-command IDs (see proxy.go)
 
@@ -45,7 +45,7 @@ func NewHub(resolver identity.Resolver) *Hub {
 		resolver:     resolver,
 		upgrader:     websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }},
 		reg:          newLocalRegistry(),
-		turns:        newTurnStateStore(),
+		turns:        newMemTurnStore(),
 		sessionCache: newSessionListCache(10 * time.Second),
 		TurnTimeout:  defaultTurnTimeout,
 	}

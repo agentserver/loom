@@ -251,15 +251,13 @@ func TestHTTP_TreeMergesTurnState(t *testing.T) {
 
 	dis := hub.reg.daemons(o)
 	require.NotEmpty(t, dis)
-	key := turnKey{owner: o, daemonID: dis[0].DaemonID, sessionID: "s1"}
-	hub.turns.mu.Lock()
-	hub.turns.m[key] = turnSnapshot{
+	key := turnKey{owner: o, shortID: dis[0].DaemonID, sessionID: "s1"}
+	hub.turns.(*memTurnStore).setForTest(key, turnSnapshot{
 		State:            turnStateAnswering,
 		ActiveWorker:     true,
 		AwaitingApproval: true,
 		updatedAt:        time.Now(),
-	}
-	hub.turns.mu.Unlock()
+	})
 
 	tree := getCommanderTree(t, srv, cookie)
 
@@ -373,7 +371,7 @@ func TestHTTP_TurnStreamsSSE(t *testing.T) {
 	require.Contains(t, joined, "hello")
 	require.Contains(t, joined, "event: done")
 
-	snap := hub.turns.get(turnKey{owner: o, daemonID: daemonID, sessionID: "s1"})
+	snap := hub.turns.get(turnKey{owner: o, shortID: daemonID, sessionID: "s1"})
 	require.Equal(t, turnStateDone, snap.State)
 	require.False(t, snap.InFlight)
 }
@@ -381,7 +379,7 @@ func TestHTTP_TurnStreamsSSE(t *testing.T) {
 func TestUpdateTurnStateFallsBackToLegacyStatusText(t *testing.T) {
 	hub := NewHub(&fakeResolver{})
 	ch := &commanderHandlers{hub: hub}
-	key := turnKey{owner: owner{userID: "alice", workspaceID: "W1"}, daemonID: "d1", sessionID: "s1"}
+	key := turnKey{owner: owner{userID: "alice", workspaceID: "W1"}, shortID: "d1", sessionID: "s1"}
 	require.True(t, hub.turns.begin(key))
 
 	payload, err := json.Marshal(commander.EventPayload{EventKind: "status", Text: "accepted by daemon"})
@@ -404,7 +402,7 @@ func TestUpdateTurnStateFallsBackToLegacyStatusText(t *testing.T) {
 func TestUpdateTurnStatePrefersStatusCode(t *testing.T) {
 	hub := NewHub(&fakeResolver{})
 	ch := &commanderHandlers{hub: hub}
-	key := turnKey{owner: owner{userID: "u", workspaceID: "w"}, daemonID: "d", sessionID: "s"}
+	key := turnKey{owner: owner{userID: "u", workspaceID: "w"}, shortID: "d", sessionID: "s"}
 	hub.turns.begin(key)
 
 	payload, err := json.Marshal(commander.EventPayload{
@@ -508,7 +506,7 @@ func TestHTTP_TerminalStatusEventsEndTurnWithoutDisconnectOverwrite(t *testing.T
 			case <-time.After(2 * time.Second):
 				t.Fatal("backend did not emit terminal status")
 			}
-			snap := hub.turns.get(turnKey{owner: o, daemonID: daemonID, sessionID: sessionID})
+			snap := hub.turns.get(turnKey{owner: o, shortID: daemonID, sessionID: sessionID})
 			require.Equal(t, tc.wantState, snap.State)
 			require.False(t, snap.InFlight)
 			require.Equal(t, tc.wantMessage, snap.Message)
@@ -605,7 +603,7 @@ func TestHTTP_TurnErrorFrameLeavesStoreError(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	require.Contains(t, string(body), "event: error")
 
-	snap := hub.turns.get(turnKey{owner: o, daemonID: daemonID, sessionID: "s1"})
+	snap := hub.turns.get(turnKey{owner: o, shortID: daemonID, sessionID: "s1"})
 	require.Equal(t, turnStateError, snap.State)
 	require.False(t, snap.InFlight)
 	require.Contains(t, snap.Message, "backend exploded")
@@ -638,7 +636,7 @@ func TestHTTP_TurnAwaitingUserLeavesStoreAwaitingApproval(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	require.Contains(t, string(body), "event: done")
 
-	snap := hub.turns.get(turnKey{owner: o, daemonID: daemonID, sessionID: "s1"})
+	snap := hub.turns.get(turnKey{owner: o, shortID: daemonID, sessionID: "s1"})
 	require.Equal(t, turnStateAwaitingApproval, snap.State)
 	require.False(t, snap.InFlight)
 	require.True(t, snap.AwaitingApproval)
@@ -666,7 +664,7 @@ func TestHTTP_TurnPreStreamDaemonGoneLeavesStoreDisconnected(t *testing.T) {
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusBadGateway, resp.StatusCode)
 
-	snap := hub.turns.get(turnKey{owner: o, daemonID: "gone", sessionID: "s1"})
+	snap := hub.turns.get(turnKey{owner: o, shortID: "gone", sessionID: "s1"})
 	require.Equal(t, turnStateDisconnected, snap.State)
 	require.False(t, snap.InFlight)
 }
@@ -683,7 +681,7 @@ func TestHTTP_TurnMissingDaemonDoesNotCreateTurnState(t *testing.T) {
 	ident := identity.Identity{UserID: "alice", WorkspaceID: "W1"}
 	o := owner{userID: ident.UserID, workspaceID: ident.WorkspaceID}
 	cookie := &http.Cookie{Name: sessionCookieName, Value: auth.putSession("tok-alice", ident)}
-	key := turnKey{owner: o, daemonID: "missing", sessionID: "s1"}
+	key := turnKey{owner: o, shortID: "missing", sessionID: "s1"}
 
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/commander/daemons/missing/sessions/s1/turn", strings.NewReader(`{"prompt":"go"}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -693,9 +691,7 @@ func TestHTTP_TurnMissingDaemonDoesNotCreateTurnState(t *testing.T) {
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusNotFound, resp.StatusCode)
 	require.Equal(t, turnStateIdle, hub.turns.get(key).State)
-	hub.turns.mu.Lock()
-	_, exists := hub.turns.m[key]
-	hub.turns.mu.Unlock()
+	_, exists := hub.turns.(*memTurnStore).snapshotForTest(key)
 	require.False(t, exists, "missing daemon request should not create turn state")
 }
 
@@ -751,7 +747,7 @@ func TestHTTP_TurnRequestCanceledKeepsGuardUntilDaemonTerminal(t *testing.T) {
 		t.Fatal("request did not return after cancel")
 	}
 
-	key := turnKey{owner: o, daemonID: daemonID, sessionID: "s1"}
+	key := turnKey{owner: o, shortID: daemonID, sessionID: "s1"}
 	snap := hub.turns.get(key)
 	require.True(t, snap.InFlight, "browser cancellation must not clear daemon turn guard: %+v", snap)
 

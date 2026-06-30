@@ -7,8 +7,8 @@ import (
 )
 
 func TestTurnStateStoreRejectsConcurrentTurn(t *testing.T) {
-	s := newTurnStateStore()
-	key := turnKey{owner: owner{"alice", "W1"}, daemonID: "d1", sessionID: "s1"}
+	s := newMemTurnStore()
+	key := turnKey{owner: owner{"alice", "W1"}, shortID: "d1", sessionID: "s1"}
 	if !s.begin(key) {
 		t.Fatal("first begin should succeed")
 	}
@@ -22,8 +22,8 @@ func TestTurnStateStoreRejectsConcurrentTurn(t *testing.T) {
 }
 
 func TestTurnStateStoreSnapshot(t *testing.T) {
-	s := newTurnStateStore()
-	key := turnKey{owner: owner{"alice", "W1"}, daemonID: "d1", sessionID: "s1"}
+	s := newMemTurnStore()
+	key := turnKey{owner: owner{"alice", "W1"}, shortID: "d1", sessionID: "s1"}
 	s.begin(key)
 	s.set(key, turnStateAnswering)
 	got := s.get(key)
@@ -33,13 +33,13 @@ func TestTurnStateStoreSnapshot(t *testing.T) {
 }
 
 func TestTurnStateStoreSetDoesNotPruneOnHotPath(t *testing.T) {
-	s := newTurnStateStore()
-	active := turnKey{owner: owner{"alice", "W1"}, daemonID: "d1", sessionID: "active"}
-	oldTerminal := turnKey{owner: owner{"alice", "W1"}, daemonID: "d1", sessionID: "old"}
+	s := newMemTurnStore()
+	active := turnKey{owner: owner{"alice", "W1"}, shortID: "d1", sessionID: "active"}
+	oldTerminal := turnKey{owner: owner{"alice", "W1"}, shortID: "d1", sessionID: "old"}
 	s.m[active] = turnSnapshot{State: turnStateQueued, InFlight: true, updatedAt: time.Now()}
 	s.m[oldTerminal] = turnSnapshot{State: turnStateDone, updatedAt: time.Now().Add(-time.Hour)}
 	for i := 0; i < maxTurnStateEntries-1; i++ {
-		key := turnKey{owner: owner{"alice", "W1"}, daemonID: "d1", sessionID: fmt.Sprintf("extra-%d", i)}
+		key := turnKey{owner: owner{"alice", "W1"}, shortID: "d1", sessionID: fmt.Sprintf("extra-%d", i)}
 		s.m[key] = turnSnapshot{State: turnStateDone, updatedAt: time.Now()}
 	}
 
@@ -51,15 +51,15 @@ func TestTurnStateStoreSetDoesNotPruneOnHotPath(t *testing.T) {
 }
 
 func TestTurnStateStorePrunesTerminalStatesPreservingInFlight(t *testing.T) {
-	s := newTurnStateStore()
-	inFlight := turnKey{owner: owner{"alice", "W1"}, daemonID: "d1", sessionID: "active"}
+	s := newMemTurnStore()
+	inFlight := turnKey{owner: owner{"alice", "W1"}, shortID: "d1", sessionID: "active"}
 	if !s.begin(inFlight) {
 		t.Fatal("in-flight begin should succeed")
 	}
 
 	var firstTerminal turnKey
 	for i := 0; i < maxTurnStateEntries-1; i++ {
-		key := turnKey{owner: owner{"alice", "W1"}, daemonID: "d1", sessionID: fmt.Sprintf("done-%d", i)}
+		key := turnKey{owner: owner{"alice", "W1"}, shortID: "d1", sessionID: fmt.Sprintf("done-%d", i)}
 		if i == 0 {
 			firstTerminal = key
 		}
@@ -73,7 +73,7 @@ func TestTurnStateStorePrunesTerminalStatesPreservingInFlight(t *testing.T) {
 	snap.updatedAt = time.Now().Add(-time.Hour)
 	s.m[firstTerminal] = snap
 	s.mu.Unlock()
-	latestTerminal := turnKey{owner: owner{"alice", "W1"}, daemonID: "d1", sessionID: "latest"}
+	latestTerminal := turnKey{owner: owner{"alice", "W1"}, shortID: "d1", sessionID: "latest"}
 	if !s.begin(latestTerminal) {
 		t.Fatal("latest terminal begin should succeed")
 	}

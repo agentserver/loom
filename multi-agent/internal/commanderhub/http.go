@@ -227,7 +227,7 @@ func (ch *commanderHandlers) turn(w http.ResponseWriter, r *http.Request, daemon
 		http.NotFound(w, r)
 		return
 	}
-	key := turnKey{owner: o, daemonID: daemonID, sessionID: sid}
+	key := turnKey{owner: o, shortID: daemonID, sessionID: sid}
 	if !ch.hub.turns.begin(key) {
 		http.Error(w, "turn already in flight", http.StatusConflict)
 		return
@@ -239,19 +239,19 @@ func (ch *commanderHandlers) turn(w http.ResponseWriter, r *http.Request, daemon
 	chunkCh, err := ch.hub.SendCommandStream(turnCtx, o, daemonID, "session_turn", args)
 	if errors.Is(err, ErrDaemonNotFound) {
 		ch.hub.turns.finish(key, turnStateDisconnected)
-		ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
+		ch.hub.invalidateDaemonSessions(key.owner, key.shortID)
 		http.NotFound(w, r)
 		return
 	}
 	if errors.Is(err, ErrDaemonGone) {
 		ch.hub.turns.finish(key, turnStateDisconnected)
-		ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
+		ch.hub.invalidateDaemonSessions(key.owner, key.shortID)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	if err != nil {
 		ch.hub.turns.fail(key, err.Error())
-		ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
+		ch.hub.invalidateDaemonSessions(key.owner, key.shortID)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -274,7 +274,7 @@ func (ch *commanderHandlers) turn(w http.ResponseWriter, r *http.Request, daemon
 			// then propagates the real session into the tree.
 			if env.Type == "command_result" {
 				if realID := payloadSessionID(env.Payload); realID != "" && realID != key.sessionID {
-					realKey := turnKey{owner: key.owner, daemonID: key.daemonID, sessionID: realID}
+					realKey := turnKey{owner: key.owner, shortID: key.shortID, sessionID: realID}
 					ch.hub.turns.rekey(key, realKey)
 					key = realKey
 				}
@@ -317,7 +317,7 @@ func (ch *commanderHandlers) finishTurnWithoutTerminal(key turnKey, ctxErr error
 			sse.emitError(commander.ErrCodeBackendUnavailable, "daemon disconnected")
 		}
 	}
-	ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
+	ch.hub.invalidateDaemonSessions(key.owner, key.shortID)
 }
 
 func (ch *commanderHandlers) updateTurnStateFromEnvelope(key turnKey, env commander.Envelope) {
@@ -338,13 +338,13 @@ func (ch *commanderHandlers) updateTurnStateFromEnvelope(key turnKey, env comman
 				ch.hub.turns.set(key, turnStateAnswering)
 			case agentbackend.StatusAwaitingApproval:
 				ch.hub.turns.finish(key, turnStateAwaitingApproval)
-				ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
+				ch.hub.invalidateDaemonSessions(key.owner, key.shortID)
 			case agentbackend.StatusDone:
 				ch.hub.turns.finish(key, turnStateDone)
-				ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
+				ch.hub.invalidateDaemonSessions(key.owner, key.shortID)
 			case agentbackend.StatusError:
 				ch.hub.turns.fail(key, ep.Text)
-				ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
+				ch.hub.invalidateDaemonSessions(key.owner, key.shortID)
 			default:
 				switch ep.Text {
 				case "queued on daemon", "queued-on-daemon", "accepted by daemon":
@@ -364,10 +364,10 @@ func (ch *commanderHandlers) updateTurnStateFromEnvelope(key turnKey, env comman
 		} else {
 			ch.hub.turns.finish(key, turnStateDone)
 		}
-		ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
+		ch.hub.invalidateDaemonSessions(key.owner, key.shortID)
 	case "error":
 		ch.hub.turns.fail(key, errorMessage(env.Payload))
-		ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
+		ch.hub.invalidateDaemonSessions(key.owner, key.shortID)
 	}
 }
 
