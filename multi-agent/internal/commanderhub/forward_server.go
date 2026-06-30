@@ -118,7 +118,7 @@ func (h *Hub) forwardHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	inserted, err := insertNonce(ctx, h.sharedReg.db, nonce)
 	if err != nil {
-		log.Printf("commanderhub: forward.received.503.nonce_pg remote=%s nonce=%s err=%v", r.RemoteAddr, nonce, err)
+		log.Printf("commanderhub: forward.received.503.nonce_pg remote=%s nonce_prefix=%s err=%v", r.RemoteAddr, noncePrefix(nonce), err)
 		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{
 			"error": map[string]any{
 				"code":    "backend_unavailable",
@@ -128,7 +128,7 @@ func (h *Hub) forwardHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !inserted {
-		log.Printf("commanderhub: forward.received.denied.replay remote=%s nonce=%s", r.RemoteAddr, nonce)
+		log.Printf("commanderhub: forward.received.denied.replay remote=%s nonce_prefix=%s", r.RemoteAddr, noncePrefix(nonce))
 		http.Error(w, "replay detected", http.StatusForbidden)
 		return
 	}

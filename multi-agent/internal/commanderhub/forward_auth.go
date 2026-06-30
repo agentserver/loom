@@ -169,6 +169,20 @@ func insertNonce(ctx context.Context, db *sql.DB, nonce string) (inserted bool, 
 	return n > 0, nil
 }
 
+// noncePrefix returns the first 8 hex characters of a nonce for use in
+// audit log lines. Emitting the full nonce in logs is prohibited (spec v19 §7:
+// "operator-visible logs must never contain auth material"). The 8-char prefix
+// gives operators a correlation handle without exposing the full 128-bit secret.
+// If the nonce is shorter than 8 chars (malformed input), the whole string is
+// returned — callers already rejected it before reaching the log line.
+func noncePrefix(nonce string) string {
+	const prefixLen = 8
+	if len(nonce) <= prefixLen {
+		return nonce
+	}
+	return nonce[:prefixLen]
+}
+
 // timestampWithinWindow reports whether ts (Unix seconds) is within
 // window of now.
 func timestampWithinWindow(ts int64, now time.Time, window time.Duration) bool {

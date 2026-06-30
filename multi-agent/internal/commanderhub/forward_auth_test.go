@@ -421,3 +421,34 @@ var _ func(context.Context, *sql.DB, string) (bool, error) = insertNonce
 
 // Compile-time: ensure signForward returns a string.
 var _ = fmt.Sprintf("%s", signForward([]byte("k"), 0, "n", []byte("b")))
+
+// ---------------------------------------------------------------------------
+// noncePrefix — C4/C5 follow-up: safe log correlation without exposing nonces
+// ---------------------------------------------------------------------------
+
+func TestNoncePrefix_NormalNonce(t *testing.T) {
+	// A well-formed 32-char hex nonce must be truncated to 8 chars.
+	nonce := "aabbccdd00112233aabbccdd00112233"
+	got := noncePrefix(nonce)
+	require.Equal(t, "aabbccdd", got, "should return first 8 hex chars")
+	require.Len(t, got, 8)
+}
+
+func TestNoncePrefix_ShortNonce(t *testing.T) {
+	// Short/malformed nonce (already rejected by parseHMACNonce in prod)
+	// must not panic — return the whole string.
+	short := "abcd"
+	got := noncePrefix(short)
+	require.Equal(t, short, got)
+}
+
+func TestNoncePrefix_ExactlyPrefixLen(t *testing.T) {
+	// Exactly 8 chars — no truncation, returns as-is.
+	nonce := "12345678"
+	got := noncePrefix(nonce)
+	require.Equal(t, nonce, got)
+}
+
+func TestNoncePrefix_Empty(t *testing.T) {
+	require.Equal(t, "", noncePrefix(""))
+}
