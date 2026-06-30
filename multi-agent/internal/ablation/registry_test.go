@@ -299,6 +299,33 @@ func TestDefault_IsRegistryAndIndependent(t *testing.T) {
 	}
 }
 
+// TestZeroValueRegistry_DoesNotPanic exercises a Registry value created
+// without NewRegistry. The spec's API contract says Register never
+// panics, so the implementation must lazy-init its internal map.
+// SetByName on the same zero-value Registry (before any Register) must
+// return ErrNotRegistered, not panic on a nil map read.
+func TestZeroValueRegistry_DoesNotPanic(t *testing.T) {
+	var r Registry
+	var b bool
+	if err := r.Register(NoCapabilityDiscovery, &b); err != nil {
+		t.Fatalf("Register on zero-value Registry: %v", err)
+	}
+	if err := r.SetByName(string(NoCapabilityDiscovery), true); err != nil {
+		t.Fatalf("SetByName after Register on zero-value Registry: %v", err)
+	}
+	if !b {
+		t.Errorf("after SetByName(true), *target = false; want true")
+	}
+
+	var empty Registry
+	if err := empty.SetByName(string(NoObserver), true); !errors.Is(err, ErrNotRegistered) {
+		t.Errorf("SetByName on zero-value Registry (no Register): want ErrNotRegistered, got %v", err)
+	}
+	if got := empty.List(); len(got) != 0 {
+		t.Errorf("List on zero-value Registry: want empty, got %v", got)
+	}
+}
+
 // TestSentinels_AreDistinct is a non-RED regression smoke test: two
 // distinct errors.New values are always distinct, so this can't
 // meaningfully fail now. It exists to fail loudly if a future refactor

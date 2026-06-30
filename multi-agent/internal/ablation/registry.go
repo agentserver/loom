@@ -90,6 +90,11 @@ func (r *Registry) Register(name FlagName, target *bool) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.targets == nil {
+		// Lazy init so a zero-value Registry (e.g. `var r ablation.Registry`)
+		// still satisfies the "Register never panics" contract.
+		r.targets = make(map[FlagName]*bool)
+	}
 	if _, dup := r.targets[name]; dup {
 		return ErrAlreadyRegistered
 	}
@@ -118,6 +123,9 @@ func (r *Registry) SetByName(name string, v bool) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// r.targets may be nil here on a zero-value Registry with no prior
+	// Register call; that's a "known name, never registered" case →
+	// ErrNotRegistered, not a panic.
 	target, ok := r.targets[fn]
 	if !ok {
 		return ErrNotRegistered
