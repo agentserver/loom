@@ -188,3 +188,33 @@ CREATE TABLE IF NOT EXISTS resource_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_resource_snapshots_latest
 ON resource_snapshots(workspace_id, created_at);
+
+-- WT-1-run-schema: per-run D1 evaluation rows (24 columns matching
+-- /root/paper_writing/docs/intermediate/08_evaluation_plan_v3.md lines 256-279).
+CREATE TABLE IF NOT EXISTS runs (
+    run_id                    TEXT PRIMARY KEY,
+    workload_id               TEXT NOT NULL,
+    claim_id                  TEXT NOT NULL,
+    experiment_id             TEXT NOT NULL,
+    baseline_or_ablation      TEXT NOT NULL,
+    loom_commit               TEXT NOT NULL,
+    agentserver_commit        TEXT NOT NULL,
+    modelserver_commit        TEXT NOT NULL,
+    app_commit                TEXT NOT NULL,
+    machine_topology          TEXT NOT NULL,
+    context_ground_truth      TEXT NOT NULL,
+    capability_snapshot_hash  TEXT NOT NULL DEFAULT '',
+    task_contract_hash        TEXT NOT NULL DEFAULT '',
+    dynamic_mcp_registry_hash TEXT NOT NULL DEFAULT '',
+    selected_context          TEXT NOT NULL,
+    ground_truth_context      TEXT NOT NULL,
+    start_time                TEXT NOT NULL,
+    end_time                  TEXT NOT NULL,
+    success_oracle_result     TEXT NOT NULL CHECK(success_oracle_result IN ('pass','fail','timeout')),
+    failure_category          TEXT NOT NULL DEFAULT '',
+    human_intervention_count  INTEGER NOT NULL DEFAULT 0,
+    artifact_hashes           TEXT NOT NULL DEFAULT '[]',
+    observer_trace_path       TEXT NOT NULL DEFAULT '',
+    model_trace_id            TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_runs_experiment ON runs(experiment_id, workload_id);
