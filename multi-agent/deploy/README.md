@@ -148,3 +148,79 @@ the user's machine, not on a server, but the same release publishes them:
   PyPI name `loom`. Wraps the driver MCP surface as a fluent workflow
   API for scripts / notebooks; needs `driver-agent` on PATH but no
   Claude Code / Codex window open.
+
+## Multi-pod observer cluster (shared-daemon-registry)
+
+Observer can run as a multi-pod cluster where daemons register on any pod and
+any pod can forward commands. All pods share a PostgreSQL-backed registry and
+authenticate inter-pod traffic with a shared `cluster-secret`.
+
+### Pre-rollout coordination
+
+Before bringing up a cluster (or scaling from 1 to 2+ replicas):
+
+1. **Set the cluster secret.** Add a `cluster-secret` key (>=32 random chars)
+   to the Kubernetes Secret named by `existingSecret` (or set
+   `secret.clusterSecret` when `secret.create=true`). The init container
+   `assert-cluster-secret` will fail-fast if the key is absent or too short.
+2. **Set `cluster.enabled=true`** in your values file.
+3. **Scale to 2+ replicas** (`replicaCount: 2` minimum). A single-pod cluster
+   is legal but defeats the purpose.
+4. **Ensure `store.driver=postgres`.** Shared state requires Postgres;
+   SQLite is rejected by the chart's validate.yaml guard.
+
+The deployment uses `RollingUpdate` with `maxUnavailable: 0` so at least one
+pod always serves traffic during a rollout.
+
+### Three-phase cluster-secret rotation
+
+To rotate the cluster secret without a service interruption:
+
+**Phase A — introduce prev secret (mixed-secret window begins)**
+
+```bash
+# Add the OLD value as cluster-secret-prev and the NEW value as cluster-secret
+# to your Kubernetes Secret, then redeploy:
+kubectl -n "$NS" patch secret observer-production-secret \
+  --type=merge -p '{"stringData":{"cluster-secret-prev":"<OLD>","cluster-secret":"<NEW>"}}'
+helm upgrade observer ./deploy/charts/observer -f values-prod.yaml
+# All pods now accept both OLD and NEW. Traffic continues uninterrupted.
+```
+
+**Phase B — promote new secret (all pods carry only the new key)**
+
+Once all pods have rolled with Phase A values, redeploy with only the new
+primary:
+
+```bash
+# Remove cluster-secret-prev from the Secret:
+kubectl -n "$NS" patch secret observer-production-secret \
+  --type=json -p '[{"op":"remove","path":"/data/cluster-secret-prev"}]'
+helm upgrade observer ./deploy/charts/observer -f values-prod.yaml
+```
+
+**Phase C — clean up (rotation complete)**
+
+Verify all pods are healthy, then confirm the old key is gone:
+
+```bash
+kubectl -n "$NS" get secret observer-production-secret -o json \
+  | jq '.data | keys'   # cluster-secret-prev should be absent
+```
+
+### Mixed-version window caveat
+
+During a rolling upgrade from a pre-cluster binary to a cluster-aware binary,
+old pods do not send the `X-Observer-Capability: cluster` header on inter-pod
+heartbeats. New pods receiving heartbeats from old pods may respond `426
+Upgrade Required`. This is expected and self-resolves once all pods have
+rolled. The public 8090 port is unaffected; only 8091 (internal) traffic sees
+426 during the window.
+
+### DaemonInfo.DaemonID is opaque
+
+Clients that call `GET /api/commander/daemons` receive a `DaemonInfo` struct
+containing a `daemon_id` field. In shared-registry mode the ID embeds a
+pod-prefix to ensure uniqueness across pods. Clients MUST treat `daemon_id`
+as an opaque string and MUST NOT parse or construct it from pod names or
+other cluster metadata. The format may change between releases.
