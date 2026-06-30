@@ -5,11 +5,24 @@ import (
 	"time"
 )
 
+// telemetryKey identifies a unique rate limit bucket across workspace, agent, and API key.
+type telemetryKey struct {
+	WorkspaceID   string
+	AgentID       string
+	TelemetryKeyID string
+}
+
+// telemetryAllower determines whether to allow a telemetry event.
+// Returns (true, nil) to proceed, (false, nil) to reject with 429, or (_, err) to reject with 503.
+type telemetryAllower interface {
+	allow(key telemetryKey, now time.Time) (bool, error)
+}
+
 type telemetryLimiter struct {
 	mu        sync.Mutex
 	perMinute int
 	burst     int
-	buckets   map[string]telemetryBucket
+	buckets   map[telemetryKey]telemetryBucket
 }
 
 type telemetryBucket struct {
@@ -30,11 +43,11 @@ func newTelemetryLimiter(perMinute, burst int) *telemetryLimiter {
 	return &telemetryLimiter{
 		perMinute: perMinute,
 		burst:     burst,
-		buckets:   map[string]telemetryBucket{},
+		buckets:   map[telemetryKey]telemetryBucket{},
 	}
 }
 
-func (l *telemetryLimiter) allow(key string, now time.Time) bool {
+func (l *telemetryLimiter) allow(key telemetryKey, now time.Time) (bool, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	b := l.buckets[key]
@@ -49,9 +62,9 @@ func (l *telemetryLimiter) allow(key string, now time.Time) bool {
 	}
 	if b.tokens < 1 {
 		l.buckets[key] = b
-		return false
+		return false, nil
 	}
 	b.tokens--
 	l.buckets[key] = b
-	return true
+	return true, nil
 }

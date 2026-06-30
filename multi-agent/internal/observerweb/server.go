@@ -142,7 +142,7 @@ type handler struct {
 	registerEnabled     bool
 	objects             objectstore.Store
 	objectProxyEnabled  bool
-	telemetryLimiter    *telemetryLimiter
+	telemetryLimiter    telemetryAllower
 	maxEventBodyBytes   int64
 	maxObjectProxyBytes int64
 }
@@ -200,10 +200,21 @@ func (h *handler) postEvent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "workspace or agent mismatch", http.StatusForbidden)
 		return
 	}
-	rateKey := agent.WorkspaceID + "\x00" + agent.ID + "\x00" + telemetryKeyID
-	if h.telemetryLimiter != nil && !h.telemetryLimiter.allow(rateKey, time.Now()) {
-		http.Error(w, "telemetry rate limit exceeded", http.StatusTooManyRequests)
-		return
+	if h.telemetryLimiter != nil {
+		key := telemetryKey{
+			WorkspaceID:    agent.WorkspaceID,
+			AgentID:        agent.ID,
+			TelemetryKeyID: telemetryKeyID,
+		}
+		allowed, err := h.telemetryLimiter.allow(key, time.Now())
+		if err != nil {
+			http.Error(w, "internal", http.StatusInternalServerError)
+			return
+		}
+		if !allowed {
+			http.Error(w, "telemetry rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
 	}
 	if err := h.recordExternalIdentity(ident); err != nil {
 		log.Printf("observer: RecordExternalIdentity error ws=%s id=%s: %v", ident.WorkspaceID, ident.AgentID, err)
