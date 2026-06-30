@@ -1,0 +1,4 @@
+=== RUN   TestGreet
+--- PASS: TestGreet (0.00s)
+PASS
+ok  	example.com/hello	0.001s

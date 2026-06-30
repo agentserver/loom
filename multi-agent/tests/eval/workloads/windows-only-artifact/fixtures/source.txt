@@ -1,0 +1,1 @@
+; placeholder Windows tool input; the real workload swaps this for a .c / .cs / .ps1 source.

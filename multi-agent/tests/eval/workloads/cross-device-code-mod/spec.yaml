@@ -1,0 +1,26 @@
+id: cross-device-code-mod
+description: "Apply a code change whose repo lives on a laptop while tests must run on a Linux server; model access is brokered via the ModelServer gateway."
+required_contexts:
+  - role: driver
+    platform: darwin
+    tools: ["git"]
+  - role: slave
+    platform: linux
+    tools: ["go", "pytest", "git"]
+  - role: model_gateway
+    platform: any
+    tools: ["modelserver"]
+allowed_contexts: ["*"]
+inputs:
+  read_artifacts:
+    - kind: repo
+      path: fixtures/repo
+outputs:
+  write_targets:
+    - kind: patch
+      path: ${workspace}/patch.diff
+    - kind: log
+      path: ${workspace}/test.log
+success_oracle: ./oracle.sh
+recovery_hint: "patch lives at ${workspace}/patch.diff; ${workspace}/test.log MUST be preserved for the recovery evaluator. Re-running should be idempotent w.r.t. the patch."
+timeout_seconds: 600

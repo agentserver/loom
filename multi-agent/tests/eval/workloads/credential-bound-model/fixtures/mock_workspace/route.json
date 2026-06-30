@@ -1,0 +1,5 @@
+{
+  "model_alias": "acme-bound-model-v1",
+  "proxy_context_id": "ctx-modelproxy-001",
+  "hops": ["driver", "model_proxy"]
+}

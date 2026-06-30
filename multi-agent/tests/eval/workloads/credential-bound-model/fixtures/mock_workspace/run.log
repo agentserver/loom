@@ -1,0 +1,4 @@
+2026-06-29T10:00:00Z driver send prompt → model_proxy
+2026-06-29T10:00:01Z model_proxy resolved alias=acme-bound-model-v1 via credential-store
+2026-06-29T10:00:02Z model_proxy → upstream OK (200, 17 tokens)
+2026-06-29T10:00:02Z driver received completion (5 words)

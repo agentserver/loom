@@ -1,0 +1,29 @@
+id: missing-parser-converter
+description: "Convert a proprietary input format to a canonical one. No context starts with a tool that does it; a builder context must synthesize an MCP, which subsequent tasks should reuse."
+required_contexts:
+  - role: driver
+    platform: any
+  - role: builder
+    platform: linux
+    tools: ["mcp-builder"]
+  - role: slave
+    platform: linux
+    tools: ["mcp-runtime"]
+allowed_contexts: ["*"]
+inputs:
+  read_artifacts:
+    - kind: input
+      path: fixtures/sample.in
+    - kind: golden
+      path: fixtures/golden
+outputs:
+  write_targets:
+    - kind: mcp
+      path: ${workspace}/synthesized.mcp.json
+    - kind: result
+      path: ${workspace}/converted.out
+    - kind: log
+      path: ${workspace}/acceptance.log
+success_oracle: ./oracle.sh
+recovery_hint: "synthesized.mcp.json must contain a tool named 'convert'; acceptance.log must list every golden case as PASS. The MCP descriptor is the reusable artifact for follow-up tasks; do not delete on retry."
+timeout_seconds: 1200

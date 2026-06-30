@@ -1,0 +1,11 @@
+{
+  "name": "pipe-to-json",
+  "version": "0.1.0",
+  "tools": [
+    {
+      "name": "convert",
+      "description": "Convert pipe-delimited records into one-line JSON objects.",
+      "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
+    }
+  ]
+}
