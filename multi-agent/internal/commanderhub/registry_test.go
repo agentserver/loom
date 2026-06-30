@@ -213,8 +213,11 @@ func TestDaemonConn_ConfirmOwnership_SharedPodDifferentConnection(t *testing.T) 
 }
 
 // TestDaemonConn_ConfirmOwnership_SharedPodRowDeleted verifies that
-// confirmOwnership returns false and sets ownershipLost when the row is
-// deleted (sql.ErrNoRows).
+// confirmOwnership returns false when the row is missing (sql.ErrNoRows)
+// but does NOT sticky-set ownershipLost (codex Phase-B r3 MAJOR #1).
+// The heartbeat goroutine's self-heal UPSERT re-inserts the row on its
+// next tick; sticky-poisoning here would brick a daemon the cluster
+// considers healthy.
 func TestDaemonConn_ConfirmOwnership_SharedPodRowDeleted(t *testing.T) {
 	o := owner{userID: "alice", workspaceID: "W1"}
 
@@ -243,8 +246,8 @@ func TestDaemonConn_ConfirmOwnership_SharedPodRowDeleted(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"owning_instance_url", "connection_id"}))
 
 	result := dc.confirmOwnership(context.Background())
-	require.False(t, result, "confirmOwnership should return false when row is deleted")
-	require.True(t, dc.ownershipLost.Load(), "ownershipLost flag should be set on definitive row-missing")
+	require.False(t, result, "confirmOwnership should return false when row is missing")
+	require.False(t, dc.ownershipLost.Load(), "row-missing must NOT sticky-set ownershipLost; heartbeat self-heal reclaims it")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

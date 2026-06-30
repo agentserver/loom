@@ -6,8 +6,6 @@ package commanderhub
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -91,13 +89,20 @@ func (dc *daemonConn) routingID() string {
 // dc.hub == nil || dc.hub.sharedReg == nil). In shared mode, checks the
 // sticky dc.ownershipLost flag, else issues a 500ms-bounded SELECT.
 //
-// Ownership-lost semantics (codex Phase-B r2 MAJOR #1):
-//   - Definitive loss (sibling pod owns row, or row missing entirely) →
-//     sticky-set ownershipLost AND return false. Future calls short-circuit.
-//   - Transient failure (caller ctx cancelled/timed out, PG transient
-//     error) → return false for THIS call, but DO NOT poison the connection.
-//     The next call retries. Otherwise a single cancelled HTTP request
-//     would brick the WS for the rest of its life.
+// Ownership-lost semantics (codex Phase-B r3 MAJOR #1):
+//
+// Sticky-set ownershipLost ONLY when the SELECT returns a row whose
+// (owning_instance_url, connection_id) doesn't match this conn — that
+// is, a sibling pod or a newer same-pod connection has DEFINITIVELY
+// taken over. The cluster can't reverse this; the WS must die.
+//
+// All other failure modes return false for THIS call only:
+//   - Caller ctx cancelled / query timeout / PG transient error: future
+//     calls retry.
+//   - sql.ErrNoRows (row missing): the row may have been swept after a
+//     PG outage; heartbeatUpsert self-heals on its next tick by
+//     re-inserting. If we sticky-set ownershipLost here, we'd permanently
+//     brick a daemon that the cluster considers healthy.
 //
 // On definitive loss, the heartbeat goroutine's separate force-close path
 // is responsible for tearing the WS down; confirmOwnership itself does NOT
@@ -122,13 +127,10 @@ func (dc *daemonConn) confirmOwnership(ctx context.Context) bool {
 		dc.owner.userID, dc.owner.workspaceID, dc.shortID)
 	var ownerURL, connID string
 	if err := row.Scan(&ownerURL, &connID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			// Definitive: row absent (sweep deleted, never inserted).
-			dc.ownershipLost.Store(true)
-			return false
-		}
-		// Transient: caller cancelled, query timeout, PG unreachable.
-		// Don't poison the conn — next call retries.
+		// All errors — including sql.ErrNoRows — are transient: don't
+		// poison. Heartbeat self-heal re-inserts the row on its next
+		// tick; an actually-displaced conn is signalled by a
+		// (mismatched url|conn) row below, NOT by row-missing.
 		return false
 	}
 
