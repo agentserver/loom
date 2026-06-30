@@ -19,7 +19,10 @@ store:
     dsn_env: OBSERVER_DSN
 
 object_store:
-  driver: filesystem
+  # memory: in-process blob store; satisfies the postgres-store requirement that
+  # objects backend is non-nil. NOT durable — fine for the multi-pod registry
+  # repro; switch to s3/MinIO for any longer-running dev work.
+  driver: memory
 
 identity:
   legacy_api_keys:
