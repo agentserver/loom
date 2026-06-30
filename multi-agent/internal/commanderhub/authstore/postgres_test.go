@@ -31,9 +31,9 @@ func TestPostgresStore_Conformance(t *testing.T) {
 	})
 }
 
-// TestPostgresStore_TablesExist verifies that the new shared-registry tables
-// are created with proper constraints.
-func TestPostgresStore_TablesExist(t *testing.T) {
+// TestPostgresStore_ClusterTablesCreated verifies that the new shared-registry tables
+// are created with proper constraints and primary key shapes.
+func TestPostgresStore_ClusterTablesCreated(t *testing.T) {
 	dsn := os.Getenv("OBSERVER_POSTGRES_TEST_DSN")
 	if dsn == "" {
 		t.Skip("set OBSERVER_POSTGRES_TEST_DSN to run")
@@ -43,45 +43,31 @@ func TestPostgresStore_TablesExist(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	require.NoError(t, MigratePostgres(db))
 
-	ctx := context.Background()
+	// commander_daemons PK must include short_id (NOT a per-connection
+	// daemon_id; that would lose ownership across reconnect).
+	var pkCols string
+	require.NoError(t, db.QueryRow(`
+		SELECT string_agg(a.attname, ',' ORDER BY array_position(i.indkey, a.attnum))
+		FROM pg_index i
+		JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+		WHERE i.indrelid = 'commander_daemons'::regclass AND i.indisprimary
+	`).Scan(&pkCols))
+	require.Equal(t, "user_id,workspace_id,short_id", pkCols)
 
-	// Verify commander_daemons table exists with primary key
-	var exists bool
-	err = db.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='commander_daemons')`).Scan(&exists)
-	require.NoError(t, err)
-	require.True(t, exists, "commander_daemons table should exist")
+	// commander_turns CHECK constraint enforces the state enum.
+	_, err = db.Exec(`
+		INSERT INTO commander_turns (user_id, workspace_id, short_id, session_id, state)
+		VALUES ('u', 'w', 's', 'sess', 'not_a_valid_state')
+	`)
+	require.Error(t, err, "expected CHECK constraint violation")
 
-	// Verify commander_daemons constraints
-	var constraintCount int
-	err = db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM information_schema.constraint_column_usage
-		 WHERE table_name='commander_daemons' AND constraint_name LIKE 'commander_daemons_%'`).Scan(&constraintCount)
-	require.NoError(t, err)
-	require.Greater(t, constraintCount, 0, "commander_daemons should have check constraints")
-
-	// Verify commander_turns table exists
-	err = db.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='commander_turns')`).Scan(&exists)
-	require.NoError(t, err)
-	require.True(t, exists, "commander_turns table should exist")
-
-	// Verify commander_turns has state enum constraint
-	err = db.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM information_schema.table_constraints
-		 WHERE table_name='commander_turns' AND constraint_name='commander_turns_state_enum')`).Scan(&exists)
-	require.NoError(t, err)
-	require.True(t, exists, "commander_turns should have state_enum constraint")
-
-	// Verify commander_forward_nonces table exists
-	err = db.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='commander_forward_nonces')`).Scan(&exists)
-	require.NoError(t, err)
-	require.True(t, exists, "commander_forward_nonces table should exist")
-
-	// Verify commander_telemetry_buckets table exists
-	err = db.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='commander_telemetry_buckets')`).Scan(&exists)
-	require.NoError(t, err)
-	require.True(t, exists, "commander_telemetry_buckets table should exist")
+	// commander_telemetry_buckets composite PK (no NUL bytes in PG text).
+	var btPK string
+	require.NoError(t, db.QueryRow(`
+		SELECT string_agg(a.attname, ',' ORDER BY array_position(i.indkey, a.attnum))
+		FROM pg_index i
+		JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+		WHERE i.indrelid = 'commander_telemetry_buckets'::regclass AND i.indisprimary
+	`).Scan(&btPK))
+	require.Equal(t, "workspace_id,agent_id,telemetry_key_id", btPK)
 }
