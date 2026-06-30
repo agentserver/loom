@@ -188,7 +188,10 @@ func TestPGTurnStore_GetExisting(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPGTurnStore_Rekey(t *testing.T) {
+// TestPGTurnStore_RekeyValidSQL: verifies that the rekey path issues a BEGIN
+// transaction and uses rekeyCheckSQL + rekeyUpdateSQL (never the old invalid
+// `UPDATE … ON CONFLICT DO NOTHING` form).
+func TestPGTurnStore_RekeyValidSQL(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
 	require.NoError(t, err)
 	defer db.Close()
@@ -201,9 +204,45 @@ func TestPGTurnStore_Rekey(t *testing.T) {
 		sessionID: "sess-real",
 	}
 
-	mock.ExpectExec(rekeyTurnSQL).
+	// Expect: BEGIN, check new key (not found → ErrNoRows), update old→new, COMMIT.
+	mock.ExpectBegin()
+	mock.ExpectQuery(rekeyCheckSQL).
+		WithArgs("alice", "W1", "agent-A", "sess-real").
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec(rekeyUpdateSQL).
 		WithArgs("alice", "W1", "agent-A", "sess-1", "alice", "W1", "agent-A", "sess-real").
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	require.NoError(t, s.rekey(context.Background(), oldKey, newKey))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestPGTurnStore_RekeyExistingTarget: when newKey already exists, rekey must
+// DELETE old (not UPDATE) and commit — leaving the existing newKey row intact.
+func TestPGTurnStore_RekeyExistingTarget(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newPGTurnStore(db)
+	oldKey := testTurnKey()
+	newKey := turnKey{
+		owner:     owner{userID: "alice", workspaceID: "W1"},
+		shortID:   "agent-A",
+		sessionID: "sess-real",
+	}
+
+	// Expect: BEGIN, check new key (found), delete old, COMMIT.
+	mock.ExpectBegin()
+	rows := sqlmock.NewRows([]string{"1"}).AddRow(1)
+	mock.ExpectQuery(rekeyCheckSQL).
+		WithArgs("alice", "W1", "agent-A", "sess-real").
+		WillReturnRows(rows)
+	mock.ExpectExec(rekeyDeleteOldSQL).
+		WithArgs("alice", "W1", "agent-A", "sess-1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
 
 	require.NoError(t, s.rekey(context.Background(), oldKey, newKey))
 	require.NoError(t, mock.ExpectationsWereMet())

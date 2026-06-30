@@ -86,8 +86,11 @@ func (h *Hub) sendCommandToLocal(ctx context.Context, dc *daemonConn, command st
 // outBuffer controls the output channel buffer size (16 for browser SSE; 256 for
 // the forwarding receiver path, which must not block the draining goroutine).
 //
+// shortID and sessionID are the turn-key components used by routeFrame to call
+// turns.updateFromEnvelope. Pass empty strings for non-turn commands.
+//
 // See sendCommandToLocal for caller responsibilities.
-func (h *Hub) sendCommandStreamToLocal(ctx context.Context, dc *daemonConn, command string, args json.RawMessage, outBuffer int) (<-chan commander.Envelope, error) {
+func (h *Hub) sendCommandStreamToLocal(ctx context.Context, dc *daemonConn, command string, args json.RawMessage, outBuffer int, shortID, sessionID string) (<-chan commander.Envelope, error) {
 	if !dc.confirmOwnership(ctx) {
 		return nil, ErrDaemonGone
 	}
@@ -97,7 +100,7 @@ func (h *Hub) sendCommandStreamToLocal(ctx context.Context, dc *daemonConn, comm
 	default:
 	}
 	cmdID := h.nextCmdID()
-	pe := dc.registerPending(cmdID, true)
+	pe := dc.registerPending(cmdID, true, shortID, sessionID, command)
 	ch := pe.ch
 	if err := dc.writeEnvelope(commandEnvelope(cmdID, command, args)); err != nil {
 		dc.removePending(cmdID)
@@ -171,9 +174,18 @@ func (h *Hub) SendCommand(ctx context.Context, o owner, daemonID, command string
 // Local path: daemonID found in localReg → sendCommandStreamToLocal.
 // Remote path (shared mode only): lookupRemote hit → forwardCli.stream.
 func (h *Hub) SendCommandStream(ctx context.Context, o owner, daemonID, command string, args json.RawMessage) (<-chan commander.Envelope, error) {
+	// Extract sessionID from args for session_turn commands so routeFrame can
+	// call turns.updateFromEnvelope with the correct turn key.
+	sessionID := ""
+	if command == "session_turn" {
+		var ta commander.SessionTurnArgs
+		if err := json.Unmarshal(args, &ta); err == nil {
+			sessionID = ta.ID
+		}
+	}
 	// Fast path: locally connected daemon.
 	if dc, ok := h.reg.lookup(o, daemonID); ok {
-		return h.sendCommandStreamToLocal(ctx, dc, command, args, 16)
+		return h.sendCommandStreamToLocal(ctx, dc, command, args, 16, daemonID, sessionID)
 	}
 	// Shared-mode remote path.
 	if h.sharedReg != nil && h.forwardCli != nil {

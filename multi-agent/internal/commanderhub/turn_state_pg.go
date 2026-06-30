@@ -22,7 +22,15 @@ const finishTurnSQL = `UPDATE commander_turns SET state=$5, updated_at=now() WHE
 
 const failTurnSQL = `UPDATE commander_turns SET state='error', message=$5, updated_at=now() WHERE user_id=$1 AND workspace_id=$2 AND short_id=$3 AND session_id=$4`
 
-const rekeyTurnSQL = `UPDATE commander_turns SET user_id=$5, workspace_id=$6, short_id=$7, session_id=$8 WHERE user_id=$1 AND workspace_id=$2 AND short_id=$3 AND session_id=$4 ON CONFLICT DO NOTHING`
+// rekeyCheckSQL checks whether the new key already has an entry (SELECT FOR UPDATE).
+// Used by the rekey transaction to decide whether to UPDATE old→new or DELETE old.
+const rekeyCheckSQL = `SELECT 1 FROM commander_turns WHERE user_id=$1 AND workspace_id=$2 AND short_id=$3 AND session_id=$4 FOR UPDATE`
+
+// rekeyUpdateSQL migrates an existing entry from oldKey to newKey.
+const rekeyUpdateSQL = `UPDATE commander_turns SET user_id=$5, workspace_id=$6, short_id=$7, session_id=$8 WHERE user_id=$1 AND workspace_id=$2 AND short_id=$3 AND session_id=$4`
+
+// rekeyDeleteOldSQL removes the old key when the new key already exists.
+const rekeyDeleteOldSQL = `DELETE FROM commander_turns WHERE user_id=$1 AND workspace_id=$2 AND short_id=$3 AND session_id=$4`
 
 const getTurnSQL = `SELECT state, awaiting_approval, active_worker, message, updated_at FROM commander_turns WHERE user_id=$1 AND workspace_id=$2 AND short_id=$3 AND session_id=$4`
 
@@ -92,16 +100,58 @@ func (s *pgTurnStore) fail(ctx context.Context, key turnKey, msg string) error {
 }
 
 // rekey migrates a turn entry from oldKey to newKey, used when the
-// fresh-session protocol returns the real backend session ID. When newKey
-// already exists, ON CONFLICT DO NOTHING preserves the existing entry.
+// fresh-session protocol returns the real backend session ID.
+//
+// Executed as a transaction with a SELECT FOR UPDATE to avoid the race between
+// checking and updating:
+//   - If newKey does NOT exist: UPDATE old→new.
+//   - If newKey already exists (parallel rekey or reconnect): DELETE old and
+//     leave the existing newKey row intact.
+//
+// The previous implementation used `UPDATE ... ON CONFLICT DO NOTHING` which is
+// not valid PostgreSQL syntax and would have produced a runtime syntax error.
 func (s *pgTurnStore) rekey(ctx context.Context, oldKey, newKey turnKey) error {
 	if oldKey == newKey {
 		return nil
 	}
-	_, err := s.db.ExecContext(ctx, rekeyTurnSQL,
-		oldKey.owner.userID, oldKey.owner.workspaceID, oldKey.shortID, oldKey.sessionID,
-		newKey.owner.userID, newKey.owner.workspaceID, newKey.shortID, newKey.sessionID)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Check whether the new key already exists (lock it to prevent concurrent creation).
+	var exists int
+	err = tx.QueryRowContext(ctx, rekeyCheckSQL,
+		newKey.owner.userID, newKey.owner.workspaceID, newKey.shortID, newKey.sessionID).
+		Scan(&exists)
+	newKeyExists := err == nil // got a row
+	if errors.Is(err, sql.ErrNoRows) {
+		newKeyExists = false
+		err = nil
+	}
+	if err != nil {
+		return err
+	}
+
+	if !newKeyExists {
+		// Safe to move: UPDATE old→new.
+		_, err = tx.ExecContext(ctx, rekeyUpdateSQL,
+			oldKey.owner.userID, oldKey.owner.workspaceID, oldKey.shortID, oldKey.sessionID,
+			newKey.owner.userID, newKey.owner.workspaceID, newKey.shortID, newKey.sessionID)
+	} else {
+		// New key already exists; drop the old placeholder row.
+		_, err = tx.ExecContext(ctx, rekeyDeleteOldSQL,
+			oldKey.owner.userID, oldKey.owner.workspaceID, oldKey.shortID, oldKey.sessionID)
+	}
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // get returns the current snapshot for key. On sql.ErrNoRows (key doesn't

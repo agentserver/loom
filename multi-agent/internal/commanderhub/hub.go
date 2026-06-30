@@ -323,10 +323,17 @@ func (dc *daemonConn) writeEnvelope(env commander.Envelope) error {
 // cancels while the buffer is full, the blocking terminal send must have an
 // escape hatch other than dc.done (which is closed only AFTER the read loop
 // returns — and the read loop is exactly the stuck goroutine).
+//
+// shortID, sessionID, command are populated at send time so that routeFrame
+// can synthesize the turnKey needed to call turns.updateFromEnvelope without
+// an extra round-trip through the daemon.  They are empty for non-turn commands.
 type pendingEntry struct {
 	ch        chan commander.Envelope // data channel; NEVER closed (GC reclaims it)
 	cancel    chan struct{}           // closed by removePending to unblock a stuck terminal send
-	streaming bool                    // streaming commands may terminate on status_code terminal events
+	streaming bool                   // streaming commands may terminate on status_code terminal events
+	shortID   string                 // populated for session_turn commands
+	sessionID string                 // populated for session_turn commands
+	command   string                 // populated for session_turn commands
 }
 
 // registerPending reserves a reply entry for cmdID and returns it. The data
@@ -335,11 +342,21 @@ type pendingEntry struct {
 // without a ch-close: terminal command_result/error frames for all commands,
 // terminal status events for streaming commands, disconnect via <-dc.done, and
 // cancel via <-ctx.Done().
-func (dc *daemonConn) registerPending(cmdID string, streaming bool) *pendingEntry {
+//
+// shortID, sessionID, command are optional: populate them when registering a
+// streaming turn command so routeFrame can call turns.updateFromEnvelope. Pass
+// empty strings for non-turn commands (list_sessions, get_session, etc.).
+func (dc *daemonConn) registerPending(cmdID string, streaming bool, turnMeta ...string) *pendingEntry {
 	pe := &pendingEntry{
 		ch:        make(chan commander.Envelope, 16),
 		cancel:    make(chan struct{}),
 		streaming: streaming,
+	}
+	// turnMeta is optional: [shortID, sessionID, command]
+	if len(turnMeta) == 3 {
+		pe.shortID = turnMeta[0]
+		pe.sessionID = turnMeta[1]
+		pe.command = turnMeta[2]
 	}
 	dc.pendingMu.Lock()
 	dc.pending[cmdID] = pe
@@ -410,6 +427,19 @@ func (dc *daemonConn) routeFrame(env commander.Envelope) {
 	dc.pendingMu.Unlock()
 	if pe == nil {
 		return // unknown id (stale/late, or removed by a cancelling consumer): drop
+	}
+	// If this pending entry carries turn metadata (session_turn path), update the
+	// persistent turn store so state is visible cross-pod. This is a fire-and-
+	// forget best-effort call: an error here must not block the read loop.
+	if pe.command != "" && dc.hub != nil {
+		key := turnKey{
+			owner:     dc.owner,
+			shortID:   pe.shortID,
+			sessionID: pe.sessionID,
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = dc.hub.turns.updateFromEnvelope(ctx, key, pe.command, env)
+		cancel()
 	}
 	terminal := isTerminalEnvelope(env) || (pe.streaming && isTerminalStatusEnvelope(env))
 	if !sendOrDrop(pe.ch, env, terminal, pe.cancel, dc.done) {

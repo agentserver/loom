@@ -203,7 +203,16 @@ func (h *Hub) forwardHandler(w http.ResponseWriter, r *http.Request) {
 	innerCtx, innerCancel := context.WithCancel(ctx)
 	defer innerCancel()
 
-	envCh, err := h.sendCommandStreamToLocal(innerCtx, dc, wire.Command, wire.Args, forwardStreamBuf)
+	// Extract sessionID from args for session_turn so the receiving pod can also
+	// update the shared turn store via routeFrame → turns.updateFromEnvelope.
+	fwdSessionID := ""
+	if wire.Command == "session_turn" {
+		var ta commander.SessionTurnArgs
+		if err := json.Unmarshal(wire.Args, &ta); err == nil {
+			fwdSessionID = ta.ID
+		}
+	}
+	envCh, err := h.sendCommandStreamToLocal(innerCtx, dc, wire.Command, wire.Args, forwardStreamBuf, wire.DaemonID, fwdSessionID)
 	if err != nil {
 		if errors.Is(err, ErrDaemonGone) {
 			http.Error(w, "daemon disconnected", http.StatusBadGateway)

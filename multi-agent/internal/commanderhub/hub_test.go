@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -440,4 +441,73 @@ func TestNextCmdID_SharedMode_PodPrefix(t *testing.T) {
 	require.Len(t, parts2, 2)
 	require.Equal(t, podHash, parts2[0], "pod hash should be consistent")
 	require.Equal(t, "2", parts2[1], "second sequence should be 2")
+}
+
+// TestHub_RouteFrame_UpdatesTurnsBackend verifies that routeFrame calls
+// turns.updateFromEnvelope when the pending entry carries session_turn metadata.
+// This is the MAJOR-5 fix: envelopes must reach the cross-pod turn store.
+func TestHub_RouteFrame_UpdatesTurnsBackend(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{
+		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
+	}}
+	hub := NewHub(resolver)
+
+	// Swap in a spy turn store that records updateFromEnvelope calls.
+	spy := &spyTurnStore{}
+	hub.turns = spy
+
+	o := owner{userID: "alice", workspaceID: "W1"}
+	dc := &daemonConn{
+		id:      "dc1",
+		shortID: "agent-A",
+		owner:   o,
+		pending: make(map[string]*pendingEntry),
+		done:    make(chan struct{}),
+		hub:     hub,
+	}
+
+	// Register a pending entry with session_turn metadata.
+	pe := dc.registerPending("cmd-1", true, "agent-A", "sess-1", "session_turn")
+	consumer := pe.ch
+
+	// Route a status=answering event.
+	ep, _ := json.Marshal(commander.EventPayload{EventKind: "status", StatusCode: "answering"})
+	env := commander.Envelope{Type: "event", ID: "cmd-1", Payload: ep}
+	dc.routeFrame(env)
+
+	// Consume the frame so the channel doesn't block.
+	select {
+	case <-consumer:
+	case <-time.After(time.Second):
+		t.Fatal("no frame delivered to consumer")
+	}
+
+	// The spy must have seen at least one updateFromEnvelope call with the correct key.
+	require.Eventually(t, func() bool {
+		spy.mu.Lock()
+		defer spy.mu.Unlock()
+		return spy.updateCount > 0
+	}, time.Second, 10*time.Millisecond, "updateFromEnvelope must be called")
+
+	spy.mu.Lock()
+	defer spy.mu.Unlock()
+	require.Equal(t, "alice", spy.lastKey.owner.userID)
+	require.Equal(t, "agent-A", spy.lastKey.shortID)
+	require.Equal(t, "sess-1", spy.lastKey.sessionID)
+}
+
+// spyTurnStore records updateFromEnvelope calls for TestHub_RouteFrame_UpdatesTurnsBackend.
+type spyTurnStore struct {
+	mu          sync.Mutex
+	updateCount int
+	lastKey     turnKey
+	memTurnStore
+}
+
+func (s *spyTurnStore) updateFromEnvelope(ctx context.Context, key turnKey, command string, env commander.Envelope) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.updateCount++
+	s.lastKey = key
+	return nil
 }
