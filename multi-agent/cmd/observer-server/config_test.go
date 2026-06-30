@@ -389,6 +389,74 @@ cluster:
 		"direct advertise_url must take precedence over advertise_url_env")
 }
 
+// --- Finding 3: revocation_channel struct field ---
+
+// TestLoadConfig_RevocationChannel verifies that the revocation_channel field
+// is accepted by AgentserverIdentityConfig and that the three meaningful values
+// ("", "postgres", malformed) are handled correctly.
+func TestLoadConfig_RevocationChannel(t *testing.T) {
+	// "" (omitted) — auto; loadConfig must not error and field is empty.
+	cfg := loadConfigFromString(t, `
+listen_addr: ":8090"
+store:
+  driver: postgres
+  postgres:
+    dsn_env: OBSERVER_DATABASE_URL
+identity:
+  legacy_api_keys:
+    enabled: true
+  agentserver:
+    enabled: false
+api_keys:
+  - id: ak-default
+    key: ak_secret
+`)
+	require.Equal(t, "", cfg.Identity.Agentserver.RevocationChannel,
+		"omitted revocation_channel must be empty string (auto)")
+
+	// "postgres" — explicit opt-in; KnownFields(true) must accept the field.
+	cfg2 := loadConfigFromString(t, `
+listen_addr: ":8090"
+store:
+  driver: postgres
+  postgres:
+    dsn_env: OBSERVER_DATABASE_URL
+identity:
+  legacy_api_keys:
+    enabled: true
+  agentserver:
+    enabled: true
+    url: https://agentserver.example.com
+    revocation_channel: "postgres"
+api_keys:
+  - id: ak-default
+    key: ak_secret
+`)
+	require.Equal(t, "postgres", cfg2.Identity.Agentserver.RevocationChannel,
+		"revocation_channel: postgres must be preserved")
+
+	// "" explicit empty string — auto fallback; KnownFields must accept the field.
+	cfg3 := loadConfigFromString(t, `
+listen_addr: ":8090"
+store:
+  driver: postgres
+  postgres:
+    dsn_env: OBSERVER_DATABASE_URL
+identity:
+  legacy_api_keys:
+    enabled: true
+  agentserver:
+    enabled: true
+    url: https://agentserver.example.com
+    revocation_channel: ""
+api_keys:
+  - id: ak-default
+    key: ak_secret
+`)
+	require.Equal(t, "", cfg3.Identity.Agentserver.RevocationChannel,
+		"explicit empty string revocation_channel must be preserved (auto)")
+}
+
 // TestLoadConfig_RenderedChartYAML ensures the binary's ClusterConfig and
 // AgentserverIdentityConfig accept the exact YAML fields the Helm chart renders
 // into the ConfigMap (observer.nonsecret.yaml). This catches silent chart/binary

@@ -146,13 +146,24 @@ type IdentityConfig struct {
 }
 
 type AgentserverIdentityConfig struct {
-	Enabled        bool           `yaml:"enabled"`
-	URL            string         `yaml:"url"`
-	FreshTTL       durationConfig `yaml:"fresh_ttl"`
-	StaleGrace     durationConfig `yaml:"stale_grace"`
-	RequestTimeout durationConfig `yaml:"request_timeout"`
-	CacheCapacity  int            `yaml:"cache_capacity"`
-	StartupProbe   bool           `yaml:"startup_probe"`
+	Enabled           bool           `yaml:"enabled"`
+	URL               string         `yaml:"url"`
+	FreshTTL          durationConfig `yaml:"fresh_ttl"`
+	StaleGrace        durationConfig `yaml:"stale_grace"`
+	RequestTimeout    durationConfig `yaml:"request_timeout"`
+	CacheCapacity     int            `yaml:"cache_capacity"`
+	StartupProbe      bool           `yaml:"startup_probe"`
+	// RevocationChannel controls which cross-pod revocation backend to use.
+	// Accepted values:
+	//   ""         — "auto": attach PG revocation channel when store.driver=postgres
+	//                (same as the pre-v19 behaviour; safe for single-pod deployments)
+	//   "postgres" — always attach the PG revocation channel (explicit opt-in;
+	//                required when running multi-pod without cluster.enabled but with
+	//                a shared Postgres store)
+	// The chart emits "postgres" when revocationChannel=enabled, and omits the
+	// field (auto) when revocationChannel=auto, so existing single-pod configs that
+	// do not set the field are unaffected.
+	RevocationChannel string `yaml:"revocation_channel,omitempty"`
 }
 
 type LegacyAPIKeysConfig struct {
@@ -925,9 +936,13 @@ func buildIdentityResolver(cfg *Config, st observerstore.ManagedStore) (identity
 			Timeout: cfg.Identity.Agentserver.RequestTimeout.Duration(),
 		})
 		var cacheOpts []identity.Option
-		// In postgres (multi-pod) mode, attach a cross-pod revocation channel so
-		// token invalidations propagate to all pods without waiting for TTL expiry.
-		if cfg.Store.Driver == "postgres" {
+		// Attach a cross-pod revocation channel so token invalidations propagate
+		// to all pods without waiting for TTL expiry.
+		// revocation_channel="postgres" (explicit): always use PG channel.
+		// revocation_channel="" (auto):             fall back to store-driver heuristic.
+		rc := cfg.Identity.Agentserver.RevocationChannel
+		usePGRevocation := rc == "postgres" || (rc == "" && cfg.Store.Driver == "postgres")
+		if usePGRevocation {
 			cacheOpts = append(cacheOpts,
 				identity.WithRevocationChannel(identity.NewPGRevocationChannel(st.DB())),
 			)
