@@ -2272,7 +2272,7 @@ func (s *sharedRegistry) runHeartbeatOnce(ctx context.Context, dc *daemonConn) b
 	switch {
 	case err != nil:
 		// Transient PG error — rate-limited log; caller continues looping.
-		n := atomic.AddInt64(&dc.heartbeatErrCount, 1)
+		n := dc.heartbeatErrCount.Add(1)
 		if n%5 == 1 {
 			log.Printf("commanderhub: heartbeatUpsert short_id=%s conn_id=%s pod=%s err=%v",
 				dc.shortID, dc.id, s.advertiseURL, err)
@@ -2289,7 +2289,7 @@ func (s *sharedRegistry) runHeartbeatOnce(ctx context.Context, dc *daemonConn) b
 		_ = dc.conn.Close()
 		return false
 	default:
-		atomic.StoreInt64(&dc.heartbeatErrCount, 0)
+		dc.heartbeatErrCount.Store(0)
 		return true
 	}
 }
