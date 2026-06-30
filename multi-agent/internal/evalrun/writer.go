@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Writer is the per-run sink for D1 evaluation rows. Implementations
@@ -95,11 +97,19 @@ const insertSQL = `INSERT INTO runs (
 // Returns ErrSchemaDrift (wrapped) if the runs table is absent or its
 // column descriptors do not match the expected 24-column layout.
 func NewSQLWriter(db *sql.DB) (Writer, error) {
-	if err := checkSchemaDrift(db); err != nil {
+	if err := CheckSchema(db); err != nil {
 		return nil, err
 	}
 	return &SQLWriter{db: db}, nil
 }
+
+// CheckSchema runs the schema-drift guard against db's runs table
+// without constructing a Writer. Useful for read-only consumers
+// (e.g. the evalrun-export CLI) that need the same up-front
+// validation guarantee — without that, a CLI reading a drifted DB
+// would crash mid-stream with a low-level driver error rather than
+// refuse to start.
+func CheckSchema(db *sql.DB) error { return checkSchemaDrift(db) }
 
 // Insert validates s, then either writes one row or (when
 // DisableTelemetry is true) logs the drop and returns nil. Validation
@@ -163,11 +173,25 @@ func (w *SQLWriter) Insert(ctx context.Context, s Schema) error {
 // Close is a no-op; the caller owns the *sql.DB lifetime.
 func (w *SQLWriter) Close() error { return nil }
 
-// formatRFC3339NanoUTC normalises t to UTC and serialises as
-// RFC3339Nano. UTC normalisation is mandatory: storing local-zoned
-// times would make later range comparisons subtly wrong.
+// formatRFC3339NanoUTC normalises t to UTC and serialises with a
+// FIXED 9-digit nanosecond field. Two reasons we don't use
+// time.RFC3339Nano:
+//  1. RFC3339Nano truncates trailing-zero nanoseconds, producing
+//     mixed forms like "...12:00:00Z" and "...12:00:00.5Z" that
+//     SORT INCONSISTENTLY as lexicographic strings (the temporally
+//     LATER ".5Z" string actually sorts BEFORE the integer-second
+//     "Z" form because '.' < 'Z' in ASCII). Downstream SQL
+//     `ORDER BY start_time` and `BETWEEN` would silently mis-bucket
+//     rows whose sole difference is fractional precision.
+//  2. A fixed-width string makes equality + range scans behave
+//     identically to chronological order, eliminating an entire
+//     class of off-by-one bugs in metric extraction.
+//
+// UTC normalisation is mandatory: storing local-zoned times would
+// make range comparisons subtly wrong across DST runs even with
+// fixed precision.
 func formatRFC3339NanoUTC(t time.Time) string {
-	return t.UTC().Format(time.RFC3339Nano)
+	return t.UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
 }
 
 // encodeArtifactHashes serialises s as a JSON array of strings. A
@@ -237,17 +261,34 @@ func (s Schema) validate() error {
 		if len(fc.val) > maxFieldBytes {
 			return fmt.Errorf("evalrun: %s length %d > %d: %w", fc.name, len(fc.val), maxFieldBytes, ErrOversizedField)
 		}
+		// UTF-8 validity ensures CSV / JSONL exports stay symmetric
+		// (encoding/csv preserves raw bytes; encoding/json silently
+		// substitutes U+FFFD). Rejecting at write time means the two
+		// exports always agree byte-for-byte on string content.
+		if !utf8.ValidString(fc.val) {
+			return fmt.Errorf("evalrun: %s contains invalid UTF-8: %w", fc.name, ErrInvalidUTF8)
+		}
 	}
 	if _, ok := validOracleResults[s.SuccessOracleResult]; !ok {
 		return fmt.Errorf("evalrun: success_oracle_result=%q: %w", s.SuccessOracleResult, ErrInvalidOracleResult)
 	}
-	// failure_category invariant: must be empty iff result == "pass".
-	// Catches the operator-intent mismatch where a pass-row carries a
-	// stale failure_category (or vice versa, a fail-row was reported
-	// without a category) — both would skew downstream metric buckets.
+	// failure_category: enforces two coupled invariants.
+	//   1. result/category compatibility: empty iff result == "pass".
+	//      A pass-row must NOT carry a stale category; a non-pass row
+	//      MUST carry one (use "unknown" / FailUnknown if the failure
+	//      site is genuinely unclassifiable).
+	//   2. taxonomy membership: when non-empty, the value must be one
+	//      of the 11 stable observerstore.AllCategories() entries or
+	//      the FailUnknown sentinel "unknown". Free-form strings like
+	//      "FailNetwork" silently land in "other" buckets downstream
+	//      and skew per-category aggregates in D4/D5/D8.
 	if (s.SuccessOracleResult == "pass") != (s.FailureCategory == "") {
-		return fmt.Errorf("evalrun: result=%q + failure_category=%q invariant violated (must be empty iff pass): %w",
-			s.SuccessOracleResult, s.FailureCategory, ErrFailureCategoryOnPass)
+		return fmt.Errorf("evalrun: result=%q + failure_category=%q invariant violated (must be empty iff pass; use \"unknown\" for unclassifiable fail/timeout): %w",
+			s.SuccessOracleResult, s.FailureCategory, ErrInvalidFailureCategory)
+	}
+	if !isAcceptedFailureCategory(s.FailureCategory) {
+		return fmt.Errorf("evalrun: failure_category=%q is not in observerstore.AllCategories() (and not the \"unknown\" sentinel): %w",
+			s.FailureCategory, ErrInvalidFailureCategory)
 	}
 	if s.StartTime.IsZero() {
 		return fmt.Errorf("evalrun: start_time is zero: %w", ErrInvalidTime)
@@ -385,12 +426,34 @@ func checkSchemaDrift(db *sql.DB) error {
 	if !createSQL.Valid {
 		return fmt.Errorf("%w: runs table CREATE SQL missing from sqlite_master", ErrSchemaDrift)
 	}
-	// Normalise whitespace so a re-indented schema doesn't false-positive.
-	normalised := strings.Join(strings.Fields(createSQL.String), " ")
+	// Strip ALL whitespace from both haystack and needles before
+	// substring match. `strings.Fields` only collapses runs to a
+	// single space, so semantically-identical reformatting like
+	// "CHECK ( success_oracle_result IN ('pass', 'fail', 'timeout') )"
+	// (extra spaces inside parens, after commas) would false-positive
+	// against the unspaced needle. Stripping all whitespace makes the
+	// match invariant to any reformatting that doesn't change tokens.
+	gotStripped := stripASCIIWhitespace(createSQL.String)
 	for _, want := range expectedCheckSubstrings {
-		if !strings.Contains(normalised, want) {
+		wantStripped := stripASCIIWhitespace(want)
+		if !strings.Contains(gotStripped, wantStripped) {
 			return fmt.Errorf("%w: missing CHECK clause %q in runs CREATE SQL", ErrSchemaDrift, want)
 		}
 	}
 	return nil
+}
+
+// stripASCIIWhitespace drops every Unicode whitespace rune. Used by
+// the CHECK-clause drift cross-check so semantically-identical DDL
+// reformatting (extra spaces around parens / commas, tabs vs spaces,
+// newlines) does not trip a false-positive ErrSchemaDrift.
+func stripASCIIWhitespace(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if !unicode.IsSpace(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }

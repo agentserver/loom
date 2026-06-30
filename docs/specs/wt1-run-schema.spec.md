@@ -137,7 +137,7 @@ type Schema struct {
     // 19. 08:274
     SuccessOracleResult    string    // CHECK constraint: "pass" | "fail" | "timeout"
     // 20. 08:275
-    FailureCategory        string    // 11-class D4 constant; "" iff result == "pass"
+    FailureCategory        string    // observerstore.AllCategories() value OR "unknown" sentinel; "" iff result == "pass"
     // 21. 08:276
     HumanInterventionCount int       // count of humanloop pauses surfaced to the operator
     // 22. 08:277
@@ -176,7 +176,7 @@ var (
     ErrOversizedField          = errors.New("evalrun: field exceeds 8 KiB limit")
     ErrInvalidOracleResult     = errors.New("evalrun: success_oracle_result must be pass|fail|timeout")
     ErrInvalidTime             = errors.New("evalrun: start_time/end_time must be non-zero")
-    ErrSchemaDrift             = errors.New("evalrun: runs table schema does not match expected 24-column descriptor")
+    ErrSchemaDrift             = errors.New("evalrun: runs table schema does not match expected layout")
 )
 ```
 

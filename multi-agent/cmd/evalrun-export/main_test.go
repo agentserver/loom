@@ -27,10 +27,6 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	// os.Exit skips deferred functions, so the temp dir cleanup MUST
-	// happen explicitly between m.Run() and os.Exit. The defer is kept
-	// belt-and-braces in case a future edit moves the os.Exit call.
-	defer os.RemoveAll(tmp)
 	binPath = filepath.Join(tmp, "evalrun-export")
 	cmd := exec.Command("go", "build", "-o", binPath, ".")
 	cmd.Stderr = os.Stderr
@@ -40,6 +36,10 @@ func TestMain(m *testing.M) {
 		panic("go build evalrun-export: " + err.Error())
 	}
 	rc := m.Run()
+	// os.Exit skips deferred functions; the cleanup is therefore
+	// explicit on every exit path (build-failure + happy). No defer
+	// fallback — adding one would just hide it from being moved when
+	// the function evolves.
 	_ = os.RemoveAll(tmp)
 	os.Exit(rc)
 }
@@ -233,6 +233,34 @@ func TestExportCSV_FlagBeatsEnv(t *testing.T) {
 	}
 	if _, err := r.Read(); err != io.EOF {
 		t.Fatalf("expected EOF after header (--db should win), got err=%v", err)
+	}
+}
+
+// Test 18b1: drifted-schema DB → exit 1 with schema check error before
+// any rows are read. Without this guard a NULL human_intervention_count
+// would crash export mid-stream with a low-level driver message.
+func TestExportCSV_DriftedSchema_Exit1AtStart(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "obs.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Apply real schema then drop the CHECK by ALTER-via-rebuild.
+	ddl, _ := os.ReadFile(schemaSQLPath(t))
+	if _, err := db.Exec(string(ddl)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("ALTER TABLE runs ADD COLUMN unexpected_col TEXT"); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	_, stderr, exit := runCmd(t, nil, "--format=csv", "--db", path)
+	if exit != 1 {
+		t.Fatalf("drifted schema must exit 1, got %d (stderr=%q)", exit, stderr)
+	}
+	if !strings.Contains(stderr, "schema check") {
+		t.Fatalf("stderr must mention schema check: %q", stderr)
 	}
 }
 
@@ -522,14 +550,20 @@ func TestExportCSV_OutFile(t *testing.T) {
 	st, _ := os.Stat(outPath)
 	mode := st.Mode().Perm()
 	// Asserting the exact 0644 bit pattern is umask-dependent: hardened
-	// hosts with umask 0027/0077 produce 0640/0600. Check the property
-	// we actually care about: owner has read+write, and no exec bits
-	// anywhere. The 0644-vs-umask interplay is OS policy, not ours.
+	// hosts with umask 0027/0077 produce 0640/0600. Instead assert the
+	// security-relevant properties: owner has read+write, no exec bits
+	// anywhere, AND no group/other WRITE (would let a co-located
+	// attacker corrupt the export between flush and the operator
+	// reading it). Group/other READ is left to umask — exposing read
+	// is a host-policy call, not ours.
 	if mode&0600 != 0600 {
 		t.Fatalf("filemode %v missing owner rw", mode)
 	}
 	if mode&0111 != 0 {
 		t.Fatalf("filemode %v should not have exec bits", mode)
+	}
+	if mode&0022 != 0 {
+		t.Fatalf("filemode %v must not grant group/other write", mode)
 	}
 }
 

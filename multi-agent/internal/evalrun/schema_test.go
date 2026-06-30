@@ -7,6 +7,7 @@ import (
 	"log"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -91,25 +92,65 @@ func TestRegisteredOnAblation(t *testing.T) {
 	if !found {
 		t.Fatalf("ablation.Default.List() does not contain NoObserver; got %v", ablation.Default.List())
 	}
-	// Successful init implies InitError() == nil for the test binary.
-	if err := InitError(); err != nil {
-		t.Fatalf("InitError() should be nil after a clean init, got %v", err)
+	// Successful init implies the sticky-error sentinel is nil.
+	if initRegistrationErr != nil {
+		t.Fatalf("initRegistrationErr should be nil after a clean init, got %v", initRegistrationErr)
 	}
 }
 
-// Test 15a: TestRegistrationCollision_DetectableByOtherPackage.
-// Mirrors the failure mode the fresh-review flagged: if a second
-// package competes for the same FlagName, ablation.Default rejects the
-// second Register. We can't replay package init in-process, but we can
-// prove the registry surfaces ErrAlreadyRegistered, which is what
-// initRegistrationErr would capture if a colliding init had run first.
-func TestRegistrationCollision_DetectableByOtherPackage(t *testing.T) {
-	// Register a fresh target into Default for NoObserver — must
-	// collide with this package's existing registration.
-	var competing bool
-	err := ablation.Default.Register(ablation.NoObserver, &competing)
-	if !errors.Is(err, ablation.ErrAlreadyRegistered) {
-		t.Fatalf("expected ErrAlreadyRegistered for second registration, got %v", err)
+// Test 15a: TestRegistrationCollision_RecoveryPathLogsOnFirstInsert.
+// Exercises the failure mode spec §7(c) names directly: init() lost
+// the race so initRegistrationErr is non-nil, DisableTelemetry is wired
+// to nobody, and the operator runs --ablation NoObserver in the dark.
+// Insert MUST emit the loud WARNING via initWarnOnce so a stderr log
+// makes the divergence observable. Asserts: (1) WARNING substring in
+// log buffer on first Insert; (2) WARNING fires only ONCE across
+// repeated Inserts (the sync.Once contract); (3) row still writes
+// successfully (the WARNING is informational, not blocking).
+func TestRegistrationCollision_RecoveryPathLogsOnFirstInsert(t *testing.T) {
+	// Save + restore package-private state. The test is in the same
+	// package, so we can poke initRegistrationErr and reset
+	// initWarnOnce via a fresh sync.Once instance; without these
+	// resets the test would be order-dependent on test shuffling.
+	// sync.Once can't be copied (vet enforces noCopy), so we swap
+	// pointer-style: assign a new zero-value Once and restore via a
+	// second new Once at cleanup (the prior Once may already have
+	// fired and is unrecoverable — what matters is that subsequent
+	// test runs see a not-yet-fired Once).
+	prevErr := initRegistrationErr
+	prevOnce := initWarnOnce
+	prevOut := log.Writer()
+	prevFlags := log.Flags()
+	buf := &bytes.Buffer{}
+	log.SetOutput(buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		initRegistrationErr = prevErr
+		initWarnOnce = prevOnce
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
+	initRegistrationErr = errors.New("simulated collision")
+	initWarnOnce = &sync.Once{}
+
+	w, _ := newTestWriter(t)
+	s := sampleSchema()
+	s.RunID = "run-collision-warn-01"
+	if err := w.Insert(context.Background(), s); err != nil {
+		t.Fatalf("Insert under simulated collision must still succeed, got %v", err)
+	}
+	first := buf.String()
+	if !strings.Contains(first, "WARNING") || !strings.Contains(first, "NoObserver") {
+		t.Fatalf("first Insert under collision must log WARNING about NoObserver; got %q", first)
+	}
+	// Second Insert: the WARNING must NOT repeat (sync.Once).
+	s.RunID = "run-collision-warn-02"
+	if err := w.Insert(context.Background(), s); err != nil {
+		t.Fatalf("second Insert: %v", err)
+	}
+	second := strings.TrimPrefix(buf.String(), first)
+	if strings.Contains(second, "WARNING") {
+		t.Fatalf("second Insert must NOT repeat the WARNING (sync.Once violated); got %q", second)
 	}
 }
 
@@ -135,17 +176,18 @@ func TestInsert_RejectsTooManyArtifactHashes(t *testing.T) {
 	}
 }
 
-// Test 6a: failure_category invariant — must be empty iff result==pass.
-func TestInsert_RejectsFailureCategoryPassMismatch(t *testing.T) {
+// Test 6a: failure_category invariants. Covers both the pass/category
+// compatibility rule AND the 11-class taxonomy membership rule.
+func TestInsert_RejectsBadFailureCategory(t *testing.T) {
 	w, _ := newTestWriter(t)
 	t.Run("pass_with_category", func(t *testing.T) {
 		s := sampleSchema()
 		s.RunID = "run-fc-pass-with-cat"
 		s.SuccessOracleResult = "pass"
-		s.FailureCategory = "FailNetwork"
+		s.FailureCategory = "slave_disconnect"
 		err := w.Insert(context.Background(), s)
-		if !errors.Is(err, ErrFailureCategoryOnPass) {
-			t.Fatalf("want ErrFailureCategoryOnPass, got %v", err)
+		if !errors.Is(err, ErrInvalidFailureCategory) {
+			t.Fatalf("want ErrInvalidFailureCategory, got %v", err)
 		}
 	})
 	t.Run("fail_without_category", func(t *testing.T) {
@@ -154,19 +196,41 @@ func TestInsert_RejectsFailureCategoryPassMismatch(t *testing.T) {
 		s.SuccessOracleResult = "fail"
 		s.FailureCategory = ""
 		err := w.Insert(context.Background(), s)
-		if !errors.Is(err, ErrFailureCategoryOnPass) {
-			t.Fatalf("want ErrFailureCategoryOnPass (same sentinel covers the inverse), got %v", err)
+		if !errors.Is(err, ErrInvalidFailureCategory) {
+			t.Fatalf("want ErrInvalidFailureCategory (same sentinel covers the inverse), got %v", err)
 		}
 	})
-	t.Run("fail_with_category_ok", func(t *testing.T) {
+	t.Run("timeout_without_category", func(t *testing.T) {
 		s := sampleSchema()
-		s.RunID = "run-fc-fail-with-cat"
-		s.SuccessOracleResult = "fail"
-		s.FailureCategory = "FailNetwork"
-		if err := w.Insert(context.Background(), s); err != nil {
-			t.Fatalf("fail+category must be accepted, got %v", err)
+		s.RunID = "run-fc-timeout-no-cat"
+		s.SuccessOracleResult = "timeout"
+		s.FailureCategory = ""
+		err := w.Insert(context.Background(), s)
+		if !errors.Is(err, ErrInvalidFailureCategory) {
+			t.Fatalf("want ErrInvalidFailureCategory; timeout requires a category (use \"unknown\" if unclassifiable), got %v", err)
 		}
 	})
+	t.Run("fail_with_unknown_taxonomy", func(t *testing.T) {
+		s := sampleSchema()
+		s.RunID = "run-fc-fail-bogus"
+		s.SuccessOracleResult = "fail"
+		s.FailureCategory = "FailNetwork" // not in observerstore.AllCategories()
+		err := w.Insert(context.Background(), s)
+		if !errors.Is(err, ErrInvalidFailureCategory) {
+			t.Fatalf("want ErrInvalidFailureCategory for off-taxonomy value, got %v", err)
+		}
+	})
+	t.Run("fail_with_uppercase_taxonomy", func(t *testing.T) {
+		s := sampleSchema()
+		s.RunID = "run-fc-fail-upper"
+		s.SuccessOracleResult = "fail"
+		s.FailureCategory = "TIMEOUT" // wrong case
+		err := w.Insert(context.Background(), s)
+		if !errors.Is(err, ErrInvalidFailureCategory) {
+			t.Fatalf("want ErrInvalidFailureCategory for case-mismatch, got %v", err)
+		}
+	})
+	// Accepted cases.
 	t.Run("pass_without_category_ok", func(t *testing.T) {
 		s := sampleSchema()
 		s.RunID = "run-fc-pass-no-cat"
@@ -176,6 +240,113 @@ func TestInsert_RejectsFailureCategoryPassMismatch(t *testing.T) {
 			t.Fatalf("pass+empty must be accepted, got %v", err)
 		}
 	})
+	t.Run("fail_with_taxonomy_category_ok", func(t *testing.T) {
+		s := sampleSchema()
+		s.RunID = "run-fc-fail-with-cat"
+		s.SuccessOracleResult = "fail"
+		s.FailureCategory = "slave_disconnect"
+		if err := w.Insert(context.Background(), s); err != nil {
+			t.Fatalf("fail+slave_disconnect must be accepted, got %v", err)
+		}
+	})
+	t.Run("timeout_with_unknown_sentinel_ok", func(t *testing.T) {
+		s := sampleSchema()
+		s.RunID = "run-fc-timeout-unknown"
+		s.SuccessOracleResult = "timeout"
+		s.FailureCategory = "unknown" // FailUnknown escape hatch
+		if err := w.Insert(context.Background(), s); err != nil {
+			t.Fatalf("timeout+unknown must be accepted, got %v", err)
+		}
+	})
+	t.Run("fail_with_unknown_sentinel_ok", func(t *testing.T) {
+		s := sampleSchema()
+		s.RunID = "run-fc-fail-unknown"
+		s.SuccessOracleResult = "fail"
+		s.FailureCategory = "unknown"
+		if err := w.Insert(context.Background(), s); err != nil {
+			t.Fatalf("fail+unknown must be accepted, got %v", err)
+		}
+	})
+}
+
+// Test 6b: invalid UTF-8 in any string field is rejected.
+func TestInsert_RejectsInvalidUTF8(t *testing.T) {
+	w, _ := newTestWriter(t)
+	badUTF8 := "valid_prefix_\xff\xfe_invalid"
+	cases := []struct {
+		name   string
+		mutate func(*Schema)
+		word   string
+	}{
+		{"workload_id", func(s *Schema) { s.WorkloadID = badUTF8 }, "workload_id"},
+		{"machine_topology", func(s *Schema) { s.MachineTopology = badUTF8 }, "machine_topology"},
+		{"selected_context", func(s *Schema) { s.SelectedContext = badUTF8 }, "selected_context"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := sampleSchema()
+			s.RunID = "run-utf8-" + c.name + "-1"
+			c.mutate(&s)
+			err := w.Insert(context.Background(), s)
+			if !errors.Is(err, ErrInvalidUTF8) {
+				t.Fatalf("want ErrInvalidUTF8 for %s, got %v", c.name, err)
+			}
+			if !strings.Contains(err.Error(), c.word) {
+				t.Fatalf("error must name field %s: %v", c.word, err)
+			}
+		})
+	}
+}
+
+// Test 1b: time roundtrip preserves chronological order under
+// lexicographic sort across mixed-precision values. Without the
+// fixed-9-digit nanosecond format, two times that differ only in
+// fractional precision would lex-sort in the wrong order (".5Z" sorts
+// before "Z" because '.' < 'Z'). The fixed-precision format makes lex
+// order == chrono order, a property downstream `ORDER BY start_time`
+// and `BETWEEN` queries depend on.
+func TestInsert_TimeFormatPreservesLexOrder(t *testing.T) {
+	w, db := newTestWriter(t)
+	base := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		runID string
+		t     time.Time
+	}{
+		{"run-time-A-12345678", base},                             // exact second
+		{"run-time-B-12345678", base.Add(500 * time.Millisecond)}, // +0.5s
+		{"run-time-C-12345678", base.Add(time.Second)},            // exact next second
+	}
+	for _, c := range cases {
+		s := sampleSchema()
+		s.RunID = c.runID
+		s.StartTime = c.t
+		s.EndTime = c.t.Add(time.Second)
+		if err := w.Insert(context.Background(), s); err != nil {
+			t.Fatalf("insert %s: %v", c.runID, err)
+		}
+	}
+	rows, err := db.Query("SELECT run_id, start_time FROM runs ORDER BY start_time")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var order []string
+	for rows.Next() {
+		var id, st string
+		if err := rows.Scan(&id, &st); err != nil {
+			t.Fatal(err)
+		}
+		order = append(order, id)
+		// Every stored time MUST have the fixed-9-digit nanosecond
+		// field, regardless of input precision.
+		if !strings.Contains(st, ".000000000Z") && !strings.Contains(st, ".500000000Z") {
+			t.Errorf("start_time %q must use fixed 9-digit nanos", st)
+		}
+	}
+	want := []string{"run-time-A-12345678", "run-time-B-12345678", "run-time-C-12345678"}
+	if !reflect.DeepEqual(order, want) {
+		t.Fatalf("ORDER BY start_time: got %v, want %v (mixed-precision RFC3339Nano would mis-sort B before A)", order, want)
+	}
 }
 
 // Test 4: TestInsert_RejectsBadRunIDFormat.
@@ -305,7 +476,7 @@ func TestInsert_RejectsBadOracleResult(t *testing.T) {
 			if good == "pass" {
 				s.FailureCategory = ""
 			} else {
-				s.FailureCategory = "FailNetwork"
+				s.FailureCategory = "slave_disconnect"
 			}
 			if err := w.Insert(context.Background(), s); err != nil {
 				t.Fatalf("oracle=%q must be accepted, got %v", good, err)

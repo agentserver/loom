@@ -15,6 +15,7 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/yourorg/multi-agent/internal/evalrun"
 	_ "modernc.org/sqlite"
 )
 
@@ -102,6 +103,16 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return &runtimeError{err: fmt.Errorf("open db %q: %w", dbPath, err)}
 	}
 	defer db.Close()
+	// Run the same schema-drift guard the writer does — without it
+	// a drifted DB would crash export mid-stream with a low-level
+	// driver error (e.g. "converting NULL to int is unsupported" if
+	// human_intervention_count's NOT NULL constraint was dropped),
+	// producing a half-truncated output file. The check is cheap and
+	// gives the operator a clear "refresh the schema, then retry"
+	// message at start instead.
+	if err := evalrun.CheckSchema(db); err != nil {
+		return &runtimeError{err: fmt.Errorf("schema check on %q: %w", dbPath, err)}
+	}
 	// Output target. We explicitly close --out files AFTER serialising
 	// and report Close errors — silently swallowing them would let a
 	// late write/buffer-flush failure (e.g. disk full) return success.

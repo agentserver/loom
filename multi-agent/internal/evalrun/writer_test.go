@@ -154,9 +154,10 @@ func TestSchema_AllFieldsRoundtrip(t *testing.T) {
 	if humanCount != s.HumanInterventionCount {
 		t.Errorf("human_intervention_count: got %d, want %d", humanCount, s.HumanInterventionCount)
 	}
-	// Times: stored as RFC3339Nano UTC.
-	wantStart := s.StartTime.UTC().Format("2006-01-02T15:04:05.999999999Z07:00")
-	wantEnd := s.EndTime.UTC().Format("2006-01-02T15:04:05.999999999Z07:00")
+	// Times: stored as fixed-9-digit-nanosecond UTC for lex-sort
+	// stability (see writer.go formatRFC3339NanoUTC).
+	wantStart := s.StartTime.UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
+	wantEnd := s.EndTime.UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
 	check("start_time", startStr, wantStart)
 	check("end_time", endStr, wantEnd)
 	// Artifact hashes round-trip through JSON.
@@ -178,10 +179,11 @@ func TestInsert_Parameterized_SQLInjection(t *testing.T) {
 	}{
 		{"workload_id", func(s *Schema) { s.WorkloadID = "x'); DROP TABLE runs;--" }},
 		{"machine_topology", func(s *Schema) { s.MachineTopology = "'; DELETE FROM runs;--" }},
-		{"failure_category", func(s *Schema) {
-			s.SuccessOracleResult = "fail"
-			s.FailureCategory = "fc'); DROP TABLE runs;--"
-		}},
+		// failure_category is taxonomy-validated, so an injection
+		// payload there is rejected by validate() before SQL — the
+		// parameterised-SQL guarantee for free-form fields is
+		// covered by selected_context and observer_trace_path instead.
+		{"selected_context", func(s *Schema) { s.SelectedContext = "sc'); DROP TABLE runs;--" }},
 	}
 	for i, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -410,6 +412,48 @@ func TestNewSQLWriter_DetectsSchemaDriftMissingCheck(t *testing.T) {
 	if !strings.Contains(err.Error(), "CHECK") {
 		t.Fatalf("error must mention the missing CHECK clause: %v", err)
 	}
+}
+
+// Test 12g: drift — runs CREATE TABLE has CHECK with semantically-
+// identical-but-reformatted whitespace must STILL pass (no false
+// positive). Guards against the round-1 fix's strings.Fields approach
+// which only collapsed whitespace to single spaces, false-positiving
+// when extra spaces lived inside parens or after commas. Stripping
+// ALL whitespace before substring match is the correct fix.
+func TestNewSQLWriter_AllowsCheckClauseWhitespaceVariants(t *testing.T) {
+	cases := map[string]string{
+		"spaces_inside_parens":  "CHECK ( success_oracle_result IN ('pass','fail','timeout') )",
+		"spaces_after_commas":   "CHECK(success_oracle_result IN ('pass', 'fail', 'timeout'))",
+		"newlines_in_check":     "CHECK(\n\tsuccess_oracle_result IN ('pass','fail','timeout')\n)",
+		"both_extra_whitespace": "CHECK  (  success_oracle_result  IN  ('pass',  'fail',  'timeout')  )",
+	}
+	for name, checkClause := range cases {
+		t.Run(name, func(t *testing.T) {
+			db := freshEmptyDB(t)
+			ddl := strings.Replace(
+				readSchemaSQL(t),
+				"CHECK(success_oracle_result IN ('pass','fail','timeout'))",
+				checkClause,
+				1,
+			)
+			if _, err := db.Exec(ddl); err != nil {
+				t.Fatalf("apply variant DDL: %v", err)
+			}
+			if _, err := NewSQLWriter(db); err != nil {
+				t.Fatalf("semantically-identical CHECK reformatting must not trip drift; got %v", err)
+			}
+		})
+	}
+}
+
+// readSchemaSQL loads the shipped schema.sql contents.
+func readSchemaSQL(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile(schemaSQLPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }
 
 // Test 14: clean schema passes.
