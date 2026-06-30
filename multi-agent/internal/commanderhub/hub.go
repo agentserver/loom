@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -54,6 +55,10 @@ type Hub struct {
 	sessionCache *sessionListCache
 	cmdSeq       atomic.Int64 // generates per-command IDs (see proxy.go)
 
+	// draining is set to 1 when Close is called. ServeHTTP checks this flag and
+	// returns 503 for any new daemon WebSocket upgrade attempts during shutdown.
+	draining atomic.Bool
+
 	// TurnTimeout is the observer-side safety max applied to a session_turn
 	// command. Turns continue draining after the browser/SSE client disconnects;
 	// this bounds daemon work that never sends a terminal frame. Defaults to
@@ -75,6 +80,13 @@ func NewHub(resolver identity.Resolver) *Hub {
 
 // ServeHTTP implements GET /api/daemon-link.
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Reject new daemon registrations while the hub is draining. Returning 503
+	// causes the daemon client to back off and reconnect to another pod.
+	if h.draining.Load() {
+		http.Error(w, "observer draining", http.StatusServiceUnavailable)
+		return
+	}
+
 	tok, ok := bearerToken(r.Header.Get("Authorization"))
 	if !ok {
 		http.Error(w, "missing bearer token", http.StatusUnauthorized)
@@ -258,10 +270,61 @@ func (h *Hub) attachSharedRegistry(cluster ClusterRuntime, sr *sharedRegistry, f
 	h.sessionCache = nil
 }
 
-// Close releases resources held by the Hub. Specifically, it closes idle
-// HTTP connections held by the forwardClient (if one is present). Heartbeat
-// goroutines are managed by per-WS defers, not by Close.
-func (h *Hub) Close(_ context.Context) error {
+// Close drains the Hub and releases all resources.
+//
+// Shutdown sequence:
+//  1. Mark hub as draining — new daemon WS upgrades return 503 immediately.
+//  2. Snapshot the current local daemon set (under registry lock; copy to avoid holding lock).
+//  3. For each local daemon: call drainAllLocalDaemons to send observer_draining
+//     event and close the WS connection, which causes the per-WS read loop to
+//     return and its defers to clean up the shared-registry row.
+//  4. Wait on each dc.done channel up to the ctx deadline (WaitGroup + ctx select).
+//  5. Close idle HTTP connections held by the forwardClient (if any).
+func (h *Hub) Close(ctx context.Context) error {
+	// Step 1: Mark as draining so no new daemon WS upgrades are admitted.
+	h.draining.Store(true)
+
+	// Step 2: Snapshot all local daemons under the registry lock.
+	h.reg.mu.Lock()
+	var daemons []*daemonConn
+	for _, m := range h.reg.conns {
+		for _, dc := range m {
+			daemons = append(daemons, dc)
+		}
+	}
+	h.reg.mu.Unlock()
+
+	// Step 3: Send observer_draining event and close WS for every local daemon.
+	// This mirrors drainAllLocalDaemons but we also need the dc.done channel
+	// handles that drainAllLocalDaemons doesn't expose, so we inline the logic.
+	h.drainAllLocalDaemons("hub-close")
+
+	// Step 4: Wait for each daemon's read loop to finish (dc.done closes when
+	// ServeHTTP's defers complete). Use a WaitGroup fed by per-daemon goroutines
+	// so we can select on the ctx deadline collectively.
+	var wg sync.WaitGroup
+	for _, dc := range daemons {
+		wg.Add(1)
+		go func(dc *daemonConn) {
+			defer wg.Done()
+			select {
+			case <-dc.done:
+			case <-ctx.Done():
+			}
+		}(dc)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+
+	// Step 5: Release idle HTTP connections.
 	if h.forwardCli != nil {
 		h.forwardCli.httpClient.CloseIdleConnections()
 	}
