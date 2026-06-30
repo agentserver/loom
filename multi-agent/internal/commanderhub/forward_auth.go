@@ -19,27 +19,42 @@ import (
 // must fail closed.
 const insertNonceSQL = `INSERT INTO commander_forward_nonces (nonce, received_at) VALUES ($1, now()) ON CONFLICT (nonce) DO NOTHING`
 
-// signForward computes the HMAC-SHA256 of the canonical message
+// signPurpose computes the HMAC-SHA256 of the canonical message
 //
-//	ts + "\n" + nonce + "\n" + body
+//	purpose + "\n" + ts + "\n" + nonce + "\n" + body
 //
 // using secret and returns the result as a lower-case hex string.
-func signForward(secret string, ts int64, nonce, body string) string {
-	h := hmac.New(sha256.New, []byte(secret))
-	fmt.Fprintf(h, "%d\n%s\n%s", ts, nonce, body)
+// The purpose prefix domain-separates /forward from /drain, preventing
+// cross-endpoint replay attacks.
+func signPurpose(secret []byte, purpose string, ts int64, nonce string, body []byte) string {
+	h := hmac.New(sha256.New, secret)
+	fmt.Fprintf(h, "%s\n%d\n%s\n", purpose, ts, nonce)
+	h.Write(body)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// verifyForward checks headerHex against HMAC signatures derived from
-// secret (matchedKey=0) and prevSecret (matchedKey=1). It returns
-// matchedKey=-1, ok=false on any failure.
+// signForward signs the request body for /forward calls (purpose-bound).
+// drain uses signDrain to prevent cross-endpoint replay attacks.
+func signForward(secret []byte, ts int64, nonce string, body []byte) string {
+	return signPurpose(secret, "forward", ts, nonce, body)
+}
+
+// signDrain signs the request body for /drain calls (purpose-bound).
+// forward uses signForward to prevent cross-endpoint replay attacks.
+func signDrain(secret []byte, ts int64, nonce string, body []byte) string {
+	return signPurpose(secret, "drain", ts, nonce, body)
+}
+
+// verifyPurpose checks headerHex against HMAC signatures derived from
+// secret (matchedKey=0) and prevSecret (matchedKey=1) for a given purpose.
+// It returns matchedKey=-1, ok=false on any failure.
 //
 // Security design:
 //   - Rejects on length BEFORE hex.Decode to avoid allocating a
 //     partial slice for timing-oracle attacks.
 //   - Compares via hmac.Equal on fixed-size [sha256.Size]byte arrays, not
 //     on []byte slices, to prevent length-based timing leaks.
-func verifyForward(headerHex, secret, prevSecret string, ts int64, nonce, body string) (matchedKey int, ok bool) {
+func verifyPurpose(headerHex, purpose string, secret, prevSecret []byte, ts int64, nonce string, body []byte) (matchedKey int, ok bool) {
 	// sha256.Size bytes = 32 bytes = 64 hex chars.
 	const wantHexLen = sha256.Size * 2
 	if len(headerHex) != wantHexLen {
@@ -53,16 +68,17 @@ func verifyForward(headerHex, secret, prevSecret string, ts int64, nonce, body s
 	}
 
 	// Helper: sign into a fixed-size array.
-	computeArr := func(key string) [sha256.Size]byte {
-		h := hmac.New(sha256.New, []byte(key))
-		fmt.Fprintf(h, "%d\n%s\n%s", ts, nonce, body)
+	computeArr := func(key []byte) [sha256.Size]byte {
+		h := hmac.New(sha256.New, key)
+		fmt.Fprintf(h, "%s\n%d\n%s\n", purpose, ts, nonce)
+		h.Write(body)
 		var arr [sha256.Size]byte
 		copy(arr[:], h.Sum(nil))
 		return arr
 	}
 
 	// Check current secret (matchedKey=0).
-	if secret != "" {
+	if len(secret) > 0 {
 		wantArr := computeArr(secret)
 		if hmac.Equal(gotArr[:], wantArr[:]) {
 			return 0, true
@@ -70,7 +86,7 @@ func verifyForward(headerHex, secret, prevSecret string, ts int64, nonce, body s
 	}
 
 	// Check previous secret (matchedKey=1) — key rotation grace period.
-	if prevSecret != "" {
+	if len(prevSecret) > 0 {
 		wantArr := computeArr(prevSecret)
 		if hmac.Equal(gotArr[:], wantArr[:]) {
 			return 1, true
@@ -78,6 +94,18 @@ func verifyForward(headerHex, secret, prevSecret string, ts int64, nonce, body s
 	}
 
 	return -1, false
+}
+
+// verifyForward checks headerHex against HMAC signatures for /forward calls.
+// Uses purpose="forward" to domain-separate from /drain.
+func verifyForward(headerHex string, secret, prevSecret []byte, ts int64, nonce string, body []byte) (matchedKey int, ok bool) {
+	return verifyPurpose(headerHex, "forward", secret, prevSecret, ts, nonce, body)
+}
+
+// verifyDrain checks headerHex against HMAC signatures for /drain calls.
+// Uses purpose="drain" to domain-separate from /forward.
+func verifyDrain(headerHex string, secret, prevSecret []byte, ts int64, nonce string, body []byte) (matchedKey int, ok bool) {
+	return verifyPurpose(headerHex, "drain", secret, prevSecret, ts, nonce, body)
 }
 
 // parseHMACTimestamp parses a decimal Unix-seconds timestamp from the

@@ -51,20 +51,20 @@ type forwardRespErr struct {
 // forwardClient is an HTTP client that forwards commands to a peer pod's
 // /api/commander/_internal/forward endpoint using HMAC-authenticated requests.
 type forwardClient struct {
-	secret       string
-	prevSecret   string
+	secret       []byte
+	prevSecret   []byte
 	advertiseURL string // self URL — used for loop detection
-	http         *http.Client
+	httpClient   *http.Client
 }
 
 // newForwardClient constructs a forwardClient. advertiseURL is this pod's own
 // public URL and is used to detect forwarding loops.
-func newForwardClient(secret, prevSecret, advertiseURL string) *forwardClient {
+func newForwardClient(secret, prevSecret []byte, advertiseURL string) *forwardClient {
 	return &forwardClient{
 		secret:       secret,
 		prevSecret:   prevSecret,
 		advertiseURL: advertiseURL,
-		http: &http.Client{
+		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
 	}
@@ -73,11 +73,11 @@ func newForwardClient(secret, prevSecret, advertiseURL string) *forwardClient {
 // keysToTry returns the signing keys to attempt, starting with the current
 // secret. If prevSecret is non-empty, it is appended so retry-on-403 can
 // try the previous secret once.
-func (fc *forwardClient) keysToTry() []string {
-	if fc.prevSecret != "" {
-		return []string{fc.secret, fc.prevSecret}
+func (fc *forwardClient) keysToTry() [][]byte {
+	if len(fc.prevSecret) > 0 {
+		return [][]byte{fc.secret, fc.prevSecret}
 	}
-	return []string{fc.secret}
+	return [][]byte{fc.secret}
 }
 
 // wouldLoop reports true when peerURL points at this pod itself or at a
@@ -177,13 +177,14 @@ func (fc *forwardClient) send(ctx context.Context, peerURL string, req forwardRe
 	return nil, ErrDaemonGone
 }
 
+
 // errForward403 is an internal sentinel meaning the peer returned HTTP 403.
 // It is never returned to callers of send/stream — they see ErrDaemonGone instead.
 var errForward403 = fmt.Errorf("forward_client: peer returned 403")
 
 // doSend executes one HTTP POST attempt with the given signing key.
 // Returns errForward403 on 403 so the caller can retry with the prev secret.
-func (fc *forwardClient) doSend(ctx context.Context, peerURL string, body []byte, key string) (json.RawMessage, error) {
+func (fc *forwardClient) doSend(ctx context.Context, peerURL string, body []byte, key []byte) (json.RawMessage, error) {
 	endpoint := strings.TrimRight(peerURL, "/") + "/api/commander/_internal/forward"
 
 	ts := time.Now().Unix()
@@ -191,7 +192,7 @@ func (fc *forwardClient) doSend(ctx context.Context, peerURL string, body []byte
 	if err != nil {
 		return nil, fmt.Errorf("forward_client: freshNonce: %w", err)
 	}
-	sig := signForward(key, ts, nonce, string(body))
+	sig := signForward(key, ts, nonce, body)
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -202,7 +203,7 @@ func (fc *forwardClient) doSend(ctx context.Context, peerURL string, body []byte
 	httpReq.Header.Set("X-Forward-Nonce", nonce)
 	httpReq.Header.Set("X-Forward-Sig", sig)
 
-	resp, err := fc.http.Do(httpReq)
+	resp, err := fc.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("forward_client: do request: %w", err)
 	}
@@ -321,7 +322,7 @@ func (fc *forwardClient) stream(ctx context.Context, peerURL string, req forward
 // doStreamRequest sends the HTTP POST for a streaming forward. Returns the
 // raw *http.Response so the caller can inspect the status code before
 // deciding whether to retry.
-func (fc *forwardClient) doStreamRequest(ctx context.Context, peerURL string, body []byte, key string) (*http.Response, error) {
+func (fc *forwardClient) doStreamRequest(ctx context.Context, peerURL string, body []byte, key []byte) (*http.Response, error) {
 	endpoint := strings.TrimRight(peerURL, "/") + "/api/commander/_internal/forward"
 
 	ts := time.Now().Unix()
@@ -329,7 +330,7 @@ func (fc *forwardClient) doStreamRequest(ctx context.Context, peerURL string, bo
 	if err != nil {
 		return nil, fmt.Errorf("forward_client: freshNonce: %w", err)
 	}
-	sig := signForward(key, ts, nonce, string(body))
+	sig := signForward(key, ts, nonce, body)
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -342,7 +343,7 @@ func (fc *forwardClient) doStreamRequest(ctx context.Context, peerURL string, bo
 
 	// Use a transport without a global timeout for streaming.
 	streamClient := &http.Client{
-		Transport: fc.http.Transport,
+		Transport: fc.httpClient.Transport,
 	}
 	return streamClient.Do(httpReq)
 }

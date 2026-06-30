@@ -51,7 +51,7 @@ func signedForwardRequest(t *testing.T, body []byte, secret string) *http.Reques
 	ts := time.Now().Unix()
 	nonce, err := freshNonce()
 	require.NoError(t, err)
-	sig := signForward(secret, ts, nonce, string(body))
+	sig := signForward([]byte(secret), ts, nonce, body)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/commander/_internal/forward", bytes.NewReader(body))
 	req.ContentLength = int64(len(body))
@@ -254,13 +254,13 @@ func TestForwardServer_403_TimestampDrift(t *testing.T) {
 
 	h := forwardHubWithDB(t, db)
 
-	// Timestamp from 10 minutes ago — outside the 30s window.
+	// Timestamp from 10 minutes ago — outside the 60s window.
 	staleTS := time.Now().Add(-10 * time.Minute).Unix()
 
 	nonce, nerr := freshNonce()
 	require.NoError(t, nerr)
 	body := []byte(`{}`)
-	sig := signForward(testSecret, staleTS, nonce, string(body))
+	sig := signForward([]byte(testSecret), staleTS, nonce, body)
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/commander/_internal/forward", bytes.NewReader(body))
@@ -292,7 +292,7 @@ func TestForwardServer_413_BodyOverCap(t *testing.T) {
 	ts := time.Now().Unix()
 	nonce, nerr := freshNonce()
 	require.NoError(t, nerr)
-	sig := signForward(testSecret, ts, nonce, string(bigBody))
+	sig := signForward([]byte(testSecret), ts, nonce, bigBody)
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/commander/_internal/forward", bytes.NewReader(bigBody))
@@ -324,7 +324,7 @@ func TestForwardServer_403_HMACMismatch(t *testing.T) {
 	nonce, nerr := freshNonce()
 	require.NoError(t, nerr)
 	// Sign with wrong key.
-	sig := signForward("wrong-secret", ts, nonce, string(body))
+	sig := signForward([]byte("wrong-secret"), ts, nonce, body)
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/commander/_internal/forward", bytes.NewReader(body))

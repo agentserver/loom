@@ -106,11 +106,25 @@ func (h *Hub) verifyDrainAuth(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 
-	// 6. HMAC verify.
-	_, ok := verifyForward(sig, string(h.cluster.Secret), string(h.cluster.PrevSecret), ts, nonce, string(body))
+	// 6. HMAC verify (purpose="drain" to prevent cross-endpoint replay from /forward).
+	_, ok := verifyDrain(sig, h.cluster.Secret, h.cluster.PrevSecret, ts, nonce, body)
 	if !ok {
 		log.Printf("commanderhub: drain.denied.hmac remote=%s", r.RemoteAddr)
 		http.Error(w, "forbidden", http.StatusForbidden)
+		return false
+	}
+
+	// 7. insertNonce — fail closed on PG error, reject on replay.
+	ctx := r.Context()
+	inserted, err := insertNonce(ctx, h.sharedReg.db, nonce)
+	if err != nil {
+		log.Printf("commanderhub: drain.received.503.nonce_pg remote=%s nonce=%s err=%v", r.RemoteAddr, nonce, err)
+		http.Error(w, "nonce storage unavailable", http.StatusServiceUnavailable)
+		return false
+	}
+	if !inserted {
+		log.Printf("commanderhub: drain.received.denied.replay remote=%s nonce=%s", r.RemoteAddr, nonce)
+		http.Error(w, "replay detected", http.StatusForbidden)
 		return false
 	}
 

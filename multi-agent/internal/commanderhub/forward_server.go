@@ -107,7 +107,7 @@ func (h *Hub) forwardHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 8. HMAC verify.
-	_, ok := verifyForward(sig, string(h.cluster.Secret), string(h.cluster.PrevSecret), ts, nonce, string(body))
+	_, ok := verifyForward(sig, h.cluster.Secret, h.cluster.PrevSecret, ts, nonce, body)
 	if !ok {
 		log.Printf("commanderhub: forward.received.denied.hmac remote=%s", r.RemoteAddr)
 		http.Error(w, "forbidden", http.StatusForbidden)

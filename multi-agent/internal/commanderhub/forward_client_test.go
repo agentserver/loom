@@ -57,7 +57,7 @@ func writeStreamEnvelopes(w io.Writer, envs ...commander.Envelope) error {
 
 // newTestClient creates a forwardClient pointing at self=http://test-pod:8091.
 func newTestClient(secret, prevSecret string) *forwardClient {
-	return newForwardClient(secret, prevSecret, "http://test-pod:8091")
+	return newForwardClient([]byte(secret), []byte(prevSecret), "http://test-pod:8091")
 }
 
 // ---------------------------------------------------------------------------
@@ -301,7 +301,7 @@ func TestForwardClient_Send_NeitherSecretMatches_Errors(t *testing.T) {
 
 func TestForwardClient_Send_LoopRefused_SelfURL(t *testing.T) {
 	selfURL := "http://test-pod:8091"
-	fc := newForwardClient("secret", "", selfURL)
+	fc := newForwardClient([]byte("secret"), nil, selfURL)
 	req := forwardRequest{UserID: "u", WorkspaceID: "w", DaemonID: "d", Command: "list_sessions"}
 
 	// Should refuse to forward to self.
@@ -330,7 +330,7 @@ func TestForwardClient_Send_LoopRefused_LoopbackURL(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fc := newForwardClient("secret", "", tc.advertiseURL)
+			fc := newForwardClient([]byte("secret"), nil, tc.advertiseURL)
 			_, err := fc.send(context.Background(), tc.peerURL, req)
 			require.ErrorIs(t, err, ErrDaemonNotFound, "loopback %q must return ErrDaemonNotFound", tc.peerURL)
 		})
@@ -378,7 +378,7 @@ func TestForwardClient_Send_AppError_ReturnsDaemonError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 var _ = func() *forwardClient {
-	return newForwardClient("s", "p", "http://a:1")
+	return newForwardClient([]byte("s"), []byte("p"), "http://a:1")
 }
 
 // Compile-time: Hub has forwardCli field (accessed via struct literal, not nil deref).

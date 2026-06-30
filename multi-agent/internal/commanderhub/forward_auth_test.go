@@ -19,13 +19,13 @@ import (
 
 func TestSignForward_Deterministic(t *testing.T) {
 	// Same inputs produce the same output.
-	sig1 := signForward("secret", 1700000000, "aabbccdd00112233aabbccdd00112233", "body")
-	sig2 := signForward("secret", 1700000000, "aabbccdd00112233aabbccdd00112233", "body")
+	sig1 := signForward([]byte("secret"), 1700000000, "aabbccdd00112233aabbccdd00112233", []byte("body"))
+	sig2 := signForward([]byte("secret"), 1700000000, "aabbccdd00112233aabbccdd00112233", []byte("body"))
 	require.Equal(t, sig1, sig2)
 }
 
 func TestSignForward_OutputIsHex64(t *testing.T) {
-	sig := signForward("secret", 1700000000, "aabbccdd00112233aabbccdd00112233", "body")
+	sig := signForward([]byte("secret"), 1700000000, "aabbccdd00112233aabbccdd00112233", []byte("body"))
 	require.Len(t, sig, 64, "HMAC-SHA256 hex is 64 chars")
 	for _, c := range sig {
 		ok := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
@@ -34,37 +34,37 @@ func TestSignForward_OutputIsHex64(t *testing.T) {
 }
 
 func TestSignForward_DifferentSecrets(t *testing.T) {
-	sig1 := signForward("secret1", 1700000000, "aabbccdd00112233aabbccdd00112233", "body")
-	sig2 := signForward("secret2", 1700000000, "aabbccdd00112233aabbccdd00112233", "body")
+	sig1 := signForward([]byte("secret1"), 1700000000, "aabbccdd00112233aabbccdd00112233", []byte("body"))
+	sig2 := signForward([]byte("secret2"), 1700000000, "aabbccdd00112233aabbccdd00112233", []byte("body"))
 	require.NotEqual(t, sig1, sig2)
 }
 
 func TestSignForward_DifferentTimestamps(t *testing.T) {
-	sig1 := signForward("secret", 1700000000, "aabbccdd00112233aabbccdd00112233", "body")
-	sig2 := signForward("secret", 1700000001, "aabbccdd00112233aabbccdd00112233", "body")
+	sig1 := signForward([]byte("secret"), 1700000000, "aabbccdd00112233aabbccdd00112233", []byte("body"))
+	sig2 := signForward([]byte("secret"), 1700000001, "aabbccdd00112233aabbccdd00112233", []byte("body"))
 	require.NotEqual(t, sig1, sig2)
 }
 
 func TestVerifyForward_ValidCurrentSecret(t *testing.T) {
-	secret := "test-secret"
+	secret := []byte("test-secret")
 	ts := int64(1700000000)
 	nonce := "aabbccdd00112233aabbccdd00112233"
-	body := "hello world"
+	body := []byte("hello world")
 
 	header := signForward(secret, ts, nonce, body)
-	key, ok := verifyForward(header, secret, "", ts, nonce, body)
+	key, ok := verifyForward(header, secret, nil, ts, nonce, body)
 	require.True(t, ok)
 	require.Equal(t, 0, key)
 }
 
 func TestVerifyForward_ValidPrevSecret(t *testing.T) {
-	prevSecret := "old-secret"
+	prevSecret := []byte("old-secret")
 	ts := int64(1700000000)
 	nonce := "aabbccdd00112233aabbccdd00112233"
-	body := "hello world"
+	body := []byte("hello world")
 
 	header := signForward(prevSecret, ts, nonce, body)
-	key, ok := verifyForward(header, "new-secret", prevSecret, ts, nonce, body)
+	key, ok := verifyForward(header, []byte("new-secret"), prevSecret, ts, nonce, body)
 	require.True(t, ok)
 	require.Equal(t, 1, key)
 }
@@ -72,43 +72,43 @@ func TestVerifyForward_ValidPrevSecret(t *testing.T) {
 func TestVerifyForward_WrongSecret(t *testing.T) {
 	ts := int64(1700000000)
 	nonce := "aabbccdd00112233aabbccdd00112233"
-	body := "hello world"
+	body := []byte("hello world")
 
-	header := signForward("attacker-secret", ts, nonce, body)
-	key, ok := verifyForward(header, "server-secret", "server-prev-secret", ts, nonce, body)
+	header := signForward([]byte("attacker-secret"), ts, nonce, body)
+	key, ok := verifyForward(header, []byte("server-secret"), []byte("server-prev-secret"), ts, nonce, body)
 	require.False(t, ok)
 	require.Equal(t, -1, key)
 }
 
 func TestVerifyForward_BodyMismatch(t *testing.T) {
-	secret := "test-secret"
+	secret := []byte("test-secret")
 	ts := int64(1700000000)
 	nonce := "aabbccdd00112233aabbccdd00112233"
 
-	header := signForward(secret, ts, nonce, "original-body")
-	key, ok := verifyForward(header, secret, "", ts, nonce, "tampered-body")
+	header := signForward(secret, ts, nonce, []byte("original-body"))
+	key, ok := verifyForward(header, secret, nil, ts, nonce, []byte("tampered-body"))
 	require.False(t, ok)
 	require.Equal(t, -1, key)
 }
 
 func TestVerifyForward_TimestampMismatch(t *testing.T) {
-	secret := "test-secret"
+	secret := []byte("test-secret")
 	nonce := "aabbccdd00112233aabbccdd00112233"
-	body := "hello"
+	body := []byte("hello")
 
 	header := signForward(secret, 1700000000, nonce, body)
-	key, ok := verifyForward(header, secret, "", 1700000001, nonce, body)
+	key, ok := verifyForward(header, secret, nil, 1700000001, nonce, body)
 	require.False(t, ok)
 	require.Equal(t, -1, key)
 }
 
 func TestVerifyForward_NonceMismatch(t *testing.T) {
-	secret := "test-secret"
+	secret := []byte("test-secret")
 	ts := int64(1700000000)
-	body := "hello"
+	body := []byte("hello")
 
 	header := signForward(secret, ts, "aabbccdd00112233aabbccdd00112233", body)
-	key, ok := verifyForward(header, secret, "", ts, "aabbccdd00112233aabbccdd00112234", body)
+	key, ok := verifyForward(header, secret, nil, ts, "aabbccdd00112233aabbccdd00112234", body)
 	require.False(t, ok)
 	require.Equal(t, -1, key)
 }
@@ -116,15 +116,15 @@ func TestVerifyForward_NonceMismatch(t *testing.T) {
 // TestVerifyForward_RejectsMalformedAuthHeader covers three sub-cases:
 // wrong length, non-hex characters, and empty string.
 func TestVerifyForward_RejectsMalformedAuthHeader(t *testing.T) {
-	secret := "test-secret"
+	secret := []byte("test-secret")
 	ts := int64(1700000000)
 	nonce := "aabbccdd00112233aabbccdd00112233"
-	body := "body"
+	body := []byte("body")
 
 	t.Run("wrong_length", func(t *testing.T) {
 		// 63 chars (one short of the expected 64).
 		header := strings.Repeat("a", 63)
-		key, ok := verifyForward(header, secret, "", ts, nonce, body)
+		key, ok := verifyForward(header, secret, nil, ts, nonce, body)
 		require.False(t, ok)
 		require.Equal(t, -1, key)
 	})
@@ -132,13 +132,13 @@ func TestVerifyForward_RejectsMalformedAuthHeader(t *testing.T) {
 	t.Run("non_hex", func(t *testing.T) {
 		// 64 chars but contains 'z' which is not a hex digit.
 		header := strings.Repeat("z", 64)
-		key, ok := verifyForward(header, secret, "", ts, nonce, body)
+		key, ok := verifyForward(header, secret, nil, ts, nonce, body)
 		require.False(t, ok)
 		require.Equal(t, -1, key)
 	})
 
 	t.Run("empty", func(t *testing.T) {
-		key, ok := verifyForward("", secret, "", ts, nonce, body)
+		key, ok := verifyForward("", secret, nil, ts, nonce, body)
 		require.False(t, ok)
 		require.Equal(t, -1, key)
 	})
@@ -146,8 +146,8 @@ func TestVerifyForward_RejectsMalformedAuthHeader(t *testing.T) {
 
 func TestVerifyForward_BothSecretsEmpty(t *testing.T) {
 	// Neither key configured => always reject.
-	sig := signForward("some-secret", 1700000000, "aabbccdd00112233aabbccdd00112233", "body")
-	key, ok := verifyForward(sig, "", "", 1700000000, "aabbccdd00112233aabbccdd00112233", "body")
+	sig := signForward([]byte("some-secret"), 1700000000, "aabbccdd00112233aabbccdd00112233", []byte("body"))
+	key, ok := verifyForward(sig, nil, nil, 1700000000, "aabbccdd00112233aabbccdd00112233", []byte("body"))
 	require.False(t, ok)
 	require.Equal(t, -1, key)
 }
@@ -332,18 +332,18 @@ func TestForwardAuth_SignVerifyInsertRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close()
 
-	secret := "integration-secret"
+	secret := []byte("integration-secret")
 	ts := time.Now().Unix()
 	nonce, err := freshNonce()
 	require.NoError(t, err)
-	body := `{"hello":"world"}`
+	body := []byte(`{"hello":"world"}`)
 
 	// Sign.
 	header := signForward(secret, ts, nonce, body)
 	require.Len(t, header, 64)
 
 	// Verify.
-	key, ok := verifyForward(header, secret, "", ts, nonce, body)
+	key, ok := verifyForward(header, secret, nil, ts, nonce, body)
 	require.True(t, ok)
 	require.Equal(t, 0, key)
 
@@ -375,16 +375,20 @@ func TestForwardAuth_SignVerifyInsertRoundTrip(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSignForward_CanonicalFormat(t *testing.T) {
-	// Ensure the canonical format is ts + "\n" + nonce + "\n" + body.
+	// Ensure the canonical format is purpose + "\n" + ts + "\n" + nonce + "\n" + body.
 	// Different nonces with same ts and body must differ (nonce is included).
-	sig1 := signForward("k", 0, "00000000000000000000000000000000", "")
-	sig2 := signForward("k", 0, "00000000000000000000000000000001", "")
+	sig1 := signForward([]byte("k"), 0, "00000000000000000000000000000000", nil)
+	sig2 := signForward([]byte("k"), 0, "00000000000000000000000000000001", nil)
 	require.Len(t, sig1, 64)
 	require.NotEqual(t, sig1, sig2, "nonce must be part of the signed message")
 
 	// Body is also included.
-	sig3 := signForward("k", 0, "00000000000000000000000000000000", "x")
+	sig3 := signForward([]byte("k"), 0, "00000000000000000000000000000000", []byte("x"))
 	require.NotEqual(t, sig1, sig3, "body must be part of the signed message")
+
+	// Purpose separation: signForward and signDrain must produce different sigs.
+	sig4 := signDrain([]byte("k"), 0, "00000000000000000000000000000000", nil)
+	require.NotEqual(t, sig1, sig4, "forward and drain signatures must differ (purpose separation)")
 }
 
 // ---------------------------------------------------------------------------
@@ -395,10 +399,10 @@ func TestVerifyForward_OnlyPrevSecretSet(t *testing.T) {
 	// current secret is empty, only prev is set.
 	ts := int64(1700000000)
 	nonce := "aabbccdd00112233aabbccdd00112233"
-	body := "data"
+	body := []byte("data")
 
-	header := signForward("prev", ts, nonce, body)
-	key, ok := verifyForward(header, "", "prev", ts, nonce, body)
+	header := signForward([]byte("prev"), ts, nonce, body)
+	key, ok := verifyForward(header, nil, []byte("prev"), ts, nonce, body)
 	require.True(t, ok)
 	require.Equal(t, 1, key)
 }
@@ -416,4 +420,4 @@ func TestInsertNonceSQL_Shape(t *testing.T) {
 var _ func(context.Context, *sql.DB, string) (bool, error) = insertNonce
 
 // Compile-time: ensure signForward returns a string.
-var _ = fmt.Sprintf("%s", signForward("k", 0, "n", "b"))
+var _ = fmt.Sprintf("%s", signForward([]byte("k"), 0, "n", []byte("b")))
