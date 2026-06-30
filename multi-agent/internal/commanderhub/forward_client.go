@@ -16,7 +16,7 @@ import (
 
 const (
 	// forwardHMACTimestampWindow is the allowed clock skew for HMAC timestamp validation.
-	forwardHMACTimestampWindow = 30 * time.Second
+	forwardHMACTimestampWindow = 60 * time.Second
 	// forwardNonceHexLen is the expected length of a nonce in hex chars.
 	forwardNonceHexLen = 32
 	// maxForwardBodySize is the max size of the forwarded request body (1.5 MiB).
