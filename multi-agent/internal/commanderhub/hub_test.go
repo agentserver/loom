@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
 
@@ -217,4 +218,120 @@ func containsString(items []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestNewDaemonID_128BitHexLength: newDaemonID returns a 32-char hex string
+// (16 bytes × 2 hex chars/byte = 32).
+func TestNewDaemonID_128BitHexLength(t *testing.T) {
+	id, err := newDaemonID()
+	require.NoError(t, err)
+	require.Len(t, id, 32, "expected 32-char hex string for 16-byte (128-bit) random ID")
+}
+
+// TestNewDaemonID_DistinctAcrossCalls: two back-to-back calls must produce
+// different IDs (probability of collision is 2^-128, i.e., astronomically low).
+func TestNewDaemonID_DistinctAcrossCalls(t *testing.T) {
+	id1, err := newDaemonID()
+	require.NoError(t, err)
+	id2, err := newDaemonID()
+	require.NoError(t, err)
+	require.NotEqual(t, id1, id2, "two newDaemonID calls must produce distinct IDs")
+}
+
+// TestServeHTTP_ClusterMode_RequiresShortID: when a sharedRegistry is attached
+// and the daemon registers with an empty ShortID, the hub must refuse the WS
+// with an invalid_request error envelope.
+func TestServeHTTP_ClusterMode_RequiresShortID(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{
+		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
+	}}
+	hub := NewHub(resolver)
+
+	// Attach a shared registry backed by a sqlmock DB.  No SQL expectations
+	// are set because admission must be refused before any DB call.
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+	hub.attachSharedRegistry(newSharedRegistry(db, "http://pod-a:8091"))
+
+	srv := httptest.NewServer(hub)
+	t.Cleanup(srv.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/daemon-link"
+	conn, _, err := websocket.DefaultDialer.DialContext(context.Background(), wsURL, wsDialHeader("tok-alice"))
+	require.NoError(t, err)
+	defer conn.Close()
+
+	// Register with empty ShortID.
+	regPayload, _ := json.Marshal(commander.RegisterPayload{
+		SchemaVersion: commander.SchemaVersion,
+		Kind:          "claude",
+		DisplayName:   "no-short-id",
+		ShortID:       "",
+	})
+	require.NoError(t, conn.WriteJSON(commander.Envelope{Type: "register", Payload: regPayload}))
+
+	// Expect an error envelope with invalid_request code.
+	var env commander.Envelope
+	require.NoError(t, conn.ReadJSON(&env))
+	require.Equal(t, "error", env.Type)
+	var ep commander.ErrorPayload
+	require.NoError(t, json.Unmarshal(env.Payload, &ep))
+	require.Equal(t, commander.ErrCodeInvalidRequest, ep.Code)
+
+	// No DB interactions should have occurred.
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestServeHTTP_ClusterMode_RefusesWSOnUpsertFailure: when connectUpsert
+// returns an error, the hub must refuse the WS with a backend_unavailable
+// error envelope and NOT add the conn to the local registry.
+func TestServeHTTP_ClusterMode_RefusesWSOnUpsertFailure(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{
+		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
+	}}
+	hub := NewHub(resolver)
+
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+	hub.attachSharedRegistry(newSharedRegistry(db, "http://pod-a:8091"))
+
+	// Make connectUpsert fail.
+	mock.ExpectExec(connectUpsertSQL).
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg()).
+		WillReturnError(errors.New("connection refused"))
+
+	srv := httptest.NewServer(hub)
+	t.Cleanup(srv.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/daemon-link"
+	conn, _, dialErr := websocket.DefaultDialer.DialContext(context.Background(), wsURL, wsDialHeader("tok-alice"))
+	require.NoError(t, dialErr)
+	defer conn.Close()
+
+	// Register with a valid ShortID.
+	regPayload, _ := json.Marshal(commander.RegisterPayload{
+		SchemaVersion: commander.SchemaVersion,
+		Kind:          "claude",
+		DisplayName:   "alice-mac",
+		ShortID:       "agent-A",
+	})
+	require.NoError(t, conn.WriteJSON(commander.Envelope{Type: "register", Payload: regPayload}))
+
+	// Expect a backend_unavailable error envelope.
+	var env commander.Envelope
+	require.NoError(t, conn.ReadJSON(&env))
+	require.Equal(t, "error", env.Type)
+	var ep commander.ErrorPayload
+	require.NoError(t, json.Unmarshal(env.Payload, &ep))
+	require.Equal(t, commander.ErrCodeBackendUnavailable, ep.Code)
+
+	// The local registry must remain empty — daemon was refused before add.
+	o := owner{userID: "alice", workspaceID: "W1"}
+	require.Empty(t, hub.reg.daemons(o), "local registry must be empty after upsert failure")
+
+	require.NoError(t, mock.ExpectationsWereMet())
 }

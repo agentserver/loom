@@ -1,6 +1,7 @@
 package commanderhub
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -66,6 +67,14 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	o := owner{userID: ident.UserID, workspaceID: ident.WorkspaceID}
 
+	// Generate 128-bit (16-byte) random connection ID; refuse upgrade on
+	// crypto/rand failure rather than silently using weak entropy.
+	connID, err := newDaemonID()
+	if err != nil {
+		http.Error(w, "server error", http.StatusServiceUnavailable)
+		return
+	}
+
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return // Upgrade already wrote the error response.
@@ -78,7 +87,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(wsReadTimeout)) })
 
 	dc := &daemonConn{
-		id:      newDaemonID(),
+		id:      connID,
 		owner:   o,
 		conn:    conn,
 		pending: make(map[string]*pendingEntry),
@@ -109,6 +118,18 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		conn.Close()
 		return
 	}
+
+	// Cluster-mode: require non-empty ShortID so peer pods can resolve the
+	// daemon by a stable name (not an ephemeral connection ID).
+	if h.sharedReg != nil && rp.ShortID == "" {
+		_ = dc.writeEnvelope(errorEnvelope("", commander.ErrCodeInvalidRequest, "cluster mode requires non-empty short_id"))
+		dc.writeMu.Lock()
+		_ = conn.WriteControl(websocket.CloseMessage, nil, time.Now().Add(wsWriteWait))
+		dc.writeMu.Unlock()
+		conn.Close()
+		return
+	}
+
 	dc.shortID = rp.ShortID
 	dc.displayName = rp.DisplayName
 	dc.kind = rp.Kind
@@ -128,11 +149,53 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	dc.lastSeenAt = time.Now().UTC()
 	dc.metaMu.Unlock()
 
+	// Cluster-mode admission: upsert into shared Postgres registry BEFORE
+	// adding to local registry, under a 3s timeout. On failure, refuse WS.
+	if h.sharedReg != nil {
+		upsertCtx, upsertCancel := context.WithTimeout(r.Context(), 3*time.Second)
+		upsertErr := h.sharedReg.connectUpsert(upsertCtx, dc)
+		upsertCancel()
+		if upsertErr != nil {
+			_ = dc.writeEnvelope(errorEnvelope("", commander.ErrCodeBackendUnavailable, "registry unavailable"))
+			dc.writeMu.Lock()
+			_ = conn.WriteControl(websocket.CloseMessage, nil, time.Now().Add(wsWriteWait))
+			dc.writeMu.Unlock()
+			conn.Close()
+			return
+		}
+	}
+
+	routingID := dc.routingID()
+
 	h.reg.add(dc)
-	// Use removeIf so that if a new connection with the same routingID has
-	// already replaced this slot (reconnect race), we do not evict it.
-	defer h.reg.removeIf(o, dc.routingID(), func(existing *daemonConn) bool { return existing == dc })
-	defer h.invalidateDaemonSessions(o, dc.routingID())
+
+	// Teardown (reverse order of setup):
+	// 1. Stop heartbeat first so it cannot touch conn after we start removing.
+	// 2. Remove from shared registry (connection-id-guarded; safe if ownership lost).
+	// 3. Remove from local registry (predicate-guarded; safe on reconnect race).
+	// 4. Invalidate session cache.
+	// 5. Signal waiters and fail pending commands.
+	hbCtx, hbCancel := context.WithCancel(context.Background())
+	hbDone := make(chan struct{})
+
+	if h.sharedReg != nil {
+		go func() {
+			defer close(hbDone)
+			h.sharedReg.runHeartbeat(hbCtx, dc)
+		}()
+	} else {
+		close(hbDone)
+	}
+
+	defer func() {
+		hbCancel()
+		<-hbDone
+		if h.sharedReg != nil {
+			_ = h.sharedReg.remove(context.Background(), o, dc.shortID, dc.id)
+		}
+		h.reg.removeIf(o, routingID, func(existing *daemonConn) bool { return existing.id == dc.id })
+	}()
+	defer h.invalidateDaemonSessions(o, routingID)
 	defer close(dc.done)
 	defer dc.failAllPending()
 
@@ -142,6 +205,12 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dc.readLoop()
+}
+
+// attachSharedRegistry sets the shared Postgres registry on this Hub.
+// Called during wiring (Phase D D1) after the Hub is constructed.
+func (h *Hub) attachSharedRegistry(sr *sharedRegistry) {
+	h.sharedReg = sr
 }
 
 // --- daemonConn WS mechanics ---
@@ -305,10 +374,12 @@ func bearerToken(auth string) (string, bool) {
 	return tok, tok != ""
 }
 
-func newDaemonID() string {
-	var b [8]byte
-	_, _ = rand.Read(b[:])
-	return hex.EncodeToString(b[:])
+func newDaemonID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
 }
 
 func errorEnvelope(id, code, message string) commander.Envelope {
