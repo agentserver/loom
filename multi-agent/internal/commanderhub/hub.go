@@ -34,6 +34,11 @@ type ClusterRuntime struct {
 	Secret             []byte
 	PrevSecret         []byte
 	InternalListenAddr string
+	// Timing overrides — zero values use package defaults in the registry/client.
+	HeartbeatInterval time.Duration
+	SweepInterval     time.Duration
+	DaemonExpiryAfter time.Duration
+	ForwardTimeout    time.Duration
 }
 
 // Hub owns the /daemon-link WebSocket endpoint and the owner-keyed registry of

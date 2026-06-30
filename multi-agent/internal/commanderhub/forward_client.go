@@ -62,13 +62,18 @@ type forwardClient struct {
 
 // newForwardClient constructs a forwardClient. advertiseURL is this pod's own
 // public URL and is used to detect forwarding loops.
-func newForwardClient(secret, prevSecret []byte, advertiseURL string) *forwardClient {
+// forwardTimeout, when > 0, overrides the default 30s HTTP client timeout.
+func newForwardClient(secret, prevSecret []byte, advertiseURL string, forwardTimeout time.Duration) *forwardClient {
+	timeout := 30 * time.Second
+	if forwardTimeout > 0 {
+		timeout = forwardTimeout
+	}
 	return &forwardClient{
 		secret:       secret,
 		prevSecret:   prevSecret,
 		advertiseURL: advertiseURL,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: timeout,
 		},
 	}
 }

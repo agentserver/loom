@@ -124,7 +124,7 @@ func newFakePod(t *testing.T, db *sql.DB, name string, advertiseURL string, secr
 	// 3. Build forward client: its advertiseURL is the fake URL (for loop
 	//    detection), but its http.Client uses a transport that dials the real
 	//    httptest.Server for any host matching the name pattern "*.internal".
-	fc := newForwardClient(secret, prevSecret, advertiseURL)
+	fc := newForwardClient(secret, prevSecret, advertiseURL, 0)
 	// Replace the transport so *.internal hostnames reach real test servers.
 	fc.httpClient.Transport = newFakeClusterTransport()
 
@@ -167,6 +167,11 @@ var multiPodOwner = owner{userID: "mp-user", workspaceID: "mp-ws"}
 // row into Postgres (simulating a WebSocket daemon connect). The returned
 // daemonConn has a real WebSocket conn via newOwnershipTestDaemonConn so
 // the heartbeat goroutine can close it.
+//
+// A background goroutine is started that watches for WS-connection closure and
+// then calls sr.remove + reg.removeIf, mirroring the deferred cleanup that the
+// real handleDaemonLink read-loop performs. This means drain tests can trigger
+// removal via normal WS close (as in production) rather than manual removeDaemon calls.
 func addLocalDaemon(t *testing.T, pod *fakePod, shortID string, caps ...string) *daemonConn {
 	t.Helper()
 	dc := newOwnershipTestDaemonConn(t, shortID+"-conn", shortID, multiPodOwner)
@@ -193,6 +198,28 @@ func addLocalDaemon(t *testing.T, pod *fakePod, shortID string, caps ...string) 
 	require.NoError(t, pod.sr.connectUpsert(ctx, dc), "connectUpsert")
 
 	pod.hub.reg.add(dc)
+
+	// Start background goroutine that mirrors the real read-loop's deferred cleanup:
+	// when dc.conn is closed (e.g. by drainAllLocalDaemons), remove the daemon from
+	// both the local registry and the shared Postgres registry.
+	go func() {
+		// The gorilla Conn's ReadMessage will return an error immediately once the
+		// server-side connection is closed. We use this as the close signal.
+		for {
+			if _, _, err := dc.conn.ReadMessage(); err != nil {
+				// Connection closed — run the deferred cleanup.
+				routingID := dc.routingID()
+				pod.hub.reg.removeIf(dc.owner, routingID, func(existing *daemonConn) bool {
+					return existing.id == dc.id
+				})
+				removeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				_ = pod.sr.remove(removeCtx, dc.owner, dc.shortID, dc.id)
+				cancel()
+				return
+			}
+		}
+	}()
+
 	return dc
 }
 
@@ -320,10 +347,26 @@ func TestMultiPod_RegistrySweep_RemovesStaleDaemon(t *testing.T) {
 		podA.advertiseURL)
 	require.NoError(t, err)
 
-	// Confirm pod B can see the stale daemon before sweep.
+	// Confirm the stale daemon row exists in raw SQL but is NOT visible via
+	// listAll (which filters by onlineTTL — 10 minutes ago is outside the
+	// default onlineTTL window, so the production filter correctly hides it).
+	rawRows, err := db.QueryContext(ctx,
+		`SELECT short_id FROM commander_daemons WHERE user_id=$1 AND workspace_id=$2`,
+		multiPodOwner.userID, multiPodOwner.workspaceID)
+	require.NoError(t, err)
+	var rawIDs []string
+	for rawRows.Next() {
+		var sid string
+		require.NoError(t, rawRows.Scan(&sid))
+		rawIDs = append(rawIDs, sid)
+	}
+	require.NoError(t, rawRows.Err())
+	rawRows.Close()
+	require.Contains(t, rawIDs, "stale-abc", "stale row must exist in raw SQL before sweep")
+
 	initial, err := podB.sr.listAll(ctx, multiPodOwner)
 	require.NoError(t, err)
-	require.Len(t, initial, 1, "stale daemon should be visible before sweep (but outside onlineTTL filter)")
+	require.Empty(t, initial, "stale daemon must NOT be visible via listAll (outside onlineTTL filter)")
 
 	// Override deleteAfter to be very short so the stale row qualifies.
 	podB.sr.deleteAfter = 5 * time.Minute
@@ -666,18 +709,22 @@ func TestMultiPod_DrainOnShutdown_FlushesDaemons(t *testing.T) {
 	resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode, "drain must succeed")
 
-	// After drain, local registry should be empty (WS connections closed).
-	// The shared registry rows are removed when the WS read loops exit via
-	// the deferred remove calls. Since we used fake WS conns (via
-	// newOwnershipTestDaemonConn), the deferred removes don't fire automatically.
-	// Manually remove to verify the shared-registry path.
-	removeDaemon(t, podA, dc1)
-	removeDaemon(t, podA, dc2)
-
-	require.NoError(t, db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM commander_daemons WHERE user_id=$1 AND workspace_id=$2`,
-		multiPodOwner.userID, multiPodOwner.workspaceID).Scan(&count))
-	require.Equal(t, 0, count, "shared registry must have 0 rows for pod A's daemons after drain")
+	// After drain, the WS connections are closed. The background goroutines
+	// started by addLocalDaemon (mirroring the real read-loop deferred cleanup)
+	// detect the close and call sr.remove. Poll until both rows disappear
+	// (or timeout), exercising the real WS-defer cleanup path rather than
+	// manually calling removeDaemon.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		require.NoError(t, db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM commander_daemons WHERE user_id=$1 AND workspace_id=$2`,
+			multiPodOwner.userID, multiPodOwner.workspaceID).Scan(&count))
+		if count == 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	require.Equal(t, 0, count, "shared registry must have 0 rows for pod A's daemons after WS-close cleanup")
 }
 
 // ---------------------------------------------------------------------------

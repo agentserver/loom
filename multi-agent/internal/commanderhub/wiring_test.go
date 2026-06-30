@@ -109,7 +109,7 @@ func TestMountAll_SinglePodMode_NoInternalMux(t *testing.T) {
 // doesn't panic.
 func TestHub_Close_ShutsDownForwardClient(t *testing.T) {
 	hub := NewHub(&fakeResolver{mu: map[string]identity.Identity{}})
-	fc := newForwardClient([]byte("secret"), nil, "http://pod-a:8091")
+	fc := newForwardClient([]byte("secret"), nil, "http://pod-a:8091", 0)
 	hub.forwardCli = fc
 
 	err := hub.Close(context.Background())
@@ -132,7 +132,7 @@ func TestAttachSharedRegistry_AssignsClusterRuntime(t *testing.T) {
 		Secret:       secret,
 	}
 	sr := newSharedRegistry(db, "http://pod-a:8091")
-	fc := newForwardClient(secret, nil, "http://pod-a:8091")
+	fc := newForwardClient(secret, nil, "http://pod-a:8091", 0)
 
 	hub.attachSharedRegistry(cluster, sr, fc, nil)
 
@@ -178,7 +178,7 @@ func TestSendCommand_RemotePath_ForwardsToClient(t *testing.T) {
 		WillReturnRows(rows)
 
 	sr := newSharedRegistry(db, "http://self:8091")
-	fc := newForwardClient([]byte("secret"), nil, "http://self:8091")
+	fc := newForwardClient([]byte("secret"), nil, "http://self:8091", 0)
 	cluster := ClusterRuntime{DB: db, AdvertiseURL: "http://self:8091", Secret: []byte("secret")}
 	hub.attachSharedRegistry(cluster, sr, fc, nil)
 

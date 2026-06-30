@@ -18,16 +18,17 @@ var sweepInterval = time.Hour
 // internalMux. internalMux may be nil for single-pod deployments.
 //
 // Cluster-mode wiring (cluster.AdvertiseURL != ""):
-//   - Builds a *sharedRegistry backed by cluster.DB.
-//   - Builds a *forwardClient using cluster.Secret, cluster.PrevSecret, cluster.AdvertiseURL.
-//   - Passes nil for turns (pgTurnStore is Phase D D2; memTurnStore remains active).
-//   - Calls hub.attachSharedRegistry(cluster, sr, fc, nil).
+//   - Builds a *sharedRegistry backed by cluster.DB with timing values from cluster.
+//   - Builds a *forwardClient using cluster.Secret, cluster.PrevSecret,
+//     cluster.AdvertiseURL, and cluster.ForwardTimeout.
+//   - Calls hub.attachSharedRegistry(cluster, sr, fc, turns).
 //   - Mounts /api/commander/_internal/forward + /api/commander/_internal/drain on
 //     internalMux (when non-nil).
 //   - Starts the shared-registry sweeper goroutine.
+//   - Returns the Hub so callers can wire Close into the shutdown sequence.
 //
 // store is required — observerweb panics if it is nil when AgentserverURL != "".
-func MountAll(publicMux *http.ServeMux, internalMux *http.ServeMux, resolver identity.Resolver, agentserverURL string, store authstore.Store, cluster ClusterRuntime) {
+func MountAll(publicMux *http.ServeMux, internalMux *http.ServeMux, resolver identity.Resolver, agentserverURL string, store authstore.Store, cluster ClusterRuntime) *Hub {
 	hub := NewHub(resolver)
 	auth := NewAuthenticator(resolver, agentserverURL, store)
 	publicMux.Handle("/api/daemon-link", hub) // hub.ServeHTTP upgrades the daemon WS
@@ -36,8 +37,23 @@ func MountAll(publicMux *http.ServeMux, internalMux *http.ServeMux, resolver ide
 	go auth.runSweep(sweepInterval)
 
 	if cluster.AdvertiseURL != "" {
-		sr := newSharedRegistry(cluster.DB, cluster.AdvertiseURL)
-		fc := newForwardClient(cluster.Secret, cluster.PrevSecret, cluster.AdvertiseURL)
+		// Build shared registry with configured timing (falls back to defaults for zero values).
+		srCfg := SharedRegistryConfig{
+			HeartbeatEvery: cluster.HeartbeatInterval,
+			SweepEvery:     cluster.SweepInterval,
+			// deleteAfter is the daemon_expiry_after config value.
+			DeleteAfter: cluster.DaemonExpiryAfter,
+		}
+		if cluster.DaemonExpiryAfter > 0 {
+			// onlineTTL = half of DaemonExpiryAfter, min 30s.
+			half := cluster.DaemonExpiryAfter / 2
+			if half < 30*time.Second {
+				half = 30 * time.Second
+			}
+			srCfg.OnlineTTL = half
+		}
+		sr := newSharedRegistryWithConfig(cluster.DB, cluster.AdvertiseURL, srCfg)
+		fc := newForwardClient(cluster.Secret, cluster.PrevSecret, cluster.AdvertiseURL, cluster.ForwardTimeout)
 		var turns turnStateBackend
 		if cluster.DB != nil {
 			turns = newPGTurnStore(cluster.DB)
@@ -52,4 +68,5 @@ func MountAll(publicMux *http.ServeMux, internalMux *http.ServeMux, resolver ide
 		// Start shared-registry sweeper goroutine. Runs until process exit.
 		go sr.runSweep(context.Background())
 	}
+	return hub
 }

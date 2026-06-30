@@ -301,3 +301,44 @@ func TestSharedRegistry_SweepOnce_ContinuesOnError(t *testing.T) {
 	s.runSweepOnce(context.Background())
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+// TestSharedRegistry_ConfiguredTimingReachesGoroutines verifies that timing
+// values passed via SharedRegistryConfig are applied to the sharedRegistry fields
+// and thereby used by the heartbeat and sweep goroutines. This is the Finding-6
+// fix: previously config values were parsed but never propagated.
+func TestSharedRegistry_ConfiguredTimingReachesGoroutines(t *testing.T) {
+	db, _, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	cfg := SharedRegistryConfig{
+		HeartbeatEvery: 7 * time.Second,
+		SweepEvery:     13 * time.Second,
+		OnlineTTL:      25 * time.Second,
+		DeleteAfter:    2 * time.Minute,
+		NonceTTL:       90 * time.Second,
+	}
+	sr := newSharedRegistryWithConfig(db, "http://10.0.0.42:8091", cfg)
+
+	require.Equal(t, 7*time.Second, sr.heartbeatEvery, "heartbeatEvery must use configured value")
+	require.Equal(t, 13*time.Second, sr.sweepEvery, "sweepEvery must use configured value")
+	require.Equal(t, 25*time.Second, sr.onlineTTL, "onlineTTL must use configured value")
+	require.Equal(t, 2*time.Minute, sr.deleteAfter, "deleteAfter must use configured value")
+	require.Equal(t, 90*time.Second, sr.nonceTTL, "nonceTTL must use configured value")
+}
+
+// TestSharedRegistry_ZeroConfigFallsBackToDefaults ensures that zero-valued config
+// fields leave the package defaults intact.
+func TestSharedRegistry_ZeroConfigFallsBackToDefaults(t *testing.T) {
+	db, _, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+
+	sr := newSharedRegistryWithConfig(db, "http://10.0.0.42:8091", SharedRegistryConfig{})
+
+	require.Equal(t, defaultHeartbeatEvery, sr.heartbeatEvery, "zero config must keep default heartbeat")
+	require.Equal(t, defaultSweepEvery, sr.sweepEvery, "zero config must keep default sweep")
+	require.Equal(t, defaultOnlineTTL, sr.onlineTTL, "zero config must keep default onlineTTL")
+	require.Equal(t, defaultDeleteAfter, sr.deleteAfter, "zero config must keep default deleteAfter")
+	require.Equal(t, defaultNonceTTL, sr.nonceTTL, "zero config must keep default nonceTTL")
+}

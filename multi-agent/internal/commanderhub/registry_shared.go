@@ -54,8 +54,22 @@ type sharedRegistry struct {
 	sweepTelemetryBucketsErrCount   int32
 }
 
+// SharedRegistryConfig carries optional timing overrides for newSharedRegistry.
+// Any zero-value field falls back to the package default.
+type SharedRegistryConfig struct {
+	OnlineTTL      time.Duration
+	DeleteAfter    time.Duration
+	HeartbeatEvery time.Duration
+	SweepEvery     time.Duration
+	NonceTTL       time.Duration
+}
+
 func newSharedRegistry(db *sql.DB, advertiseURL string) *sharedRegistry {
-	return &sharedRegistry{
+	return newSharedRegistryWithConfig(db, advertiseURL, SharedRegistryConfig{})
+}
+
+func newSharedRegistryWithConfig(db *sql.DB, advertiseURL string, cfg SharedRegistryConfig) *sharedRegistry {
+	sr := &sharedRegistry{
 		db:             db,
 		advertiseURL:   advertiseURL,
 		onlineTTL:      defaultOnlineTTL,
@@ -64,6 +78,22 @@ func newSharedRegistry(db *sql.DB, advertiseURL string) *sharedRegistry {
 		sweepEvery:     defaultSweepEvery,
 		nonceTTL:       defaultNonceTTL,
 	}
+	if cfg.OnlineTTL > 0 {
+		sr.onlineTTL = cfg.OnlineTTL
+	}
+	if cfg.DeleteAfter > 0 {
+		sr.deleteAfter = cfg.DeleteAfter
+	}
+	if cfg.HeartbeatEvery > 0 {
+		sr.heartbeatEvery = cfg.HeartbeatEvery
+	}
+	if cfg.SweepEvery > 0 {
+		sr.sweepEvery = cfg.SweepEvery
+	}
+	if cfg.NonceTTL > 0 {
+		sr.nonceTTL = cfg.NonceTTL
+	}
+	return sr
 }
 
 // connectUpsert: claim ownership on new WS connect. INSERT ... ON CONFLICT
