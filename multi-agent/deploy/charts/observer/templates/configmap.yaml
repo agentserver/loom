@@ -47,6 +47,7 @@ data:
       retention_days: {{ .Values.config.telemetry.retentionDays }}
     {{- if .Values.cluster.enabled }}
     cluster:
+      enabled: true
       advertise_url_env: {{ .Values.cluster.advertiseUrlEnv | quote }}
       secret_env: {{ .Values.cluster.secretEnv | quote }}
       {{- if .Values.cluster.prevSecretEnv }}

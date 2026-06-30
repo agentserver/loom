@@ -339,3 +339,27 @@ echo "revocationChannel enum fail-fast OK"
 echo "E5.7 passed"
 
 echo "E5 cluster-mode tests passed"
+
+# --- Finding 1: cluster.enabled in ConfigMap + env-field names in ConfigMap ---
+echo "[test] F1.1 cluster.enabled: true appears in ConfigMap when cluster.enabled=true"
+f1_multi="$(helm template observer-test "$CHART_DIR" \
+  --set replicaCount=2 \
+  --set cluster.enabled=true \
+  --set secret.create=true \
+  --set "secret.clusterSecret=$(openssl rand -hex 32)" \
+  --set secret.databaseUrl='postgres://x' \
+  --set secret.s3AccessKey=x --set secret.s3SecretKey=x \
+  --set "secret.telemetryKeys.telemetry-global-key=x" \
+  --set config.identity.legacyAPIKeys.enabled=true \
+  --set "config.apiKeys[0].id=test" --set "config.apiKeys[0].key=test" \
+  --set postgresql.enabled=false \
+  --set minio.enabled=false)"
+f1_configmap="$(awk '/^---$/{p=0} /kind: ConfigMap/{p=1} p' <<<"$f1_multi")"
+grep -q 'cluster:' <<<"$f1_configmap" || { echo "FAIL: cluster: block missing from ConfigMap"; exit 1; }
+grep -q 'enabled: true' <<<"$f1_configmap" || { echo "FAIL: cluster.enabled: true missing from ConfigMap"; exit 1; }
+grep -q 'advertise_url_env:' <<<"$f1_configmap" || { echo "FAIL: advertise_url_env missing from ConfigMap"; exit 1; }
+grep -q 'secret_env:' <<<"$f1_configmap" || { echo "FAIL: secret_env missing from ConfigMap"; exit 1; }
+grep -q 'internal_listen_addr:' <<<"$f1_configmap" || { echo "FAIL: internal_listen_addr missing from ConfigMap"; exit 1; }
+echo "F1.1 passed"
+
+echo "Finding 1 chart tests passed"

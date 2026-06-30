@@ -1,6 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -313,4 +319,187 @@ func TestValidateClusterConfig_RejectsLoopbackInternalWithRemoteAdvertise(t *tes
 	err := validateClusterConfig(&c, "postgres")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "loopback")
+}
+
+// --- Finding 1: env-indirection fields ---
+
+// TestClusterConfig_EnvFields_Resolved verifies that when advertise_url_env /
+// secret_env / prev_secret_env are set in the YAML and the corresponding direct
+// fields are empty, loadConfig resolves the values via os.Getenv before
+// validateClusterConfig runs. Both "direct value" and "env-indirected value"
+// layouts must coexist: direct fields always take precedence.
+func TestClusterConfig_EnvFields_Resolved(t *testing.T) {
+	t.Setenv("TEST_ADVERTISE_URL", "https://observer-pod-1.svc:8443")
+	t.Setenv("TEST_CLUSTER_SECRET", validClusterSecret)
+	t.Setenv("TEST_PREV_SECRET", "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe")
+
+	cfg := loadConfigFromString(t, `
+listen_addr: ":8090"
+store:
+  driver: postgres
+  postgres:
+    dsn_env: OBSERVER_DATABASE_URL
+identity:
+  legacy_api_keys:
+    enabled: true
+api_keys:
+  - id: ak-default
+    key: ak_secret
+cluster:
+  enabled: true
+  advertise_url_env: TEST_ADVERTISE_URL
+  internal_listen_addr: ":8444"
+  secret_env: TEST_CLUSTER_SECRET
+  prev_secret_env: TEST_PREV_SECRET
+`)
+	require.True(t, cfg.Cluster.Enabled)
+	require.Equal(t, "https://observer-pod-1.svc:8443", cfg.Cluster.AdvertiseURL,
+		"AdvertiseURL must be resolved from env var TEST_ADVERTISE_URL")
+	require.Equal(t, validClusterSecret, cfg.Cluster.Secret,
+		"Secret must be resolved from env var TEST_CLUSTER_SECRET")
+	require.Equal(t, "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe", cfg.Cluster.PrevSecret,
+		"PrevSecret must be resolved from env var TEST_PREV_SECRET")
+}
+
+// TestClusterConfig_DirectFieldTakesPrecedenceOverEnv verifies that when both
+// a direct field and an env-indirection field are set, the direct field wins.
+func TestClusterConfig_DirectFieldTakesPrecedenceOverEnv(t *testing.T) {
+	t.Setenv("TEST_ADVERTISE_URL_IGNORED", "https://should-be-ignored.example.com:8443")
+
+	cfg := loadConfigFromString(t, `
+listen_addr: ":8090"
+store:
+  driver: postgres
+  postgres:
+    dsn_env: OBSERVER_DATABASE_URL
+identity:
+  legacy_api_keys:
+    enabled: true
+api_keys:
+  - id: ak-default
+    key: ak_secret
+cluster:
+  enabled: true
+  advertise_url: https://observer-pod-direct.svc:8443
+  advertise_url_env: TEST_ADVERTISE_URL_IGNORED
+  internal_listen_addr: ":8444"
+  secret: `+validClusterSecret+`
+`)
+	require.Equal(t, "https://observer-pod-direct.svc:8443", cfg.Cluster.AdvertiseURL,
+		"direct advertise_url must take precedence over advertise_url_env")
+}
+
+// TestLoadConfig_RenderedChartYAML ensures the binary's ClusterConfig and
+// AgentserverIdentityConfig accept the exact YAML fields the Helm chart renders
+// into the ConfigMap (observer.nonsecret.yaml). This catches silent chart/binary
+// schema divergence by running `helm template` and loading the result.
+//
+// The test is skipped if `helm` is not on PATH so it does not block CI
+// environments without Helm installed (though local dev should always run it).
+func TestLoadConfig_RenderedChartYAML(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not in PATH; skipping chart/binary schema divergence test")
+	}
+
+	// Locate chart directory relative to this test file. The test binary runs
+	// from cmd/observer-server so go up to multi-agent root then into deploy.
+	chartDir, err := filepath.Abs("../../deploy/charts/observer")
+	require.NoError(t, err, "could not resolve chart directory")
+	if _, err := os.Stat(filepath.Join(chartDir, "Chart.yaml")); err != nil {
+		t.Skipf("chart directory not found at %s; skipping", chartDir)
+	}
+
+	hexSecret := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+	// Render the chart with cluster.enabled=true + agentserver enabled + revocationChannel=enabled.
+	// Use filesystem object store (not s3) to avoid requiring s3 endpoint/bucket in the test secret.
+	out, err := exec.Command("helm", "template", "observer-test", chartDir,
+		"--set", "replicaCount=2",
+		"--set", "cluster.enabled=true",
+		"--set", "secret.create=true",
+		"--set", "secret.clusterSecret="+hexSecret,
+		"--set", "secret.databaseUrl=postgres://observer:observer@pg:5432/observer?sslmode=disable",
+		"--set", "config.objectStore.driver=filesystem",
+		"--set", "config.telemetry.enabled=false",
+		"--set", "config.identity.legacyAPIKeys.enabled=true",
+		"--set", "config.apiKeys[0].id=test",
+		"--set", "config.apiKeys[0].key=testkey",
+		"--set", "config.identity.agentserver.enabled=true",
+		"--set", "config.identity.agentserver.url=https://agentserver.example.com",
+		"--set", "config.identity.agentserver.freshTTL=30s",
+		"--set", "config.identity.agentserver.revocationChannel=enabled",
+		"--set", "postgresql.enabled=false",
+		"--set", "minio.enabled=false",
+	).Output()
+	require.NoError(t, err, "helm template must succeed")
+
+	// Extract observer.nonsecret.yaml content from the ConfigMap YAML.
+	// The ConfigMap data has the key `observer.nonsecret.yaml:` followed by
+	// indented YAML lines. We extract everything from that key up to the next
+	// top-level key or end of document.
+	nonsecretContent := extractConfigMapValue(string(out), "observer.nonsecret.yaml")
+	require.NotEmpty(t, nonsecretContent, "observer.nonsecret.yaml not found in helm template output")
+
+	// Set required env vars so env-indirected cluster fields resolve.
+	t.Setenv("OBSERVER_CLUSTER_SECRET", hexSecret)
+	t.Setenv("OBSERVER_ADVERTISE_URL", "http://10.0.0.1:8091")
+
+	// Write the minimal "secret" YAML (observer.yaml) + nonsecret YAML side by side.
+	// The minimal secret YAML must include enough fields to pass validateConfig.
+	dir := t.TempDir()
+	secretYAML := strings.TrimSpace(`
+listen_addr: ":8090"
+store:
+  driver: postgres
+  postgres:
+    dsn_env: OBSERVER_DATABASE_URL
+identity:
+  legacy_api_keys:
+    enabled: true
+  agentserver:
+    enabled: true
+    url: https://agentserver.example.com
+api_keys:
+  - id: test
+    key: testkey
+`) + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "observer.yaml"), []byte(secretYAML), 0o600))
+
+	nonsecretDir := filepath.Join(dir, "nonsecret")
+	require.NoError(t, os.MkdirAll(nonsecretDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(nonsecretDir, "observer.nonsecret.yaml"),
+		[]byte(nonsecretContent), 0o600))
+
+	// loadConfig must succeed — if it returns an error the chart rendered a
+	// field the binary doesn't know or the schema diverged.
+	cfg, err := loadConfig(filepath.Join(dir, "observer.yaml"))
+	require.NoError(t, err, "loadConfig must accept the YAML rendered by helm template; chart/binary schema diverged")
+
+	// Sanity: env-based cluster fields should have been resolved.
+	require.True(t, cfg.Cluster.Enabled, "cluster.enabled must be true after chart render + load")
+	require.NotEmpty(t, cfg.Cluster.AdvertiseURL, "cluster.advertise_url must be resolved from env")
+}
+
+// extractConfigMapValue extracts the YAML block for a given data key from a
+// Kubernetes ConfigMap rendered by helm template. The returned string is
+// de-indented (2 spaces of ConfigMap data indent removed).
+func extractConfigMapValue(helmOutput, key string) string {
+	// Find the line "  <key>: |" (2-space indent from ConfigMap data block).
+	pattern := regexp.MustCompile(`(?m)^  ` + regexp.QuoteMeta(key) + `: \|\n((?:    [^\n]*\n)*)`)
+	m := pattern.FindStringSubmatch(helmOutput)
+	if len(m) < 2 {
+		return ""
+	}
+	raw := m[1]
+	// Remove 4-space indent (2 for data: block + 2 for literal block scalar).
+	var buf bytes.Buffer
+	for _, line := range strings.Split(raw, "\n") {
+		if strings.HasPrefix(line, "    ") {
+			buf.WriteString(line[4:])
+		} else {
+			buf.WriteString(line)
+		}
+		buf.WriteByte('\n')
+	}
+	return buf.String()
 }

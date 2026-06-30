@@ -50,12 +50,22 @@ type Config struct {
 // When Enabled is false all other fields are ignored. When Enabled is true
 // the server starts a second internal HTTP listener on InternalListenAddr and
 // registers itself in the shared Postgres registry via AdvertiseURL.
+//
+// Env-indirection fields (advertise_url_env, secret_env, prev_secret_env):
+// If the direct value field (e.g. AdvertiseURL) is empty but the corresponding
+// *Env field is non-empty, loadConfig resolves the value via os.Getenv after
+// YAML merge. This allows Kubernetes Deployments to inject per-pod values
+// (e.g. POD_IP-derived advertise URL) via environment variables while keeping
+// the config file in a ConfigMap rather than a Secret.
 type ClusterConfig struct {
 	Enabled             bool          `yaml:"enabled"`
 	AdvertiseURL        string        `yaml:"advertise_url"`
+	AdvertiseURLEnv     string        `yaml:"advertise_url_env,omitempty"`
 	InternalListenAddr  string        `yaml:"internal_listen_addr"`
 	Secret              string        `yaml:"secret"`
+	SecretEnv           string        `yaml:"secret_env,omitempty"`
 	PrevSecret          string        `yaml:"prev_secret,omitempty"`
+	PrevSecretEnv       string        `yaml:"prev_secret_env,omitempty"`
 	HeartbeatInterval   time.Duration `yaml:"heartbeat_interval"`
 	HeartbeatJitter     time.Duration `yaml:"heartbeat_jitter"`
 	SweepInterval       time.Duration `yaml:"sweep_interval"`
@@ -627,6 +637,20 @@ func loadConfig(path string) (*Config, error) {
 			return nil, fmt.Errorf("observer.nonsecret.yaml: %w", err)
 		}
 	}
+	// Resolve env-indirection fields on ClusterConfig. Operators may set
+	// advertise_url_env / secret_env / prev_secret_env in the ConfigMap so
+	// that per-pod values (e.g. POD_IP-derived URL) are injected at runtime
+	// without storing them in a Secret. Direct fields take precedence.
+	if cfg.Cluster.AdvertiseURL == "" && cfg.Cluster.AdvertiseURLEnv != "" {
+		cfg.Cluster.AdvertiseURL = os.Getenv(cfg.Cluster.AdvertiseURLEnv)
+	}
+	if cfg.Cluster.Secret == "" && cfg.Cluster.SecretEnv != "" {
+		cfg.Cluster.Secret = os.Getenv(cfg.Cluster.SecretEnv)
+	}
+	if cfg.Cluster.PrevSecret == "" && cfg.Cluster.PrevSecretEnv != "" {
+		cfg.Cluster.PrevSecret = os.Getenv(cfg.Cluster.PrevSecretEnv)
+	}
+
 	if cfg.Production && !yamlPathExists(data, "identity", "legacy_api_keys", "enabled") {
 		cfg.Identity.LegacyAPIKeys.Enabled = false
 	}
