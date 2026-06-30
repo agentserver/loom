@@ -119,10 +119,10 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cluster-mode: require non-empty ShortID so peer pods can resolve the
-	// daemon by a stable name (not an ephemeral connection ID).
-	if h.sharedReg != nil && rp.ShortID == "" {
-		_ = dc.writeEnvelope(errorEnvelope("", commander.ErrCodeInvalidRequest, "cluster mode requires non-empty short_id"))
+	// Cluster-mode: require non-empty (and non-whitespace) ShortID so peer pods
+	// can resolve the daemon by a stable name (not an ephemeral connection ID).
+	if h.sharedReg != nil && strings.TrimSpace(rp.ShortID) == "" {
+		_ = dc.writeEnvelope(errorEnvelope("", commander.ErrCodeInvalidRequest, "short_id is required when observer is in cluster mode"))
 		dc.writeMu.Lock()
 		_ = conn.WriteControl(websocket.CloseMessage, nil, time.Now().Add(wsWriteWait))
 		dc.writeMu.Unlock()

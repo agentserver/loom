@@ -283,6 +283,51 @@ func TestServeHTTP_ClusterMode_RequiresShortID(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// TestServeHTTP_ClusterMode_RejectsWhitespaceShortID: when a sharedRegistry is
+// attached and the daemon registers with a whitespace-only ShortID ("   "), the
+// hub must refuse the WS with an invalid_request error envelope.
+func TestServeHTTP_ClusterMode_RejectsWhitespaceShortID(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{
+		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
+	}}
+	hub := NewHub(resolver)
+
+	// Attach a shared registry backed by a sqlmock DB. No SQL expectations
+	// are set because admission must be refused before any DB call.
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+	hub.attachSharedRegistry(newSharedRegistry(db, "http://pod-a:8091"))
+
+	srv := httptest.NewServer(hub)
+	t.Cleanup(srv.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/daemon-link"
+	conn, _, err := websocket.DefaultDialer.DialContext(context.Background(), wsURL, wsDialHeader("tok-alice"))
+	require.NoError(t, err)
+	defer conn.Close()
+
+	// Register with a whitespace-only ShortID.
+	regPayload, _ := json.Marshal(commander.RegisterPayload{
+		SchemaVersion: commander.SchemaVersion,
+		Kind:          "claude",
+		DisplayName:   "whitespace-short-id",
+		ShortID:       "   ",
+	})
+	require.NoError(t, conn.WriteJSON(commander.Envelope{Type: "register", Payload: regPayload}))
+
+	// Expect an error envelope with invalid_request code.
+	var env commander.Envelope
+	require.NoError(t, conn.ReadJSON(&env))
+	require.Equal(t, "error", env.Type)
+	var ep commander.ErrorPayload
+	require.NoError(t, json.Unmarshal(env.Payload, &ep))
+	require.Equal(t, commander.ErrCodeInvalidRequest, ep.Code)
+
+	// No DB interactions should have occurred.
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 // TestServeHTTP_ClusterMode_RefusesWSOnUpsertFailure: when connectUpsert
 // returns an error, the hub must refuse the WS with a backend_unavailable
 // error envelope and NOT add the conn to the local registry.
