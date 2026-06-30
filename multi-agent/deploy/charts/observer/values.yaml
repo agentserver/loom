@@ -1,4 +1,4 @@
-replicaCount: 2
+replicaCount: 1
 
 image:
   repository: registry.nj.cs.ac.cn/loom/observer
@@ -35,6 +35,19 @@ ingress:
 
 existingSecret: ""
 
+cluster:
+  enabled: false
+  advertiseUrlEnv: OBSERVER_ADVERTISE_URL
+  secretEnv: OBSERVER_CLUSTER_SECRET
+  prevSecretEnv: OBSERVER_CLUSTER_SECRET_PREV
+  secretKey: cluster-secret
+  prevSecretKey: cluster-secret-prev
+  internalListenAddr: ":8091"
+  internalServicePort: 8091
+  headlessServiceName: ""  # default "<release>-observer-headless" computed in _helpers.tpl
+  networkPolicy:
+    enabled: true
+
 secret:
   create: false
   annotations: {}
@@ -53,7 +66,8 @@ config:
     agentserver:
       enabled: false
       url: ""
-      freshTTL: 180s
+      freshTTL: ""
+      revocationChannel: "auto"
       staleGrace: 15m
       requestTimeout: 2s
       cacheCapacity: 65536
