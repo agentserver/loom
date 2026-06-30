@@ -1,0 +1,22 @@
+id: windows-only-artifact
+description: "Produce an artifact (e.g. .pdb, .msi, signed binary) using a tool that only runs on Windows; the driver lives elsewhere."
+required_contexts:
+  - role: driver
+    platform: linux
+  - role: slave
+    platform: windows
+    tools: ["signtool", "powershell"]
+allowed_contexts: ["*"]
+inputs:
+  read_artifacts:
+    - kind: source
+      path: fixtures/source.txt
+outputs:
+  write_targets:
+    - kind: artifact
+      path: ${workspace}/artifact.bin
+    - kind: metadata
+      path: ${workspace}/artifact.meta.json
+success_oracle: ./oracle.sh
+recovery_hint: "artifact.bin must exist with non-zero size; artifact.meta.json records the SHA-256 the oracle compares against the artifact bytes. The oracle also requires a working sha256sum binary; if artifact.bin is present but no hash can be computed, details.sha256_tool is `unavailable` and the trial fails rather than reporting an unverifiable pass. This workload NEEDS A WINDOWS HOST in production runs — the harness must route the slave step to a Windows context."
+timeout_seconds: 900

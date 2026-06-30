@@ -1,0 +1,23 @@
+id: remote-data-processing
+description: "Run a data-processing job whose dataset and toolchain live on a headless Linux server while the user task is dispatched from a laptop."
+required_contexts:
+  - role: driver
+    platform: darwin
+    tools: ["ssh"]
+  - role: slave
+    platform: linux
+    tools: ["python3", "pandas"]
+allowed_contexts: ["*"]
+inputs:
+  read_artifacts:
+    - kind: dataset
+      path: fixtures/dataset/input.csv
+outputs:
+  write_targets:
+    - kind: result
+      path: ${workspace}/result.json
+    - kind: checksum
+      path: ${workspace}/result.sha256
+success_oracle: ./oracle.sh
+recovery_hint: "result.json holds the aggregated stats and MUST contain the keys {count, mean, sum} (each is grep-asserted for presence by the oracle; the values are not numerically validated). result.sha256 is the SHA-256 of result.json. Both must match the golden checksum committed alongside the dataset. The oracle reports three integrity axes on the failure path: details.checksum, details.golden, and (R8-M1) details.sha256_tool — each can be `matches`, `mismatch`, `skipped`, or (for sha256_tool) `unavailable`.  A `skipped` value on the checksum or golden axis means the oracle had no actual sha256 to compare against (result.json missing/empty, OR sha256sum binary unavailable on PATH).  metrics.result_bytes is emitted on BOTH the pass and fail branches (R8-S4) so downstream consumers can rely on the key always being present."
+timeout_seconds: 900

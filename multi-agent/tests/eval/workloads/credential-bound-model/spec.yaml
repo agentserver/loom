@@ -1,0 +1,24 @@
+id: credential-bound-model
+description: "Use a model whose credential is held only by a proxy / workspace-bound context. The raw key MUST never leave that context."
+required_contexts:
+  - role: driver
+    platform: any
+  - role: model_proxy
+    platform: linux
+    tools: ["modelserver", "credential-store"]
+allowed_contexts: ["*"]
+inputs:
+  read_artifacts:
+    - kind: prompt
+      path: fixtures/prompt.txt
+outputs:
+  write_targets:
+    - kind: completion
+      path: ${workspace}/completion.txt
+    - kind: route_trace
+      path: ${workspace}/route.json
+    - kind: log
+      path: ${workspace}/run.log
+success_oracle: ./oracle.sh
+recovery_hint: "completion.txt is the user-visible answer. route.json must record model_alias and a NON-EMPTY opaque proxy_context_id (round-7 enforcement; an empty-string value is rejected). The `hops` array is documented in the schema for future enforcement but is NOT currently asserted by the oracle — this is a bootstrap floor. proxy_context_id must NOT be a JWT — the leak grep would flag a JWT-shaped id. No raw token (sk-..., eyJ..., AKIA..., ghp_..., xox[baprs]-...) may appear anywhere under ${workspace}; the oracle greps for these. run.log must be present (non-empty)."
+timeout_seconds: 600
