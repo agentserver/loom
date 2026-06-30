@@ -2,7 +2,7 @@
 
 **Issue:** [#49](https://github.com/agentserver/loom/issues/49) — commanderhub daemon registry not shared across observer instances; the commander UI shows daemons intermittently when the observer scales horizontally.
 
-> Revision history: v1 (initial), v2 (post-Claude adversarial review — fixes B1–B4, M1–M11, m1–m10), v3 (post-Codex review — fixes additional 9 BLOCKERs + 14 MAJORs), v4 (post-Codex round-2 — fixes 7 BLOCKERs + 9 MAJORs), v5 (post-Codex round-3 — fixes 4 BLOCKERs + 4 MAJORs), v6 (post-Codex round-4 — fixes 1 BLOCKER + 5 MAJORs), v7 (post-Codex round-5 — fixes 0 BLOCKERs + 4 MAJORs), v8 (post-Codex round-6 — fixes 0 BLOCKERs + 3 MAJORs), v9 (post-Codex round-7 — fixes 0 BLOCKERs + 2 MAJORs), v10 (post-comment 4839308595 — extends scope to cover three additional cross-pod consistency bugs), v11 (post-Codex v10-round-1 — fixes 0 BLOCKERs + 4 MAJORs), v12 (post-Codex v11-round-2 — fixes 0 BLOCKERs + 5 MAJORs), **v13 (post-issue-#49 final audit — adds Finding E: telemetry rate limiter is per-pod; effective quota balloons to ×N pods. Full 5-bug audit list is now: #49 registry, A turn_state, B sessionListCache, D identity cache TTL skew, E telemetry rate limiter)**.
+> Revision history: v1 (initial), v2 (post-Claude adversarial review — fixes B1–B4, M1–M11, m1–m10), v3 (post-Codex review — fixes additional 9 BLOCKERs + 14 MAJORs), v4 (post-Codex round-2 — fixes 7 BLOCKERs + 9 MAJORs), v5 (post-Codex round-3 — fixes 4 BLOCKERs + 4 MAJORs), v6 (post-Codex round-4 — fixes 1 BLOCKER + 5 MAJORs), v7 (post-Codex round-5 — fixes 0 BLOCKERs + 4 MAJORs), v8 (post-Codex round-6 — fixes 0 BLOCKERs + 3 MAJORs), v9 (post-Codex round-7 — fixes 0 BLOCKERs + 2 MAJORs), v10 (post-comment 4839308595 — extends scope to cover three additional cross-pod consistency bugs), v11 (post-Codex v10-round-1 — fixes 0 BLOCKERs + 4 MAJORs), v12 (post-Codex v11-round-2 — fixes 0 BLOCKERs + 5 MAJORs), v13 (post-issue-#49 final audit — adds Finding E: telemetry rate limiter), **v14 (post-Codex v13 — fixes 2 BLOCKERs + 5 MAJORs: telemetry UPSERT refill from current row not EXCLUDED, composite-PK rate key (no NUL bytes), `allow` returns (bool, error), telemetry table migration gated on telemetry-enabled, revocation component map matches v12 fixes, fresh_ttl 30s applied AFTER decode (not before), chart renders fresh_ttl/revocation_channel into observer.nonsecret.yaml so existingSecret deployments get them)**.
 
 ## Context
 
@@ -61,27 +61,30 @@ Four layers:
 
    **Fix v13:** in **shared mode** only, swap `*telemetryLimiter` for a Postgres-backed token bucket that atomically refills + decrements in a single SQL statement, keyed identically. Single-pod mode keeps the in-memory limiter unchanged.
 
-   New table `commander_telemetry_buckets`:
+   New table `commander_telemetry_buckets`. **Composite PK** (codex v13 BLOCKER #2): the existing in-memory limiter keys are `workspace_id + "\x00" + agent_id + "\x00" + telemetry_key_id`; Postgres `text` cannot contain NUL bytes, so we split into three explicit columns:
 
    ```sql
    CREATE TABLE IF NOT EXISTS commander_telemetry_buckets (
-       rate_key      text         PRIMARY KEY,
-       tokens        double precision NOT NULL,
-       last_refilled timestamptz NOT NULL DEFAULT now(),
-       updated_at    timestamptz NOT NULL DEFAULT now()
+       workspace_id      text             NOT NULL,
+       agent_id          text             NOT NULL,
+       telemetry_key_id  text             NOT NULL,
+       tokens            double precision NOT NULL,
+       last_refilled     timestamptz      NOT NULL DEFAULT now(),
+       updated_at        timestamptz      NOT NULL DEFAULT now(),
+       PRIMARY KEY (workspace_id, agent_id, telemetry_key_id)
    );
    CREATE INDEX IF NOT EXISTS commander_telemetry_buckets_updated_idx
        ON commander_telemetry_buckets (updated_at);
    ```
 
-   The atomic allow check is a single statement (PG 14+ supports `INSERT … ON CONFLICT … DO UPDATE … RETURNING`):
+   The atomic allow check (codex v13 BLOCKER #1 fix — refill computed from `b.tokens` in the existing row, NOT `EXCLUDED.tokens`):
 
    ```sql
-   INSERT INTO commander_telemetry_buckets AS b (rate_key, tokens, last_refilled, updated_at)
-   VALUES ($1, $burst - 1, $now, $now)
-   ON CONFLICT (rate_key) DO UPDATE
+   INSERT INTO commander_telemetry_buckets AS b (workspace_id, agent_id, telemetry_key_id, tokens, last_refilled, updated_at)
+   VALUES ($workspace, $agent, $tkid, $burst::double precision - 1, $now, $now)
+   ON CONFLICT (workspace_id, agent_id, telemetry_key_id) DO UPDATE
      SET tokens = LEAST(
-                    EXCLUDED.tokens + (EXTRACT(EPOCH FROM ($now - b.last_refilled)) / 60.0) * $perMinute,
+                    b.tokens + (EXTRACT(EPOCH FROM ($now - b.last_refilled)) / 60.0) * $perMinute,
                     $burst::double precision
                   ) - 1,
          last_refilled = $now,
@@ -93,15 +96,47 @@ Four layers:
    RETURNING tokens
    ```
 
-   - Rows affected > 0 ⇒ token granted (request allowed).
-   - 0 rows affected ⇒ no token available (request denied with HTTP 429, same as today).
+   - INSERT path (no conflict): the bucket is created with `$burst - 1` tokens — this is the **first-ever request** for this key; only the first request post-creation gets to start near burst. The reused `$burst - 1` is correct here because there's no row to refill from.
+   - UPDATE path (conflict): refill is computed from `b.tokens` (the EXISTING row), not from `EXCLUDED.tokens` (the proposed insert) — that was v13's bug.
+   - Concurrency safety: PG row-level lock on the conflicting row serializes concurrent UPSERTs; both the refill computation in the SET and the gating in the WHERE see the post-lock view of `b.tokens` / `b.last_refilled`. Two concurrent calls cannot both pass the `WHERE` check with the same tokens — one sees the bucket pre-decrement, the other sees it post-decrement.
+   - Rows returned > 0 ⇒ token granted (request allowed).
+   - 0 rows returned ⇒ no token available (request denied with HTTP 429, same as today).
 
-   **Failure modes:**
-   - **PG unavailable during allow check:** request returns `503 Service Unavailable` (NOT fail-open to a per-pod limiter, which would re-introduce the bug under flaky PG). Operator MUST scale PG before telemetry can ingest. This is acceptable because telemetry ingest is non-critical and PG is already a hard dep for the cluster mode that surfaces this bug.
+   **Failure modes** (codex v13 MAJOR #3 — error must be distinguishable from "denied"):
+   - **`allow` signature:** `(allowed bool, err error)`. The handler distinguishes three outcomes:
+     - `allow → (true, nil)`: request proceeds.
+     - `allow → (false, nil)`: bucket exhausted → HTTP 429 (same as today).
+     - `allow → (_, err != nil)`: PG unavailable, `lock_timeout` hit (PG error code `55P03`), context cancelled, etc. → HTTP 503. Operator alert; client should retry against another pod.
+   - **Failure-mode mapping example** (`*pgTelemetryLimiter.allow`):
+     ```go
+     if errors.Is(err, context.DeadlineExceeded) ||
+        errors.Is(err, context.Canceled) ||
+        isPGLockTimeout(err) ||  // checks pgconn.PgError.Code == "55P03"
+        isPGUnavailable(err) {   // checks SQLSTATE class 08 (connection_exception)
+         return false, err
+     }
+     if errors.Is(err, sql.ErrNoRows) {  // RETURNING returned no row → denied
+         return false, nil
+     }
+     ```
+   - **PG unavailable / lock_timeout:** HTTP 503 (NOT fail-open to a per-pod limiter, which would re-introduce the bug under flaky PG). Telemetry ingest is non-critical and PG is already a hard dep for cluster mode.
    - **Sweeper:** `sharedReg.sweep` (already runs every 30s in v9 for `commander_daemons` and `commander_forward_nonces`) extends to `DELETE FROM commander_telemetry_buckets WHERE updated_at < now() - interval '1 hour'`. A bucket idle for an hour has refilled to `burst` and is functionally identical to a fresh row; deleting reclaims space.
-   - **Hot key contention:** under sustained high QPS for a single key, the `INSERT … ON CONFLICT DO UPDATE` causes row-level lock contention. Set `lock_timeout = 100ms` on the connection used for telemetry; on timeout return 503 (same path as PG unavailable). 100ms is plenty for an UPSERT and fails fast enough that the client sees a 503 → retries against another pod.
+   - **Hot key contention:** under sustained high QPS for a single key, the `INSERT … ON CONFLICT DO UPDATE` causes row-level lock contention. Set `lock_timeout = 100ms` on the connection used for telemetry; on timeout return `(false, err)` and the handler responds 503.
 
-   **Wiring change:** `observerweb.Handler.telemetryLimiter` becomes an interface `telemetryAllower` with `allow(key string, now time.Time) bool`. `*telemetryLimiter` (in-memory) and `*pgTelemetryLimiter` both implement it. `cmd/observer-server/main.go` selects based on `cluster.enabled`. Tests assert that the in-memory variant is byte-equivalent in single-pod and that the PG variant denies correctly across two `Handler` instances sharing a Postgres.
+   **Wiring change:** `observerweb.Handler.telemetryLimiter` becomes an interface `telemetryAllower` with `allow(ctx context.Context, key telemetryKey, now time.Time) (bool, error)` where `telemetryKey = struct{ WorkspaceID, AgentID, TelemetryKeyID string }`. Both `*telemetryLimiter` (in-memory) and `*pgTelemetryLimiter` implement it. In-memory variant ignores ctx and always returns `(_, nil)`. The call site at `server.go:203-207` adapts:
+   ```go
+   allowed, err := h.telemetryLimiter.allow(r.Context(), telemetryKey{...}, time.Now())
+   switch {
+   case err != nil:
+       http.Error(w, "telemetry rate limit unavailable", http.StatusServiceUnavailable)
+       log.Printf("observerweb: telemetry rate limit error: %v", err)
+       return
+   case !allowed:
+       http.Error(w, "telemetry rate limit exceeded", http.StatusTooManyRequests)
+       return
+   }
+   ```
+   `cmd/observer-server/main.go` selects based on `cluster.enabled` (see §"Telemetry limiter wiring gate" below for v14 selection rules — must NOT use the old `cluster.enabled && store.driver=postgres` gate, since single-pod-with-postgres deployments should keep the in-memory limiter to avoid extra PG hits for no benefit).
 
 All eight layers are **fail-closed on partial config**: any mix-up of `cluster.advertise_url{,_env}` set + `cluster.secret_env` empty (or vice versa) is a fatal `validateConfig` error at observer startup, NOT a silent fallback to single-pod mode. The default `cluster.internal_listen_addr=":8091"` is **applied only when `cluster.enabled=true` resolves true**, so it cannot trigger the partial-config error on legitimate single-pod deployments.
 
@@ -153,15 +188,15 @@ Also fix the §"Component map" identity row reference if you read this in implem
 | Schema rollback                                      | `internal/commanderhub/authstore/schema_postgres_rollback.sql` (new)    | manual down migration for ops                                                |
 | preStop lifecycle hook                               | `deploy/charts/observer/templates/deployment.yaml`                      | shortens mixed-version window via cluster-internal drain call                |
 | Config loader merge                                  | `cmd/observer-server/main.go::loadConfig`                               | also reads sibling `nonsecret/observer.nonsecret.yaml` when present          |
-| Identity-cache shared-mode TTL default (v10/v12)    | `cmd/observer-server/main.go::loadConfig` defaults block + chart `values-production.example.yaml` + chart `templates/secret.yaml` | **Binary layer:** when `cluster.enabled=true` AND `identity.agentserver.fresh_ttl` unset (zero value), default to `30s` (was `180s`). **Chart layer (v12):** `values-production.example.yaml` explicitly sets `config.identity.agentserver.freshTTL: 30s` so existing chart-rendered `templates/secret.yaml:54` interpolates the right value (secret.yaml already renders `fresh_ttl: {{ default "180s" .Values.config.identity.agentserver.freshTTL | quote }}`; changing the default is a values-file edit, not a template edit). Existing template default `"180s"` remains for back-compat with single-pod operators who don't set the value. |
-| Identity-cache revocation channel (v10/v11, OPT-IN) | `internal/identity/cache.go`, new `internal/identity/revocation_pg.go`   | **Functional-options `NewCache` signature** to preserve existing callers: `NewCache(delegate Resolver, cfg CacheConfig, opts ...CacheOption) Resolver`. New option `WithRevocationChannel(conn *pgx.Conn, channel string) CacheOption` — when set, the cache subscribes to PG `LISTEN observer_identity_revoke` AND publishes `NOTIFY observer_identity_revoke '<tok_hash>'` whenever the delegate returns `identity.ErrRevoked` or `identity.ErrInvalid` for ANY token (regardless of local cache state). Existing callers (`cmd/observer-server/main.go:632`) pass no opts and behave unchanged. New `evict(key)` method on `cacheResolver` for receiver-side delete. |
-| Identity config schema (v11/v12)                    | `cmd/observer-server/main.go::AgentserverIdentityConfig` + chart `templates/secret.yaml`/`values.yaml`/`values-production.example.yaml` | **Binary:** new field `RevocationChannel string yaml:"revocation_channel"` (default empty = off; only valid value when set is `"postgres"`). `validateConfig` rejects unknown values. `buildIdentityResolver` consults the field and opens a dedicated `*pgx.Conn` for LISTEN PLUS reuses the existing `*sql.DB` pool for NOTIFY publish (separate connections required because `pgx.Conn` is not goroutine-safe and `WaitForNotification` blocks). **Chart:** `values.yaml` adds `config.identity.agentserver.revocationChannel: ""` default; `templates/secret.yaml` after line 58 emits `{{- if .Values.config.identity.agentserver.revocationChannel }}{{ "\n        revocation_channel: " }}{{ .Values.config.identity.agentserver.revocationChannel | quote }}{{- end }}`; `values-production.example.yaml` sets `revocationChannel: postgres`. Chart test asserts the rendered output. |
+| Identity-cache shared-mode TTL default (v10/v12/v14) | `cmd/observer-server/main.go::loadConfig` defaults block + chart `values-production.example.yaml` + chart `templates/secret.yaml` + chart `templates/configmap.yaml` | **Binary layer (v14 codex MAJOR #6):** v10/v12 said "default 30s when unset," but `cmd/observer-server/main.go:455` PRE-SEEDS `FreshTTL = 180s` BEFORE YAML decode, so the 30s default never fires. v14 fix: remove the pre-seed; apply `FreshTTL = 30s if cluster.enabled else 180s` AFTER YAML decode, only when the YAML did NOT explicitly set the field (track via `yamlPathExists(data, "identity", "agentserver", "fresh_ttl")` — helper already exists at `main.go:518` used by `legacy_api_keys.enabled`). **Chart layer (v12+v14):** `values-production.example.yaml` explicitly sets `config.identity.agentserver.freshTTL: 30s`. Existing chart-rendered `templates/secret.yaml:54` interpolates the value. Existing template default `"180s"` remains for back-compat. |
+| Identity-cache revocation channel (v10/v11/v12/v14, OPT-IN) | `internal/identity/cache.go`, new `internal/identity/revocation_pg.go`   | **Functional-options `NewCache` signature** to preserve existing callers: `NewCache(delegate Resolver, cfg CacheConfig, opts ...CacheOption) Resolver`. **v14 corrected signature (codex MAJOR #5):** `WithRevocationChannel(listener *pgx.Conn, publisher *sql.DB, channel string) CacheOption` — separate listener/publisher per v12 fix (pgx.Conn is not goroutine-safe; WaitForNotification blocks the conn). Subscribes to PG `LISTEN observer_identity_revoke` on `listener`; publishes `NOTIFY observer_identity_revoke '<tok_hash>'` on `publisher`. **Publish policy:** ALWAYS on `identity.ErrRevoked`; on `identity.ErrInvalid` ONLY if the token's `tokenKey(token)` is currently in this pod's `c.entries` AND the per-pod publish rate is < 100/s (drop with WARN log otherwise). Existing callers pass no opts and behave unchanged. New `evict(key)` method on `cacheResolver` for receiver-side delete. |
+| Identity config schema (v11/v12/v14)                | `cmd/observer-server/main.go::AgentserverIdentityConfig` + chart `templates/secret.yaml` + chart `templates/configmap.yaml` + chart `values.yaml`/`values-production.example.yaml` | **Binary:** new field `RevocationChannel string yaml:"revocation_channel"` (default empty = off; only valid value when set is `"postgres"`). `validateConfig` rejects unknown values. `buildIdentityResolver` consults the field and opens a dedicated `*pgx.Conn` for LISTEN PLUS reuses the existing `*sql.DB` pool for NOTIFY publish. **Chart (v14 codex MAJOR #7):** production uses `existingSecret`, so `templates/secret.yaml` is NOT rendered. v14 emits `fresh_ttl` and `revocation_channel` into `templates/configmap.yaml::observer.nonsecret.yaml` (which IS always rendered). The config loader merge added in v3 (`loadConfig` reads `nonsecret/observer.nonsecret.yaml` on top of the secret-mounted `observer.yaml`) carries these values into `Config.Identity.Agentserver` even for existingSecret deployments. Specifically, extend the configmap's `observer.nonsecret.yaml` after `identity.agentserver.enabled` line with: `{{- if .Values.cluster.enabled }}{{ "\n      fresh_ttl: " }}{{ default "30s" .Values.config.identity.agentserver.freshTTL | quote }}{{- end }}{{- if .Values.config.identity.agentserver.revocationChannel }}{{ "\n      revocation_channel: " }}{{ .Values.config.identity.agentserver.revocationChannel | quote }}{{- end }}`. Chart test asserts the values appear in the rendered ConfigMap. Single-pod / unset cluster.enabled deployments emit nothing → loader pre-seeds `FreshTTL=180s` as today. |
 | Multi-pod gates inmemory authstore (v10/v11)        | `cmd/observer-server/main.go::validateConfig` + `templates/validate.yaml` | **Binary:** rejects `cluster.enabled AND store.driver != "postgres"` (binary cannot see replicaCount). **Chart:** rejects `replicaCount > 1 AND store.driver != "postgres"` AND `replicaCount > 1 AND !cluster.enabled`. Both layers needed: chart catches at `helm install`; binary catches at startup for the case where ops manually edit the rendered config. |
 | cmdID pod prefix (v10/v12)                          | `internal/commanderhub/hub.go::Hub.nextCmdID`                            | **Single-pod (h.sharedReg == nil): exactly unchanged.** Emits `strconv.FormatInt(h.cmdSeq.Add(1), 36)` — `"1"`, `"2"`, etc. **Shared mode (h.sharedReg != nil):** emits `<podHash>-<base36-seq>` where `podHash = hex(sha256(h.sharedReg.advertiseURL))[:4]`. Goal: cross-pod log correlation, not security. Test asserts byte-equality of single-pod output to the legacy implementation. |
 | Identity revocation test                            | `internal/identity/cache_pg_test.go` (new)                              | env-skipped on `OBSERVER_POSTGRES_TEST_DSN`; two `cacheResolver` instances against shared PG; assert NOTIFY-driven eviction propagates within 100 ms. |
-| Finding E — telemetry rate limiter PG schema (v13)  | `internal/commanderhub/authstore/schema_postgres.sql`                   | new table `commander_telemetry_buckets (rate_key PK, tokens double precision, last_refilled timestamptz, updated_at timestamptz)`. Added to the same migration script as the other commander tables; same gate (`agentserverURL != ""`). |
+| Finding E — telemetry rate limiter PG schema (v13/v14) | `internal/commanderhub/authstore/schema_postgres.sql` + `cmd/observer-server/main.go` migration gate | new table `commander_telemetry_buckets` with composite PK `(workspace_id, agent_id, telemetry_key_id)`. **v14 migration gate (codex MAJOR #4):** v13 reused the commander `agentserverURL != ""` gate; that misses the case where telemetry is enabled but commander isn't (e.g. agent-only deployments). v14 splits: the table DDL stays in `authstore/schema_postgres.sql` (which now runs whenever `store.driver=postgres` AND (commander enabled OR telemetry enabled AND cluster.enabled)). Both `--migrate-only` and the startup-time `MigratePostgres` call check both conditions. |
 | Finding E — telemetry limiter abstraction (v13)     | `internal/observerweb/rate_limit.go`, new `internal/observerweb/rate_limit_pg.go` | `telemetryAllower` interface; `*telemetryLimiter` (in-memory, unchanged) and `*pgTelemetryLimiter` (new) both implement `allow(key, now) bool`. `*pgTelemetryLimiter` runs the atomic UPSERT-with-LEAST-and-EXTRACT statement against `commander_telemetry_buckets`. PG unavailable → returns false → handler responds 503. `lock_timeout=100ms` per call to fail fast on hot-key contention. |
-| Finding E — telemetry limiter wiring (v13)          | `cmd/observer-server/main.go`, `internal/observerweb/server.go`         | `Handler.telemetryLimiter telemetryAllower` (was `*telemetryLimiter`). `main.go` selects PG variant when `cluster.enabled=true` AND `store.driver=postgres`; in-memory variant otherwise. `cluster_runtime.go` (already created in v3) exposes the `*sql.DB` to observerweb via `Options.Cluster.DB`. |
+| Finding E — telemetry limiter wiring (v13/v14)      | `cmd/observer-server/main.go`, `internal/observerweb/server.go`         | `Handler.telemetryLimiter telemetryAllower` (was `*telemetryLimiter`). **v14 selection rule (codex MAJOR #4 / v13 question):** PG variant selected ONLY when telemetry is enabled AND (`cluster.enabled=true` OR `replicaCount` env signals multi-pod). Single-pod-with-postgres deployments keep the in-memory limiter (no PG cost for no benefit). v14 adds an env var `OBSERVER_MULTIPOD=1` injected by the chart's `deployment.yaml` whenever `cluster.enabled=true`, so the binary's `validateConfig` can know "this is intended to run multi-pod" without seeing `replicaCount`. `cluster_runtime.go` exposes the `*sql.DB` to observerweb via `Options.Cluster.DB`. |
 | Finding E — sweeper extension (v13)                 | `internal/commanderhub/registry_shared.go::sweep`                       | same goroutine that prunes `commander_daemons` (45s/5min split) and `commander_forward_nonces` (120s) also prunes `commander_telemetry_buckets` (`updated_at < now() - interval '1 hour'`). |
 | Finding E — test                                    | `internal/observerweb/rate_limit_pg_test.go` (new)                      | env-skipped on `OBSERVER_POSTGRES_TEST_DSN`; two `*pgTelemetryLimiter` instances against shared PG; assert the second pod's `allow` returns false within `burst` requests across both pods. |
 
@@ -229,12 +264,17 @@ CREATE TABLE IF NOT EXISTS commander_forward_nonces (
 CREATE INDEX IF NOT EXISTS commander_forward_nonces_received_idx
     ON commander_forward_nonces (received_at);
 
--- v13: Finding E. Shared token bucket for telemetry rate limiter.
+-- v13/v14: Finding E. Shared token bucket for telemetry rate limiter.
+-- Composite PK because PG text cannot contain NUL bytes (the in-memory
+-- limiter used "\x00"-separated string key).
 CREATE TABLE IF NOT EXISTS commander_telemetry_buckets (
-    rate_key      text             PRIMARY KEY,
-    tokens        double precision NOT NULL,
-    last_refilled timestamptz      NOT NULL DEFAULT now(),
-    updated_at    timestamptz      NOT NULL DEFAULT now()
+    workspace_id      text             NOT NULL,
+    agent_id          text             NOT NULL,
+    telemetry_key_id  text             NOT NULL,
+    tokens            double precision NOT NULL,
+    last_refilled     timestamptz      NOT NULL DEFAULT now(),
+    updated_at        timestamptz      NOT NULL DEFAULT now(),
+    PRIMARY KEY (workspace_id, agent_id, telemetry_key_id)
 );
 CREATE INDEX IF NOT EXISTS commander_telemetry_buckets_updated_idx
     ON commander_telemetry_buckets (updated_at);
