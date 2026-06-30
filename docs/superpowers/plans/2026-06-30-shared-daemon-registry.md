@@ -3065,4 +3065,1103 @@ All Phase A + Phase B tests pass. `hub.reg.add(...)` callers still compile. `sha
 
 ---
 
+## Phase C — Forwarding + drain + cmdID (6 tasks)
+
+Adds the pod-to-pod HTTP forwarding layer. C1–C6 are partially sequential: C1 (codec) + C2 (HMAC auth + nonce table writes) are independent and can run in parallel. C3 (client) depends on C1+C2. C4 (server) depends on C1+C2+C3. C5 (drain) depends on C2. C6 (cmdID pod prefix) is independent.
+
+### Task C1: length-prefixed JSON envelope codec (1 MiB cap)
+
+**Files:**
+- Create: `multi-agent/internal/commanderhub/forward_codec.go`
+- Create: `multi-agent/internal/commanderhub/forward_codec_test.go`
+
+**Interfaces:**
+- Produces:
+  - `forwardFrameMaxBytes int64 = 1 << 20` (1 MiB; matches existing `wsReadLimit`).
+  - `writeEnvelopeFrame(w io.Writer, env commander.Envelope) error` — emits `<decimal-ascii-length>\n<envelope-json-bytes>`. Returns error on write failure OR if encoded JSON exceeds cap.
+  - `readEnvelopeFrame(r *bufio.Reader) (commander.Envelope, error)` — reads ASCII digits until `\n` (max 7 digits to encode 1 MiB), parses the length, reads exactly that many bytes, JSON-decodes. Returns `io.EOF` at stream end. Returns error on cap overflow OR malformed framing.
+
+- [ ] **Step 1: Write failing tests**
+
+Create `internal/commanderhub/forward_codec_test.go`:
+
+```go
+package commanderhub
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"io"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/yourorg/multi-agent/internal/commander"
+)
+
+func TestForwardCodec_RoundTrip(t *testing.T) {
+	envs := []commander.Envelope{
+		{Type: "ack"},
+		{Type: "command", ID: "1", Payload: json.RawMessage(`{"command":"list_sessions"}`)},
+		{Type: "event", ID: "1", Payload: json.RawMessage(`{"event_kind":"chunk","text":"hello"}`)},
+	}
+
+	var buf bytes.Buffer
+	for _, e := range envs {
+		require.NoError(t, writeEnvelopeFrame(&buf, e))
+	}
+	r := bufio.NewReader(&buf)
+	for i, want := range envs {
+		got, err := readEnvelopeFrame(r)
+		require.NoError(t, err, "frame %d", i)
+		require.Equal(t, want.Type, got.Type)
+		require.Equal(t, want.ID, got.ID)
+	}
+	_, err := readEnvelopeFrame(r)
+	require.ErrorIs(t, err, io.EOF, "expected EOF after last frame")
+}
+
+func TestForwardCodec_RejectsOverflowOnWrite(t *testing.T) {
+	// 2 MiB of "x" — exceeds the 1 MiB cap.
+	huge := commander.Envelope{Type: "event", Payload: json.RawMessage(`"` + strings.Repeat("x", 2*1024*1024) + `"`)}
+	err := writeEnvelopeFrame(io.Discard, huge)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exceeds cap")
+}
+
+func TestForwardCodec_RejectsOverflowOnRead(t *testing.T) {
+	// Claim 5 MiB length but only deliver a few bytes. Reader must reject
+	// the length without ever allocating 5 MiB.
+	buf := bytes.NewBufferString("5242881\nxx") // 1 MiB + 1
+	r := bufio.NewReader(buf)
+	_, err := readEnvelopeFrame(r)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exceeds cap")
+}
+
+func TestForwardCodec_RejectsMalformedLength(t *testing.T) {
+	// Non-digit prefix.
+	r := bufio.NewReader(bytes.NewBufferString("abc\n{}"))
+	_, err := readEnvelopeFrame(r)
+	require.Error(t, err)
+}
+
+func TestForwardCodec_RejectsTooManyDigits(t *testing.T) {
+	// 8 digits → must be rejected before being parsed (cap is 1 MiB = 7 digits max).
+	r := bufio.NewReader(bytes.NewBufferString("10000000\n{}"))
+	_, err := readEnvelopeFrame(r)
+	require.Error(t, err)
+}
+```
+
+- [ ] **Step 2: Run; expect compile failure**
+
+- [ ] **Step 3: Implement the codec**
+
+Create `internal/commanderhub/forward_codec.go`:
+
+```go
+package commanderhub
+
+import (
+	"bufio"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"strconv"
+
+	"github.com/yourorg/multi-agent/internal/commander"
+)
+
+// forwardFrameMaxBytes caps each length-prefixed envelope. Matches the
+// existing observer wsReadLimit (1 MiB) so a single envelope can carry
+// at most what the WS read loop already accepts. Daemon-side ReadFile
+// (commander/files.go) enforces a 768 KiB JSON-encoded cap so this
+// boundary is never approached in practice; the wire cap is a safety
+// net against pathological or malicious frames.
+const forwardFrameMaxBytes = 1 << 20
+
+// forwardFrameMaxDigits: 1<<20 = 1048576 → 7 decimal digits. Reader
+// rejects more, so a forged length cannot be parsed into a giant int.
+const forwardFrameMaxDigits = 7
+
+var errEnvelopeOversized = errors.New("forward: envelope exceeds cap of 1 MiB")
+
+// writeEnvelopeFrame marshals env to JSON and writes `<len>\n<json>`.
+// Returns errEnvelopeOversized when the encoded JSON exceeds the cap.
+func writeEnvelopeFrame(w io.Writer, env commander.Envelope) error {
+	body, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("forward: marshal envelope: %w", err)
+	}
+	if int64(len(body)) > forwardFrameMaxBytes {
+		return fmt.Errorf("%w (was %d bytes)", errEnvelopeOversized, len(body))
+	}
+	if _, err := fmt.Fprintf(w, "%d\n", len(body)); err != nil {
+		return fmt.Errorf("forward: write length prefix: %w", err)
+	}
+	if _, err := w.Write(body); err != nil {
+		return fmt.Errorf("forward: write envelope body: %w", err)
+	}
+	return nil
+}
+
+// readEnvelopeFrame parses one length-prefixed envelope from r. Returns
+// io.EOF at clean end of stream. Returns errEnvelopeOversized on a
+// claimed length > cap; returns descriptive error on malformed framing.
+func readEnvelopeFrame(r *bufio.Reader) (commander.Envelope, error) {
+	lineBytes, err := r.ReadSlice('\n')
+	if err != nil {
+		// io.EOF here is the clean end-of-stream signal.
+		if errors.Is(err, io.EOF) && len(lineBytes) == 0 {
+			return commander.Envelope{}, io.EOF
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			return commander.Envelope{}, fmt.Errorf("forward: length prefix > %d digits", forwardFrameMaxDigits)
+		}
+		return commander.Envelope{}, fmt.Errorf("forward: read length prefix: %w", err)
+	}
+	// Strip trailing '\n'.
+	line := lineBytes[:len(lineBytes)-1]
+	if len(line) == 0 || len(line) > forwardFrameMaxDigits {
+		return commander.Envelope{}, fmt.Errorf("forward: invalid length prefix (%q)", lineBytes)
+	}
+	for _, c := range line {
+		if c < '0' || c > '9' {
+			return commander.Envelope{}, fmt.Errorf("forward: non-digit in length prefix (%q)", line)
+		}
+	}
+	n, err := strconv.ParseInt(string(line), 10, 64)
+	if err != nil {
+		return commander.Envelope{}, fmt.Errorf("forward: parse length: %w", err)
+	}
+	if n < 0 || n > forwardFrameMaxBytes {
+		return commander.Envelope{}, fmt.Errorf("%w (was %d bytes)", errEnvelopeOversized, n)
+	}
+	body := make([]byte, n)
+	if _, err := io.ReadFull(r, body); err != nil {
+		return commander.Envelope{}, fmt.Errorf("forward: read body (%d bytes): %w", n, err)
+	}
+	var env commander.Envelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return commander.Envelope{}, fmt.Errorf("forward: unmarshal envelope: %w", err)
+	}
+	return env, nil
+}
+```
+
+- [ ] **Step 4: Run; expect pass**
+
+```sh
+go test ./internal/commanderhub -run TestForwardCodec_ -count=1 -race
+```
+
+- [ ] **Step 5: Commit**
+
+```sh
+git add internal/commanderhub/forward_codec.go internal/commanderhub/forward_codec_test.go
+git commit -m "feat(commanderhub): length-prefixed JSON envelope codec for pod-to-pod forwarding
+
+Wire format: <decimal-ascii-length>\\n<envelope-json-bytes>. 1 MiB cap
+per envelope matches existing observer wsReadLimit; daemon-side
+ReadFile's 768 KiB JSON-encoded cap (Task A2) keeps frames well under
+this. Reader rejects malformed lengths and lengths exceeding cap WITHOUT
+ever allocating the buffer (digit count check before parse).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+```
+
+---
+
+### Task C2: HMAC auth + `commander_forward_nonces` write side
+
+**Files:**
+- Create: `multi-agent/internal/commanderhub/forward_auth.go`
+- Create: `multi-agent/internal/commanderhub/forward_auth_test.go`
+
+**Interfaces:**
+- Produces:
+  - `forwardHMACTimestampWindow time.Duration = 60 * time.Second`
+  - `signForward(secret []byte, ts int64, nonce string, body []byte) string` — returns hex SHA-256 HMAC of `ts || "\n" || nonce || "\n" || body`. Used by client.
+  - `verifyForward(headerHex string, secret, prevSecret []byte, ts int64, nonce string, body []byte) (matchedKey int, ok bool)` — returns `matchedKey: 0` for Secret, `1` for PrevSecret, `-1` for no match. Uses `hmac.Equal` over fixed `[32]byte` arrays to avoid timing side channels.
+  - `parseHMACTimestamp(headerVal string) (int64, error)` + `parseHMACNonce(headerVal string) error` — header parsing helpers (32 hex chars for nonce, decimal seconds for timestamp).
+  - `freshNonce() (string, error)` — 32 random hex chars via `crypto/rand`.
+  - `insertNonce(ctx context.Context, db *sql.DB, nonce string) (inserted bool, err error)` — `INSERT INTO commander_forward_nonces (nonce, received_at) VALUES ($1, now()) ON CONFLICT DO NOTHING RETURNING true`; `inserted=false` ⇒ replay. PG error ⇒ caller fails closed (503).
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `internal/commanderhub/forward_auth_test.go`:
+
+```go
+package commanderhub
+
+import (
+	"context"
+	"encoding/hex"
+	"testing"
+
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/stretchr/testify/require"
+)
+
+const insertNonceSQL = `INSERT INTO commander_forward_nonces (nonce, received_at) VALUES ($1, now()) ON CONFLICT DO NOTHING`
+
+func TestSignForward_Deterministic(t *testing.T) {
+	secret := []byte("supersecret-32-chars-padding-aaaa")
+	sig1 := signForward(secret, 1751155200, "0123456789abcdef0123456789abcdef", []byte(`{"x":1}`))
+	sig2 := signForward(secret, 1751155200, "0123456789abcdef0123456789abcdef", []byte(`{"x":1}`))
+	require.Equal(t, sig1, sig2)
+	require.Len(t, sig1, 64) // SHA-256 hex
+	_, err := hex.DecodeString(sig1)
+	require.NoError(t, err)
+}
+
+func TestVerifyForward_AcceptsCurrentSecret(t *testing.T) {
+	secret := []byte("supersecret-32-chars-padding-aaaa")
+	body := []byte(`{"x":1}`)
+	ts := int64(1751155200)
+	nonce := "0123456789abcdef0123456789abcdef"
+	sig := signForward(secret, ts, nonce, body)
+	matched, ok := verifyForward(sig, secret, nil, ts, nonce, body)
+	require.True(t, ok)
+	require.Equal(t, 0, matched)
+}
+
+func TestVerifyForward_AcceptsPrevSecret(t *testing.T) {
+	oldSecret := []byte("OLD-secret-32-chars-padding-bbbbb")
+	newSecret := []byte("NEW-secret-32-chars-padding-ccccc")
+	body := []byte(`{"x":1}`)
+	ts := int64(1751155200)
+	nonce := "0123456789abcdef0123456789abcdef"
+	sig := signForward(oldSecret, ts, nonce, body)
+	matched, ok := verifyForward(sig, newSecret, oldSecret, ts, nonce, body)
+	require.True(t, ok)
+	require.Equal(t, 1, matched)
+}
+
+func TestVerifyForward_RejectsWrongSecret(t *testing.T) {
+	secret := []byte("a-secret-32-chars-padding-dddddd")
+	otherSecret := []byte("ANOTHER-32-chars-padding-eeeeee")
+	body := []byte(`{"x":1}`)
+	ts := int64(1751155200)
+	nonce := "0123456789abcdef0123456789abcdef"
+	sig := signForward(otherSecret, ts, nonce, body)
+	_, ok := verifyForward(sig, secret, nil, ts, nonce, body)
+	require.False(t, ok)
+}
+
+func TestFreshNonce_HexAndUnique(t *testing.T) {
+	seen := make(map[string]struct{}, 1000)
+	for i := 0; i < 1000; i++ {
+		n, err := freshNonce()
+		require.NoError(t, err)
+		require.Len(t, n, 32)
+		_, err = hex.DecodeString(n)
+		require.NoError(t, err)
+		if _, dup := seen[n]; dup {
+			t.Fatalf("duplicate nonce: %s", n)
+		}
+		seen[n] = struct{}{}
+	}
+}
+
+func TestInsertNonce_FirstAccepted(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+	mock.ExpectExec(insertNonceSQL).
+		WithArgs("nonce-1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	inserted, err := insertNonce(context.Background(), db, "nonce-1")
+	require.NoError(t, err)
+	require.True(t, inserted)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestInsertNonce_ConflictRejected(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+	mock.ExpectExec(insertNonceSQL).
+		WithArgs("nonce-replay").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	inserted, err := insertNonce(context.Background(), db, "nonce-replay")
+	require.NoError(t, err)
+	require.False(t, inserted, "ON CONFLICT DO NOTHING → 0 rows → replay detected")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+```
+
+- [ ] **Step 2: Run; expect compile failure**
+
+- [ ] **Step 3: Implement `forward_auth.go`**
+
+Create `internal/commanderhub/forward_auth.go`:
+
+```go
+package commanderhub
+
+import (
+	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"strconv"
+	"time"
+)
+
+const (
+	forwardHMACTimestampWindow = 60 * time.Second
+	forwardNonceHexLen         = 32 // 16 random bytes
+)
+
+// signForward returns the hex-encoded SHA-256 HMAC of
+// (timestamp || "\n" || nonce || "\n" || body) under `secret`. Used by
+// the client to compute X-Observer-Cluster-Auth.
+func signForward(secret []byte, ts int64, nonce string, body []byte) string {
+	mac := hmac.New(sha256.New, secret)
+	fmt.Fprintf(mac, "%d\n%s\n", ts, nonce)
+	mac.Write(body)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// verifyForward checks the hex auth header against Secret and (if non-
+// nil) PrevSecret in constant time. Returns:
+//   matchedKey = 0 → Secret matched
+//   matchedKey = 1 → PrevSecret matched (during three-phase rotation)
+//   matchedKey = -1 → neither matched
+//
+// hmac.Equal uses crypto/subtle internally and is constant-time over
+// equal-length inputs. We decode the hex header into a fixed [32]byte
+// so length comparison can't leak via subtle.ConstantTimeCompare's
+// early-exit on mismatched lengths.
+func verifyForward(headerHex string, secret, prevSecret []byte, ts int64, nonce string, body []byte) (matchedKey int, ok bool) {
+	got, err := hex.DecodeString(headerHex)
+	if err != nil || len(got) != sha256.Size {
+		return -1, false
+	}
+	want0, _ := hex.DecodeString(signForward(secret, ts, nonce, body))
+	if hmac.Equal(got, want0) {
+		return 0, true
+	}
+	if prevSecret != nil {
+		want1, _ := hex.DecodeString(signForward(prevSecret, ts, nonce, body))
+		if hmac.Equal(got, want1) {
+			return 1, true
+		}
+	}
+	return -1, false
+}
+
+// parseHMACTimestamp parses the X-Observer-Cluster-Timestamp header.
+func parseHMACTimestamp(s string) (int64, error) {
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid timestamp: %w", err)
+	}
+	return n, nil
+}
+
+// parseHMACNonce validates the X-Observer-Cluster-Nonce header. Returns
+// nil if it's 32 hex chars (the freshNonce format).
+func parseHMACNonce(s string) error {
+	if len(s) != forwardNonceHexLen {
+		return fmt.Errorf("invalid nonce length: want %d, got %d", forwardNonceHexLen, len(s))
+	}
+	if _, err := hex.DecodeString(s); err != nil {
+		return fmt.Errorf("invalid nonce: %w", err)
+	}
+	return nil
+}
+
+// freshNonce returns a fresh 32-hex-char nonce (16 random bytes). Returns
+// error on crypto/rand failure (system entropy starvation; unrecoverable).
+func freshNonce() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("freshNonce: %w", err)
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+// insertNonce atomically inserts the nonce. Returns inserted=false when
+// the nonce already exists (replay). PG errors bubble up; caller MUST
+// fail closed (503) on err.
+func insertNonce(ctx context.Context, db *sql.DB, nonce string) (bool, error) {
+	res, err := db.ExecContext(ctx, `INSERT INTO commander_forward_nonces (nonce, received_at) VALUES ($1, now()) ON CONFLICT DO NOTHING`, nonce)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// timestampWithinWindow returns true when |now - ts| <= window.
+func timestampWithinWindow(ts int64, now time.Time, window time.Duration) bool {
+	diff := now.Unix() - ts
+	if diff < 0 {
+		diff = -diff
+	}
+	return time.Duration(diff)*time.Second <= window
+}
+
+// ErrForwardAuthDenied is returned to callers in lieu of leaking which
+// step (timestamp, nonce, HMAC) failed. Audit log gets the detail.
+var ErrForwardAuthDenied = errors.New("forward: authentication denied")
+```
+
+- [ ] **Step 4: Run; expect pass**
+
+```sh
+go test ./internal/commanderhub -run 'TestSignForward|TestVerifyForward|TestFreshNonce|TestInsertNonce' -count=1 -race
+```
+
+- [ ] **Step 5: Commit**
+
+```sh
+git add internal/commanderhub/forward_auth.go internal/commanderhub/forward_auth_test.go
+git commit -m "feat(commanderhub): HMAC + nonce auth helpers for pod-to-pod forwarding
+
+signForward computes SHA-256 HMAC over (ts || nonce || body) per spec
+v19. verifyForward accepts Secret OR PrevSecret (three-phase rotation)
+via constant-time hmac.Equal on fixed [32]byte arrays. freshNonce
+returns 32 hex chars from crypto/rand and propagates entropy errors.
+insertNonce atomically commits the nonce; ON CONFLICT DO NOTHING with
+0 affected rows signals replay.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+```
+
+---
+
+### Task C3: `*forwardClient` — pod-to-pod HTTP forwarding
+
+**Files:**
+- Create: `multi-agent/internal/commanderhub/forward_client.go`
+- Create: `multi-agent/internal/commanderhub/forward_client_test.go`
+- Modify: `multi-agent/internal/commanderhub/hub.go` (ADD `forwardCli *forwardClient` field to Hub struct now that the type exists)
+
+**Interfaces:**
+- Produces:
+  - `*forwardClient`: `secret`, `prevSecret`, `httpClient *http.Client`, `audit *log.Logger` (uses stdlib log to stderr).
+  - `(c *forwardClient).send(ctx, peerURL string, req forwardRequest) (json.RawMessage, error)` — non-streaming. Marshals request body, signs HMAC, POSTs to `peerURL + "/api/commander/_internal/forward"`. On 403 with PrevSecret-available, retries ONCE with PrevSecret. On 426 (daemon upgrade) → returns `&commander.DaemonError{Code: commander.ErrCodeDaemonUpgradeRequired}`. On 404 → returns `ErrDaemonNotFound`. On other → returns `ErrDaemonGone`.
+  - `(c *forwardClient).stream(ctx, peerURL string, req forwardRequest) (<-chan commander.Envelope, error)` — streaming. Returns a channel that decodes length-prefixed envelopes from the chunked HTTP response.
+  - `type forwardRequest struct { Owner owner; ShortID string; Command string; Args json.RawMessage; Streaming bool; TimeoutMs int64 }`.
+
+This task is sizable; the test set covers signing OK, retry-on-403, body cap, 426 mapping, 404 mapping, streaming round-trip, and stream cancel. See the spec §"Forwarding endpoint — Auth" / "Response — non-streaming" / "Response — streaming" / "Cancellation propagation" for exact wire shape.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `internal/commanderhub/forward_client_test.go`. Use `httptest.NewServer` to stand up a fake peer that validates HMAC and responds. (Full test code: ~250 lines — see structure below; expand each block to concrete assertions.)
+
+```go
+package commanderhub
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/yourorg/multi-agent/internal/commander"
+)
+
+const forwardEndpoint = "/api/commander/_internal/forward"
+
+func TestForwardClient_Send_RoundTrip(t *testing.T) {
+	secret := []byte("supersecret-32-chars-padding-aaaa")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, forwardEndpoint, r.URL.Path)
+		body, _ := io.ReadAll(r.Body)
+		ts, err := parseHMACTimestamp(r.Header.Get("X-Observer-Cluster-Timestamp"))
+		require.NoError(t, err)
+		require.NoError(t, parseHMACNonce(r.Header.Get("X-Observer-Cluster-Nonce")))
+		_, ok := verifyForward(r.Header.Get("X-Observer-Cluster-Auth"), secret, nil, ts, r.Header.Get("X-Observer-Cluster-Nonce"), body)
+		require.True(t, ok)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"result":{"sessions":[]}}`)
+	}))
+	defer srv.Close()
+
+	c := newForwardClient(secret, nil)
+	res, err := c.send(context.Background(), srv.URL, forwardRequest{
+		Owner: owner{userID: "alice", workspaceID: "W1"}, ShortID: "agent-A",
+		Command: "list_sessions",
+	})
+	require.NoError(t, err)
+	require.Contains(t, string(res), "sessions")
+}
+
+func TestForwardClient_Send_RetryOnPrevSecret(t *testing.T) {
+	oldSecret := []byte("OLD-secret-32-chars-padding-bbbbb")
+	newSecret := []byte("NEW-secret-32-chars-padding-ccccc")
+	var attempt int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt++
+		body, _ := io.ReadAll(r.Body)
+		ts, _ := parseHMACTimestamp(r.Header.Get("X-Observer-Cluster-Timestamp"))
+		nonce := r.Header.Get("X-Observer-Cluster-Nonce")
+		_, ok := verifyForward(r.Header.Get("X-Observer-Cluster-Auth"), oldSecret, nil, ts, nonce, body)
+		if !ok {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"result":{}}`)
+	}))
+	defer srv.Close()
+
+	// Sender's PrevSecret = oldSecret; receiver accepts old only.
+	c := newForwardClient(newSecret, oldSecret)
+	_, err := c.send(context.Background(), srv.URL, forwardRequest{
+		Owner: owner{userID: "alice", workspaceID: "W1"}, ShortID: "agent-A",
+		Command: "list_sessions",
+	})
+	require.NoError(t, err)
+	require.Equal(t, 2, attempt, "should have retried once with PrevSecret")
+}
+
+func TestForwardClient_Send_404_MapsToErrDaemonNotFound(t *testing.T) {
+	secret := []byte("supersecret-32-chars-padding-aaaa")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer srv.Close()
+	c := newForwardClient(secret, nil)
+	_, err := c.send(context.Background(), srv.URL, forwardRequest{
+		Owner: owner{userID: "alice", workspaceID: "W1"}, ShortID: "ghost",
+		Command: "list_sessions",
+	})
+	require.ErrorIs(t, err, ErrDaemonNotFound)
+}
+
+func TestForwardClient_Send_426_MapsToDaemonUpgradeRequired(t *testing.T) {
+	secret := []byte("supersecret-32-chars-padding-aaaa")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUpgradeRequired)
+		_, _ = fmt.Fprint(w, `{"error":{"code":"daemon_upgrade_required","message":"upgrade your daemon"}}`)
+	}))
+	defer srv.Close()
+	c := newForwardClient(secret, nil)
+	_, err := c.send(context.Background(), srv.URL, forwardRequest{
+		Owner: owner{userID: "alice", workspaceID: "W1"}, ShortID: "old-daemon",
+		Command: "read_file",
+	})
+	var de *commander.DaemonError
+	require.ErrorAs(t, err, &de)
+	require.Equal(t, commander.ErrCodeDaemonUpgradeRequired, de.Code)
+}
+
+func TestForwardClient_Stream_RoundTrip(t *testing.T) {
+	secret := []byte("supersecret-32-chars-padding-aaaa")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Stream three envelopes terminated by command_result.
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		for i, e := range []commander.Envelope{
+			{Type: "event", ID: "1", Payload: json.RawMessage(`{"event_kind":"chunk","text":"hi"}`)},
+			{Type: "event", ID: "1", Payload: json.RawMessage(`{"event_kind":"chunk","text":" world"}`)},
+			{Type: "command_result", ID: "1", Payload: json.RawMessage(`{"result":{"ok":true}}`)},
+		} {
+			require.NoError(t, writeEnvelopeFrame(w, e), "frame %d", i)
+			flusher.Flush()
+		}
+	}))
+	defer srv.Close()
+	c := newForwardClient(secret, nil)
+	ch, err := c.stream(context.Background(), srv.URL, forwardRequest{
+		Owner: owner{userID: "alice", workspaceID: "W1"}, ShortID: "agent-A",
+		Command: "session_turn", Streaming: true,
+	})
+	require.NoError(t, err)
+	got := 0
+	for env := range ch {
+		got++
+		_ = env
+	}
+	require.Equal(t, 3, got)
+}
+
+// Helper: in real code, peer-bridge tests use the codec directly.
+var _ = bufio.NewReader
+
+// Additional tests to author (left as TODO for the executing subagent
+// since they're variants of the above; ALL must use require.NoError on
+// mock expectations where sqlmock is involved):
+// - TestForwardClient_Send_OversizedBody_Rejected (cap test)
+// - TestForwardClient_Stream_CancelClosesChannel (cancellation)
+// - TestForwardClient_Send_NeitherSecretMatches_Errors (auth failure)
+
+// Stub for compile until concrete test added by the executing subagent.
+func TestForwardClient_TODOAdditionalTests(t *testing.T) {
+	t.Skip("see comments above; add concrete tests before merge")
+	_ = strings.NewReader("")
+	_ = time.Now
+}
+```
+
+(The above provides a complete first batch of tests. The executing subagent should author the three TODO tests as part of this task — they follow the same pattern.)
+
+- [ ] **Step 2: Run; expect compile failure**
+
+- [ ] **Step 3: Implement `forward_client.go`**
+
+Create `internal/commanderhub/forward_client.go`:
+
+```go
+package commanderhub
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/yourorg/multi-agent/internal/commander"
+)
+
+// forwardRequest is the JSON body of a /api/commander/_internal/forward
+// POST. Owner is the cluster-scoped identity (NOT the request's bearer
+// token; the cluster secret is the only auth on this internal endpoint,
+// see spec v19 §"Threat model").
+type forwardRequest struct {
+	Owner     owner           `json:"-"` // populated separately; JSON below
+	ShortID   string          `json:"short_id"`
+	Command   string          `json:"command"`
+	Args      json.RawMessage `json:"args,omitempty"`
+	Streaming bool            `json:"streaming"`
+	TimeoutMs int64           `json:"timeout_ms"`
+}
+
+// forwardWireRequest is the actual JSON wire shape; flattens Owner.
+type forwardWireRequest struct {
+	UserID      string          `json:"user_id"`
+	WorkspaceID string          `json:"workspace_id"`
+	ShortID     string          `json:"short_id"`
+	Command     string          `json:"command"`
+	Args        json.RawMessage `json:"args,omitempty"`
+	Streaming   bool            `json:"streaming"`
+	TimeoutMs   int64           `json:"timeout_ms"`
+}
+
+// forwardResponse is the non-streaming response shape.
+type forwardResponse struct {
+	Result json.RawMessage         `json:"result,omitempty"`
+	Error  *commander.ErrorPayload `json:"error,omitempty"`
+}
+
+const forwardRequestBodyMaxBytes int64 = (1 << 20) + (1 << 19) // 1.5 MiB
+
+type forwardClient struct {
+	secret     []byte
+	prevSecret []byte
+	httpClient *http.Client
+}
+
+func newForwardClient(secret, prevSecret []byte) *forwardClient {
+	return &forwardClient{
+		secret:     secret,
+		prevSecret: prevSecret,
+		httpClient: &http.Client{
+			Timeout: 0, // per-call ctx bounds; long streams need no client-side timeout
+			Transport: &http.Transport{
+				ResponseHeaderTimeout: 10 * time.Second,
+				IdleConnTimeout:       60 * time.Second,
+			},
+		},
+	}
+}
+
+func (c *forwardClient) buildRequest(ctx context.Context, peerURL string, req forwardRequest, useSecret []byte) (*http.Request, []byte, error) {
+	wire := forwardWireRequest{
+		UserID: req.Owner.userID, WorkspaceID: req.Owner.workspaceID,
+		ShortID: req.ShortID, Command: req.Command, Args: req.Args,
+		Streaming: req.Streaming, TimeoutMs: req.TimeoutMs,
+	}
+	body, err := json.Marshal(wire)
+	if err != nil {
+		return nil, nil, fmt.Errorf("forward: marshal request: %w", err)
+	}
+	if int64(len(body)) > forwardRequestBodyMaxBytes {
+		return nil, nil, fmt.Errorf("forward: request body %d > cap %d", len(body), forwardRequestBodyMaxBytes)
+	}
+	nonce, err := freshNonce()
+	if err != nil {
+		return nil, nil, err
+	}
+	ts := time.Now().Unix()
+	sig := signForward(useSecret, ts, nonce, body)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, peerURL+forwardEndpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	httpReq.Header.Set("X-Observer-Cluster-Timestamp", strconv.FormatInt(ts, 10))
+	httpReq.Header.Set("X-Observer-Cluster-Nonce", nonce)
+	httpReq.Header.Set("X-Observer-Cluster-Auth", sig)
+	return httpReq, body, nil
+}
+
+// send: non-streaming forward. On 403 with PrevSecret available, retries
+// once with PrevSecret (three-phase rotation accommodation).
+func (c *forwardClient) send(ctx context.Context, peerURL string, req forwardRequest) (json.RawMessage, error) {
+	if req.Streaming {
+		return nil, fmt.Errorf("forward: send() called with Streaming=true; use stream()")
+	}
+	for _, key := range c.keysToTry() {
+		httpReq, _, err := c.buildRequest(ctx, peerURL, req, key)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.httpClient.Do(httpReq)
+		if err != nil {
+			c.audit("forward.sent.failed", peerURL, req.ShortID, req.Command, err)
+			return nil, ErrDaemonGone
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, forwardRequestBodyMaxBytes))
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusForbidden && key == nil {
+			// First retry with prev key.
+			continue
+		}
+		return c.mapResponse(resp.StatusCode, body, peerURL, req)
+	}
+	return nil, ErrDaemonGone
+}
+
+// stream: streaming forward. Returns a channel that decodes envelopes
+// from the chunked HTTP response. Channel closed on terminal frame or
+// upstream error. On 403 + PrevSecret, retries once.
+func (c *forwardClient) stream(ctx context.Context, peerURL string, req forwardRequest) (<-chan commander.Envelope, error) {
+	if !req.Streaming {
+		return nil, fmt.Errorf("forward: stream() called with Streaming=false; use send()")
+	}
+	var resp *http.Response
+	var lastErr error
+	for _, key := range c.keysToTry() {
+		httpReq, _, err := c.buildRequest(ctx, peerURL, req, key)
+		if err != nil {
+			return nil, err
+		}
+		r, err := c.httpClient.Do(httpReq)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if r.StatusCode == http.StatusForbidden && key == nil {
+			_ = r.Body.Close()
+			continue
+		}
+		resp = r
+		break
+	}
+	if resp == nil {
+		c.audit("forward.stream.failed", peerURL, req.ShortID, req.Command, lastErr)
+		return nil, ErrDaemonGone
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, forwardRequestBodyMaxBytes))
+		_ = resp.Body.Close()
+		_, err := c.mapResponse(resp.StatusCode, body, peerURL, req)
+		return nil, err
+	}
+	out := make(chan commander.Envelope, 256)
+	go func() {
+		defer close(out)
+		defer resp.Body.Close()
+		reader := bufio.NewReader(resp.Body)
+		for {
+			env, err := readEnvelopeFrame(reader)
+			if errors.Is(err, io.EOF) {
+				return
+			}
+			if err != nil {
+				out <- commander.Envelope{
+					Type: "error",
+					Payload: json.RawMessage(fmt.Sprintf(`{"code":%q,"message":%q}`,
+						commander.ErrCodeBackendUnavailable, err.Error())),
+				}
+				return
+			}
+			select {
+			case out <- env:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out, nil
+}
+
+// mapResponse: turn HTTP status + body into either a result payload or
+// the appropriate error (ErrDaemonNotFound for 404, *DaemonError for
+// daemon-origin errors, ErrDaemonGone for everything else).
+func (c *forwardClient) mapResponse(status int, body []byte, peerURL string, req forwardRequest) (json.RawMessage, error) {
+	switch status {
+	case http.StatusOK:
+		var fr forwardResponse
+		if err := json.Unmarshal(body, &fr); err != nil {
+			return nil, fmt.Errorf("forward: malformed peer response: %w", err)
+		}
+		if fr.Error != nil {
+			return nil, &commander.DaemonError{Code: fr.Error.Code, Message: fr.Error.Message}
+		}
+		return fr.Result, nil
+	case http.StatusNotFound:
+		c.audit("forward.sent.404", peerURL, req.ShortID, req.Command, nil)
+		return nil, ErrDaemonNotFound
+	case http.StatusUpgradeRequired: // 426
+		var fr forwardResponse
+		_ = json.Unmarshal(body, &fr)
+		if fr.Error == nil {
+			fr.Error = &commander.ErrorPayload{Code: commander.ErrCodeDaemonUpgradeRequired, Message: "daemon upgrade required"}
+		}
+		return nil, &commander.DaemonError{Code: fr.Error.Code, Message: fr.Error.Message}
+	case http.StatusForbidden:
+		c.audit("forward.sent.denied", peerURL, req.ShortID, req.Command, nil)
+		return nil, ErrDaemonGone
+	default:
+		c.audit("forward.sent.5xx", peerURL, req.ShortID, req.Command, fmt.Errorf("status %d", status))
+		return nil, ErrDaemonGone
+	}
+}
+
+func (c *forwardClient) keysToTry() [][]byte {
+	if c.prevSecret == nil {
+		return [][]byte{c.secret}
+	}
+	return [][]byte{c.secret, c.prevSecret} // nil sentinel for "retry slot" — caller iterates twice
+}
+
+// audit emits a structured WARN/INFO line. Never logs secret/nonce/auth.
+func (c *forwardClient) audit(event, peer, shortID, command string, err error) {
+	msg := ""
+	if err != nil {
+		msg = err.Error()
+	}
+	log.Printf("forward audit event=%s peer=%s short_id=%s command=%s err=%q",
+		event, peer, shortID, command, msg)
+}
+```
+
+Note the audit signature subtly differs from the spec's "structured log to stderr" wording — it uses stdlib `log` which writes to stderr by default. If the project later adopts a structured logger, swap the impl; the audit-line format is fixed (event, peer, short_id, command, err).
+
+- [ ] **Step 4: Add `forwardCli *forwardClient` field to Hub struct**
+
+In `internal/commanderhub/hub.go`, find the Hub struct (post-B1 shape) and add `forwardCli` next to `sharedReg`:
+
+```go
+type Hub struct {
+	resolver     identity.Resolver
+	upgrader     websocket.Upgrader
+	reg          *localRegistry
+	sharedReg    *sharedRegistry
+	forwardCli   *forwardClient // C3: nil in single-pod; populated by Phase D D1's attachSharedRegistry
+	turns        turnStateBackend
+	sessionCache *sessionListCache
+	cmdSeq       atomic.Int64
+
+	TurnTimeout time.Duration
+}
+```
+
+- [ ] **Step 5: Run; expect pass**
+
+```sh
+go test ./internal/commanderhub -run 'TestForwardClient_' -count=1 -race
+```
+
+- [ ] **Step 6: Commit**
+
+```sh
+git add internal/commanderhub/forward_client.go \
+        internal/commanderhub/forward_client_test.go \
+        internal/commanderhub/hub.go
+git commit -m "feat(commanderhub): forwardClient send + stream + retry-on-403-PrevSecret
+
+Pod-to-pod HTTP client for the internal /api/commander/_internal/forward
+endpoint. Marshals forwardRequest, signs HMAC (Task C2), POSTs to peer.
+On 403 + non-nil PrevSecret, retries once (three-phase secret rotation
+accommodation). 404 → ErrDaemonNotFound. 426 → *DaemonError with
+ErrCodeDaemonUpgradeRequired. Streaming response decodes length-
+prefixed envelopes (Task C1 codec) into a buffered channel (256).
+Hub.forwardCli field declared but populated only by Phase D D1's
+attachSharedRegistry.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+```
+
+---
+
+### Tasks C4, C5, C6 — abbreviated specification
+
+The remaining Phase C tasks follow the same shape as C1–C3. **For brevity in this plan revision, they are summarized; the executing subagent for each task expands the test list and code following the patterns established above. The Plan document author commits to following this expansion in plan v10 once Phase A+B execution feedback validates the level of detail.**
+
+#### Task C4: `forwardServer` HTTP handler
+
+- Files: `forward_server.go` (new), `forward_server_test.go` (new), `hub.go` (add `(h *Hub).forwardHandler` method).
+- Interface: `(h *Hub).forwardHandler(w http.ResponseWriter, r *http.Request)` mounted at `/api/commander/_internal/forward` on the INTERNAL mux only.
+- Receiver pipeline (STRICT ORDER per spec v19 §"Receiver"): length check (413 if Content-Length > 1.5 MiB) → header parse (400 if missing/malformed) → timestamp window (403 if drift > 60s) → body LimitReader (413 if exceeded) → HMAC verify (403 + audit log on mismatch with both Secret and PrevSecret) → atomic nonce insert (403 on conflict; **503 on PG error — fail closed**) → audit log → local-registry lookup ONLY (404 if missing — `sharedReg.lookupRemote` would loop) → invoke `sendCommandToLocal` (non-streaming) or `sendCommandStreamToLocal` (streaming) → return JSON `{result|error}` or stream envelopes via codec.
+- Tests: auth-fail modes (each step), replay rejection, body cap, stream cap propagation from receiver to client, cancellation propagation (client closes body → server ctx cancels → local SendCommandStream ctx cancels → removePending frees daemon slot).
+- Commit: `feat(commanderhub): forwardServer handler with strict-ordered auth + nonce insert + local-only lookup`.
+
+#### Task C5: `drainHandler` endpoint
+
+- Files: `drain_server.go` (new), `drain_server_test.go` (new), `hub.go` (add `(h *Hub).drainHandler` method).
+- Interface: `(h *Hub).drainHandler(w http.ResponseWriter, r *http.Request)` mounted at `/api/commander/_internal/drain` on the INTERNAL mux. Loopback bypass via `net.ParseIP(host).IsLoopback()` on `r.RemoteAddr` — else HMAC verify (same as forward). Iterates `h.reg` for all daemons of all owners (NO owner filter — the preStop hook drains everything), sends `event_kind: observer_draining` envelope, closes WS.
+- Tests: loopback bypass works, non-loopback requires HMAC, all daemons closed.
+- Commit: `feat(commanderhub): drainHandler endpoint for preStop hook + cluster-internal drain`.
+
+#### Task C6: `Hub.nextCmdID` pod-prefix in shared mode
+
+- Files: `hub.go` (modify `nextCmdID`), `hub_test.go` (add tests).
+- Interface: `(h *Hub) nextCmdID() string`. Single-pod (`h.sharedReg == nil`): exactly `strconv.FormatInt(h.cmdSeq.Add(1), 36)` — byte-for-byte unchanged from today (spec invariant). Shared mode: `<podHash>-<base36>` where `podHash = hex(sha256(h.sharedReg.advertiseURL))[:4]`.
+- Tests:
+  - `TestNextCmdID_SinglePod_ByteExactLegacy`: in a Hub with `sharedReg == nil`, first 5 calls return `"1"`, `"2"`, `"3"`, `"4"`, `"5"`.
+  - `TestNextCmdID_SharedMode_PodPrefix`: shared mode with advertiseURL set; calls return `<4hex>-1`, `<4hex>-2`, etc.; prefix derived deterministically from URL.
+- Commit: `feat(commanderhub): cmdID pod-prefix in shared mode for cross-pod log correlation`.
+
+---
+
+### Phase C Gate
+
+```sh
+cd multi-agent
+go vet ./...
+go test ./internal/commanderhub -count=1 -race
+```
+
+All Phase A+B+C tests pass. Forwarding client/server round-trip via httptest. **Dispatch to codex for Phase C review** before starting Phase D.
+
+---
+
+## Phase D — Wiring, read-path migration, observer-server lifecycle (5 tasks)
+
+Phase D wires the new pieces into existing code paths. Each task in summary form; same expansion pattern as Phase C.
+
+### Task D1: `Hub.attachSharedRegistry` + `listDaemons` + `lookupDaemon` + caller migration
+
+- Files: `wiring.go` (modify `MountAll` signature to `(publicMux, internalMux *http.ServeMux, resolver, agentserverURL, store, cluster ClusterRuntime)`), `hub.go` (expand `attachSharedRegistry(sr, fc, turns, sessionsCache nil)`), `proxy.go` (branch SendCommand[Stream]: localReg hit → sendCommandToLocal which calls confirmOwnership; miss → sharedReg.lookupRemote → forwardCli.send/stream), `http.go` (`ch.daemons`/`ch.tree`/`ch.sessionsFanout` use `hub.listDaemons`; `ch.turn` existence guard uses `hub.lookupDaemon`; `writeSendCmdError` adds 426 for `ErrCodeDaemonUpgradeRequired`), `tree.go` (`CommanderTree` → listDaemons; `cachedSessionRows` skips cache when `h.sessionCache == nil`).
+- Tests: extend existing `*_test.go` (real-WS path); add `wiring_test.go` for `MountAll` signature; verify in-package single-pod runs unchanged.
+- Commit: `feat(commanderhub): wire shared registry through MountAll + SendCommand[Stream] + read-path helpers`.
+
+### Task D2: `*pgTurnStore` (cross-pod begin / get / updateFromEnvelope / cleanupOrphans)
+
+- Files: `turn_state_pg.go` (new), `turn_state_pg_test.go` (new, sqlmock).
+- Interface: `*pgTurnStore` implements `turnStateBackend`. `begin` uses `INSERT … ON CONFLICT … WHERE state IN ('idle','done','error','awaiting_approval','disconnected') RETURNING (xmax=0) AS inserted`. `updateFromEnvelope` invoked by owning pod's `routeFrame` (Phase D adds the hook in `hub.go::routeFrame` for shared mode). `cleanupOrphans` flips `state='disconnected'` for rows older than `older`.
+- Tests: sqlmock for SQL shape; integration test against `OBSERVER_POSTGRES_TEST_DSN` for the begin-on-conflict semantics (xmax read).
+- Commit: `feat(commanderhub): pgTurnStore — cross-pod turn-state via commander_turns`.
+
+### Task D3: `*pgTelemetryLimiter` (atomic UPSERT-with-LEAST + lock_timeout in transaction)
+
+- Files: `internal/observerweb/rate_limit_pg.go` (new), `internal/observerweb/rate_limit_pg_test.go` (new, sqlmock + env-skipped integration). `cmd/observer-server/main.go` (selection rule: `cluster.enabled AND store.driver=="postgres" AND telemetry.enabled` → PG variant).
+- Interface: per spec v19 §"Finding E — telemetry rate limiter" — `(l *pgTelemetryLimiter) allow(ctx, key, now) (bool, error)`. Wraps the UPSERT in `BeginTx → SET LOCAL lock_timeout = '100ms' → ExecContext(upsertSQL) → Commit`. The UPSERT computes refill from `b.tokens` (existing row) not `EXCLUDED.tokens`.
+- Commit: `feat(observerweb): pgTelemetryLimiter — atomic shared token bucket via commander_telemetry_buckets`.
+
+### Task D4: Identity revocation channel (functional-options NewCache + revocation_pg.go)
+
+- Files: `internal/identity/cache.go` (change `NewCache(d, cfg)` → `NewCache(d, cfg, opts ...CacheOption) Resolver`; add `(c *cacheResolver).evict(key string)`). Create `internal/identity/revocation_pg.go` (`WithRevocationChannel(listener *pgx.Conn, publisher *sql.DB, channel string) CacheOption`; LISTEN goroutine; NOTIFY publish gated per spec v19 §"Publish policy"). Create `cache_pg_test.go` (env-skipped, two cacheResolver against shared PG).
+- Tests: functional-options compile against existing callers (`cmd/observer-server/main.go:632`); NOTIFY-driven eviction propagates within 100ms.
+- Commit: `feat(identity): opt-in PG LISTEN/NOTIFY revocation channel via functional options`.
+
+### Task D5: observer-server `Cluster ClusterConfig` + `loadConfig` merge + `validateConfig` + dual-listener lifecycle
+
+- Files: `cmd/observer-server/main.go` (new fields per spec v19 §"Cluster config" + AgentserverIdentityConfig pointer-nullable; loadConfig merges sibling `nonsecret/observer.nonsecret.yaml`; validateConfig partial-cluster + loopback-coverage + `cluster.enabled AND store.driver!=postgres` rules; post-merge defaulting for FreshTTL/RevocationChannel; dual `*http.Server` under `errgroup` with coordinated `Shutdown`; replace `newHTTPServer` with `newPublicHTTPServer`/`newInternalHTTPServer` (no WriteTimeout)); `cmd/observer-server/cluster_runtime.go` (new); `cmd/observer-server/drain_local.go` (new — `--drain-local` subcommand validates loopback-reachable internal_listen_addr; exit 1 on config-read error; exit 0 with WARN on connect error).
+- Files: `internal/observerweb/server.go` (Options.Cluster + dual return from `NewWithResolverOptions`).
+- Tests: `main_test.go` matrix for validateConfig partial-cluster rules and pointer-nullable post-merge defaulting; integration test for the dual-listener shutdown.
+- Commit: `feat(observer-server): cluster config + dual listener + drain-local subcommand`.
+
+---
+
+### Phase D Gate
+
+```sh
+cd multi-agent
+go vet ./...
+go test ./... -race -count=1
+```
+
+All single-pod + shared-mode unit/integration tests pass. **Dispatch to codex for Phase D review** before starting Phase E.
+
+---
+
+## Phase E — Chart + CI + docs (5 tasks)
+
+### Task E1: `values.yaml` + `values-production.example.yaml`
+
+Per spec v19 §"Helm chart values" + §"values-production". Including `revocationChannel: auto|enabled|disabled` enum + `freshTTL: ""` default + `cluster:` block. Test renders.
+
+Commit: `chore(chart): values.yaml + values-production.example.yaml (cluster block + identity defaults)`.
+
+### Task E2: `templates/validate.yaml` (always-rendered)
+
+Per spec v19 §"Helm validate.yaml". Four fail guards. Add chart tests for each fail case.
+
+Commit: `chore(chart): templates/validate.yaml fail-fast guards for cluster + sqlite + secret-length`.
+
+### Task E3: `templates/{configmap,secret,deployment}.yaml` renders + init container + preStop
+
+Per spec v19 §"Configmap snippet" + §"templates/secret.yaml" v17/v18 changes + §"Init container" + §"preStop". Single `initContainers:` block. Conditional fresh_ttl/revocation_channel emission. preStop exec calls `observer-server --drain-local --config ... --internal-port=...`.
+
+Commit: `chore(chart): deployment + configmap + secret renders for cluster mode`.
+
+### Task E4: `templates/service.yaml` (headless) + `templates/networkpolicy.yaml` + ingress/httproute hardening
+
+Per spec v19 §"Internal Service — headless" + §"Internal NetworkPolicy" + §"Ingress/HTTPRoute hardening". Two-rule NetworkPolicy (allow public 8090 from anywhere; restrict 8091 to observer peers).
+
+Commit: `chore(chart): headless Service + NetworkPolicy + ingress deny for /_internal/*`.
+
+### Task E5: `chart_test.sh` extensions + `observer-deploy.yml` + `deploy/README.md` + `dev/compose.multi-observer.yaml`
+
+Chart-test assertions per spec v19 §"Chart tests" blocks 1–7 (default, multi-pod, fail-fast, existingSecret-renders-into-ConfigMap, secret.create-renders-into-Secret, revocationChannel=disabled emits empty, invalid enum fails).
+
+`observer-deploy.yml` smoke: generate `cluster_secret` (48 chars) + `::add-mask::`; bump `replicaCount: 2`; render `cluster.enabled=true`. Resolve pod IPs in GitHub runner; render one wget Job per pod IP. Release: require `OBSERVER_CLUSTER_SECRET` in `required` list.
+
+`deploy/README.md`: pre-rollout coordination; three-phase rotation; mixed-version window caveat; clients-treat-DaemonInfo.DaemonID-as-opaque.
+
+`dev/compose.multi-observer.yaml` + `dev/README.md`: 2 observers + 1 PG + nginx LB for local repro.
+
+Commit: `ci(observer-deploy) + chore(chart) + docs(deploy): full cluster-mode rollout assets`.
+
+---
+
+### Phase E Gate
+
+```sh
+cd multi-agent
+go test ./... -race -count=1
+helm template observer-test deploy/charts/observer | head -20  # smoke
+deploy/charts/observer/tests/chart_test.sh
+```
+
+All gates pass. **Dispatch to codex for Phase E review.** After codex clean, the implementation is ready for end-to-end verification per spec v19 §"Verification".
+
+---
+
 
