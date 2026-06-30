@@ -74,23 +74,22 @@ func TestSkillFlags_NoAcceptanceGate_Registered(t *testing.T) {
 	})
 }
 
-// TestSkillFlags_MustRegister_PanicsOnError exercises the mustRegister
-// wrapper's panic path. We construct a fresh local Registry so the
-// process-wide Default stays unmodified, then deliberately re-register
-// the same name to provoke ErrAlreadyRegistered.
+// TestSkillFlags_MustRegister_PanicsOnError exercises the production
+// mustRegister wrapper directly against a fresh local Registry so the
+// process-wide Default stays unmodified. We deliberately re-register
+// the same name to provoke ErrAlreadyRegistered, then assert the
+// panic value wraps that sentinel.
 //
-// This is the only path that exercises mustRegister against a non-OK
-// return from Register; the production init() necessarily hits the OK
-// path (otherwise the test binary would not have linked). Without this
-// test, mustRegister's panic branch would be dead code from a coverage
-// standpoint, and a future refactor that broke its err handling (e.g.
-// `_ = Default.Register(...)`) would not be caught.
+// Calling the real mustRegister (rather than an inline mirror) means
+// a regression like `_ = reg.Register(...)` or `return` instead of
+// `panic` would now make this test fail loudly. The earlier shape
+// (inline mirror) was caught by PR #57 review as a test-gap.
 func TestSkillFlags_MustRegister_PanicsOnError(t *testing.T) {
 	t.Parallel()
 	defer func() {
 		r := recover()
 		if r == nil {
-			t.Fatal("expected panic from mustRegister-equivalent path, got none")
+			t.Fatal("expected panic from mustRegister, got none")
 		}
 		err, ok := r.(error)
 		if !ok {
@@ -101,27 +100,13 @@ func TestSkillFlags_MustRegister_PanicsOnError(t *testing.T) {
 		}
 	}()
 
-	// Build a local equivalent of mustRegister against a fresh Registry
-	// so the panic path is exercised without poisoning Default.
-	r := NewRegistry()
+	// First Register against a fresh local Registry: must succeed.
+	reg := NewRegistry()
 	var b1, b2 bool
-	if err := r.Register(NoAcceptanceGate, &b1); err != nil {
-		t.Fatalf("first Register: %v", err)
-	}
-	// Inline mustRegister body, against r (not Default). This is the
-	// branch we are pinning behaviour for.
-	if err := r.Register(NoAcceptanceGate, &b2); err != nil {
-		// Real mustRegister wraps the error and panics. We mirror it
-		// here so the recover() above sees the same shape.
-		panic(errAlreadyForTest{err: err})
-	}
-	t.Fatal("Register(dup) returned nil; expected ErrAlreadyRegistered")
+	mustRegister(reg, NoAcceptanceGate, &b1)
+	// Second Register with same name + different target: must panic
+	// with ErrAlreadyRegistered (per registry contract — name
+	// duplicate beats target duplicate).
+	mustRegister(reg, NoAcceptanceGate, &b2)
+	t.Fatal("mustRegister did not panic; expected ErrAlreadyRegistered")
 }
-
-// errAlreadyForTest mirrors the fmt.Errorf("...: %w", err) shape used
-// by the production mustRegister, so the recover() block's errors.Is
-// check exercises the same Unwrap chain as production code would.
-type errAlreadyForTest struct{ err error }
-
-func (e errAlreadyForTest) Error() string { return "ablation: registering NoAcceptanceGate: " + e.err.Error() }
-func (e errAlreadyForTest) Unwrap() error { return e.err }

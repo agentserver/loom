@@ -221,10 +221,13 @@ def _is_within(path: Path, root: Path) -> bool:
 def _resolve_cases_path(path: str) -> Path:
     """Validate --cases <path> and return the resolved Path.
 
-    Special-cases "-" for stdin (legacy-mode convenience); stdin cases
-    are read but cannot be golden-mode (golden mode requires a real
-    on-disk path because input.path traversal checks need MODULE_ROOT
-    relative resolution and a stdin payload has no anchor).
+    Special-cases "-" for stdin — supported in BOTH legacy and golden
+    mode. Stdin payloads still go through all §3 (a)-(f) security
+    checks (mode-detect, allowlist, in-case input.path traversal); only
+    the §3 (a) --cases-resolves-inside-REPO_ROOT check is skipped
+    because there is no on-disk anchor to resolve against. The ablation
+    bypass log surfaces `cases=-` so the audit trail makes the stdin
+    origin explicit.
 
     Per spec §2.3 / §3 (a), --cases must resolve inside REPO_ROOT (the
     worktree dir), not MODULE_ROOT — legacy fixtures like
@@ -352,6 +355,21 @@ def load_cases(path: str) -> tuple[list[dict[str, Any]], str, Path | None]:
             raise GoldenLoadError(
                 f"cases line {i}: only one of {{expected, expected_error}} allowed"
             )
+        # §3 (c) defensive: empty expected_error would substring-match
+        # every isError response (`"" in anything == True`), giving
+        # silent green on any unrelated tool error. Reject at load
+        # time. Discovered by PR #57 review.
+        if "expected_error" in obj:
+            if not isinstance(obj["expected_error"], str):
+                raise GoldenLoadError(
+                    f"cases line {i}: expected_error must be a string, "
+                    f"got {type(obj['expected_error']).__name__}"
+                )
+            if obj["expected_error"] == "":
+                raise GoldenLoadError(
+                    f"cases line {i}: expected_error must be a non-empty string "
+                    "(empty needle would match every isError response)"
+                )
         if not isinstance(obj["input"], dict):
             raise GoldenLoadError(f"cases line {i}: 'input' must be a JSON object")
 
@@ -384,6 +402,16 @@ def load_cases(path: str) -> tuple[list[dict[str, Any]], str, Path | None]:
                 # paths must update both the allowlist AND this loop.
                 raise GoldenLoadError(
                     f"input.{path_field} must be a string, got {type(value).__name__}"
+                )
+            # §3 (b) defensive: an empty / whitespace-only path silently
+            # joins to MODULE_ROOT (Path("") resolves to ".") and slips
+            # past _assert_inside. The MCP tool then sees "" and its
+            # tool-specific behaviour (list CWD, default file, etc.)
+            # leaks. Reject at load time. Discovered by PR #57 review.
+            if not value.strip():
+                raise GoldenLoadError(
+                    f"input.{path_field} must be a non-empty string "
+                    "(blank paths bypass the traversal check)"
                 )
             _assert_inside(value, f"input.{path_field}", MODULE_ROOT, "module root")
 

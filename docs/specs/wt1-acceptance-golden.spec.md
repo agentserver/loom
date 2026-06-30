@@ -265,7 +265,7 @@ this decision tree, exit-2-ing immediately on any rejection:
 |---|---|
 | `"/etc/passwd"` | absolute, outside MODULE_ROOT |
 | `"../../etc/passwd"` | relative, resolves outside MODULE_ROOT |
-| `"tests/eval/golden/../../../etc/passwd"` | repo-relative-looking but resolves outside |
+| `"tests/eval/golden/../../../../etc/passwd"` | repo-relative-looking but resolves outside (4 `..` from `tests/eval/golden/` clears `multi-agent/`; PR #57 review caught that 3 `..` only reaches `multi-agent/etc/passwd` and stays inside MODULE_ROOT, which is accepted — use 4 for the unambiguous escape) |
 | `"/tmp"` | exact `/tmp` — `/tmp/` prefix check is *strict*; bare `/tmp` is not a fixture path |
 | `"/tmp/../etc/passwd"` | starts with `/tmp/` but resolves outside MODULE_ROOT — the carve-out is **prefix-only**, not "anything that *resolves* under /tmp". Implementation note: the carve-out short-circuits the resolve check, so this string is *accepted* by the path layer (bullet 1 above takes the value verbatim). The MCP tool itself, when it eventually `os.path.realpath()`s and reads it, surfaces a normal `file not found` or permission error. This is acceptable because the prefix check guarantees the literal *string* never escapes `/tmp/...`; the MCP tool may not pass it to a privileged operation. If a future MCP tool *does* perform a privileged op on its `input.path` (e.g. read-as-root), that tool's own input validation is responsible — the same way it would be for any cases.jsonl-driven call. The §3 (b) check defends the runner, not every downstream tool. |
 | `"/tmpfile"` | starts with `/tmp` but no trailing slash — fails the strict prefix |
@@ -434,7 +434,7 @@ asserts `Default.List()` contains `NoAcceptanceGate` after package init.
 ## 5. Verification (must run, must pass)
 
 ```bash
-cd multi-agent/.worktrees/p1-acceptance-golden
+cd <repo-root>  # e.g. /root/multi-agent/.worktrees/p1-acceptance-golden
 
 # Python pytest suite — full matrix
 pytest skills/mcp-acceptance/scripts/ -q

@@ -203,6 +203,56 @@ def test_unknown_input_field_rejected(synth_cases) -> None:
     assert "input field 'base_url' not allowed for tool 'csv_profile'" in r.stderr, r.stderr
 
 
+# ---- §3 (b) defensive: empty path bypass (PR #57 review) -------------
+
+
+def test_empty_input_path_rejected(synth_cases) -> None:
+    """An empty input.path slips past _assert_inside (Path("") resolves
+    to MODULE_ROOT); reject it at load time."""
+    cases = synth_cases([
+        {"name": "blank", "tool": "csv_profile",
+         "input": {"path": ""}, "expected_error": "x"},
+    ])
+    r = _run_runner(cases, server_cmd="true")
+    assert r.returncode == 2, (r.returncode, r.stderr)
+    assert "input.path must be a non-empty string" in r.stderr, r.stderr
+
+
+def test_whitespace_input_path_rejected(synth_cases) -> None:
+    cases = synth_cases([
+        {"name": "ws", "tool": "csv_profile",
+         "input": {"path": "   "}, "expected_error": "x"},
+    ])
+    r = _run_runner(cases, server_cmd="true")
+    assert r.returncode == 2, (r.returncode, r.stderr)
+    assert "input.path must be a non-empty string" in r.stderr, r.stderr
+
+
+# ---- §3 (c) defensive: empty expected_error (PR #57 review) ----------
+
+
+def test_empty_expected_error_rejected(synth_cases) -> None:
+    """Empty expected_error matches every isError response via `"" in X`;
+    reject at load time to preserve the negative-case contract."""
+    cases = synth_cases([
+        {"name": "empty_err", "tool": "csv_profile",
+         "input": {"path": "/tmp/x.csv"}, "expected_error": ""},
+    ])
+    r = _run_runner(cases, server_cmd="true")
+    assert r.returncode == 2, (r.returncode, r.stderr)
+    assert "expected_error must be a non-empty string" in r.stderr, r.stderr
+
+
+def test_non_string_expected_error_rejected(synth_cases) -> None:
+    cases = synth_cases([
+        {"name": "bad_type", "tool": "csv_profile",
+         "input": {"path": "/tmp/x.csv"}, "expected_error": 42},
+    ])
+    r = _run_runner(cases, server_cmd="true")
+    assert r.returncode == 2, (r.returncode, r.stderr)
+    assert "expected_error must be a string" in r.stderr, r.stderr
+
+
 # ---- §3 (c) case-sensitive substring ---------------------------------
 
 
@@ -463,7 +513,21 @@ for line in sys.stdin:
          "--cases", str(example)],
         capture_output=True, text=True, timeout=60, cwd=str(REPO_ROOT),
     )
-    assert r.returncode != 2, (
-        f"legacy mode produced GoldenLoadError (exit 2); regression!\n"
+    # Hard exit-code pin: must be 0 or 1, never 2 or higher. exit 2 =
+    # GoldenLoadError fired (mode-detect regression); >1 = handshake or
+    # other infra error. exit 1 is expected because the echo server
+    # cannot satisfy the file's specific expect_contains needles.
+    assert r.returncode in (0, 1), (
+        f"legacy mode produced exit {r.returncode}; expected 0 or 1.\n"
         f"stderr:\n{r.stderr}\nstdout:\n{r.stdout}"
     )
+    # The legacy reporter prints each case name; confirm the loader
+    # actually ran cases and the report path is alive. A future
+    # regression that silently classified the file as golden (or as
+    # zero cases) would not print any of these names.
+    for expected_name in ("four-row sum", "empty rows", "missing rows raises"):
+        assert expected_name in r.stdout, (
+            f"legacy mode did not name case {expected_name!r} in stdout; "
+            f"loader may have mis-classified the file.\n"
+            f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        )

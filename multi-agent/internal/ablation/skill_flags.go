@@ -5,6 +5,17 @@
 // skill cannot Register against the registry directly, so the bridge is
 // twofold:
 //
+// IMPORTANT — link-time panic: this file's init() panics if the
+// underlying Register call fails (see mustRegister docs below). Linking
+// `internal/ablation` therefore commits the importing binary to abort
+// at startup if the registry shape regresses (e.g. NoAcceptanceGate is
+// removed from canonicalFlags, or this file's mustRegister call is
+// duplicated). The registry.go contract "Register never panics" is
+// preserved at the registry-method level; mustRegister is the escalation
+// wrapper around it. If a future caller needs init-time soft failure
+// (introspection tools, lint binaries), they should import only the
+// internal/ablation types they need, not this file's init side-effects.
+//
 //  1. This file's init() registers each Python-skill-owned flag against
 //     a package-private *bool target, making Default.List() exhaustive
 //     and Default.SetByName(name, true) functional. The Phase-2 CLI
@@ -59,11 +70,15 @@ var noAcceptanceGate bool
 // concurrently is a usage bug, not a contract gap.
 func IsNoAcceptanceGate() bool { return noAcceptanceGate }
 
-// mustRegister wraps Default.Register and panics on error. This is the
+// mustRegister wraps Registry.Register and panics on error. This is the
 // documented escalation pattern, NOT a violation of the
 // "Register-never-panics" contract on the registry itself: Register
 // returns errors; this wrapper chooses to turn them into init-time
 // panics because no recovery path is meaningful here.
+//
+// The reg parameter exists so tests can drive mustRegister against a
+// fresh local Registry without poisoning process-wide Default. The
+// production caller (init below) passes Default.
 //
 // Justification per error:
 //   - ErrUnknownFlag: only fires if NoAcceptanceGate is removed from
@@ -85,12 +100,12 @@ func IsNoAcceptanceGate() bool { return noAcceptanceGate }
 // All four are programmer bugs in this package's source, not runtime
 // inputs. Panicking is the right level of severity for "the binary
 // must not start in this state."
-func mustRegister(name FlagName, target *bool) {
-	if err := Default.Register(name, target); err != nil {
+func mustRegister(reg *Registry, name FlagName, target *bool) {
+	if err := reg.Register(name, target); err != nil {
 		panic(fmt.Errorf("ablation: registering %s: %w", name, err))
 	}
 }
 
 func init() {
-	mustRegister(NoAcceptanceGate, &noAcceptanceGate)
+	mustRegister(Default, NoAcceptanceGate, &noAcceptanceGate)
 }
