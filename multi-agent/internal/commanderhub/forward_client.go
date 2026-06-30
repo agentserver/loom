@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -82,60 +83,25 @@ func (fc *forwardClient) keysToTry() [][]byte {
 	return [][]byte{fc.secret}
 }
 
-// wouldLoop reports true when peerURL points at this pod itself or at a
-// known-loopback named host (localhost, ::1). IPv4 loopback addresses (127.x)
-// are blocked only via the self-URL check, because test servers often bind to
-// 127.0.0.1 and production peers never have loopback advertise URLs.
+// wouldLoop reports true when peerURL is empty, equals self, or resolves to a
+// loopback address (127.x.x.x, ::1, localhost). Uses net.IP.IsLoopback so all
+// IPv4 127.x loopback addresses are detected, not just the self-URL match.
 func (fc *forwardClient) wouldLoop(peerURL string) bool {
-	// Trim trailing slash for comparison.
-	self := strings.TrimRight(fc.advertiseURL, "/")
-	peer := strings.TrimRight(peerURL, "/")
-	if peer == self {
+	if peerURL == "" || peerURL == fc.advertiseURL {
 		return true
 	}
-	// Also block if self is on loopback and peer resolves to the same host:port
-	// (covers http://127.0.0.1:PORT == http://localhost:PORT, etc.).
-	if selfHost := extractHost(self); isLoopbackHost(selfHost) {
-		if peerHost := extractHost(peer); selfHost == peerHost {
-			return true
-		}
+	u, err := url.Parse(peerURL)
+	if err != nil {
+		return true // malformed URL → refuse
 	}
-	// Block named loopback hostnames regardless of self's address.
-	// This prevents any pod from forwarding to localhost or ::1, which are
-	// never valid peer addresses in production.
-	if peerHost := extractHost(peer); isNamedLoopback(peerHost) {
+	host := u.Hostname()
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
 		return true
 	}
 	return false
-}
-
-// extractHost returns the hostname (without port) from a URL string like
-// "http://host:port/path". Returns the input unchanged on any parse failure.
-func extractHost(u string) string {
-	host := u
-	if idx := strings.Index(host, "://"); idx >= 0 {
-		host = host[idx+3:]
-	}
-	if idx := strings.Index(host, "/"); idx >= 0 {
-		host = host[:idx]
-	}
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		return h
-	}
-	return host
-}
-
-// isLoopbackHost reports whether host is any loopback address (127.x, ::1,
-// localhost).
-func isLoopbackHost(host string) bool {
-	return isNamedLoopback(host) || strings.HasPrefix(host, "127.")
-}
-
-// isNamedLoopback reports whether host is a named loopback: "localhost" or
-// "::1". IPv4 127.x addresses are NOT covered here; they are checked via
-// self-URL match or isLoopbackHost.
-func isNamedLoopback(host string) bool {
-	return host == "localhost" || host == "::1"
 }
 
 // send forwards a non-streaming command to peerURL and returns the result payload.

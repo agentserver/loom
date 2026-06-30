@@ -374,6 +374,45 @@ func TestForwardClient_Send_AppError_ReturnsDaemonError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// TestWouldLoop_IPv4Loopback — covers Fix #5: net.IP.IsLoopback detection
+// ---------------------------------------------------------------------------
+
+func TestWouldLoop_IPv4Loopback(t *testing.T) {
+	selfURL := "http://prod-pod:8091"
+	fc := newForwardClient([]byte("secret"), nil, selfURL)
+
+	cases := []struct {
+		peerURL    string
+		expectLoop bool
+	}{
+		// IPv4 loopback — must be blocked by IsLoopback.
+		{"http://127.0.0.1:8091", true},
+		{"http://127.1.2.3:8091", true},
+		// IPv6 loopback — blocked by IsLoopback.
+		{"http://[::1]:8091", true},
+		// Named loopback — explicit check.
+		{"http://localhost:8091", true},
+		// Non-loopback production peer — must NOT be blocked.
+		{"http://10.0.0.42:8091", false},
+		// Self URL — blocked by exact match.
+		{selfURL, true},
+		// Empty — blocked.
+		{"", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.peerURL, func(t *testing.T) {
+			got := fc.wouldLoop(tc.peerURL)
+			if tc.expectLoop {
+				require.True(t, got, "peerURL %q should be detected as loop", tc.peerURL)
+			} else {
+				require.False(t, got, "peerURL %q should NOT be detected as loop", tc.peerURL)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // TestForwardClient_Stream_DecodeError_EmitsErrorEnvelope
 // ---------------------------------------------------------------------------
 
