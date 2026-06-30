@@ -24,7 +24,10 @@ mode locally.
 - Docker with Compose v2 (`docker compose version` shows >= 2.x).
 - A built `observer-server:dev` image, or set `OBSERVER_IMAGE` to an existing
   image ref (e.g. `registry.nj.cs.ac.cn/loom/observer:master-latest`).
-- A cluster secret: any random string >= 32 characters.
+- A cluster secret: a 64-hex-char (32-byte) secret generated with
+  `openssl rand -hex 32`. The observer validates the secret is valid hex and
+  at least 64 characters (32 bytes); alphanumeric or shorter secrets are
+  rejected at startup.
 
 Build the local image if needed:
 
@@ -36,8 +39,8 @@ docker build -f cmd/observer-server/Dockerfile -t observer-server:dev .
 ### Quick start
 
 ```bash
-# Generate a cluster secret and export it:
-export OBSERVER_CLUSTER_SECRET="$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 48)"
+# Generate a cluster secret (must be 64 hex chars / 32 bytes):
+export OBSERVER_CLUSTER_SECRET="$(openssl rand -hex 32)"
 
 cd multi-agent
 docker compose -f dev/compose.multi-observer.yaml up -d
@@ -46,7 +49,7 @@ docker compose -f dev/compose.multi-observer.yaml up -d
 Or use a `.env` file next to `compose.multi-observer.yaml`:
 
 ```
-OBSERVER_CLUSTER_SECRET=<your-48-char-secret>
+OBSERVER_CLUSTER_SECRET=<64-hex-char secret from openssl rand -hex 32>
 OBSERVER_IMAGE=observer-server:dev
 ```
 
