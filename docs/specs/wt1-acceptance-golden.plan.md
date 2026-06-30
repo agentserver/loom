@@ -160,9 +160,9 @@ into the per-session `_pytest_tmp/` dir, flips the first `"rows": 5` to
 ## 3. Verification commands (must all pass)
 
 ```bash
-cd /root/multi-agent/.worktrees/p1-acceptance-golden
+cd <repo-root>  # e.g. /root/multi-agent/.worktrees/p1-acceptance-golden
 
-# Python pytest suite — 17 tests
+# Python pytest suite — 33 tests (17 + 16 added by PR #57 review rounds)
 pytest skills/mcp-acceptance/scripts/ -q
 
 # 5-family golden smoke (driven by pytest above, but also runnable
@@ -170,8 +170,7 @@ pytest skills/mcp-acceptance/scripts/ -q
 for f in multi-agent/tests/eval/golden/*/acceptance/cases.jsonl; do
   python3 skills/mcp-acceptance/scripts/mcp_acceptance.py \
       --server "python3 skills/mcp-acceptance/scripts/_echo_oracle_server.py --cases $f" \
-      --cases "$f" \
-      --cwd multi-agent || { echo "FAIL: $f"; exit 1; }
+      --cases "$f" || { echo "FAIL: $f"; exit 1; }
 done
 
 # Path-traversal smoke

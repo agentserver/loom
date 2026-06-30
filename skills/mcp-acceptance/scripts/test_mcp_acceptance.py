@@ -253,6 +253,61 @@ def test_non_string_expected_error_rejected(synth_cases) -> None:
     assert "expected_error must be a string" in r.stderr, r.stderr
 
 
+@pytest.mark.parametrize("blank", ["\n", "\t", " ", "   ", "\r\n"])
+def test_whitespace_only_expected_error_rejected(synth_cases, blank: str) -> None:
+    """Round-2 PR #57 review: \"\\n\" in any multi-line error == True,
+    \" \" in any multi-word error == True — same silent-green class as
+    empty-string. Reject all whitespace-only needles."""
+    cases = synth_cases([
+        {"name": "ws", "tool": "csv_profile",
+         "input": {"path": "/tmp/x.csv"}, "expected_error": blank},
+    ], suffix=f"-ws-{repr(blank)}")
+    r = _run_runner(cases, server_cmd="true")
+    assert r.returncode == 2, (
+        f"blank={blank!r} expected exit 2, got {r.returncode}\nstderr:\n{r.stderr}"
+    )
+    assert "expected_error must be a non-empty string" in r.stderr, r.stderr
+
+
+# ---- Per-file invariants (mirror golden_schema_test.go) --------------
+
+
+def test_duplicate_case_names_rejected(synth_cases) -> None:
+    """Mirrors golden_schema_test.go:TestAcceptanceCasesAreValid's
+    per-file name uniqueness check."""
+    cases = synth_cases([
+        {"name": "same", "tool": "csv_profile",
+         "input": {"path": "/tmp/a"}, "expected_error": "x"},
+        {"name": "same", "tool": "csv_profile",
+         "input": {"path": "/tmp/b"}, "expected_error": "y"},
+    ])
+    r = _run_runner(cases, server_cmd="true")
+    assert r.returncode == 2, (r.returncode, r.stderr)
+    assert "duplicate case name" in r.stderr, r.stderr
+    assert "'same'" in r.stderr, r.stderr
+
+
+def test_empty_case_name_rejected(synth_cases) -> None:
+    """Mirrors Go schema test's `if c.Name == ""` check."""
+    cases = synth_cases([
+        {"name": "", "tool": "csv_profile",
+         "input": {"path": "/tmp/x"}, "expected_error": "y"},
+    ])
+    r = _run_runner(cases, server_cmd="true")
+    assert r.returncode == 2, (r.returncode, r.stderr)
+    assert "'name' must be a non-empty string" in r.stderr, r.stderr
+
+
+def test_whitespace_case_name_rejected(synth_cases) -> None:
+    cases = synth_cases([
+        {"name": "  ", "tool": "csv_profile",
+         "input": {"path": "/tmp/x"}, "expected_error": "y"},
+    ])
+    r = _run_runner(cases, server_cmd="true")
+    assert r.returncode == 2, (r.returncode, r.stderr)
+    assert "'name' must be a non-empty string" in r.stderr, r.stderr
+
+
 # ---- §3 (c) case-sensitive substring ---------------------------------
 
 

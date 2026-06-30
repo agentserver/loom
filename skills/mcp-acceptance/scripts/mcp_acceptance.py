@@ -347,6 +347,15 @@ def load_cases(path: str) -> tuple[list[dict[str, Any]], str, Path | None]:
         for required in ("name", "tool", "input"):
             if required not in obj:
                 raise GoldenLoadError(f"cases line {i}: missing required field {required!r}")
+        # name must be a non-empty string — mirrors the Go schema test
+        # (golden_schema_test.go:TestAcceptanceCasesAreValid). PR #57
+        # round-2 review caught the Python loader silently accepting
+        # `"name": ""`, which would render as `[PASS]  (csv_profile)`
+        # in reports — confusing for human review.
+        if not isinstance(obj["name"], str) or not obj["name"].strip():
+            raise GoldenLoadError(
+                f"cases line {i}: 'name' must be a non-empty string"
+            )
         if "expected" not in obj and "expected_error" not in obj:
             raise GoldenLoadError(
                 f"cases line {i}: exactly one of {{expected, expected_error}} required"
@@ -355,20 +364,27 @@ def load_cases(path: str) -> tuple[list[dict[str, Any]], str, Path | None]:
             raise GoldenLoadError(
                 f"cases line {i}: only one of {{expected, expected_error}} allowed"
             )
-        # §3 (c) defensive: empty expected_error would substring-match
-        # every isError response (`"" in anything == True`), giving
-        # silent green on any unrelated tool error. Reject at load
-        # time. Discovered by PR #57 review.
+        # §3 (c) defensive: empty / whitespace-only expected_error would
+        # substring-match nearly every isError response (`"" in
+        # anything == True`; `"\n" in any-multi-line-traceback == True`;
+        # `" " in any-multi-word-error == True`), giving silent green
+        # on any unrelated tool error. Reject at load time. The first
+        # version of this check only rejected `== ""`; the round-2 PR
+        # #57 review caught that `"\n"` against a Python traceback
+        # still bypassed the §3 (c) contract. Use the same
+        # not value.strip() pattern as the input.path check below for
+        # symmetry.
         if "expected_error" in obj:
             if not isinstance(obj["expected_error"], str):
                 raise GoldenLoadError(
                     f"cases line {i}: expected_error must be a string, "
                     f"got {type(obj['expected_error']).__name__}"
                 )
-            if obj["expected_error"] == "":
+            if not obj["expected_error"].strip():
                 raise GoldenLoadError(
-                    f"cases line {i}: expected_error must be a non-empty string "
-                    "(empty needle would match every isError response)"
+                    f"cases line {i}: expected_error must be a non-empty "
+                    "string (whitespace-only would substring-match almost "
+                    "any error message)"
                 )
         if not isinstance(obj["input"], dict):
             raise GoldenLoadError(f"cases line {i}: 'input' must be a JSON object")
@@ -422,6 +438,20 @@ def load_cases(path: str) -> tuple[list[dict[str, Any]], str, Path | None]:
         raise GoldenLoadError(
             f"cases file declares multiple tools: {sorted(tools_seen)} "
             "(§13 §2.5 #1: one family, one tool)"
+        )
+
+    # Mirror golden_schema_test.go's per-file name-uniqueness check
+    # (TestAcceptanceCasesAreValid). Without this, a duplicate name
+    # would produce two PASS / FAIL lines under the same label,
+    # defeating report aggregation. PR #57 round-2 review caught the
+    # Python loader silently accepting duplicates.
+    seen_names: dict[str, int] = {}
+    for c in cases:
+        seen_names[c["name"]] = seen_names.get(c["name"], 0) + 1
+    dupes = sorted(n for n, count in seen_names.items() if count > 1)
+    if dupes:
+        raise GoldenLoadError(
+            f"duplicate case name(s) in cases file: {dupes}"
         )
 
     return cases, mode, resolved

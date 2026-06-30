@@ -439,12 +439,14 @@ cd <repo-root>  # e.g. /root/multi-agent/.worktrees/p1-acceptance-golden
 # Python pytest suite — full matrix
 pytest skills/mcp-acceptance/scripts/ -q
 
-# 5-family smoke loop using the echo-oracle fixture server
+# 5-family smoke loop using the echo-oracle fixture server.
+# Run from <repo-root>; no --cwd needed (both --cases and --server use
+# repo-relative paths, and the oracle is launched by the parent process
+# which inherits the repo-root cwd).
 for fam in multi-agent/tests/eval/golden/*/acceptance/cases.jsonl; do
   python3 skills/mcp-acceptance/scripts/mcp_acceptance.py \
       --server "python3 skills/mcp-acceptance/scripts/_echo_oracle_server.py --cases $fam" \
-      --cases "$fam" \
-      --cwd multi-agent
+      --cases "$fam"
 done
 
 # Mutation: change one expected value in csv-profiler and re-run → exit 1
