@@ -215,7 +215,11 @@ func main() {
 	// commander_identity_revocations table to exist at subscribe time. If we
 	// migrate after building the resolver, the subscribe call fails once (fresh
 	// DB) and is never retried — resulting in no cross-pod revocations.
-	if cfg.Store.Driver == "postgres" && strings.TrimSpace(cfg.Identity.Agentserver.URL) != "" {
+	//
+	// Also migrates when the cluster telemetry PG limiter is selected
+	// (telemetry + cluster + postgres) so commander_telemetry_buckets is
+	// present before the first telemetry request hits the table.
+	if cfg.Store.Driver == "postgres" && needsCommanderDDL(cfg) {
 		if err := authstore.MigratePostgres(st.DB()); err != nil {
 			log.Fatalf("commanderhub authstore migrate (pre-resolver): %v", err)
 		}
@@ -384,9 +388,11 @@ func runMigrationsOnly(cfg *Config) error {
 	if err := userspace.MigrateForDriver(st.DB(), cfg.Store.Driver); err != nil {
 		return fmt.Errorf("userspace migrate: %w", err)
 	}
-	// Mirror the runtime gate above: only apply commander DDL when this
-	// deployment will actually mount the commander surface.
-	if cfg.Store.Driver == "postgres" && strings.TrimSpace(cfg.Identity.Agentserver.URL) != "" {
+	// Apply commander DDL when the runtime would need it. Uses the same gate
+	// as the startup path: commander enabled OR telemetry+cluster+postgres
+	// (which selects the shared-PG telemetry limiter and requires the
+	// commander_telemetry_buckets table to exist).
+	if cfg.Store.Driver == "postgres" && needsCommanderDDL(cfg) {
 		if err := authstore.MigratePostgres(st.DB()); err != nil {
 			return fmt.Errorf("commanderhub authstore migrate: %w", err)
 		}
@@ -420,6 +426,25 @@ func buildCommanderAuthStore(cfg *Config, db *sql.DB) (authstore.Store, error) {
 
 func shouldMigrateUserspaceOnStartup(driver string) bool {
 	return driver != "postgres" && driver != "pgx"
+}
+
+// needsCommanderDDL returns true when the commander_* tables (including
+// commander_telemetry_buckets) must be present in the database. This is true
+// when:
+//   - Commander is enabled (AgentserverURL is set), OR
+//   - The cluster telemetry PG limiter is selected (telemetry enabled AND cluster
+//     enabled AND store driver is postgres). The SetPGTelemetryLimiter gate in
+//     main() selects the shared-PG limiter exactly when these three conditions
+//     are met; failing to migrate in that case leaves the table absent and
+//     produces 503s on the first telemetry call.
+func needsCommanderDDL(cfg *Config) bool {
+	if strings.TrimSpace(cfg.Identity.Agentserver.URL) != "" {
+		return true
+	}
+	if cfg.Telemetry.Enabled && cfg.Cluster.Enabled && cfg.Store.Driver == "postgres" {
+		return true
+	}
+	return false
 }
 
 func runRetentionCleanup(cfg *Config) (int64, error) {
