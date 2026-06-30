@@ -108,7 +108,9 @@ func NewWithResolverOptions(s Store, usHandler *userspace.Handler, resolver iden
 		if opts.AuthStore == nil {
 			panic("observerweb: AuthStore is required when AgentserverURL is set (see internal/commanderhub/authstore)")
 		}
-		commanderhub.MountAll(mux, resolver, opts.AgentserverURL, opts.AuthStore)
+		// internalMux is nil and ClusterRuntime is zero for now; Phase D D5 will
+		// wire cluster mode from observer-server config.
+		commanderhub.MountAll(mux, nil, resolver, opts.AgentserverURL, opts.AuthStore, commanderhub.ClusterRuntime{})
 	}
 	return mux
 }

@@ -36,12 +36,12 @@ func forwardHubWithDB(t *testing.T, db *sql.DB) *Hub {
 	resolver := &fakeResolver{mu: map[string]identity.Identity{}}
 	h := NewHub(resolver)
 	sr := newSharedRegistry(db, "http://self-pod:9000")
-	h.attachSharedRegistry(sr)
-	h.cluster = ClusterRuntime{
+	cluster := ClusterRuntime{
 		DB:           db,
 		AdvertiseURL: "http://self-pod:9000",
 		Secret:       []byte(testSecret),
 	}
+	h.attachSharedRegistry(cluster, sr, nil, nil)
 	return h
 }
 

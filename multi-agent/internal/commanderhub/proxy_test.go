@@ -245,7 +245,7 @@ func TestSendCommand_OwnershipLost_ReturnsErrDaemonGone(t *testing.T) {
 	hub := NewHub(resolver)
 	// Attach a sharedRegistry so confirmOwnership enters cluster-mode path.
 	// db=nil is safe because ownershipLost.Load() short-circuits before any DB call.
-	hub.attachSharedRegistry(&sharedRegistry{advertiseURL: "http://pod-a:8091"})
+	hub.attachSharedRegistry(ClusterRuntime{AdvertiseURL: "http://pod-a:8091"}, &sharedRegistry{advertiseURL: "http://pod-a:8091"}, nil, nil)
 
 	o := owner{userID: "alice", workspaceID: "W1"}
 	dc := &daemonConn{
@@ -270,7 +270,7 @@ func TestSendCommandStream_OwnershipLost_ReturnsErrDaemonGone(t *testing.T) {
 		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
 	}}
 	hub := NewHub(resolver)
-	hub.attachSharedRegistry(&sharedRegistry{advertiseURL: "http://pod-a:8091"})
+	hub.attachSharedRegistry(ClusterRuntime{AdvertiseURL: "http://pod-a:8091"}, &sharedRegistry{advertiseURL: "http://pod-a:8091"}, nil, nil)
 
 	o := owner{userID: "alice", workspaceID: "W1"}
 	dc := &daemonConn{
@@ -297,7 +297,7 @@ func TestSendCommandStream_OwnershipLost_ReturnsErrDaemonGone(t *testing.T) {
 // CapabilityFilePreviewEncodedCap when the hub is in shared (cluster) mode.
 func TestReadFile_LocalSharedMode_RejectsOldDaemon(t *testing.T) {
 	hub := NewHub(&fakeResolver{mu: map[string]identity.Identity{}})
-	hub.attachSharedRegistry(&sharedRegistry{advertiseURL: "http://pod-a:8091"})
+	hub.attachSharedRegistry(ClusterRuntime{AdvertiseURL: "http://pod-a:8091"}, &sharedRegistry{advertiseURL: "http://pod-a:8091"}, nil, nil)
 
 	o := owner{userID: "alice", workspaceID: "W1"}
 	dc := &daemonConn{
@@ -363,7 +363,7 @@ func TestReadFile_SinglePod_AllowsOldDaemon(t *testing.T) {
 // in shared (cluster) mode.
 func TestReadFile_LocalSharedMode_AllowsNewDaemon(t *testing.T) {
 	hub := NewHub(&fakeResolver{mu: map[string]identity.Identity{}})
-	hub.attachSharedRegistry(&sharedRegistry{advertiseURL: "http://pod-a:8091"})
+	hub.attachSharedRegistry(ClusterRuntime{AdvertiseURL: "http://pod-a:8091"}, &sharedRegistry{advertiseURL: "http://pod-a:8091"}, nil, nil)
 
 	o := owner{userID: "alice", workspaceID: "W1"}
 	dc := &daemonConn{

@@ -232,10 +232,74 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	dc.readLoop()
 }
 
-// attachSharedRegistry sets the shared Postgres registry on this Hub.
-// Called during wiring (Phase D D1) after the Hub is constructed.
-func (h *Hub) attachSharedRegistry(sr *sharedRegistry) {
+// attachSharedRegistry wires cluster-mode components onto this Hub.
+// Called during wiring (Phase D D1). Must be called before ServeHTTP receives
+// any requests (not goroutine-safe against concurrent reads).
+//
+//   - cluster is stored for forwardHandler / drainHandler HMAC key access.
+//   - sr is the shared Postgres daemon registry.
+//   - fc is the HTTP forward client used for peer-pod command forwarding.
+//   - turns, when non-nil, replaces the Hub's in-memory turn store (e.g.
+//     pgTurnStore from Phase D D2). When nil the existing memTurnStore is kept.
+//   - h.sessionCache is set to nil so tree.go skips the in-process session
+//     cache in shared mode (all pods must go to the source of truth).
+func (h *Hub) attachSharedRegistry(cluster ClusterRuntime, sr *sharedRegistry, fc *forwardClient, turns turnStateBackend) {
+	h.cluster = cluster
 	h.sharedReg = sr
+	h.forwardCli = fc
+	if turns != nil {
+		h.turns = turns
+	}
+	h.sessionCache = nil
+}
+
+// Close releases resources held by the Hub. Specifically, it closes idle
+// HTTP connections held by the forwardClient (if one is present). Heartbeat
+// goroutines are managed by per-WS defers, not by Close.
+func (h *Hub) Close(_ context.Context) error {
+	if h.forwardCli != nil {
+		h.forwardCli.httpClient.CloseIdleConnections()
+	}
+	return nil
+}
+
+// listDaemons returns the set of online daemons visible to owner o.
+// In shared mode (sharedReg != nil) it queries the Postgres registry so
+// peer-pod daemons appear in the list. In single-pod mode it falls back to
+// the local registry snapshot.
+func (h *Hub) listDaemons(ctx context.Context, o owner) ([]DaemonInfo, error) {
+	if h.sharedReg != nil {
+		return h.sharedReg.listAll(ctx, o)
+	}
+	return h.reg.daemons(o), nil
+}
+
+// lookupResult is returned by lookupDaemon.
+type lookupResult struct {
+	dc      *daemonConn // non-nil when local
+	peerURL string      // non-empty when remote
+	info    DaemonInfo  // populated for remote
+}
+
+// lookupDaemon checks whether shortID is owned locally or remotely.
+// Returns (result, true, nil) when found; (zero, false, nil) when not found;
+// (zero, false, err) on registry error.
+func (h *Hub) lookupDaemon(ctx context.Context, o owner, shortID string) (lookupResult, bool, error) {
+	// Check local registry first.
+	if dc, ok := h.reg.lookup(o, shortID); ok {
+		return lookupResult{dc: dc}, true, nil
+	}
+	// In shared mode, ask the Postgres registry for a remote owner.
+	if h.sharedReg != nil {
+		peerURL, info, found, err := h.sharedReg.lookupRemote(ctx, o, shortID)
+		if err != nil {
+			return lookupResult{}, false, err
+		}
+		if found {
+			return lookupResult{peerURL: peerURL, info: info}, true, nil
+		}
+	}
+	return lookupResult{}, false, nil
 }
 
 // --- daemonConn WS mechanics ---

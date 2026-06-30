@@ -25,12 +25,12 @@ func drainHubWithDB(t *testing.T, db *sql.DB, secret []byte) *Hub {
 	resolver := &fakeResolver{mu: map[string]identity.Identity{}}
 	h := NewHub(resolver)
 	sr := newSharedRegistry(db, "http://self-pod:9000")
-	h.attachSharedRegistry(sr)
-	h.cluster = ClusterRuntime{
+	cluster := ClusterRuntime{
 		DB:           db,
 		AdvertiseURL: "http://self-pod:9000",
 		Secret:       secret,
 	}
+	h.attachSharedRegistry(cluster, sr, nil, nil)
 	return h
 }
 
@@ -217,11 +217,11 @@ func TestDrain_NilDB_503(t *testing.T) {
 	h := NewHub(resolver)
 	// Attach a sharedRegistry whose db field is explicitly nil.
 	sr := &sharedRegistry{db: nil, advertiseURL: "http://self-pod:9000"}
-	h.attachSharedRegistry(sr)
-	h.cluster = ClusterRuntime{
+	cluster := ClusterRuntime{
 		Secret:       []byte("some-secret"),
 		AdvertiseURL: "http://self-pod:9000",
 	}
+	h.attachSharedRegistry(cluster, sr, nil, nil)
 
 	// Non-loopback request → verifyDrainAuth is called → must hit the nil-DB guard.
 	req := httptest.NewRequest(http.MethodPost, "/api/commander/_internal/drain", nil)

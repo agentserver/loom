@@ -252,7 +252,7 @@ func TestServeHTTP_ClusterMode_RequiresShortID(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
-	hub.attachSharedRegistry(newSharedRegistry(db, "http://pod-a:8091"))
+	hub.attachSharedRegistry(ClusterRuntime{DB: db, AdvertiseURL: "http://pod-a:8091"}, newSharedRegistry(db, "http://pod-a:8091"), nil, nil)
 
 	srv := httptest.NewServer(hub)
 	t.Cleanup(srv.Close)
@@ -297,7 +297,7 @@ func TestServeHTTP_ClusterMode_RejectsWhitespaceShortID(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
-	hub.attachSharedRegistry(newSharedRegistry(db, "http://pod-a:8091"))
+	hub.attachSharedRegistry(ClusterRuntime{DB: db, AdvertiseURL: "http://pod-a:8091"}, newSharedRegistry(db, "http://pod-a:8091"), nil, nil)
 
 	srv := httptest.NewServer(hub)
 	t.Cleanup(srv.Close)
@@ -340,7 +340,7 @@ func TestServeHTTP_ClusterMode_RefusesWSOnUpsertFailure(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
-	hub.attachSharedRegistry(newSharedRegistry(db, "http://pod-a:8091"))
+	hub.attachSharedRegistry(ClusterRuntime{DB: db, AdvertiseURL: "http://pod-a:8091"}, newSharedRegistry(db, "http://pod-a:8091"), nil, nil)
 
 	// Make connectUpsert fail.
 	mock.ExpectExec(connectUpsertSQL).

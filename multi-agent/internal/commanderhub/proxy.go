@@ -138,26 +138,60 @@ func (h *Hub) sendCommandStreamToLocal(ctx context.Context, dc *daemonConn, comm
 // SendCommand runs a non-streaming command (list_sessions / get_session) on one
 // daemon and returns the command_result payload. ErrDaemonNotFound → caller 404.
 //
-// TODO(D1): add sharedReg.lookupRemote → forwardCli.send else branch for remote daemons.
+// Local path: daemonID found in localReg → sendCommandToLocal.
+// Remote path (shared mode only): lookupRemote hit → forwardCli.send.
 func (h *Hub) SendCommand(ctx context.Context, o owner, daemonID, command string, args json.RawMessage) (json.RawMessage, error) {
-	dc, ok := h.reg.lookup(o, daemonID)
-	if !ok {
-		return nil, ErrDaemonNotFound
+	// Fast path: locally connected daemon.
+	if dc, ok := h.reg.lookup(o, daemonID); ok {
+		return h.sendCommandToLocal(ctx, dc, command, args)
 	}
-	return h.sendCommandToLocal(ctx, dc, command, args)
+	// Shared-mode remote path.
+	if h.sharedReg != nil && h.forwardCli != nil {
+		peerURL, _, found, err := h.sharedReg.lookupRemote(ctx, o, daemonID)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			return h.forwardCli.send(ctx, peerURL, forwardRequest{
+				UserID:      o.userID,
+				WorkspaceID: o.workspaceID,
+				DaemonID:    daemonID,
+				Command:     command,
+				Args:        args,
+			})
+		}
+	}
+	return nil, ErrDaemonNotFound
 }
 
 // SendCommandStream runs a streaming command (session_turn). Events and the
 // terminal command_result/error or terminal status event are forwarded on the
 // returned channel, which is closed when the turn ends or the daemon/ctx is done.
 //
-// TODO(D1): add sharedReg.lookupRemote → forwardCli.stream else branch for remote daemons.
+// Local path: daemonID found in localReg → sendCommandStreamToLocal.
+// Remote path (shared mode only): lookupRemote hit → forwardCli.stream.
 func (h *Hub) SendCommandStream(ctx context.Context, o owner, daemonID, command string, args json.RawMessage) (<-chan commander.Envelope, error) {
-	dc, ok := h.reg.lookup(o, daemonID)
-	if !ok {
-		return nil, ErrDaemonNotFound
+	// Fast path: locally connected daemon.
+	if dc, ok := h.reg.lookup(o, daemonID); ok {
+		return h.sendCommandStreamToLocal(ctx, dc, command, args, 16)
 	}
-	return h.sendCommandStreamToLocal(ctx, dc, command, args, 16)
+	// Shared-mode remote path.
+	if h.sharedReg != nil && h.forwardCli != nil {
+		peerURL, _, found, err := h.sharedReg.lookupRemote(ctx, o, daemonID)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			return h.forwardCli.stream(ctx, peerURL, forwardRequest{
+				UserID:      o.userID,
+				WorkspaceID: o.workspaceID,
+				DaemonID:    daemonID,
+				Command:     command,
+				Args:        args,
+			})
+		}
+	}
+	return nil, ErrDaemonNotFound
 }
 
 func (h *Hub) ListFiles(ctx context.Context, o owner, daemonID, sessionID, path string) (json.RawMessage, error) {
@@ -200,8 +234,15 @@ type DaemonSessions struct {
 // FanOutSessions concurrently asks every online daemon of this owner for its
 // sessions, each under defaultCmdTimeout. Slow/dead daemons surface a per-row
 // status and do not block the rest (fail-open).
+// In shared mode, the daemon list comes from listDaemons (Postgres), so
+// peer-pod daemons appear in the fan-out.
 func (h *Hub) FanOutSessions(ctx context.Context, o owner) []DaemonSessions {
-	snapshot := h.reg.daemons(o)
+	snapshot, err := h.listDaemons(ctx, o)
+	if err != nil {
+		// Registry error: return empty rather than panic; the caller surfaces it
+		// as an empty daemons array.
+		return nil
+	}
 	results := make([]DaemonSessions, len(snapshot))
 	var wg sync.WaitGroup
 	for i := range snapshot {

@@ -50,7 +50,12 @@ func (ch *commanderHandlers) daemons(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, map[string]any{"daemons": ch.hub.reg.daemons(o)})
+	infos, err := ch.hub.listDaemons(r.Context(), o)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, map[string]any{"daemons": infos})
 }
 
 func (ch *commanderHandlers) sessionsFanout(w http.ResponseWriter, r *http.Request) {
@@ -185,8 +190,9 @@ func (ch *commanderHandlers) readFile(w http.ResponseWriter, r *http.Request, da
 
 // writeSendCmdError maps a SendCommand error to an HTTP status for the
 // non-streaming handlers. Daemon-originated session_not_found or an absent
-// daemon → 404, invalid_request → 400, anything else → 502. The turn handler
-// streams and forwards error frames as SSE, so it does not use this.
+// daemon → 404, invalid_request → 400, daemon_upgrade_required → 426,
+// anything else → 502. The turn handler streams and forwards error frames
+// as SSE, so it does not use this.
 func writeSendCmdError(w http.ResponseWriter, r *http.Request, err error) {
 	var de *DaemonError
 	if errors.As(err, &de) {
@@ -196,6 +202,9 @@ func writeSendCmdError(w http.ResponseWriter, r *http.Request, err error) {
 			return
 		case commander.ErrCodeInvalidRequest:
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		case commander.ErrCodeDaemonUpgradeRequired:
+			http.Error(w, err.Error(), http.StatusUpgradeRequired)
 			return
 		}
 	}
@@ -223,7 +232,10 @@ func (ch *commanderHandlers) turn(w http.ResponseWriter, r *http.Request, daemon
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return
 	}
-	if _, ok := ch.hub.reg.lookup(o, daemonID); !ok {
+	if _, ok, err := ch.hub.lookupDaemon(r.Context(), o, daemonID); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	} else if !ok {
 		http.NotFound(w, r)
 		return
 	}
