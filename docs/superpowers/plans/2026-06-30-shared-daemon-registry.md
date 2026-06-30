@@ -4188,7 +4188,7 @@ Add a test in `proxy_test.go` (extending the existing local-path tests): assert 
 10. Decode body as `forwardWireRequest`. Build `o := owner{userID: wire.UserID, workspaceID: wire.WorkspaceID}`. (Decode happens AFTER auth so a forged/garbage body can't reach the deserializer; happens BEFORE the accepted audit so the audit line carries the tenant/daemon/command fields — codex CDE r2 MAJOR #4.)
 11. Audit accepted: `forward.received.accepted` with `user_id=wire.UserID workspace_id=wire.WorkspaceID short_id=wire.ShortID command=wire.Command peer=r.RemoteAddr`.
 12. `dc, ok := h.reg.lookup(o, wire.ShortID)` (LOCAL ONLY — `sharedReg.lookupRemote` would create peer-to-peer loops). 404 if missing.
-13. If `wire.Command == "read_file"` AND `dc.capabilities[commander.CapabilityFilePreviewEncodedCap] == false`: respond 426 with `{"error":{"code":"daemon_upgrade_required","message":"daemon binary too old; upgrade required for file preview in cluster mode"}}`. (Spec v19 §"Capability gate".)
+13. If `wire.Command == "read_file"` AND `dc.capabilities[commander.CapabilityFilePreviewEncodedCap] == false`: respond 426 with `{"error":{"code":"daemon_upgrade_required","message":"daemon binary too old; upgrade required for file preview in cluster mode"}}`. (Spec v19 §"Capability gate".) **This gate is ALSO enforced in `proxy.go::Hub.ReadFile`** (the local-only path that single-pod uses today, and that the WS-owning pod uses in cluster mode when the request lands there directly). See §"Capability gate parity with local path" below for the corresponding modification to `proxy.go`.
 14. If `wire.Streaming == false`: invoke `h.sendCommandToLocal`; marshal `{result|error}` per `mapResponse` shape; 200.
 15. If `wire.Streaming == true`: set `Content-Type: application/octet-stream`; `http.Flusher`; start drain goroutine that watches `r.Context().Done()` (caller cancellation) AND the returned channel; for each envelope, `writeEnvelopeFrame(w, env)` + `flusher.Flush()`; close on terminal frame or ctx cancel; on `r.Context().Done()`, cancel the inner ctx passed to `sendCommandStreamToLocal` so `dc.removePending` runs and frees the daemon slot.
 
@@ -4231,7 +4231,43 @@ type ClusterRuntime struct {
 13. `TestForwardServer_Streaming_RoundTrip` — daemon emits 3 envelopes; client receives 3.
 14. `TestForwardServer_Streaming_CancelPropagates` — caller cancels ctx; server drain exits within 1s; `dc.removePending` was called.
 
-- Commit: `feat(commanderhub): forwardServer handler with strict-ordered auth + nonce insert + local-only lookup + 426 capability gate`.
+**Capability gate parity with local path (codex CDE r3 MAJOR #1):**
+
+Spec v19 requires the 426 gate to fire whether the request hits the owning pod directly OR is forwarded. C4 above adds it in `forwardHandler`; we also need it in `proxy.go::Hub.ReadFile` so the WS-owning pod's own UI-direct path is gated identically. Modify `internal/commanderhub/proxy.go::ReadFile` (the existing `ListFiles`/`ReadFile` helpers — currently a thin `SendCommand` wrapper):
+
+```go
+func (h *Hub) ReadFile(ctx context.Context, o owner, shortID, sessionID, path string) (json.RawMessage, error) {
+	if h.sharedReg != nil {
+		// Cluster mode: check the daemon has the encoded-size cap
+		// capability before forwarding/sending read_file. Local-path
+		// lookup mirrors the forwardHandler check.
+		if dc, ok := h.reg.lookup(o, shortID); ok {
+			dc.metaMu.Lock()
+			has := dc.capabilities[commander.CapabilityFilePreviewEncodedCap]
+			dc.metaMu.Unlock()
+			if !has {
+				return nil, &DaemonError{
+					Code:    commander.ErrCodeDaemonUpgradeRequired,
+					Message: "daemon binary too old; upgrade required for file preview in cluster mode",
+				}
+			}
+		}
+		// If the daemon is on a peer pod, the forwardHandler on that
+		// pod runs the same check before invoking sendCommandToLocal.
+	}
+	args, _ := json.Marshal(commander.FileReadArgs{ID: sessionID, Path: path})
+	return h.SendCommand(ctx, o, shortID, "read_file", args)
+}
+```
+
+Single-pod mode (`h.sharedReg == nil`) is unaffected — no gate fires; old daemons (without the capability) continue to work as today, relying on the existing `wsReadLimit = 1 MiB` + `MaxFilePreviewBytes = 2 MiB` interaction (the pre-existing latent issue documented in spec v19 §"Wire sizing").
+
+Tests:
+- `TestReadFile_LocalSharedMode_RejectsOldDaemon` — daemon registered without `CapabilityFilePreviewEncodedCap`, sharedReg attached, `ReadFile` returns `*DaemonError` with `ErrCodeDaemonUpgradeRequired`.
+- `TestReadFile_LocalSharedMode_AllowsNewDaemon` — daemon registered with the capability, `ReadFile` round-trips normally.
+- `TestReadFile_SinglePod_AllowsOldDaemon` — single-pod (sharedReg nil), no capability → still proceeds (legacy behavior preserved).
+
+- Commit: `feat(commanderhub): forwardServer handler with strict-ordered auth + nonce insert + local-only lookup + 426 capability gate (local + forwarded paths)`.
 
 #### Task C5: `drainHandler` endpoint
 
