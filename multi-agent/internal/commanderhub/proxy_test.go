@@ -234,6 +234,59 @@ func TestProxy_FanOutSessionsFailOpen(t *testing.T) {
 	require.Contains(t, []string{"error", "disconnected", "timeout"}, byID["ghost"].Status)
 }
 
+// TestSendCommand_OwnershipLost_ReturnsErrDaemonGone: when dc.ownershipLost is
+// already set (simulating a prior sibling-pod takeover), SendCommand must return
+// ErrDaemonGone immediately — before registering a pending entry or writing.
+func TestSendCommand_OwnershipLost_ReturnsErrDaemonGone(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{
+		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
+	}}
+	hub := NewHub(resolver)
+	// Attach a sharedRegistry so confirmOwnership enters cluster-mode path.
+	// db=nil is safe because ownershipLost.Load() short-circuits before any DB call.
+	hub.attachSharedRegistry(&sharedRegistry{advertiseURL: "http://pod-a:8091"})
+
+	o := owner{userID: "alice", workspaceID: "W1"}
+	dc := &daemonConn{
+		id:      "conn-1",
+		shortID: "agent-A",
+		owner:   o,
+		done:    make(chan struct{}),
+		pending: make(map[string]*pendingEntry),
+		hub:     hub,
+	}
+	dc.ownershipLost.Store(true)
+	hub.reg.add(dc)
+
+	_, err := hub.SendCommand(context.Background(), o, "agent-A", "list_sessions", nil)
+	require.ErrorIs(t, err, ErrDaemonGone)
+}
+
+// TestSendCommandStream_OwnershipLost_ReturnsErrDaemonGone: analogous test for
+// the streaming path — ownership lost before registerPending must return ErrDaemonGone.
+func TestSendCommandStream_OwnershipLost_ReturnsErrDaemonGone(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{
+		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
+	}}
+	hub := NewHub(resolver)
+	hub.attachSharedRegistry(&sharedRegistry{advertiseURL: "http://pod-a:8091"})
+
+	o := owner{userID: "alice", workspaceID: "W1"}
+	dc := &daemonConn{
+		id:      "conn-2",
+		shortID: "agent-B",
+		owner:   o,
+		done:    make(chan struct{}),
+		pending: make(map[string]*pendingEntry),
+		hub:     hub,
+	}
+	dc.ownershipLost.Store(true)
+	hub.reg.add(dc)
+
+	_, err := hub.SendCommandStream(context.Background(), o, "agent-B", "session_turn", nil)
+	require.ErrorIs(t, err, ErrDaemonGone)
+}
+
 // --- helpers ---
 
 func jsonRaw(t *testing.T, v any) []byte {

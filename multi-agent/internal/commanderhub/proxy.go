@@ -42,6 +42,9 @@ func (h *Hub) SendCommand(ctx context.Context, o owner, daemonID, command string
 	if !ok {
 		return nil, ErrDaemonNotFound
 	}
+	if !dc.confirmOwnership(ctx) {
+		return nil, ErrDaemonGone
+	}
 	select {
 	case <-dc.done:
 		return nil, ErrDaemonGone
@@ -85,6 +88,9 @@ func (h *Hub) SendCommandStream(ctx context.Context, o owner, daemonID, command 
 	dc, ok := h.reg.lookup(o, daemonID)
 	if !ok {
 		return nil, ErrDaemonNotFound
+	}
+	if !dc.confirmOwnership(ctx) {
+		return nil, ErrDaemonGone
 	}
 	select {
 	case <-dc.done:
