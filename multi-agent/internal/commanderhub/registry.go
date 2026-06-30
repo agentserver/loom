@@ -49,7 +49,7 @@ type daemonConn struct {
 	// different owning_instance_url for this daemon's shortID (i.e., a faster
 	// pod won the registration race). The heartbeat loop checks this flag and
 	// terminates the connection so the winning pod takes over cleanly.
-	ownershipLost bool
+	ownershipLost atomic.Bool
 
 	// heartbeatErrCount counts consecutive heartbeat write failures. The
 	// heartbeat loop terminates the connection after a threshold is reached.
