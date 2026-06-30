@@ -188,16 +188,20 @@ var Default = NewRegistry()
 
 ```go
 var (
-    ErrUnknownFlag       = errors.New("ablation: unknown flag")
-    ErrNilTarget         = errors.New("ablation: nil target")
-    ErrAlreadyRegistered = errors.New("ablation: flag already registered")
-    ErrNotRegistered     = errors.New("ablation: flag not registered")
+    ErrUnknownFlag             = errors.New("ablation: unknown flag")
+    ErrNilTarget               = errors.New("ablation: nil target")
+    ErrAlreadyRegistered       = errors.New("ablation: flag already registered")
+    ErrNotRegistered           = errors.New("ablation: flag not registered")
+    ErrTargetAlreadyRegistered = errors.New("ablation: target already registered under another flag")
 )
 ```
 
 All API errors returned by `Register` / `SetByName` MUST satisfy
 `errors.Is(err, ErrXxx)` for the corresponding sentinel; callers are expected
-to switch on the sentinel, not on string contents.
+to switch on the sentinel, not on string contents. Sentinel errors are
+returned bare in v1; any future enrichment (e.g. adding the offending flag
+name to the message) MUST use `fmt.Errorf("...: %w", ErrXxx, ...)` so that
+`errors.Is(err, ErrXxx)` continues to hold for every caller.
 
 ---
 
@@ -208,6 +212,7 @@ to switch on the sentinel, not on string contents.
 | Register   | `name` is not in `KnownFlags()`                           | `ErrUnknownFlag`                       | Caller bug — switch to an exported `FlagName` constant (identifier form fails at `go build`). |
 | Register   | `target == nil`                                           | `ErrNilTarget`                         | Bug in caller; pass `&pkg.DisableFoo`.                                          |
 | Register   | `name` is already registered with some target             | `ErrAlreadyRegistered` (no overwrite)  | Two packages claim the same flag — pick one owner.                              |
+| Register   | `target` is already registered under a different `name`   | `ErrTargetAlreadyRegistered` (no overwrite) | Copy-paste in the consumer pattern — fix the consumer to pass distinct `*bool`s. |
 | Register   | valid name, valid non-nil target, not previously seen     | `nil`                                  | Target is wired. SetByName(name, …) will flip it.                               |
 | SetByName  | `name` not in `KnownFlags()` (e.g. typo on CLI)           | `ErrUnknownFlag`                       | CLI binder surfaces this to the user as an error before the binary runs work.   |
 | SetByName  | known `name` but no Register call has happened yet        | `ErrNotRegistered`                     | CLI binder surfaces it; the owning package wasn't linked.                       |
@@ -326,7 +331,8 @@ when each mitigation has at least one passing test:
 | §7 (a) Goroutine safety | `TestConcurrent_Register_Race`, `TestConcurrent_SetByName_Race`, `TestConcurrent_RegisterSetList_Race` | N goroutines hit `Register` / `SetByName` / `List` (the last one in a mixed-method test) under `t.Parallel()` + `-race`; no data race, no panic, registry stays consistent. |
 | §7 (b) Unknown name not silent | `TestSetByName_Unknown_ErrUnknownFlag` | `SetByName("NoTpedContracts", true)` returns `ErrUnknownFlag` (NOT `nil`). |
 | §7 (b) Known-but-unregistered not silent | `TestSetByName_NotRegistered_ErrNotRegistered` | `SetByName("NoObserver", true)` with no prior `Register` returns `ErrNotRegistered`. |
-| §7 (c) Duplicate Register | `TestRegister_Duplicate_ErrAlreadyRegistered` | Second `Register` of the same name returns `ErrAlreadyRegistered`, does NOT panic, does NOT overwrite (the original target's value still tracks subsequent `SetByName`). |
+| §7 (c) Duplicate Register (name) | `TestRegister_Duplicate_ErrAlreadyRegistered`, `TestSetByName_DuplicateRegisterDoesNotOverwrite` | Second `Register` of the same name returns `ErrAlreadyRegistered`, does NOT panic, does NOT overwrite (the original target's value still tracks subsequent `SetByName`). |
+| §7 (c) Duplicate Register (target) | `TestRegister_SameTargetUnderTwoNames_Rejected` | Second `Register` of the same `*bool` under a different `FlagName` returns `ErrTargetAlreadyRegistered`; the second name remains NOT registered. |
 | §7 (d) Typed FlagName runtime check | `TestRegister_UnknownFlag_ErrUnknownFlag` | `Register(FlagName("NoBogus"), &x)` returns `ErrUnknownFlag`. |
 | §7 (e) Stable List output | `TestList_Stable` | After a non-trivial registration sequence, `List()` returns the registered FlagNames in **ascending order of the underlying string** (the natural `<` order). Asserted by comparing the result with a hand-rolled `sort.Strings`-style expected slice — not just by comparing two consecutive `List()` calls to each other. |
 
@@ -370,9 +376,14 @@ NoTpedContracts", and there is no post-hoc way to tell which `tee`'d run was
 real and which was a typo. The single worst outcome for this package is
 silent acceptance of an unknown flag name.
 
-### (c) Duplicate Register MUST NOT panic and MUST NOT overwrite
+### (c) Duplicate ownership MUST NOT panic and MUST NOT overwrite
 
-If two packages both try to `Register(ablation.NoX, &theirBool)`:
+Two registrations resolve to the same owner if they share the same name
+OR the same `*bool` target. Both arms must be rejected — the package
+exists to prevent silent ownership ambiguity from EITHER direction.
+
+**Name-aliasing:** If two packages both try to
+`Register(ablation.NoX, &theirBool)`:
 
 - The second call MUST return `ErrAlreadyRegistered`.
 - The previously registered `*bool` MUST remain the one that future
@@ -382,6 +393,23 @@ If two packages both try to `Register(ablation.NoX, &theirBool)`:
   trivially-exploitable DoS on a process whose only sin is linking two
   packages that both claim a flag. Returning an error lets the caller
   decide (panic in their own init if they want strict mode).
+
+**Target-aliasing:** If a package mistakenly does
+
+```go
+ablation.Default.Register(ablation.NoCapabilityDiscovery, &DisableCapabilityDiscovery)
+ablation.Default.Register(ablation.NoObserver,            &DisableCapabilityDiscovery) // copy-paste, wrong var
+```
+
+the second call MUST return `ErrTargetAlreadyRegistered` and MUST NOT
+wire the second name. Without this rule, `--ablation NoCapabilityDiscovery`
+and `--ablation NoObserver` would silently flip the SAME toggle, which is
+the same "two flags secretly share an owner" failure surface as the
+name-aliasing case — just discovered through the consumer's copy-paste
+instead of through two packages competing for the same name. The §5
+consumer pattern (`panic(err)` in init on Register failure) means a
+target-aliasing typo fails at process start, before any ablation sweep
+runs.
 - The package MUST NOT silently overwrite. Reason: silent overwrite means
   whichever package was init'd second wins. Even though Go does define a
   deterministic init order from the import graph, flag *ownership* must
@@ -431,10 +459,12 @@ The two failure modes that this package exists to prevent are:
 
 1. **Silent typo** (mitigation: (b), (d)) — operator thinks the ablation
    flag was on, but it wasn't. Output: invalid metrics, paper retraction.
-2. **Non-deterministic flag ownership** (mitigation: (c)) — two packages
-   claim the same flag, so the "winning" target depends on the import
-   graph and would silently change under an unrelated refactor. Output:
-   irreproducible experiments.
+2. **Non-deterministic flag ownership** (mitigation: (c)) — two
+   registrations resolve to the same owner (either by sharing a name or
+   by sharing a `*bool` target via a copy-paste in the consumer). Either
+   way the "winning" target depends on the import graph or on which line
+   of init() ran first, and would silently change under an unrelated
+   refactor. Output: irreproducible experiments.
 
 Mitigations (a) and (e) are correctness substrate that makes (b) and (c)
 actually hold under realistic runtime / test concurrency (CLI binder

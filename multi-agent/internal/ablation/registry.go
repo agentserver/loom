@@ -74,10 +74,13 @@ func NewRegistry() *Registry {
 // Register associates a *bool target with a known ablation FlagName.
 //
 // Returns:
-//   - ErrUnknownFlag       if name is not one of the 8 KnownFlags() values.
-//   - ErrNilTarget         if target is nil.
-//   - ErrAlreadyRegistered if a target is already registered for name; the
+//   - ErrUnknownFlag             if name is not one of the 8 KnownFlags() values.
+//   - ErrNilTarget               if target is nil.
+//   - ErrAlreadyRegistered       if a target is already registered for name; the
 //     previously registered *bool is NOT overwritten.
+//   - ErrTargetAlreadyRegistered if the same *bool is already registered for
+//     a DIFFERENT FlagName in this Registry (catches a copy-paste in the
+//     consumer pattern from §5 — see spec §7 (c)).
 //
 // Register never panics — init-time panics would DoS the whole process
 // before main runs.
@@ -97,6 +100,15 @@ func (r *Registry) Register(name FlagName, target *bool) error {
 	}
 	if _, dup := r.targets[name]; dup {
 		return ErrAlreadyRegistered
+	}
+	// Reverse check: the same *bool MUST NOT already be wired under a
+	// different name. Linear scan is fine here — the map maxes out at
+	// len(canonicalFlags) == 8 entries.
+	for existingName, existingTarget := range r.targets {
+		if existingTarget == target {
+			_ = existingName // not surfaced in the sentinel; future enrichment may.
+			return ErrTargetAlreadyRegistered
+		}
 	}
 	r.targets[name] = target
 	return nil

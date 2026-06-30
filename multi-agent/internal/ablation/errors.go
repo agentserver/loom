@@ -29,4 +29,13 @@ var (
 	// FlagName but no Register call has yet wired a target for it. This
 	// typically means the owning package was not linked into this binary.
 	ErrNotRegistered = errors.New("ablation: flag not registered")
+
+	// ErrTargetAlreadyRegistered is returned by Register when the *bool
+	// being registered is already wired to some other FlagName in this
+	// Registry. This catches the copy-paste failure mode where two
+	// Register calls in a downstream package's init() share the same
+	// target variable by accident — without this check, two CLI flags
+	// would silently flip the SAME toggle, which is exactly the "two
+	// flags secretly share an owner" failure mode spec §7 (c) prohibits.
+	ErrTargetAlreadyRegistered = errors.New("ablation: target already registered under another flag")
 )

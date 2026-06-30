@@ -2,9 +2,11 @@ package ablation
 
 import (
 	"errors"
-	"sort"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestKnownFlags_CopyIsolation(t *testing.T) {
@@ -104,6 +106,33 @@ func TestSetByName_Flips(t *testing.T) {
 	}
 }
 
+// TestRegister_SameTargetUnderTwoNames_Rejected guards spec §7 (c) against
+// a target-aliasing failure that's distinct from name-aliasing: a downstream
+// package can copy-paste a Register line and forget to swap the target
+// pointer, ending up with two flag names wired to the same *bool. CLI
+// `--ablation NoX` and `--ablation NoY` would then flip the SAME toggle
+// silently, which is exactly the "two flags secretly share an owner"
+// failure mode §7 (c) exists to prevent.
+func TestRegister_SameTargetUnderTwoNames_Rejected(t *testing.T) {
+	r := NewRegistry()
+	var b bool
+	if err := r.Register(NoCapabilityDiscovery, &b); err != nil {
+		t.Fatalf("first Register: %v", err)
+	}
+	err := r.Register(NoObserver, &b)
+	if !errors.Is(err, ErrTargetAlreadyRegistered) {
+		t.Fatalf("Register(NoObserver, &b) when &b is already registered under NoCapabilityDiscovery: want errors.Is ErrTargetAlreadyRegistered, got %v", err)
+	}
+	// The second flag must NOT have been wired — SetByName on it returns
+	// ErrNotRegistered, proving the rejection wasn't a soft "warn-and-store".
+	if err := r.SetByName(string(NoObserver), true); !errors.Is(err, ErrNotRegistered) {
+		t.Errorf("SetByName(NoObserver) after rejected duplicate-target Register: want ErrNotRegistered, got %v", err)
+	}
+	if b {
+		t.Errorf("*b after rejected duplicate-target Register + SetByName(NoObserver): want false, got true")
+	}
+}
+
 func TestSetByName_DuplicateRegisterDoesNotOverwrite(t *testing.T) {
 	r := NewRegistry()
 	var first, second bool
@@ -189,8 +218,11 @@ func TestConcurrent_Register_Race(t *testing.T) {
 }
 
 // TestConcurrent_SetByName_Race: many goroutines hammer SetByName on the
-// same flag. The final *target value is intentionally non-deterministic —
-// the test asserts only that no race / panic occurs.
+// same flag. The interleaved final value is non-deterministic; the test
+// checks (1) the race detector and panics, AND (2) that SetByName
+// actually writes through *target — guards against a future refactor
+// that moves the deref outside the lock and silently drops the write on
+// a non-happy path.
 func TestConcurrent_SetByName_Race(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry()
@@ -212,12 +244,31 @@ func TestConcurrent_SetByName_Race(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+
+	// Final deterministic write — must be observed. If SetByName silently
+	// dropped the deref this would fail. Cheap and pins the write-through
+	// contract under the lock.
+	if err := r.SetByName(string(NoObserver), true); err != nil {
+		t.Fatalf("final SetByName: %v", err)
+	}
+	if !b {
+		t.Errorf("after final SetByName(NoObserver, true): *target = false; SetByName dropped the write")
+	}
+	if err := r.SetByName(string(NoObserver), false); err != nil {
+		t.Fatalf("final SetByName false: %v", err)
+	}
+	if b {
+		t.Errorf("after final SetByName(NoObserver, false): *target = true; SetByName dropped the write")
+	}
 }
 
 // TestConcurrent_RegisterSetList_Race: mixed Register / SetByName / List
-// workload. Validates that the mutex spans every method touching the map,
-// not just Register. Asserts that every List() snapshot is in ascending
-// order (catches sort-after-unlock vs sort-before-unlock regressions).
+// workload. Validates that the mutex spans every method touching the map
+// (a List() that read the map outside the lock would trip -race here).
+// A "ready" gate + wall-clock budget on the List goroutine ensures it
+// actually runs concurrently with the Register/SetByName goroutines —
+// without it, List could drain its loop before the workers wake up and
+// the test would pass against a totally unlocked List().
 func TestConcurrent_RegisterSetList_Race(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry()
@@ -235,12 +286,22 @@ func TestConcurrent_RegisterSetList_Race(t *testing.T) {
 	postTargets := make([]bool, len(flags)-half)
 
 	var wg sync.WaitGroup
+	var ready sync.WaitGroup
+	// Worker goroutines are blocked on `start` until the main goroutine
+	// releases them, AFTER the List goroutine is already spinning. This
+	// removes the early-finish race where List drains before workers
+	// start.
+	start := make(chan struct{})
+	workers := len(flags) // half Registers + half SetByNames
+	ready.Add(workers)
 
 	// Registers for the second half.
 	for i := half; i < len(flags); i++ {
 		wg.Add(1)
 		i := i
 		go func() {
+			ready.Done()
+			<-start
 			defer wg.Done()
 			if err := r.Register(flags[i], &postTargets[i-half]); err != nil {
 				t.Errorf("Register(%q): %v", flags[i], err)
@@ -253,6 +314,8 @@ func TestConcurrent_RegisterSetList_Race(t *testing.T) {
 		wg.Add(1)
 		i := i
 		go func() {
+			ready.Done()
+			<-start
 			defer wg.Done()
 			if err := r.SetByName(string(flags[i]), true); err != nil {
 				t.Errorf("SetByName(%q): %v", flags[i], err)
@@ -260,24 +323,42 @@ func TestConcurrent_RegisterSetList_Race(t *testing.T) {
 		}()
 	}
 
-	// List in a small loop, checking sortedness each time.
+	// List goroutine: runs for a small wall-clock budget. Tracks the
+	// largest snapshot size observed; if it never sees a growth from the
+	// pre-registered `half` (i.e. it never observed any concurrent
+	// Register landing), the test failed to actually exercise concurrency
+	// and we fail loudly rather than passing silently.
 	wg.Add(1)
+	var maxSeen int64
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 32; i++ {
+		<-start
+		deadline := time.Now().Add(50 * time.Millisecond)
+		for time.Now().Before(deadline) {
 			snap := r.List()
-			if !sort.SliceIsSorted(snap, func(i, j int) bool { return snap[i] < snap[j] }) {
-				t.Errorf("List() returned unsorted slice: %v", snap)
-				return
+			if n := int64(len(snap)); n > atomic.LoadInt64(&maxSeen) {
+				atomic.StoreInt64(&maxSeen, n)
 			}
 		}
 	}()
 
+	// Wait until every worker is parked on `start`, then release them
+	// simultaneously with the List goroutine.
+	ready.Wait()
+	close(start)
 	wg.Wait()
 
 	final := r.List()
 	if len(final) != len(flags) {
 		t.Errorf("after mixed workload: List len = %d, want %d", len(final), len(flags))
+	}
+	// At least one List() snapshot must have observed the registry
+	// growing past its pre-registered size, i.e. List ran concurrently
+	// with at least one Register. If maxSeen == half, the List goroutine
+	// finished before any concurrent Register landed (or the registry was
+	// frozen), and the test wasn't exercising the contract it claims to.
+	if seen := atomic.LoadInt64(&maxSeen); seen <= int64(half) {
+		t.Errorf("List goroutine never observed a concurrent Register landing (maxSeen=%d, want > half=%d); test did not actually exercise concurrent List vs Register", seen, half)
 	}
 }
 
@@ -326,11 +407,12 @@ func TestZeroValueRegistry_DoesNotPanic(t *testing.T) {
 	}
 }
 
-// TestSentinels_AreDistinct is a non-RED regression smoke test: two
-// distinct errors.New values are always distinct, so this can't
-// meaningfully fail now. It exists to fail loudly if a future refactor
-// accidentally writes `var ErrFoo = ErrBar` (e.g. while consolidating
-// error declarations), which would silently merge two error categories.
+// TestSentinels_AreDistinct guards against an accidental `var ErrFoo =
+// ErrBar` aliasing in a future consolidation refactor, which would
+// silently merge two error categories. Also asserts each sentinel's
+// Error() string starts with the "ablation: " package prefix — catches a
+// copy-paste error like `errors.New("")` or a sentinel pulled in from a
+// neighbouring package.
 func TestSentinels_AreDistinct(t *testing.T) {
 	sentinels := []struct {
 		name string
@@ -340,10 +422,11 @@ func TestSentinels_AreDistinct(t *testing.T) {
 		{"ErrNilTarget", ErrNilTarget},
 		{"ErrAlreadyRegistered", ErrAlreadyRegistered},
 		{"ErrNotRegistered", ErrNotRegistered},
+		{"ErrTargetAlreadyRegistered", ErrTargetAlreadyRegistered},
 	}
 	for i, a := range sentinels {
-		if !errors.Is(a.err, a.err) {
-			t.Errorf("%s does not match itself via errors.Is", a.name)
+		if !strings.HasPrefix(a.err.Error(), "ablation: ") {
+			t.Errorf("%s.Error() = %q; want prefix \"ablation: \"", a.name, a.err.Error())
 		}
 		for j, b := range sentinels {
 			if i == j {
