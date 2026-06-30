@@ -14,3 +14,24 @@ spec:
   selector:
     {{- include "observer.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: observer
+{{- if .Values.cluster.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ default (printf "%s-headless" (include "observer.fullname" .)) .Values.cluster.headlessServiceName }}
+  labels:
+    {{- include "observer.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - name: internal
+      port: {{ .Values.cluster.internalServicePort }}
+      targetPort: internal
+      protocol: TCP
+  selector:
+    {{- include "observer.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: observer
+{{- end }}

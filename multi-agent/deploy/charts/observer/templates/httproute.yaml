@@ -12,6 +12,17 @@ spec:
     - matches:
         - path:
             type: PathPrefix
+            value: /api/commander/_internal/
+      filters:
+        - type: ResponseHeaderModifier
+          responseHeaderModifier:
+            set:
+              - name: Content-Type
+                value: application/json
+      # No backendRefs => Gateway API returns 503 for this path.
+    - matches:
+        - path:
+            type: PathPrefix
             value: /
       backendRefs:
         - name: {{ include "observer.fullname" . }}
