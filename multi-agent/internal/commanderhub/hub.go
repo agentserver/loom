@@ -28,6 +28,7 @@ type Hub struct {
 	resolver     identity.Resolver
 	upgrader     websocket.Upgrader
 	reg          *localRegistry
+	sharedReg    *sharedRegistry // B1: nil in single-pod; populated by attachSharedRegistry (Phase B B4)
 	turns        turnStateBackend
 	sessionCache *sessionListCache
 	cmdSeq       atomic.Int64 // generates per-command IDs (see proxy.go)
