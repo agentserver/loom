@@ -2176,6 +2176,7 @@ func TestSharedRegistry_HeartbeatOnce_ForceClosesOnOwnershipLoss(t *testing.T) {
 	require.False(t, keepRunning, "ownership loss must signal stop")
 	require.True(t, dc.ownershipLost.Load(), "ownershipLost must be sticky-true")
 	require.True(t, ownershipTestConnIsClosed(dc), "WS conn must be force-closed on ownership loss")
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 ```
 
@@ -2390,6 +2391,7 @@ func TestDaemonConn_ConfirmOwnership_StillOwn(t *testing.T) {
 
 	require.True(t, dc.confirmOwnership(context.Background()))
 	require.False(t, dc.ownershipLost.Load())
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestDaemonConn_ConfirmOwnership_DifferentPod(t *testing.T) {
@@ -2408,6 +2410,7 @@ func TestDaemonConn_ConfirmOwnership_DifferentPod(t *testing.T) {
 
 	require.False(t, dc.confirmOwnership(context.Background()))
 	require.True(t, dc.ownershipLost.Load(), "ownershipLost must be sticky-true")
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestDaemonConn_ConfirmOwnership_RowMissing(t *testing.T) {
@@ -2424,6 +2427,7 @@ func TestDaemonConn_ConfirmOwnership_RowMissing(t *testing.T) {
 
 	require.False(t, dc.confirmOwnership(context.Background()))
 	require.True(t, dc.ownershipLost.Load())
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestDaemonConn_ConfirmOwnership_StickyNegativeNoQuery(t *testing.T) {
@@ -2454,6 +2458,7 @@ func TestDaemonConn_ConfirmOwnership_PGError(t *testing.T) {
 
 	require.False(t, dc.confirmOwnership(context.Background()))
 	require.True(t, dc.ownershipLost.Load(), "PG error must be fail-closed (treat as lost)")
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 ```
 
