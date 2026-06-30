@@ -371,39 +371,42 @@ func TestHTTP_TurnStreamsSSE(t *testing.T) {
 	require.Contains(t, joined, "hello")
 	require.Contains(t, joined, "event: done")
 
-	snap := hub.turns.get(turnKey{owner: o, shortID: daemonID, sessionID: "s1"})
+	snap, _ := hub.turns.get(context.Background(), turnKey{owner: o, shortID: daemonID, sessionID: "s1"})
 	require.Equal(t, turnStateDone, snap.State)
 	require.False(t, snap.InFlight)
 }
 
 func TestUpdateTurnStateFallsBackToLegacyStatusText(t *testing.T) {
+	ctx := context.Background()
 	hub := NewHub(&fakeResolver{})
 	ch := &commanderHandlers{hub: hub}
 	key := turnKey{owner: owner{userID: "alice", workspaceID: "W1"}, shortID: "d1", sessionID: "s1"}
-	require.True(t, hub.turns.begin(key))
+	ok, _ := hub.turns.begin(ctx, key)
+	require.True(t, ok)
 
 	payload, err := json.Marshal(commander.EventPayload{EventKind: "status", Text: "accepted by daemon"})
 	require.NoError(t, err)
-	ch.updateTurnStateFromEnvelope(key, commander.Envelope{Type: "event", Payload: payload})
+	ch.updateTurnStateFromEnvelope(ctx, key, commander.Envelope{Type: "event", Payload: payload})
 
-	snap := hub.turns.get(key)
+	snap, _ := hub.turns.get(ctx, key)
 	require.Equal(t, turnStateQueued, snap.State)
 	require.True(t, snap.InFlight)
 
 	payload, err = json.Marshal(commander.EventPayload{EventKind: "status", Text: "codex running"})
 	require.NoError(t, err)
-	ch.updateTurnStateFromEnvelope(key, commander.Envelope{Type: "event", Payload: payload})
+	ch.updateTurnStateFromEnvelope(ctx, key, commander.Envelope{Type: "event", Payload: payload})
 
-	snap = hub.turns.get(key)
+	snap, _ = hub.turns.get(ctx, key)
 	require.Equal(t, turnStateAnswering, snap.State)
 	require.True(t, snap.InFlight)
 }
 
 func TestUpdateTurnStatePrefersStatusCode(t *testing.T) {
+	ctx := context.Background()
 	hub := NewHub(&fakeResolver{})
 	ch := &commanderHandlers{hub: hub}
 	key := turnKey{owner: owner{userID: "u", workspaceID: "w"}, shortID: "d", sessionID: "s"}
-	hub.turns.begin(key)
+	_, _ = hub.turns.begin(ctx, key)
 
 	payload, err := json.Marshal(commander.EventPayload{
 		EventKind:  "status",
@@ -411,9 +414,9 @@ func TestUpdateTurnStatePrefersStatusCode(t *testing.T) {
 		StatusCode: agentbackend.StatusStarting,
 	})
 	require.NoError(t, err)
-	ch.updateTurnStateFromEnvelope(key, commander.Envelope{Type: "event", Payload: payload})
+	ch.updateTurnStateFromEnvelope(ctx, key, commander.Envelope{Type: "event", Payload: payload})
 
-	state := hub.turns.get(key)
+	state, _ := hub.turns.get(ctx, key)
 	require.Equal(t, turnStateQueued, state.State)
 	require.True(t, state.InFlight)
 
@@ -423,9 +426,9 @@ func TestUpdateTurnStatePrefersStatusCode(t *testing.T) {
 		StatusCode: agentbackend.StatusAnswering,
 	})
 	require.NoError(t, err)
-	ch.updateTurnStateFromEnvelope(key, commander.Envelope{Type: "event", Payload: payload})
+	ch.updateTurnStateFromEnvelope(ctx, key, commander.Envelope{Type: "event", Payload: payload})
 
-	state = hub.turns.get(key)
+	state, _ = hub.turns.get(ctx, key)
 	require.Equal(t, turnStateAnswering, state.State)
 	require.True(t, state.InFlight)
 }
@@ -506,7 +509,7 @@ func TestHTTP_TerminalStatusEventsEndTurnWithoutDisconnectOverwrite(t *testing.T
 			case <-time.After(2 * time.Second):
 				t.Fatal("backend did not emit terminal status")
 			}
-			snap := hub.turns.get(turnKey{owner: o, shortID: daemonID, sessionID: sessionID})
+			snap, _ := hub.turns.get(context.Background(), turnKey{owner: o, shortID: daemonID, sessionID: sessionID})
 			require.Equal(t, tc.wantState, snap.State)
 			require.False(t, snap.InFlight)
 			require.Equal(t, tc.wantMessage, snap.Message)
@@ -603,7 +606,7 @@ func TestHTTP_TurnErrorFrameLeavesStoreError(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	require.Contains(t, string(body), "event: error")
 
-	snap := hub.turns.get(turnKey{owner: o, shortID: daemonID, sessionID: "s1"})
+	snap, _ := hub.turns.get(context.Background(), turnKey{owner: o, shortID: daemonID, sessionID: "s1"})
 	require.Equal(t, turnStateError, snap.State)
 	require.False(t, snap.InFlight)
 	require.Contains(t, snap.Message, "backend exploded")
@@ -636,7 +639,7 @@ func TestHTTP_TurnAwaitingUserLeavesStoreAwaitingApproval(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	require.Contains(t, string(body), "event: done")
 
-	snap := hub.turns.get(turnKey{owner: o, shortID: daemonID, sessionID: "s1"})
+	snap, _ := hub.turns.get(context.Background(), turnKey{owner: o, shortID: daemonID, sessionID: "s1"})
 	require.Equal(t, turnStateAwaitingApproval, snap.State)
 	require.False(t, snap.InFlight)
 	require.True(t, snap.AwaitingApproval)
@@ -664,7 +667,7 @@ func TestHTTP_TurnPreStreamDaemonGoneLeavesStoreDisconnected(t *testing.T) {
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusBadGateway, resp.StatusCode)
 
-	snap := hub.turns.get(turnKey{owner: o, shortID: "gone", sessionID: "s1"})
+	snap, _ := hub.turns.get(context.Background(), turnKey{owner: o, shortID: "gone", sessionID: "s1"})
 	require.Equal(t, turnStateDisconnected, snap.State)
 	require.False(t, snap.InFlight)
 }
@@ -690,7 +693,8 @@ func TestHTTP_TurnMissingDaemonDoesNotCreateTurnState(t *testing.T) {
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusNotFound, resp.StatusCode)
-	require.Equal(t, turnStateIdle, hub.turns.get(key).State)
+	gotSnap, _ := hub.turns.get(context.Background(), key)
+	require.Equal(t, turnStateIdle, gotSnap.State)
 	_, exists := hub.turns.(*memTurnStore).snapshotForTest(key)
 	require.False(t, exists, "missing daemon request should not create turn state")
 }
@@ -748,7 +752,7 @@ func TestHTTP_TurnRequestCanceledKeepsGuardUntilDaemonTerminal(t *testing.T) {
 	}
 
 	key := turnKey{owner: o, shortID: daemonID, sessionID: "s1"}
-	snap := hub.turns.get(key)
+	snap, _ := hub.turns.get(context.Background(), key)
 	require.True(t, snap.InFlight, "browser cancellation must not clear daemon turn guard: %+v", snap)
 
 	secondCtx, secondCancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
@@ -763,7 +767,7 @@ func TestHTTP_TurnRequestCanceledKeepsGuardUntilDaemonTerminal(t *testing.T) {
 
 	closeBlock()
 	waitFor(t, func() bool {
-		snap := hub.turns.get(key)
+		snap, _ := hub.turns.get(context.Background(), key)
 		return snap.State == turnStateDone && !snap.InFlight
 	}, 2*time.Second, "turn state did not finish after daemon terminal")
 }

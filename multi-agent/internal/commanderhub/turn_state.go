@@ -41,12 +41,12 @@ type turnSnapshot struct {
 // implementation is *memTurnStore; Phase D will add a *pgTurnStore that
 // persists state across pod restarts.
 type turnStateBackend interface {
-	begin(key turnKey) bool
-	set(key turnKey, state turnState)
-	finish(key turnKey, state turnState)
-	fail(key turnKey, msg string)
-	rekey(oldKey, newKey turnKey)
-	get(key turnKey) turnSnapshot
+	begin(ctx context.Context, key turnKey) (bool, error)
+	set(ctx context.Context, key turnKey, state turnState) error
+	finish(ctx context.Context, key turnKey, state turnState) error
+	fail(ctx context.Context, key turnKey, msg string) error
+	rekey(ctx context.Context, oldKey, newKey turnKey) error
+	get(ctx context.Context, key turnKey) (turnSnapshot, error)
 	// updateFromEnvelope persists envelope-derived state changes in backends
 	// that require it (e.g. pgTurnStore). memTurnStore is a no-op because
 	// the callers in http.go call begin/set/finish/fail directly.
@@ -67,19 +67,19 @@ func newMemTurnStore() *memTurnStore {
 	return &memTurnStore{m: make(map[turnKey]turnSnapshot)}
 }
 
-func (s *memTurnStore) begin(key turnKey) bool {
+func (s *memTurnStore) begin(_ context.Context, key turnKey) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cur := s.m[key]
 	if cur.InFlight {
-		return false
+		return false, nil
 	}
 	s.m[key] = turnSnapshot{State: turnStateQueued, InFlight: true, updatedAt: time.Now()}
 	s.pruneLocked()
-	return true
+	return true, nil
 }
 
-func (s *memTurnStore) set(key turnKey, state turnState) {
+func (s *memTurnStore) set(_ context.Context, key turnKey, state turnState) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cur := s.m[key]
@@ -87,9 +87,10 @@ func (s *memTurnStore) set(key turnKey, state turnState) {
 	cur.InFlight = state == turnStateQueued || state == turnStateAnswering
 	cur.updatedAt = time.Now()
 	s.m[key] = cur
+	return nil
 }
 
-func (s *memTurnStore) finish(key turnKey, state turnState) {
+func (s *memTurnStore) finish(_ context.Context, key turnKey, state turnState) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cur := s.m[key]
@@ -99,9 +100,10 @@ func (s *memTurnStore) finish(key turnKey, state turnState) {
 	cur.updatedAt = time.Now()
 	s.m[key] = cur
 	s.pruneLocked()
+	return nil
 }
 
-func (s *memTurnStore) fail(key turnKey, msg string) {
+func (s *memTurnStore) fail(_ context.Context, key turnKey, msg string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cur := s.m[key]
@@ -111,6 +113,7 @@ func (s *memTurnStore) fail(key turnKey, msg string) {
 	cur.updatedAt = time.Now()
 	s.m[key] = cur
 	s.pruneLocked()
+	return nil
 }
 
 // rekey migrates an in-flight entry from oldKey to newKey, used when the
@@ -119,30 +122,31 @@ func (s *memTurnStore) fail(key turnKey, msg string) {
 // this is a no-op; when newKey already exists, the existing entry is
 // preserved (the caller's subsequent finish/fail then writes the
 // terminal state under newKey).
-func (s *memTurnStore) rekey(oldKey, newKey turnKey) {
+func (s *memTurnStore) rekey(_ context.Context, oldKey, newKey turnKey) error {
 	if oldKey == newKey {
-		return
+		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cur, ok := s.m[oldKey]
 	if !ok {
-		return
+		return nil
 	}
 	delete(s.m, oldKey)
 	if _, exists := s.m[newKey]; !exists {
 		cur.updatedAt = time.Now()
 		s.m[newKey] = cur
 	}
+	return nil
 }
 
-func (s *memTurnStore) get(key turnKey) turnSnapshot {
+func (s *memTurnStore) get(_ context.Context, key turnKey) (turnSnapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if snap, ok := s.m[key]; ok {
-		return snap
+		return snap, nil
 	}
-	return turnSnapshot{State: turnStateIdle}
+	return turnSnapshot{State: turnStateIdle}, nil
 }
 
 // updateFromEnvelope is a no-op for memTurnStore. Phase D's pgTurnStore
