@@ -4153,17 +4153,15 @@ The remaining Phase C tasks follow the same shape as C1–C3. **For brevity in t
 - Create: `multi-agent/internal/commanderhub/forward_server_test.go`
 - Modify: `multi-agent/internal/commanderhub/proxy.go` — EXTRACT helpers from existing `SendCommand` and `SendCommandStream` bodies. **This extraction happens in C4 (NOT D1)** because the forwardServer needs to invoke the local-only path, and the only thing that knows how is the existing proxy.go logic. D1 only adds the BRANCHING (`localReg miss → forwardCli.send`).
 
-**Extraction shape** (concrete, not a TODO):
-- `(h *Hub) sendCommandToLocal(ctx context.Context, dc *daemonConn, command string, args json.RawMessage) (json.RawMessage, error)` — body of today's `SendCommand` AFTER `h.reg.lookup` succeeds (lines `proxy.go:45-79` today). Takes the resolved `*daemonConn` as arg instead of looking it up.
-- `(h *Hub) sendCommandStreamToLocal(ctx context.Context, dc *daemonConn, command string, args json.RawMessage, outBuffer int) (<-chan commander.Envelope, error)` — body of today's `SendCommandStream` AFTER `h.reg.lookup` succeeds (lines `proxy.go:90-130`). `outBuffer` controls the wrapper channel size (16 for browser SSE path, 256 for forwarding receivers — see spec v19 §"Back-pressure").
+**Extraction shape** (concrete, not a TODO). Both helpers call `dc.confirmOwnership(ctx)` as their FIRST step — this way every caller (browser SSE via SendCommand, or forwardHandler via sendCommandToLocal) gets the per-send PG ownership check uniformly:
+
+- `(h *Hub) sendCommandToLocal(ctx context.Context, dc *daemonConn, command string, args json.RawMessage) (json.RawMessage, error)` — body of today's `SendCommand` AFTER `h.reg.lookup` succeeds (lines `proxy.go:45-79` today). Takes the resolved `*daemonConn` as arg instead of looking it up. **FIRST line:** `if !dc.confirmOwnership(ctx) { return nil, ErrDaemonGone }` (cheap no-op in single-pod — confirmOwnership returns true when sharedReg == nil, per Task B3 fix).
+- `(h *Hub) sendCommandStreamToLocal(ctx context.Context, dc *daemonConn, command string, args json.RawMessage, outBuffer int) (<-chan commander.Envelope, error)` — body of today's `SendCommandStream` AFTER `h.reg.lookup` succeeds (lines `proxy.go:90-130`). Same confirmOwnership first. `outBuffer` controls the wrapper channel size (16 for browser SSE path, 256 for forwarding receivers — see spec v19 §"Back-pressure").
 - Existing `SendCommand` becomes:
   ```go
   func (h *Hub) SendCommand(ctx context.Context, o owner, shortID, command string, args json.RawMessage) (json.RawMessage, error) {
       if dc, ok := h.reg.lookup(o, shortID); ok {
-          if !dc.confirmOwnership(ctx) {
-              return nil, ErrDaemonGone
-          }
-          return h.sendCommandToLocal(ctx, dc, command, args)
+          return h.sendCommandToLocal(ctx, dc, command, args) // confirmOwnership inside
       }
       // Remote path is wired in Phase D Task D1 (this task only does
       // the local-extraction half so C4's tests can compile).
@@ -4171,6 +4169,8 @@ The remaining Phase C tasks follow the same shape as C1–C3. **For brevity in t
   }
   ```
   Same shape for `SendCommandStream`. D1 then replaces the `return nil, ErrDaemonNotFound` lines with the shared-registry remote lookup + forwardCli call.
+
+Add a test in `proxy_test.go` (extending the existing local-path tests): assert that `sendCommandToLocal` short-circuits to `ErrDaemonGone` when `dc.ownershipLost.Load() == true` — verifies the confirmOwnership inside-the-helper invocation. The forwardHandler invocation tests in C4 cover the cross-pod case.
 
 **`forwardServer` interface:** `(h *Hub).forwardHandler(w http.ResponseWriter, r *http.Request)` mounted at `forwardEndpoint` (from C3) on the INTERNAL mux only.
 
@@ -4185,8 +4185,8 @@ The remaining Phase C tasks follow the same shape as C1–C3. **For brevity in t
 7. Read body via `io.ReadAll(io.LimitReader(r.Body, forwardRequestBodyMaxBytes+1))` → 413 if N+1.
 8. `verifyForward(authHeader, h.cluster.Secret, h.cluster.PrevSecret, ts, nonce, body)` → 403 + audit `forward.received.denied.hmac` on mismatch.
 9. `insertNonce(ctx, h.sharedReg.db, nonce)` → 503 + audit `forward.received.503.nonce_pg` on PG error (**fail closed; never proceed**); 403 + audit `forward.received.denied.replay` on `inserted=false`.
-10. Audit accepted: `forward.received.accepted`.
-11. Decode body as `forwardWireRequest`. Build `o := owner{userID: wire.UserID, workspaceID: wire.WorkspaceID}`.
+10. Decode body as `forwardWireRequest`. Build `o := owner{userID: wire.UserID, workspaceID: wire.WorkspaceID}`. (Decode happens AFTER auth so a forged/garbage body can't reach the deserializer; happens BEFORE the accepted audit so the audit line carries the tenant/daemon/command fields — codex CDE r2 MAJOR #4.)
+11. Audit accepted: `forward.received.accepted` with `user_id=wire.UserID workspace_id=wire.WorkspaceID short_id=wire.ShortID command=wire.Command peer=r.RemoteAddr`.
 12. `dc, ok := h.reg.lookup(o, wire.ShortID)` (LOCAL ONLY — `sharedReg.lookupRemote` would create peer-to-peer loops). 404 if missing.
 13. If `wire.Command == "read_file"` AND `dc.capabilities[commander.CapabilityFilePreviewEncodedCap] == false`: respond 426 with `{"error":{"code":"daemon_upgrade_required","message":"daemon binary too old; upgrade required for file preview in cluster mode"}}`. (Spec v19 §"Capability gate".)
 14. If `wire.Streaming == false`: invoke `h.sendCommandToLocal`; marshal `{result|error}` per `mapResponse` shape; 200.
@@ -4269,8 +4269,13 @@ Phase D wires the new pieces into existing code paths. Each task in summary form
 
 ### Task D1: `Hub.attachSharedRegistry` + `listDaemons` + `lookupDaemon` + caller migration + `Hub.Close`
 
-- Files: `wiring.go` (modify `MountAll` signature to `(publicMux, internalMux *http.ServeMux, resolver, agentserverURL, store, cluster ClusterRuntime)`), `hub.go` (expand `attachSharedRegistry(sr, fc, turns, sessionsCache nil)`; add `(h *Hub).Close(ctx) error` that calls `h.forwardCli.transport.CloseIdleConnections()` plus any other shutdown tasks — spec v19 §"Hub.Close"), `proxy.go` (branch SendCommand[Stream]: localReg hit → sendCommandToLocal which calls confirmOwnership; miss → sharedReg.lookupRemote → forwardCli.send/stream), `http.go` (`ch.daemons`/`ch.tree`/`ch.sessionsFanout` use `hub.listDaemons`; `ch.turn` existence guard uses `hub.lookupDaemon`; `writeSendCmdError` adds 426 for `ErrCodeDaemonUpgradeRequired`), `tree.go` (`CommanderTree` → listDaemons; `cachedSessionRows` skips cache when `h.sessionCache == nil`).
-- Tests: extend existing `*_test.go` (real-WS path); add `wiring_test.go` for `MountAll` signature; verify in-package single-pod runs unchanged; new `TestHub_Close_ShutsDownForwardClient` asserts `forwardCli` is non-nil after attach AND that Close idempotently closes idle conns.
+- Files: `wiring.go` (modify `MountAll` signature to `(publicMux, internalMux *http.ServeMux, resolver, agentserverURL, store, cluster ClusterRuntime)`; inside, build `sharedRegistry`/`forwardClient`/`pgTurnStore` when `cluster.AdvertiseURL != ""` then call `hub.attachSharedRegistry(cluster, sr, fc, turns)`; mount `/api/commander/_internal/forward` + `/api/commander/_internal/drain` on internalMux; start sweeper goroutine), `hub.go` (`attachSharedRegistry(cluster ClusterRuntime, sr *sharedRegistry, fc *forwardClient, turns turnStateBackend)` ASSIGNS `h.cluster = cluster; h.sharedReg = sr; h.forwardCli = fc; h.turns = turns; h.sessionCache = nil`; add `(h *Hub).Close(ctx context.Context) error` — see signature below), `proxy.go` (branch SendCommand[Stream]: localReg hit → sendCommandToLocal which calls confirmOwnership internally; miss → sharedReg.lookupRemote → forwardCli.send/stream), `http.go` (`ch.daemons`/`ch.tree`/`ch.sessionsFanout` use `hub.listDaemons`; `ch.turn` existence guard uses `hub.lookupDaemon`; `writeSendCmdError` adds 426 for `ErrCodeDaemonUpgradeRequired`), `tree.go` (`CommanderTree` → listDaemons; `cachedSessionRows` skips cache when `h.sessionCache == nil`).
+
+- **`attachSharedRegistry` signature (codex CDE r2 BLOCKER #2):** takes `ClusterRuntime` as first arg AND assigns `h.cluster = cluster` so `forwardHandler` (added by C4) can read `h.cluster.Secret`/`PrevSecret`. Without this assignment, C4's HMAC verify uses zero-value secrets and the forward auth flow either rejects every legitimate request or (worse) accepts forged ones.
+
+- **`(h *Hub).Close(ctx) error` (codex CDE r2 BLOCKER #3):** closes idle HTTP transport connections via `h.forwardCli.httpClient.CloseIdleConnections()` (NOT `forwardCli.transport.CloseIdleConnections()` — the field is `httpClient *http.Client`, per C3 production code). For shared mode also drains any active heartbeat goroutines (their hbCtx is cancelled by `ServeHTTP`'s defer chain; Close blocks until all `dc.done` channels are closed up to a 5s deadline via the passed ctx). Returns first non-nil error.
+
+- Tests: extend existing `*_test.go` (real-WS path); add `wiring_test.go` for `MountAll` signature; verify in-package single-pod runs unchanged; new `TestHub_Close_ShutsDownForwardClient` asserts `forwardCli` non-nil after attach AND that Close idempotently closes idle conns; new `TestAttachSharedRegistry_AssignsClusterRuntime` asserts `h.cluster.Secret == sentinel` post-attach.
 - Commit: `feat(commanderhub): wire shared registry through MountAll + SendCommand[Stream] + read-path helpers + Hub.Close`.
 
 ### Task D2: `*pgTurnStore` (cross-pod begin / get / updateFromEnvelope / cleanupOrphans)
