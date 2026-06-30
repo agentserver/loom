@@ -30,6 +30,7 @@ type Hub struct {
 	upgrader     websocket.Upgrader
 	reg          *localRegistry
 	sharedReg    *sharedRegistry // B1: nil in single-pod; populated by attachSharedRegistry (Phase B B4)
+	forwardCli   *forwardClient  // C3: nil in single-pod; populated by attachForwardClient
 	turns        turnStateBackend
 	sessionCache *sessionListCache
 	cmdSeq       atomic.Int64 // generates per-command IDs (see proxy.go)
