@@ -4,8 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"regexp"
 	"time"
+
+	"github.com/yourorg/multi-agent/internal/secretscrub"
 )
 
 // RouteReasonRow is the data shape persisted by NewRouteWriter. It mirrors
@@ -45,51 +46,32 @@ type routeReasonsWriter struct{ db *sql.DB }
 // NewRouteWriter returns a RouteWriter backed by the provided *sql.DB. The
 // schema migration (CREATE TABLE IF NOT EXISTS route_reasons) is applied by
 // OpenSQLite via the embedded schema.sql.
+//
+// **SQLite-only in this WT.** The INSERT statement below uses `?`
+// placeholders and sends candidates_json as a plain string. Both are
+// SQLite-native forms; pgx/v5/stdlib (the driver used by
+// observerstore/postgres) does not rewrite `?` to `$N` and will not
+// auto-cast a plain string into a jsonb column. A pg-native writer is
+// deferred to a follow-up WT that ships the pg schema alongside a
+// $N-flavor INSERT with an explicit `::jsonb` cast. Passing a pg *sql.DB
+// here today will error every call with `syntax error at or near "?"`,
+// which is exactly the silent-drop class the wiring is supposed to
+// close — DO NOT WIRE against pg until the follow-up lands.
 func NewRouteWriter(db *sql.DB) RouteWriter { return &routeReasonsWriter{db: db} }
 
-// reasonTextSecretRE is a defense-in-depth mirror of
-// dispatch.secretBlacklistRE. dispatch.FinalizeAndEmit already sanitizes
-// ReasonText before WriteRouteReason is called via the WrapRouteWriter
-// adapter, but WriteRouteReason is a public API: future callers (the
-// spec'd follow-up observer HTTP handler, a hand-built RouteReasonRow
-// from another package, etc.) might wire rows directly without going
-// through dispatch. We re-apply the same blacklist here so the boundary
-// invariant "no raw secret in route_reasons.reason_text" cannot be
-// broken by a single missing sanitize call upstream. Patterns are kept
-// in sync with dispatch.secretBlacklistRE by the test
-// TestWriteRouteReason_SanitizesReasonText.
-var reasonTextSecretRE = regexp.MustCompile(
-	`sk-[A-Za-z0-9_\-]{8,}|` +
-		`eyJ[A-Za-z0-9_\-\.]{16,}|` +
-		`AKIA[A-Z0-9]{12,}|` +
-		`gh[opsruA-Z]_[A-Za-z0-9]{20,}|` +
-		`github_pat_[A-Za-z0-9_]{20,}|` +
-		`glpat-[A-Za-z0-9_\-]{20,}|` +
-		`AIza[A-Za-z0-9_\-]{20,}|` +
-		`xox[baprs]-[A-Za-z0-9-]{8,}|` +
-		`-----BEGIN [A-Z ]*PRIVATE KEY-----`,
-)
-
-func sanitizeReasonText(s string) string {
-	if s == "" {
-		return s
-	}
-	out := reasonTextSecretRE.ReplaceAllString(s, "[REDACTED]")
-	runes := []rune(out)
-	if len(runes) > 256 {
-		return string(runes[:256]) + "...[truncated]"
-	}
-	return out
-}
-
 func (w *routeReasonsWriter) WriteRouteReason(ctx context.Context, r RouteReasonRow) error {
-	// Defense-in-depth: scrub ReasonText again at the writer boundary so
-	// the route_reasons table can never store a raw secret even if a
-	// caller bypassed dispatch.FinalizeAndEmit. The dispatch-side
-	// sanitize already ran for the WrapRouteWriter path; this second
-	// pass is cheap (idempotent on already-redacted strings) and closes
-	// the writer-direct hole the spec acknowledges as a follow-up risk.
-	r.ReasonText = sanitizeReasonText(r.ReasonText)
+	// Defense-in-depth: scrub the two free-form text columns at the writer
+	// boundary so the route_reasons table can never store a raw secret
+	// even if a caller bypassed dispatch.FinalizeAndEmit. The
+	// dispatch-side finalize gate already ran for the WrapRouteWriter
+	// path; this second pass is cheap (idempotent on already-redacted
+	// strings) and closes the writer-direct hole the spec acknowledges
+	// as a follow-up risk. Both call sites delegate to
+	// secretscrub.Sanitize so the blacklist cannot drift — see
+	// internal/secretscrub/scrub_test.go for the authoritative pattern
+	// matrix.
+	r.ReasonText = secretscrub.Sanitize(r.ReasonText)
+	r.ConversationID = secretscrub.Sanitize(r.ConversationID)
 	payload, err := json.Marshal(r.Candidates)
 	if err != nil {
 		return err

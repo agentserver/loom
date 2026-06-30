@@ -5,8 +5,11 @@
 
 ## Global Constraints (copied verbatim from spec)
 
-- File domain: `multi-agent/internal/dispatch/` and
-  `multi-agent/internal/observerstore/` ONLY. **Do not** touch `cmd/*`,
+- File domain: `multi-agent/internal/dispatch/`,
+  `multi-agent/internal/observerstore/`, and (added in round-2 review)
+  `multi-agent/internal/secretscrub/` — the stdlib-only single source of
+  truth for the secret-blacklist regex + truncate rule + expvar counter
+  shared by the other two packages. **Do not** touch `cmd/*`,
   `internal/executor/*`, `internal/contract`, or any other package.
 - `Dispatcher.Run`'s signature is `(executor.Result, error)` — unchanged.
 - `contract.DecodeEnvelope`'s signature is unchanged.
@@ -15,8 +18,12 @@
   `multi-agent/.worktrees/p1-routing-trace/multi-agent/`** (the Go module
   root). From the worktree root, run `cd multi-agent` first.
 - Test command: `go test ./internal/dispatch/... ./internal/observerstore/...
-  -count=1 -shuffle=on -race`
-- Lint: `go vet ./...` && `gofmt -l internal/dispatch internal/observerstore`
+  ./internal/secretscrub/... -count=1 -shuffle=on -race`
+- Lint: `go vet ./...` && `gofmt -l internal/dispatch internal/observerstore internal/secretscrub`
+  (Aside: `gofmt -l ./internal/observerstore` from repo root also lists
+  `internal/observerstore/categorized_error_test.go` — that's a pre-existing
+  WT-0-failure-taxonomy hit, not from this WT. Scope our gofmt check to the
+  three specific paths above to avoid confusion.)
 - Each `git commit` ends with `Co-Authored-By: Claude Opus 4.8 (1M context)
   <noreply@anthropic.com>`. **Do not** push.
 
@@ -26,13 +33,15 @@
 
 | Path | Action | Responsibility |
 |---|---|---|
-| `multi-agent/internal/dispatch/route_decision.go` | **CREATE** | `RouteDecision`/`Candidate`/`ReasonCode` types, `NewDecision`, `FinalizeAndEmit`, `Writer`/`SetWriter`/`IsNoopWriter`/`currentWriter`, `peekConversationID`, `SanitizeReasonText`, `deriveID`, `WrapRouteWriter` adapter, `decisionNonce` atomic counter, `route_reason_redacted_total` expvar. |
+| `multi-agent/internal/dispatch/route_decision.go` | **CREATE** | `RouteDecision`/`Candidate`/`ReasonCode` types, `NewDecision`, `FinalizeAndEmit` (sanitizes BOTH ReasonText and ConversationID before write + log), `Writer`/`SetWriter`/`IsNoopWriter`/`currentWriter`, `peekConversationID`, `SanitizeReasonText` (var alias for `secretscrub.Sanitize` — function-pointer identity), `deriveID`, `WrapRouteWriter` adapter, `decisionNonce` atomic counter. The regex + truncate rule + expvar counter all live in `internal/secretscrub`. |
 | `multi-agent/internal/dispatch/route_decision_test.go` | **CREATE** | All type-level + sanitize + nonce + writer-wiring + forgery tests. |
 | `multi-agent/internal/dispatch/dispatch.go` | **MODIFY** | Insert `peekConversationID` + `NewDecision` + `defer FinalizeAndEmit` as first 4 lines of `Run`. Populate `SelectedAgentID`/`SelectedNone`/`ReasonCode`/`ReasonText`/`Candidates` on each branch (success, no-executor, exec error, duplicate). |
 | `multi-agent/internal/dispatch/dispatch_test.go` | **MODIFY** | Append integration tests covering the dispatch hook end-to-end (the 7 tests #1, #2, #7, #14, #16, #23, #24). |
 | `multi-agent/internal/observerstore/schema.sql` | **MODIFY (APPEND)** | Append `route_reasons` table DDL + index, **at the end** of the file. |
 | `multi-agent/internal/observerstore/route_reasons_writer.go` | **CREATE** | `RouteReasonRow`, `RouteCandidate`, `RouteWriter` interface, `routeReasonsWriter` struct, `NewRouteWriter`. |
-| `multi-agent/internal/observerstore/route_reasons_writer_test.go` | **CREATE** | SQL injection guard, round-trip, ON CONFLICT DO NOTHING. |
+| `multi-agent/internal/observerstore/route_reasons_writer_test.go` | **CREATE** | SQL injection guard, round-trip, ON CONFLICT DO NOTHING, writer-side defense-in-depth sanitize. |
+| `multi-agent/internal/secretscrub/scrub.go` | **CREATE** | Single source of truth for the secret-blacklist regex, 256-rune truncate, and `route_reason_redacted_total` expvar. Stdlib-only, no internal deps. |
+| `multi-agent/internal/secretscrub/scrub_test.go` | **CREATE** | Authoritative pattern matrix (14 fixtures) + idempotence + counter bump semantics + UTF-8 truncation. |
 
 ## Test Matrix (each row links a test to spec / security item)
 
@@ -63,6 +72,12 @@
 | 23 | `TestDispatch_TimestampDetached_PreservesTraceOnCtxCancel` | Pass a `ctx` that is already cancelled; assert the writer still received the row (FinalizeAndEmit uses `context.WithTimeout(context.Background(),2s)`). | §3.2 |
 | 24 | `TestDispatch_Run_SignatureUnchanged` | `reflect.TypeOf((*Dispatcher).Run).String()` matches the recorded baseline `func(*Dispatcher, context.Context, executor.Task) (executor.Result, error)`. | §3.3 |
 | 25 | `TestDispatch_FallbackExecutor_SelectedAsCapabilityMatch` | When `d.routes[""]` is the only entry and the task carries an unknown skill, the trace records `SelectedAgentID=""`, `SelectedNone=false`, `ReasonCode=capability_match`. Verifies §3.1's "fallback selected vs no-match" disambiguation. | §3.1 |
+| 26 | `TestDispatch_StoreCompleteFails_TraceRecordsFailure` | `exec.Run` succeeds, then `store.Complete` fails (store closed mid-run). Trace's ReasonText must contain `"store.Complete failed"` so the audit row does not misrepresent the outcome as a clean success. | §3.2 |
+| 27 | `TestWriteRouteReason_SanitizesReasonText` | Writer-direct caller bypasses dispatch and hands a raw `sk-` token in `ReasonText`. `WriteRouteReason` must sanitize at the boundary; persisted column reads `[REDACTED]`. | Security (a) defense-in-depth |
+| 28 | `internal/secretscrub/scrub_test.go::TestSanitize_AllKnownPrefixes` (and siblings) | Authoritative single-source-of-truth pattern matrix for all 14 secret fixtures; idempotence; counter bump semantics; UTF-8 truncation. | Security (a) |
+| 29 | `TestFinalizeAndEmit_SanitizesConversationID` | ConversationID containing a raw `sk-` token must be redacted by `FinalizeAndEmit` before the trace row is written (dispatch side). | Security (a) defense-in-depth |
+| 30 | `TestWriteRouteReason_SanitizesConversationID` | Writer-direct caller hands a raw `sk-`-shaped ConversationID; `WriteRouteReason` redacts it at the boundary. | Security (a) defense-in-depth |
+| 31 | `TestSanitizeReasonText_DelegatesToSecretscrub` | dispatch.SanitizeReasonText literally IS secretscrub.Sanitize by function-pointer identity (`reflect.ValueOf(...).Pointer()`), so a future refactor that inlines a stripped-down regex fails the test instead of silently regressing. | Security (a) drift-prevention |
 
 ## Test → File Placement (authoritative)
 
@@ -869,10 +884,13 @@ func (d *Dispatcher) Run(ctx context.Context, t executor.Task) (executor.Result,
     //                            if s == matchedKey { r = ReasonCapabilityMatch; score = 1.0 }
     //                            dec.Candidates = append(dec.Candidates, Candidate{AgentID:s, Score:score, Reason:r})
     //                          }
-    //   * duplicate-running:   dec.ReasonCode=ReasonUnknown; dec.ReasonText="duplicate task running"
-    //   * exec error:          dec.ReasonCode=ReasonUnknown; dec.ReasonText="executor returned error"
-    //                          (do NOT include the executor's actual error string; sanitize would catch
-    //                          a secret leak but principle of minimum disclosure applies)
+    //   * duplicate-running:   dec.ReasonCode=ReasonUnknown; dec.ReasonText="duplicate task; replaying existing row"
+    //   * exec error:          KEEP ReasonCode=ReasonCapabilityMatch (the routing decision
+    //                          itself succeeded; runtime failure is a separate concern);
+    //                          dec.ReasonText="matched skill X; executor returned error"
+    //   * store.Complete err:  KEEP ReasonCode=ReasonCapabilityMatch; append the err string
+    //                          so the audit row doesn't read like a clean success. sanitize
+    //                          in FinalizeAndEmit will scrub any secret inside err.Error().
     // ... return as before
 }
 ```

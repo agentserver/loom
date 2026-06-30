@@ -7,7 +7,6 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/yourorg/multi-agent/internal/contract"
 	"github.com/yourorg/multi-agent/internal/observerstore"
+	"github.com/yourorg/multi-agent/internal/secretscrub"
 )
 
 // openSQLiteForDispatchTest opens a fresh observerstore SQLite file (with the
@@ -49,59 +49,31 @@ func (c *capture) last() RouteDecision {
 	return c.got[len(c.got)-1]
 }
 
-func TestSanitize_RawSecret_Redacted(t *testing.T) {
-	cases := []struct {
-		name, in, mustNotContain string
-	}{
-		{"openai-sk", "leaked: sk-abcdefghijklmnopqrstuv", "sk-abcdefghij"},
-		{"anthropic-sk-ant", "tok=sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv", "sk-ant-api03"},
-		{"jwt", "tok=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"},
-		{"aws-akia", "creds AKIAIOSFODNN7EXAMPLE here", "AKIAIOSFODNN7EXAMPLE"},
-		{"github-ghp", "leaked ghp_abcdefghijklmnopqrstuv12345 stuff", "ghp_abcdefghijklmnopqrstuv12345"},
-		{"github-gho", "oauth gho_abcdefghijklmnopqrstuv12345 stuff", "gho_abcdefghijklmnopqrstuv12345"},
-		{"github-ghs", "server ghs_abcdefghijklmnopqrstuv12345 stuff", "ghs_abcdefghijklmnopqrstuv12345"},
-		{"github-ghr", "refresh ghr_abcdefghijklmnopqrstuv12345 stuff", "ghr_abcdefghijklmnopqrstuv12345"},
-		{"github-ghu", "user ghu_abcdefghijklmnopqrstuv12345 stuff", "ghu_abcdefghijklmnopqrstuv12345"},
-		{"github-pat", "tok=github_pat_11ABCDEFG0xyzABCDEFGHIJ stuff", "github_pat_11ABCDEFG0xyz"},
-		{"gitlab-pat", "tok=glpat-xxxxxxxxxxxxxxxxxxxx", "glpat-xxxxxxxxxxxxxxxxxxxx"},
-		{"google-api", "GOOG_KEY=AIzaSyA0123456789abcdefghij stuff", "AIzaSyA0123456789abcdefghij"},
-		{"slack-xoxb", "slack xoxb-12345-67890-abcdef token", "xoxb-12345-67890-abcdef"},
-		{"pem-private", "key:\n-----BEGIN RSA PRIVATE KEY-----\nMIIEvQ...\n-----END RSA PRIVATE KEY-----", "-----BEGIN RSA PRIVATE KEY-----"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			out := SanitizeReasonText(c.in)
-			require.NotContains(t, out, c.mustNotContain, "%s prefix must be redacted", c.name)
-			require.Contains(t, out, "[REDACTED]")
-		})
-	}
+// TestSanitizeReasonText_DelegatesToSecretscrub asserts the dispatch
+// alias IS the shared secretscrub.Sanitize, by function-pointer identity
+// (not by behavioural fixture). A fixture-only test would still pass if
+// a future refactor re-inlined SanitizeReasonText with a stripped-down
+// regex — drift this catches structurally.
+//
+// The exhaustive per-pattern matrix lives in
+// internal/secretscrub/scrub_test.go::TestSanitize_AllKnownPrefixes
+// (single source of truth so the dispatch and observerstore call sites
+// cannot drift).
+func TestSanitizeReasonText_DelegatesToSecretscrub(t *testing.T) {
+	aliasPtr := reflect.ValueOf(SanitizeReasonText).Pointer()
+	sotPtr := reflect.ValueOf(secretscrub.Sanitize).Pointer()
+	require.Equal(t, sotPtr, aliasPtr,
+		"SanitizeReasonText must literally BE secretscrub.Sanitize (alias by function pointer); "+
+			"if you needed to inline custom logic, add a pattern to secretscrub instead")
+	// Behavioural sanity check: redaction round-trips through the alias.
+	out := SanitizeReasonText("leaked: sk-abcdefghijklmnopqrstuv tail")
+	require.NotContains(t, out, "sk-abcdefghij")
+	require.Contains(t, out, "[REDACTED]")
 }
 
-func TestSanitize_LongerThan256_Truncated(t *testing.T) {
-	in := strings.Repeat("x", 1024)
-	out := SanitizeReasonText(in)
-	require.True(t, strings.HasSuffix(out, "...[truncated]"))
-	body := strings.TrimSuffix(out, "...[truncated]")
-	require.Equal(t, 256, len([]rune(body)))
-}
-
-// TestSanitize_LongerThan256_MultibyteRuneSafe verifies the 256-rune cap is
-// rune-counted (not byte-counted): a multibyte-character input must truncate
-// to exactly 256 runes and must NOT split a UTF-8 sequence mid-codepoint.
-func TestSanitize_LongerThan256_MultibyteRuneSafe(t *testing.T) {
-	// 300 "汉" runes (3 bytes each in UTF-8). Truncated body must be 256 runes
-	// and round-trip as valid UTF-8.
-	in := strings.Repeat("汉", 300)
-	out := SanitizeReasonText(in)
-	require.True(t, strings.HasSuffix(out, "...[truncated]"))
-	body := strings.TrimSuffix(out, "...[truncated]")
-	require.Equal(t, 256, len([]rune(body)), "must truncate to 256 RUNES, not bytes")
-	require.Equal(t, strings.Repeat("汉", 256), body, "must not split a UTF-8 codepoint mid-sequence")
-
-	// 200 emoji (4 bytes each in UTF-8) — below the rune limit, must round-trip unchanged.
-	emoji := strings.Repeat("🚀", 200)
-	require.Equal(t, emoji, SanitizeReasonText(emoji), "input ≤256 runes must round-trip even at high byte count")
-}
+// Truncate/UTF-8 behavior is exhaustively tested in
+// internal/secretscrub/scrub_test.go::TestSanitize_TruncateAscii and
+// TestSanitize_TruncateMultibyteRuneSafe — no need to mirror here.
 
 func TestDecisionID_NoParameter(t *testing.T) {
 	rt := reflect.TypeOf(NewDecision)
@@ -173,6 +145,22 @@ func TestForgery_DecisionID_OverwrittenOnFinalize(t *testing.T) {
 	require.Equal(t, real, cap.last().DecisionID)
 }
 
+// TestFinalizeAndEmit_SanitizesConversationID covers the §6(a) extension
+// added in round-3 review: ConversationID (carried from caller-supplied
+// envelope text) must also be sanitized before it lands in the trace
+// row, not just ReasonText.
+func TestFinalizeAndEmit_SanitizesConversationID(t *testing.T) {
+	cap := &capture{}
+	SetWriter(cap)
+	t.Cleanup(func() { SetWriter(nil) })
+
+	d := NewDecision("conv-sk-abcdefghijklmnopqr-tail")
+	FinalizeAndEmit(context.Background(), d)
+	got := cap.last().ConversationID
+	require.NotContains(t, got, "sk-abcdefghij")
+	require.Contains(t, got, "[REDACTED]")
+}
+
 func TestPeekConversationID(t *testing.T) {
 	start := contract.EnvelopeStart
 	end := contract.EnvelopeEnd
@@ -236,7 +224,7 @@ func TestPersistedRow_ReasonText_Redacted(t *testing.T) {
 	SetWriter(WrapRouteWriter(observerstore.NewRouteWriter(db)))
 	t.Cleanup(func() { SetWriter(nil) })
 
-	before := routeReasonRedactedTotal.Value()
+	before := secretscrub.RedactedTotal.Value()
 	d := NewDecision("conv-leak")
 	d.SelectedAgentID = "agent-X"
 	d.ReasonCode = ReasonCapabilityMatch
@@ -249,7 +237,7 @@ func TestPersistedRow_ReasonText_Redacted(t *testing.T) {
 	).Scan(&stored))
 	require.NotContains(t, stored, "sk-abcdefghij")
 	require.Contains(t, stored, "[REDACTED]")
-	require.Greater(t, routeReasonRedactedTotal.Value(), before,
+	require.Greater(t, secretscrub.RedactedTotal.Value(), before,
 		"route_reason_redacted_total expvar must be incremented")
 }
 

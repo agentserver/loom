@@ -11,7 +11,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"expvar"
 	"log"
 	"reflect"
 	"regexp"
@@ -22,6 +21,7 @@ import (
 
 	"github.com/yourorg/multi-agent/internal/contract"
 	"github.com/yourorg/multi-agent/internal/observerstore"
+	"github.com/yourorg/multi-agent/internal/secretscrub"
 )
 
 // ReasonCode enumerates the routing decision rationales. The string values are
@@ -125,11 +125,19 @@ func FinalizeAndEmit(_ context.Context, d *RouteDecision) {
 		return
 	}
 	end := time.Now()
-	d.ConversationID = d.seedConv
+	// DecisionID is derived from the RAW seedConv first — DecisionID is an
+	// sha256 fingerprint, so it does not leak any underlying secret even if
+	// the seed itself happens to contain one. ConversationID written to the
+	// trace row (and emitted in logs) THEN goes through sanitize as
+	// defense-in-depth: in practice conversation_id values are UUID-shaped,
+	// but the field comes from caller-supplied envelope text (via
+	// peekConversationID) and we'd rather redact a stray secret than let it
+	// land in route_reasons.conversation_id.
 	d.DecisionStartedAt = d.seedStarted
 	d.DecisionEndedAt = end
 	d.DecisionDurationNs = end.Sub(d.seedStarted).Nanoseconds()
 	d.DecisionID = deriveID(d.seedConv, d.seedStarted, d.seedNonce)
+	d.ConversationID = SanitizeReasonText(d.seedConv)
 	d.ReasonText = SanitizeReasonText(d.ReasonText)
 
 	// Detach parent context: the trace is an audit artifact, not request-
@@ -139,6 +147,9 @@ func FinalizeAndEmit(_ context.Context, d *RouteDecision) {
 	writeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := currentWriter().Write(writeCtx, *d); err != nil {
+		// d.ConversationID is already sanitized above; safe to log
+		// directly. The DecisionID is a sha256-derived hex string with no
+		// secret content of its own.
 		log.Printf("[route-trace] write failed: %v conv=%s decision=%s",
 			err, d.ConversationID, d.DecisionID)
 	}
@@ -147,61 +158,28 @@ func FinalizeAndEmit(_ context.Context, d *RouteDecision) {
 // ----------------------------------------------------------------------------
 // Sanitize.
 
-// secretBlacklistRE matches common API-token / credential / private-key
-// shapes. The patterns are deliberately a bit broader than strict
-// vendor-spec to catch test-shaped tokens too; false positives only cost
-// a harmless [REDACTED] string in ReasonText.
+// SanitizeReasonText is the dispatch-package alias for the shared
+// secret-scrub gate. It is a `var` (not a `func`), so it is LITERALLY the
+// same function value as secretscrub.Sanitize — function-pointer
+// equality holds, and any in-package refactor that replaces it with a
+// different implementation will fail the identity assertion in
+// TestSanitizeReasonText_DelegatesToSecretscrub.
 //
-// The pattern list is NOT exhaustive — sanitize is defence-in-depth, not
-// the primary auth boundary. Adding a new family is a one-line change;
-// the corresponding test case lives in TestSanitize_RawSecret_Redacted.
-var secretBlacklistRE = regexp.MustCompile(
-	// OpenAI / Anthropic and similar `sk-` family (covers `sk-ant-...`).
-	`sk-[A-Za-z0-9_\-]{8,}|` +
-		// JWT (header.payload.signature shape).
-		`eyJ[A-Za-z0-9_\-\.]{16,}|` +
-		// AWS access key.
-		`AKIA[A-Z0-9]{12,}|` +
-		// GitHub legacy/PAT/server/refresh/user/app tokens.
-		`gh[opsruA-Z]_[A-Za-z0-9]{20,}|` +
-		// GitHub fine-grained personal access tokens.
-		`github_pat_[A-Za-z0-9_]{20,}|` +
-		// GitLab personal access tokens.
-		`glpat-[A-Za-z0-9_\-]{20,}|` +
-		// Google API keys.
-		`AIza[A-Za-z0-9_\-]{20,}|` +
-		// Slack tokens.
-		`xox[baprs]-[A-Za-z0-9-]{8,}|` +
-		// PEM-armored private keys.
-		`-----BEGIN [A-Z ]*PRIVATE KEY-----`,
-)
-
-// routeReasonRedactedTotal counts ReasonText values that matched the secret
-// blacklist. Exposed via expvar for "did sanitize ever fire?" smoke checks.
-var routeReasonRedactedTotal = expvar.NewInt("route_reason_redacted_total")
-
-// SanitizeReasonText replaces any value matching the secret blacklist with
-// "[REDACTED]" and truncates the result to ≤ 256 runes (appending the literal
-// suffix "...[truncated]" on overflow). Always safe to call; no-op on empty
-// input. Spec §6 (a).
-func SanitizeReasonText(s string) string {
-	if s == "" {
-		return s
-	}
-	redacted := false
-	out := secretBlacklistRE.ReplaceAllStringFunc(s, func(_ string) string {
-		redacted = true
-		return "[REDACTED]"
-	})
-	if redacted {
-		routeReasonRedactedTotal.Add(1)
-	}
-	runes := []rune(out)
-	if len(runes) > 256 {
-		return string(runes[:256]) + "...[truncated]"
-	}
-	return out
-}
+// Tradeoff acknowledged: because this is a `var`, code IN THIS PACKAGE
+// (production or test) could reassign it to a no-op and bypass
+// scrubbing. No code does so today, and grep is the easy defense.
+// External packages cannot reassign it — Go forbids assignment to a
+// var imported from another package. We accept the in-package
+// reassignability cost in exchange for the identity-testable drift
+// guarantee; if a future change wants stronger immutability, switch
+// back to `func SanitizeReasonText(s string) string { return
+// secretscrub.Sanitize(s) }` and rewrite the identity test to a
+// fixture-suite that exhaustively covers every secretscrub pattern.
+//
+// The regex, the truncation rule, and the route_reason_redacted_total
+// expvar all live in internal/secretscrub so the dispatch finalize gate
+// and the observerstore writer boundary cannot drift. Spec §6 (a).
+var SanitizeReasonText = secretscrub.Sanitize
 
 // ----------------------------------------------------------------------------
 // Writer + thread-safe wiring.

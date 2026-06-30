@@ -102,6 +102,27 @@ func TestWriteRouteReason_SanitizesReasonText(t *testing.T) {
 	require.Contains(t, stored, "[REDACTED]")
 }
 
+// TestWriteRouteReason_SanitizesConversationID asserts the writer-side
+// defense-in-depth covers ConversationID as well as ReasonText (added in
+// round-3 review). A direct caller that bypassed dispatch and handed a
+// secret-shaped conversation_id must NOT land that value in the column.
+func TestWriteRouteReason_SanitizesConversationID(t *testing.T) {
+	_, db := openTestObserverStore(t)
+	w := NewRouteWriter(db)
+	row := RouteReasonRow{
+		DecisionID: "dn-conv", ConversationID: "leaked-sk-abcdefghijklmnopqr",
+		ReasonCode:        "capability_match",
+		DecisionStartedAt: time.Unix(1, 0), DecisionEndedAt: time.Unix(2, 0),
+	}
+	require.NoError(t, w.WriteRouteReason(context.Background(), row))
+	var stored string
+	require.NoError(t, db.QueryRow(
+		`SELECT conversation_id FROM route_reasons WHERE decision_id=?`, "dn-conv",
+	).Scan(&stored))
+	require.NotContains(t, stored, "sk-abcdefghij")
+	require.Contains(t, stored, "[REDACTED]")
+}
+
 func TestRouteReasonsWriter_SQLInjection(t *testing.T) {
 	_, db := openTestObserverStore(t)
 	w := NewRouteWriter(db)

@@ -111,11 +111,18 @@ conversationID in a tight loop and asserts |distinct IDs| == 10000.
 
 ```
 end := time.Now()
-d.ConversationID     = d.seedConv
+// DecisionID derives from the RAW seedConv (sha256 fingerprint hides any
+// underlying secret); ConversationID is then ALSO sanitized before write +
+// log emission — defense-in-depth (round-3 review): conversation_id
+// values come from caller-supplied envelope text via peekConversationID,
+// so even though they're typically UUID-shaped we'd rather redact a
+// stray secret than let it land in route_reasons.conversation_id.
 d.DecisionStartedAt  = d.seedStarted
 d.DecisionEndedAt    = end
 d.DecisionDurationNs = end.Sub(d.seedStarted).Nanoseconds()   // monotonic-preserving
 d.DecisionID         = deriveID(d.seedConv, d.seedStarted, d.seedNonce)
+d.ConversationID     = SanitizeReasonText(d.seedConv)
+d.ReasonText         = SanitizeReasonText(d.ReasonText)
 ```
 
 Because the seed pair is unexported, code outside `internal/dispatch` cannot
@@ -262,6 +269,22 @@ covers both serializations.
    the fallback substitution and that the persisted row's
    `conversation_id` equals `t.ID`.
 
+   **Post-success persistence failure** (added after code-review round 2):
+   the success path runs `exec.Run` and then `d.store.Complete(t.ID,
+   stored)`. If `Complete` fails after `exec.Run` already succeeded, the
+   route decision itself was sound — `ReasonCode` stays
+   `ReasonCapabilityMatch` — but `ReasonText` must be amended to record
+   the downstream persistence failure, otherwise the audit row reads as a
+   clean success and obscures the incident:
+
+       dec.ReasonText = "matched skill " + t.Skill + "; store.Complete failed: " + err.Error()
+
+   `FinalizeAndEmit` then sanitizes the concatenated text (including any
+   tainted substring inside `err.Error()`) via
+   `secretscrub.Sanitize`, so this concatenation cannot widen the
+   blast radius established by §6(a). Test
+   `TestDispatch_StoreCompleteFails_TraceRecordsFailure` covers it.
+
    With this placement the `defer` fires for **all** early-return paths
    (envelope-decode failure, duplicate-task replay, no-executor lookup miss,
    executor-error, timeout, success). Each early branch that knows the
@@ -364,6 +387,8 @@ import (
     "database/sql"
     "encoding/json"
     "time"
+
+    "github.com/yourorg/multi-agent/internal/secretscrub"
 )
 
 // RouteReasonRow is the data shape persisted by NewRouteWriter. It mirrors
@@ -395,12 +420,27 @@ type RouteWriter interface {
 
 type routeReasonsWriter struct{ db *sql.DB }
 
-// NewRouteWriter returns a RouteWriter backed by the provided *sql.DB. The
-// schema migration (CREATE TABLE IF NOT EXISTS route_reasons) is applied by
-// observerstore.OpenSQLite via the embedded schema.sql.
+// NewRouteWriter returns a RouteWriter backed by the provided *sql.DB.
+// The schema migration (CREATE TABLE IF NOT EXISTS route_reasons) is
+// applied by observerstore.OpenSQLite via the embedded schema.sql.
+//
+// SQLite-only in this WT: the INSERT uses `?` placeholders and sends
+// candidates_json as a plain string. pgx/v5/stdlib does not rewrite `?`
+// nor auto-cast string→jsonb, so wiring this writer against pg will
+// fail every call with `syntax error at or near "?"`. A pg-native
+// writer (with `$N` placeholders + `::jsonb` cast, alongside a matching
+// pg DDL block) is deferred to the follow-up WT that wires
+// cmd/slave-agent → observer-server → observerstore.
 func NewRouteWriter(db *sql.DB) RouteWriter { return &routeReasonsWriter{db: db} }
 
 func (w *routeReasonsWriter) WriteRouteReason(ctx context.Context, r RouteReasonRow) error {
+    // Defense-in-depth: scrub the two free-form text columns at the writer
+    // boundary so a future caller bypassing dispatch.FinalizeAndEmit (e.g.
+    // the spec'd follow-up observer HTTP handler) cannot land a raw secret
+    // here. Idempotent on the WrapRouteWriter path (dispatch already
+    // redacted; the [REDACTED] literal does not re-match the regex).
+    r.ReasonText     = secretscrub.Sanitize(r.ReasonText)
+    r.ConversationID = secretscrub.Sanitize(r.ConversationID)
     payload, err := json.Marshal(r.Candidates)
     if err != nil {
         return err
@@ -496,30 +536,76 @@ clock-skew-driven p50/p95 lies. Mitigations are **mandatory**, not aspirational.
 The dispatcher composes `ReasonText` from internal facts (skill name, candidate
 list size) — but it may include capability snippets, model names, or other
 caller-influenced fragments. Before the field hits the writer it MUST be run
-through `sanitizeReasonText(string) string`:
+through a shared sanitize helper.
+
+**Single source of truth**: the regex blacklist, the truncation rule, and the
+`route_reason_redacted_total` `expvar.Int` all live in
+`internal/secretscrub` (one stdlib-only package, depended on by both
+`internal/dispatch` and `internal/observerstore`). Splitting the blacklist
+into a third package means the dispatch finalize gate and the observerstore
+writer boundary cannot drift — adding a new pattern is a one-line change
+that automatically benefits both call sites.
 
 1. Apply a regex blacklist that matches common secret prefixes and replaces
-   each match with `[REDACTED]`:
+   each match with `[REDACTED]`. Current pattern list (live in
+   `internal/secretscrub/scrub.go`):
 
    ```
    regexp.MustCompile(
-     `(sk-[A-Za-z0-9_\-]{8,}|` +              // OpenAI / generic
+     `sk-[A-Za-z0-9_\-]{8,}|` +              // OpenAI / Anthropic (sk-, sk-ant-)
      `eyJ[A-Za-z0-9_\-\.]{16,}|` +            // JWT
-     `AKIA[A-Z0-9]{12,}|` +                   // AWS
-     `ghp_[A-Za-z0-9]{20,}|` +                // GitHub
-     `xox[baprs]-[A-Za-z0-9-]{8,})`,          // Slack
+     `AKIA[A-Z0-9]{12,}|` +                   // AWS access key
+     `gh[opsruA-Z]_[A-Za-z0-9]{20,}|` +       // GitHub gh{p,o,s,r,u}_ tokens
+     `github_pat_[A-Za-z0-9_]{20,}|` +        // GitHub fine-grained PATs
+     `glpat-[A-Za-z0-9_\-]{20,}|` +           // GitLab PATs
+     `AIza[A-Za-z0-9_\-]{20,}|` +             // Google API keys
+     `xox[baprs]-[A-Za-z0-9-]{8,}|` +         // Slack
+     `-----BEGIN [A-Z ]*PRIVATE KEY-----`,    // PEM private keys
    )
    ```
 
 2. After redaction, truncate to ≤ 256 runes; on truncation append the literal
    suffix `...[truncated]` (so the total is at most `256 + len(suffix)` runes).
 
-3. On any redaction, increment a module-level `expvar.Int` exposed as
-   `route_reason_redacted_total` (zero-cost if unused).
+3. On any redaction (one or more pattern hits within a single call),
+   increment `route_reason_redacted_total` by one. Multiple hits per call
+   still bump the counter only once — it counts CALLS-with-redaction, not
+   redaction occurrences. Idempotent: a second `Sanitize` on an
+   already-redacted string returns the same string and does NOT bump.
 
-The sanitize function is exported as `SanitizeReasonText` so other packages
-that build their own `ReasonText` can run it through the same gate, but the
-package's own `FinalizeAndEmit` calls it **unconditionally** on the way out.
+The sanitize function is exported by the secretscrub package as
+`Sanitize(s string) string`. `internal/dispatch` re-exports it as
+`var SanitizeReasonText = secretscrub.Sanitize` (function-pointer alias,
+not a wrapper) so the test
+`TestSanitizeReasonText_DelegatesToSecretscrub` can assert literal
+function identity (`reflect.ValueOf(...).Pointer()`) and structurally
+catch a future refactor that inlines a stripped-down regex. The mutable
+`var` is reassignable inside the dispatch package — that is an
+intentional tradeoff for identity-testability and is acceptable because
+no production or test code in the package reassigns it.
+
+`FinalizeAndEmit` calls `SanitizeReasonText` unconditionally on every
+write path for BOTH fields that carry caller-influenced text:
+
+* `d.ReasonText` (primary leak surface — composed inside dispatch).
+* `d.ConversationID` (defense-in-depth — sourced from caller envelope
+  text via `peekConversationID`). The raw `seedConv` is still used
+  internally for `deriveID` because a sha256 fingerprint does not leak
+  the underlying value, but the serialized `conversation_id` column AND
+  the writer-fail log line `conv=%s` both see the sanitized version.
+
+`internal/observerstore.WriteRouteReason` calls `secretscrub.Sanitize`
+again at the writer boundary on both `r.ReasonText` AND `r.ConversationID`
+as defense-in-depth, so a future caller bypassing dispatch (e.g. the
+spec'd follow-up observer HTTP handler that reconstructs a
+`RouteReasonRow` from a remote slave's POST body) cannot land a raw
+secret in either column. The second pass is idempotent on the
+WrapRouteWriter path (dispatch already redacted; `[REDACTED]` does not
+re-match the regex) so the counter does not double-count.
+
+Tests covering ConversationID sanitization:
+`TestFinalizeAndEmit_SanitizesConversationID` (dispatch side),
+`TestWriteRouteReason_SanitizesConversationID` (writer boundary).
 
 ### (b) `candidates_json` minimum-field rule
 
