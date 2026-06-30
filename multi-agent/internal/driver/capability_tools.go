@@ -526,6 +526,13 @@ func clarificationQuestions(tc contract.TaskContract) []string {
 	if len(tc.Intent.SuccessCriteria) == 1 && tc.Intent.SuccessCriteria[0] == "The requested result is produced as an artifact." {
 		questions = append(questions, "What exact checks should define a successful result?")
 	}
+	// WT-1-contract-schema §3.3: recovery_hint is a required lifecycle
+	// field after this worktree. The draft tool doesn't populate it
+	// (operator must fill it before submission), so always prompt the
+	// operator to provide one.
+	if strings.TrimSpace(tc.RecoveryHint) == "" {
+		questions = append(questions, "What is the recovery_hint? (key artifact paths + idempotency notes; see spec §2.1)")
+	}
 	return questions
 }
 

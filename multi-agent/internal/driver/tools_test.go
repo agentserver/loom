@@ -171,9 +171,11 @@ func testTaskContract() contract.TaskContract {
 			SuccessCriteria: []string{"helper is saved"},
 		},
 		DataContract: contract.DataContract{
-			WriteTargets: []contract.WriteTarget{{Type: contract.WriteTargetArtifact, Kind: "code", Name: "helper.go"}},
+			ReadArtifacts: []contract.ArtifactRef{},
+			WriteTargets:  []contract.WriteTarget{{Type: contract.WriteTargetArtifact, Kind: "code", Name: "helper.go"}},
 		},
 		CapabilityRequirements: contract.CapabilityRequirements{Skills: []string{"chat"}},
+		RecoveryHint:           "test recovery hint",
 	}
 }
 
@@ -2236,6 +2238,7 @@ func TestSubmitContractTask_DegradesRecordDelegatedTaskFailureToWarning(t *testi
 				"success_criteria": []string{"finishes"},
 			},
 			"data_contract": map[string]any{
+				"read_artifacts": []any{},
 				"write_targets": []map[string]any{
 					{"type": "artifact", "kind": "summary", "name": "out.md"},
 				},
@@ -2243,6 +2246,10 @@ func TestSubmitContractTask_DegradesRecordDelegatedTaskFailureToWarning(t *testi
 			"execution_policy": map[string]any{
 				"routing": "direct_first",
 			},
+			"capability_requirements": map[string]any{
+				"skills": []string{"chat"},
+			},
+			"recovery_hint": "test recovery hint",
 		},
 		"prompt":              "do work",
 		"skill":               "chat",

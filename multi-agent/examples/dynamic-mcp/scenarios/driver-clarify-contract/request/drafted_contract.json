@@ -62,7 +62,8 @@
       "resources": {
         "tags": ["python3", "data", "policy"]
       }
-    }
+    },
+    "recovery_hint": "If refund-risk-report.md is missing, re-run is safe (the report is the only output). Idempotent."
   },
   "clarification_questions": [
     "Which input files or artifact IDs should be read?",

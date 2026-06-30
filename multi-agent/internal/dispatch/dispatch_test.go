@@ -185,8 +185,11 @@ func envelopedPrompt(t *testing.T, body string) string {
 			SuccessCriteria: []string{"thing is done"},
 		},
 		DataContract: contract.DataContract{
-			WriteTargets: []contract.WriteTarget{{Type: contract.WriteTargetArtifact, Kind: "document", Name: "out.md"}},
+			ReadArtifacts: []contract.ArtifactRef{},
+			WriteTargets:  []contract.WriteTarget{{Type: contract.WriteTargetArtifact, Kind: "document", Name: "out.md"}},
 		},
+		CapabilityRequirements: contract.CapabilityRequirements{Skills: []string{"chat"}},
+		RecoveryHint:           "test recovery hint",
 	}
 	tc.ApplyDefaults()
 	p, err := contract.EncodeEnvelope(tc, body)

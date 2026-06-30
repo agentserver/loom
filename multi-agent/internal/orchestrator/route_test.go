@@ -185,7 +185,8 @@ func routeContractPrompt(t *testing.T, allowedTargets, requiredSkills []string, 
 			SuccessCriteria: []string{"done"},
 		},
 		DataContract: contract.DataContract{
-			WriteTargets: []contract.WriteTarget{{Type: contract.WriteTargetArtifact, Kind: "text", Name: "out.txt"}},
+			ReadArtifacts: []contract.ArtifactRef{},
+			WriteTargets:  []contract.WriteTarget{{Type: contract.WriteTargetArtifact, Kind: "text", Name: "out.txt"}},
 		},
 		ExecutionPolicy: contract.ExecutionPolicy{
 			Routing:        contract.RoutingMasterOnly,
@@ -193,6 +194,7 @@ func routeContractPrompt(t *testing.T, allowedTargets, requiredSkills []string, 
 			AllowedTargets: allowedTargets,
 		},
 		CapabilityRequirements: contract.CapabilityRequirements{Skills: requiredSkills},
+		RecoveryHint:           "test recovery hint",
 	}
 	tc.ApplyDefaults()
 	prompt, err := contract.EncodeEnvelope(tc, body)

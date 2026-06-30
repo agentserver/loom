@@ -29,6 +29,18 @@ type TaskContract struct {
 	DataContract           DataContract           `json:"data_contract"`
 	ExecutionPolicy        ExecutionPolicy        `json:"execution_policy"`
 	CapabilityRequirements CapabilityRequirements `json:"capability_requirements"`
+	// RecoveryHint is the §A2 lifecycle field added by WT-1-contract-schema:
+	// a freeform short string naming the key artifact paths a §D5 recovery
+	// evaluator must inspect, the idempotency assumption the contract makes
+	// about repeated invocation, and the artifact-semantic notes the
+	// recovery agent needs. Not an oracle input — the oracle is
+	// Intent.SuccessCriteria. See spec §2.1.
+	//
+	// Required (non-empty after trim) when schema enforcement is active.
+	// No `omitempty` on the tag: a marshalled zero-value contract MUST
+	// still carry the key, so downstream round-tripping through
+	// Marshal+Unmarshal cannot silently drop the field.
+	RecoveryHint string `json:"recovery_hint"`
 }
 
 type IntentSpec struct {
