@@ -1,6 +1,7 @@
 package observerweb
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -16,50 +17,50 @@ func TestTelemetryLimiterUsesTokenBucketRateAndBurst(t *testing.T) {
 		TelemetryKeyID: "key1",
 	}
 
-	allow, err := limiter.allow(key, start)
+	allow, err := limiter.allow(context.Background(), key, start)
 	require.NoError(t, err)
 	require.True(t, allow)
 
-	allow, err = limiter.allow(key, start)
+	allow, err = limiter.allow(context.Background(), key, start)
 	require.NoError(t, err)
 	require.True(t, allow)
 
-	allow, err = limiter.allow(key, start)
+	allow, err = limiter.allow(context.Background(), key, start)
 	require.NoError(t, err)
 	require.True(t, allow)
 
-	allow, err = limiter.allow(key, start)
+	allow, err = limiter.allow(context.Background(), key, start)
 	require.NoError(t, err)
 	require.True(t, allow)
 
-	allow, err = limiter.allow(key, start)
+	allow, err = limiter.allow(context.Background(), key, start)
 	require.NoError(t, err)
 	require.False(t, allow)
 
-	allow, err = limiter.allow(key, start.Add(30*time.Second))
+	allow, err = limiter.allow(context.Background(), key, start.Add(30*time.Second))
 	require.NoError(t, err)
 	require.True(t, allow)
 
-	allow, err = limiter.allow(key, start.Add(30*time.Second))
+	allow, err = limiter.allow(context.Background(), key, start.Add(30*time.Second))
 	require.NoError(t, err)
 	require.False(t, allow)
 
-	allow, err = limiter.allow(key, start.Add(time.Minute))
+	allow, err = limiter.allow(context.Background(), key, start.Add(time.Minute))
 	require.NoError(t, err)
 	require.True(t, allow)
 
-	allow, err = limiter.allow(key, start.Add(time.Minute))
+	allow, err = limiter.allow(context.Background(), key, start.Add(time.Minute))
 	require.NoError(t, err)
 	require.False(t, allow)
 
 	idle := start.Add(10 * time.Minute)
 	for i := 0; i < 4; i++ {
-		allow, err := limiter.allow(key, idle)
+		allow, err := limiter.allow(context.Background(), key, idle)
 		require.NoError(t, err)
 		require.True(t, allow)
 	}
 
-	allow, err = limiter.allow(key, idle)
+	allow, err = limiter.allow(context.Background(), key, idle)
 	require.NoError(t, err)
 	require.False(t, allow)
 }

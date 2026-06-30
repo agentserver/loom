@@ -1,6 +1,7 @@
 package observerweb
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -15,7 +16,7 @@ type telemetryKey struct {
 // telemetryAllower determines whether to allow a telemetry event.
 // Returns (true, nil) to proceed, (false, nil) to reject with 429, or (_, err) to reject with 503.
 type telemetryAllower interface {
-	allow(key telemetryKey, now time.Time) (bool, error)
+	allow(ctx context.Context, key telemetryKey, now time.Time) (bool, error)
 }
 
 type telemetryLimiter struct {
@@ -47,7 +48,7 @@ func newTelemetryLimiter(perMinute, burst int) *telemetryLimiter {
 	}
 }
 
-func (l *telemetryLimiter) allow(key telemetryKey, now time.Time) (bool, error) {
+func (l *telemetryLimiter) allow(_ context.Context, key telemetryKey, now time.Time) (bool, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	b := l.buckets[key]

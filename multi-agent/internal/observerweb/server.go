@@ -206,7 +206,7 @@ func (h *handler) postEvent(w http.ResponseWriter, r *http.Request) {
 			AgentID:        agent.ID,
 			TelemetryKeyID: telemetryKeyID,
 		}
-		allowed, err := h.telemetryLimiter.allow(key, time.Now())
+		allowed, err := h.telemetryLimiter.allow(r.Context(), key, time.Now())
 		if err != nil {
 			http.Error(w, "telemetry rate limit unavailable", http.StatusServiceUnavailable)
 			log.Printf("observerweb: telemetry rate limit error: %v", err)
