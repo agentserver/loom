@@ -213,6 +213,7 @@ name to the message) MUST use `fmt.Errorf("...: %w", ErrXxx, ...)` so that
 | Register   | `target == nil`                                           | `ErrNilTarget`                         | Bug in caller; pass `&pkg.DisableFoo`.                                          |
 | Register   | `name` is already registered with some target             | `ErrAlreadyRegistered` (no overwrite)  | Two packages claim the same flag — pick one owner.                              |
 | Register   | `target` is already registered under a different `name`   | `ErrTargetAlreadyRegistered` (no overwrite) | Copy-paste in the consumer pattern — fix the consumer to pass distinct `*bool`s. |
+| Register   | identical `(name, target)` already registered             | `ErrAlreadyRegistered` (precedence: name match beats target match) | Idempotent re-Register from a copy-pasted line — fix the consumer to remove the duplicate. |
 | Register   | valid name, valid non-nil target, not previously seen     | `nil`                                  | Target is wired. SetByName(name, …) will flip it.                               |
 | SetByName  | `name` not in `KnownFlags()` (e.g. typo on CLI)           | `ErrUnknownFlag`                       | CLI binder surfaces this to the user as an error before the binary runs work.   |
 | SetByName  | known `name` but no Register call has happened yet        | `ErrNotRegistered`                     | CLI binder surfaces it; the owning package wasn't linked.                       |

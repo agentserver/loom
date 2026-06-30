@@ -103,10 +103,15 @@ func (r *Registry) Register(name FlagName, target *bool) error {
 	}
 	// Reverse check: the same *bool MUST NOT already be wired under a
 	// different name. Linear scan is fine here — the map maxes out at
-	// len(canonicalFlags) == 8 entries.
-	for existingName, existingTarget := range r.targets {
+	// len(canonicalFlags) == 8 entries. Note that the name-duplicate
+	// check above takes precedence: if (name, target) is identical to an
+	// existing registration, the caller sees ErrAlreadyRegistered, not
+	// ErrTargetAlreadyRegistered. The pre-existing FlagName of the
+	// conflicting target is intentionally not surfaced in the sentinel
+	// (the spec §2.5 wrapping rule lets a future caller enrich with %w
+	// without breaking errors.Is).
+	for _, existingTarget := range r.targets {
 		if existingTarget == target {
-			_ = existingName // not surfaced in the sentinel; future enrichment may.
 			return ErrTargetAlreadyRegistered
 		}
 	}

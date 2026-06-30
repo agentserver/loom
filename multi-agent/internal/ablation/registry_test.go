@@ -2,6 +2,7 @@ package ablation
 
 import (
 	"errors"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -10,6 +11,7 @@ import (
 )
 
 func TestKnownFlags_CopyIsolation(t *testing.T) {
+	t.Parallel()
 	got := KnownFlags()
 	if len(got) != 8 {
 		t.Fatalf("KnownFlags(): want length 8, got %d (%v)", len(got), got)
@@ -27,6 +29,7 @@ func TestKnownFlags_CopyIsolation(t *testing.T) {
 }
 
 func TestRegister_Success(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	var b bool
 	if err := r.Register(NoCapabilityDiscovery, &b); err != nil {
@@ -35,6 +38,7 @@ func TestRegister_Success(t *testing.T) {
 }
 
 func TestRegister_NilTarget_ErrNilTarget(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	err := r.Register(NoObserver, nil)
 	if !errors.Is(err, ErrNilTarget) {
@@ -43,6 +47,7 @@ func TestRegister_NilTarget_ErrNilTarget(t *testing.T) {
 }
 
 func TestRegister_UnknownFlag_ErrUnknownFlag(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	var b bool
 	err := r.Register(FlagName("NoBogus"), &b)
@@ -52,6 +57,7 @@ func TestRegister_UnknownFlag_ErrUnknownFlag(t *testing.T) {
 }
 
 func TestRegister_Duplicate_ErrAlreadyRegistered(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	var first, second bool
 	if err := r.Register(NoDryRun, &first); err != nil {
@@ -75,6 +81,7 @@ func TestRegister_Duplicate_ErrAlreadyRegistered(t *testing.T) {
 // a typo as "package not linked" diagnostic noise. The correct
 // behaviour is ErrUnknownFlag (the name is not in canonicalSet at all).
 func TestSetByName_Unknown_ErrUnknownFlag(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	err := r.SetByName("NoTpedContracts", true) // typo of NoTypedContracts
 	if !errors.Is(err, ErrUnknownFlag) {
@@ -83,6 +90,7 @@ func TestSetByName_Unknown_ErrUnknownFlag(t *testing.T) {
 }
 
 func TestSetByName_NotRegistered_ErrNotRegistered(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	err := r.SetByName(string(NoObserver), true)
 	if !errors.Is(err, ErrNotRegistered) {
@@ -91,6 +99,7 @@ func TestSetByName_NotRegistered_ErrNotRegistered(t *testing.T) {
 }
 
 func TestSetByName_Flips(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	var b bool
 	if err := r.Register(NoCapabilityDiscovery, &b); err != nil {
@@ -114,6 +123,7 @@ func TestSetByName_Flips(t *testing.T) {
 // silently, which is exactly the "two flags secretly share an owner"
 // failure mode §7 (c) exists to prevent.
 func TestRegister_SameTargetUnderTwoNames_Rejected(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	var b bool
 	if err := r.Register(NoCapabilityDiscovery, &b); err != nil {
@@ -133,7 +143,31 @@ func TestRegister_SameTargetUnderTwoNames_Rejected(t *testing.T) {
 	}
 }
 
+// TestRegister_SamePairTwice_ErrAlreadyRegistered pins the documented
+// sentinel precedence: an idempotent re-Register with the SAME name and
+// the SAME *bool resolves to ErrAlreadyRegistered (name-duplicate beats
+// target-duplicate). This makes the failure mode obvious for the
+// copy-paste-the-whole-line variant of the §7 (c) bug; without this
+// pinning, a future implementation could choose to check target-aliasing
+// first and the same caller would see a different sentinel.
+func TestRegister_SamePairTwice_ErrAlreadyRegistered(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry()
+	var b bool
+	if err := r.Register(NoCapabilityDiscovery, &b); err != nil {
+		t.Fatalf("first Register: %v", err)
+	}
+	err := r.Register(NoCapabilityDiscovery, &b)
+	if !errors.Is(err, ErrAlreadyRegistered) {
+		t.Errorf("Register(NoCapabilityDiscovery, &b) twice: want errors.Is ErrAlreadyRegistered, got %v", err)
+	}
+	if errors.Is(err, ErrTargetAlreadyRegistered) {
+		t.Errorf("Register of identical (name, target): unexpectedly matched ErrTargetAlreadyRegistered too (precedence rule broken)")
+	}
+}
+
 func TestSetByName_DuplicateRegisterDoesNotOverwrite(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	var first, second bool
 	if err := r.Register(NoDryRun, &first); err != nil {
@@ -154,6 +188,7 @@ func TestSetByName_DuplicateRegisterDoesNotOverwrite(t *testing.T) {
 }
 
 func TestList_Stable(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	// Register an out-of-canonical-order subset to exercise the sort.
 	var a, b, c bool
@@ -300,9 +335,9 @@ func TestConcurrent_RegisterSetList_Race(t *testing.T) {
 		wg.Add(1)
 		i := i
 		go func() {
+			defer wg.Done()
 			ready.Done()
 			<-start
-			defer wg.Done()
 			if err := r.Register(flags[i], &postTargets[i-half]); err != nil {
 				t.Errorf("Register(%q): %v", flags[i], err)
 			}
@@ -314,9 +349,9 @@ func TestConcurrent_RegisterSetList_Race(t *testing.T) {
 		wg.Add(1)
 		i := i
 		go func() {
+			defer wg.Done()
 			ready.Done()
 			<-start
-			defer wg.Done()
 			if err := r.SetByName(string(flags[i]), true); err != nil {
 				t.Errorf("SetByName(%q): %v", flags[i], err)
 			}
@@ -328,6 +363,12 @@ func TestConcurrent_RegisterSetList_Race(t *testing.T) {
 	// pre-registered `half` (i.e. it never observed any concurrent
 	// Register landing), the test failed to actually exercise concurrency
 	// and we fail loudly rather than passing silently.
+	//
+	// runtime.Gosched() yields after each iteration so the scheduler can
+	// run the worker goroutines under GOMAXPROCS=1 (some CI runners /
+	// resource-throttled containers). Without it, this tight loop can
+	// dominate the single P for the whole 50ms budget and the maxSeen
+	// self-check would flake to false-FAIL.
 	wg.Add(1)
 	var maxSeen int64
 	go func() {
@@ -339,6 +380,7 @@ func TestConcurrent_RegisterSetList_Race(t *testing.T) {
 			if n := int64(len(snap)); n > atomic.LoadInt64(&maxSeen) {
 				atomic.StoreInt64(&maxSeen, n)
 			}
+			runtime.Gosched()
 		}
 	}()
 
@@ -367,6 +409,7 @@ func TestConcurrent_RegisterSetList_Race(t *testing.T) {
 // with NewRegistry. The identity check captures Default into a local so
 // the comparison is not folded by the compiler.
 func TestDefault_IsRegistryAndIndependent(t *testing.T) {
+	t.Parallel()
 	if Default == nil {
 		t.Fatal("Default is nil; expected process-wide registry singleton")
 	}
@@ -386,6 +429,7 @@ func TestDefault_IsRegistryAndIndependent(t *testing.T) {
 // SetByName on the same zero-value Registry (before any Register) must
 // return ErrNotRegistered, not panic on a nil map read.
 func TestZeroValueRegistry_DoesNotPanic(t *testing.T) {
+	t.Parallel()
 	var r Registry
 	var b bool
 	if err := r.Register(NoCapabilityDiscovery, &b); err != nil {
@@ -414,6 +458,7 @@ func TestZeroValueRegistry_DoesNotPanic(t *testing.T) {
 // copy-paste error like `errors.New("")` or a sentinel pulled in from a
 // neighbouring package.
 func TestSentinels_AreDistinct(t *testing.T) {
+	t.Parallel()
 	sentinels := []struct {
 		name string
 		err  error

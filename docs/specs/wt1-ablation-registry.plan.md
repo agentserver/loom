@@ -4,6 +4,16 @@
 > `docs/specs/wt1-ablation-registry.spec.md`.
 > Branch: `paper/v3/p1-ablation-registry`.
 > Base: `origin/paper/v3-integration @ 1332327`.
+>
+> **Status update (post-review):** Stage-3 implementation has been amended
+> with `ErrTargetAlreadyRegistered` plus the corresponding
+> `TestRegister_SameTargetUnderTwoNames_Rejected` /
+> `TestRegister_SamePairTwice_ErrAlreadyRegistered` regression tests; the
+> race tests gained a `runtime.Gosched()` / ready-gate / `maxSeen`
+> assertion; `t.Parallel()` was extended to every test. The sections
+> below have been synced to match. The spec (sibling file) remains the
+> authoritative contract source — if anything here drifts, prefer the
+> spec.
 
 This plan turns each spec deliverable into a file and each spec security
 mitigation into a Go test, then sequences them strictly RED → GREEN →
@@ -20,9 +30,9 @@ All paths are relative to the Go module root,
 | File | Purpose | Public symbols (must be in this file) | Imports |
 | --- | --- | --- | --- |
 | `internal/ablation/doc.go` | Package-level godoc only. Describes the registry's role and the consumer pattern from spec §5. No code. | — | (none) |
-| `internal/ablation/errors.go` | Sentinel error values. | `ErrUnknownFlag`, `ErrNilTarget`, `ErrAlreadyRegistered`, `ErrNotRegistered` | `errors` |
+| `internal/ablation/errors.go` | Sentinel error values. | `ErrUnknownFlag`, `ErrNilTarget`, `ErrAlreadyRegistered`, `ErrNotRegistered`, `ErrTargetAlreadyRegistered` | `errors` |
 | `internal/ablation/registry.go` | Core types, constants, methods, and `Default`. | `FlagName`, the 8 `No*` constants, `KnownFlags() []FlagName`, `Registry`, `NewRegistry()`, `(*Registry).Register`, `(*Registry).SetByName`, `(*Registry).List`, `Default` | `sort`, `sync` |
-| `internal/ablation/registry_test.go` | Functional + security test matrix. `package ablation` (white-box) — tests need to construct fresh `Registry` instances and pass typed `FlagName` values. | (tests) | `sort`, `sync`, `sync/atomic`, `testing`, `errors` |
+| `internal/ablation/registry_test.go` | Functional + security test matrix. `package ablation` (white-box) — tests need to construct fresh `Registry` instances and pass typed `FlagName` values. | (tests) | `errors`, `runtime`, `strings`, `sync`, `sync/atomic`, `testing`, `time` |
 
 Notes:
 
@@ -60,6 +70,8 @@ var (
     ErrNilTarget         = errors.New("ablation: nil target")
     ErrAlreadyRegistered = errors.New("ablation: flag already registered")
     ErrNotRegistered     = errors.New("ablation: flag not registered")
+    // (post-review addition; precedence: name-duplicate beats target-duplicate.)
+    ErrTargetAlreadyRegistered = errors.New("ablation: target already registered under another flag")
 )
 ```
 
@@ -130,8 +142,14 @@ func (r *Registry) Register(name FlagName, target *bool) error {
     }
     r.mu.Lock()
     defer r.mu.Unlock()
+    if r.targets == nil { r.targets = make(map[FlagName]*bool) } // lazy init for zero-value Registry
     if _, dup := r.targets[name]; dup {
-        return ErrAlreadyRegistered
+        return ErrAlreadyRegistered // (precedence: name-duplicate wins over target-duplicate below)
+    }
+    for _, existingTarget := range r.targets {
+        if existingTarget == target {
+            return ErrTargetAlreadyRegistered
+        }
     }
     r.targets[name] = target
     return nil
@@ -191,17 +209,20 @@ references the spec §7 security mitigations.
 | `TestRegister_Success` | Single valid `Register(NoCapabilityDiscovery, &b)` returns nil; subsequent `SetByName("NoCapabilityDiscovery", true)` makes `b == true`. | — (happy path) |
 | `TestRegister_NilTarget_ErrNilTarget` | `Register(NoObserver, nil)` returns `errors.Is(err, ErrNilTarget)`. | (a) defensive |
 | `TestRegister_UnknownFlag_ErrUnknownFlag` | `Register(FlagName("NoBogus"), &b)` returns `ErrUnknownFlag`; ensures the runtime-side of the (d) mitigation is wired. | (d) |
-| `TestRegister_Duplicate_ErrAlreadyRegistered` | Two `Register(NoDryRun, ...)` calls — second returns `ErrAlreadyRegistered`; does NOT panic; the **first** target is the one a subsequent `SetByName("NoDryRun", true)` flips (second target remains `false`). | (c) |
+| `TestRegister_Duplicate_ErrAlreadyRegistered` | Two `Register(NoDryRun, ...)` calls — second returns `ErrAlreadyRegistered`; does NOT panic; the **first** target is the one a subsequent `SetByName("NoDryRun", true)` flips (second target remains `false`). | (c) name-aliasing |
+| `TestRegister_SameTargetUnderTwoNames_Rejected` | `Register(NoCapabilityDiscovery, &b); Register(NoObserver, &b)` — second returns `ErrTargetAlreadyRegistered`; the second name is NOT wired (SetByName on it returns `ErrNotRegistered`, `*b` unchanged). | (c) target-aliasing |
+| `TestRegister_SamePairTwice_ErrAlreadyRegistered` | Idempotent re-Register with the same name AND same `*bool` returns `ErrAlreadyRegistered` (NOT `ErrTargetAlreadyRegistered`); pins the documented precedence rule. | (c) precedence |
 | `TestSetByName_Unknown_ErrUnknownFlag` | `SetByName("NoTpedContracts", true)` returns `ErrUnknownFlag`; explicitly NOT nil. This is the headline (b) test. | (b) |
 | `TestSetByName_NotRegistered_ErrNotRegistered` | Known flag, no prior Register → `ErrNotRegistered`. | (b) |
 | `TestSetByName_Flips` | true → false → true cycle on a registered target. | — |
 | `TestList_Stable` | After registering an out-of-order subset (e.g. `NoObserver`, `NoDryRun`, `NoAcceptanceGate`), `List()` returns `[NoAcceptanceGate, NoDryRun, NoObserver]` — i.e. ascending string order — and a second call returns a slice equal element-by-element to the first. The expected slice is hand-rolled in the test, not derived from a second `sort.Slice` of the result. | (e) |
 | `TestKnownFlags_CopyIsolation` | Mutating the slice returned by `KnownFlags()` does not affect a subsequent `KnownFlags()` call; length is 8; element 0 is `NoCapabilityDiscovery`. | (e) — copy isolation per spec §4 last bullet |
 | `TestConcurrent_Register_Race` | 8 goroutines, each registering a different one of the 8 known flags concurrently (`sync.WaitGroup` + `t.Parallel()`); all return nil; final `len(r.List()) == 8`. Run with `-race`. | (a) |
-| `TestConcurrent_SetByName_Race` | One known flag, 100 goroutines calling `SetByName("NoObserver", g%2==0)` concurrently; the final `*target` value is allowed to be either true or false (race semantics) but the test must not trigger the race detector or panic. | (a) |
-| `TestConcurrent_RegisterSetList_Race` | Mixed workload: 4 goroutines call `Register` on distinct flags, 4 call `SetByName` on already-registered flags (using a barrier + small sleep to ensure overlap), 4 call `List()` in a loop. No `-race` failure, no panic, every `List()` slice is in sorted order. | (a) |
-| `TestSentinels_AreDistinct` | `errors.Is` cross-checks: each Err* matches itself, none matches another. Cheap regression for accidental aliasing. | — |
-| `TestDefault_IsRegistryAndIndependent` | `Default != nil`; `Default == Default` (same singleton across calls); `NewRegistry() != Default`. Guards against someone refactoring `Default` into a `func` or a per-call constructor. | — |
+| `TestConcurrent_SetByName_Race` | One known flag, 100 goroutines calling `SetByName("NoObserver", g%2==0)` concurrently; the final `*target` value is allowed to be either true or false (race semantics). Test then performs two deterministic post-`wg.Wait()` writes and asserts `*target` reflects each — catches a future refactor that silently drops the deref. | (a) + write-observed contract |
+| `TestConcurrent_RegisterSetList_Race` | Mixed workload, released via a `ready`-gate barrier so the List goroutine genuinely runs concurrently with Register/SetByName. List loop uses a 50ms wall-clock budget + `runtime.Gosched()` (so it interleaves under `GOMAXPROCS=1`) and tracks `maxSeen` via `sync/atomic`. Asserts (1) no `-race` failure, (2) `maxSeen > half` (proves concurrency was observed). | (a) |
+| `TestSentinels_AreDistinct` | Each sentinel's `.Error()` starts with `"ablation: "`; no sentinel matches a different one via `errors.Is` (catches accidental `var ErrFoo = ErrBar` aliasing). | — |
+| `TestDefault_IsRegistryAndIndependent` | `Default != nil`; the same singleton returned across two reads; `NewRegistry() != Default`. Guards against someone refactoring `Default` into a `func` or a per-call constructor. | — |
+| `TestZeroValueRegistry_DoesNotPanic` | `var r ablation.Registry; r.Register(...)` must not panic on the nil-map write (lazy init), and `SetByName` / `List` on a never-Register-ed zero-value Registry return `ErrNotRegistered` / empty respectively. | (a) defensive |
 
 Verification commands (Stage-3 must run all three with zero output / zero
 non-zero exit):
@@ -231,7 +252,8 @@ commits make the RED/GREEN evidence reviewable).
 1. **Skeleton + doc.go + errors.go** *(non-TDD scaffolding step; the
    RED/GREEN loop starts at step 2)*
    - Write `doc.go` with the package comment.
-   - Write `errors.go` with the four sentinels.
+   - Write `errors.go` with the five sentinels (the four originals plus
+     `ErrTargetAlreadyRegistered` from the post-review amendment).
    - Write `registry_test.go` containing only `package ablation` and an
      empty import block so the test binary compiles.
    - We deliberately do NOT add `TestSentinels_AreDistinct` here; it is

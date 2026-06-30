@@ -23,6 +23,9 @@ var (
 	// stays in place; the duplicate caller is rejected. This is deliberate:
 	// silent overwrite would make ablation behaviour depend on init order,
 	// which is fragile across refactors (see spec §7 (c)).
+	//
+	// Takes precedence over ErrTargetAlreadyRegistered when both apply
+	// (same name AND same *bool): Register returns ErrAlreadyRegistered.
 	ErrAlreadyRegistered = errors.New("ablation: flag already registered")
 
 	// ErrNotRegistered is returned by SetByName when the name is a known
