@@ -35,13 +35,14 @@ const (
 	defaultTurnTimeout = 10 * time.Minute // safety max after browser/SSE disconnect
 )
 
-// SendCommand runs a non-streaming command (list_sessions / get_session) on one
-// daemon and returns the command_result payload. ErrDaemonNotFound → caller 404.
-func (h *Hub) SendCommand(ctx context.Context, o owner, daemonID, command string, args json.RawMessage) (json.RawMessage, error) {
-	dc, ok := h.reg.lookup(o, daemonID)
-	if !ok {
-		return nil, ErrDaemonNotFound
-	}
+// sendCommandToLocal sends a non-streaming command on a pre-resolved *daemonConn.
+// It first checks ownership (confirmOwnership), then registers a pending entry,
+// writes the command envelope, and drains the reply channel.
+//
+// The caller is responsible for the initial registry lookup; this helper is used
+// both by SendCommand (local path) and by forwardHandler (receiver path, D1 remote
+// lookup bypassed intentionally — loop prevention).
+func (h *Hub) sendCommandToLocal(ctx context.Context, dc *daemonConn, command string, args json.RawMessage) (json.RawMessage, error) {
 	if !dc.confirmOwnership(ctx) {
 		return nil, ErrDaemonGone
 	}
@@ -81,14 +82,12 @@ func (h *Hub) SendCommand(ctx context.Context, o owner, daemonID, command string
 	}
 }
 
-// SendCommandStream runs a streaming command (session_turn). Events and the
-// terminal command_result/error or terminal status event are forwarded on the
-// returned channel, which is closed when the turn ends or the daemon/ctx is done.
-func (h *Hub) SendCommandStream(ctx context.Context, o owner, daemonID, command string, args json.RawMessage) (<-chan commander.Envelope, error) {
-	dc, ok := h.reg.lookup(o, daemonID)
-	if !ok {
-		return nil, ErrDaemonNotFound
-	}
+// sendCommandStreamToLocal sends a streaming command on a pre-resolved *daemonConn.
+// outBuffer controls the output channel buffer size (16 for browser SSE; 256 for
+// the forwarding receiver path, which must not block the draining goroutine).
+//
+// See sendCommandToLocal for caller responsibilities.
+func (h *Hub) sendCommandStreamToLocal(ctx context.Context, dc *daemonConn, command string, args json.RawMessage, outBuffer int) (<-chan commander.Envelope, error) {
 	if !dc.confirmOwnership(ctx) {
 		return nil, ErrDaemonGone
 	}
@@ -104,7 +103,7 @@ func (h *Hub) SendCommandStream(ctx context.Context, o owner, daemonID, command 
 		dc.removePending(cmdID)
 		return nil, ErrDaemonGone
 	}
-	out := make(chan commander.Envelope, 16)
+	out := make(chan commander.Envelope, outBuffer)
 	go func() {
 		defer close(out)
 		defer dc.removePending(cmdID)
@@ -134,6 +133,31 @@ func (h *Hub) SendCommandStream(ctx context.Context, o owner, daemonID, command 
 		}
 	}()
 	return out, nil
+}
+
+// SendCommand runs a non-streaming command (list_sessions / get_session) on one
+// daemon and returns the command_result payload. ErrDaemonNotFound → caller 404.
+//
+// TODO(D1): add sharedReg.lookupRemote → forwardCli.send else branch for remote daemons.
+func (h *Hub) SendCommand(ctx context.Context, o owner, daemonID, command string, args json.RawMessage) (json.RawMessage, error) {
+	dc, ok := h.reg.lookup(o, daemonID)
+	if !ok {
+		return nil, ErrDaemonNotFound
+	}
+	return h.sendCommandToLocal(ctx, dc, command, args)
+}
+
+// SendCommandStream runs a streaming command (session_turn). Events and the
+// terminal command_result/error or terminal status event are forwarded on the
+// returned channel, which is closed when the turn ends or the daemon/ctx is done.
+//
+// TODO(D1): add sharedReg.lookupRemote → forwardCli.stream else branch for remote daemons.
+func (h *Hub) SendCommandStream(ctx context.Context, o owner, daemonID, command string, args json.RawMessage) (<-chan commander.Envelope, error) {
+	dc, ok := h.reg.lookup(o, daemonID)
+	if !ok {
+		return nil, ErrDaemonNotFound
+	}
+	return h.sendCommandStreamToLocal(ctx, dc, command, args, 16)
 }
 
 func (h *Hub) ListFiles(ctx context.Context, o owner, daemonID, sessionID, path string) (json.RawMessage, error) {

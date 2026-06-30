@@ -3,6 +3,7 @@ package commanderhub
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -23,6 +24,17 @@ const (
 	wsReadTimeout = 90 * time.Second // 3x default heartbeat (30s) → dead peer after 3 missed pongs
 )
 
+// ClusterRuntime holds the configuration needed for multi-pod cluster mode.
+// Populated by the wiring layer (Phase D D1) after NewHub. All fields are
+// read-only after the Hub is started.
+type ClusterRuntime struct {
+	DB                 *sql.DB
+	AdvertiseURL       string
+	Secret             []byte
+	PrevSecret         []byte
+	InternalListenAddr string
+}
+
 // Hub owns the /daemon-link WebSocket endpoint and the owner-keyed registry of
 // live daemon connections.
 type Hub struct {
@@ -31,6 +43,7 @@ type Hub struct {
 	reg          *localRegistry
 	sharedReg    *sharedRegistry // B1: nil in single-pod; populated by attachSharedRegistry (Phase B B4)
 	forwardCli   *forwardClient  // C3: nil in single-pod; populated by attachForwardClient
+	cluster      ClusterRuntime  // C4: populated by wiring layer (Phase D D1) for cluster mode
 	turns        turnStateBackend
 	sessionCache *sessionListCache
 	cmdSeq       atomic.Int64 // generates per-command IDs (see proxy.go)
