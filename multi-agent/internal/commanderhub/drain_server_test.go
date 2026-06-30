@@ -1,14 +1,55 @@
 package commanderhub
 
 import (
+	"bytes"
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/yourorg/multi-agent/internal/identity"
 )
+
+// ---------------------------------------------------------------------------
+// Drain auth helpers
+// ---------------------------------------------------------------------------
+
+// drainHubWithDB builds a Hub in cluster (shared) mode with the provided db.
+// cluster.Secret is set to the given secret for HMAC signing.
+func drainHubWithDB(t *testing.T, db *sql.DB, secret []byte) *Hub {
+	t.Helper()
+	resolver := &fakeResolver{mu: map[string]identity.Identity{}}
+	h := NewHub(resolver)
+	sr := newSharedRegistry(db, "http://self-pod:9000")
+	h.attachSharedRegistry(sr)
+	h.cluster = ClusterRuntime{
+		DB:           db,
+		AdvertiseURL: "http://self-pod:9000",
+		Secret:       secret,
+	}
+	return h
+}
+
+// signedDrainRequest builds a signed HTTP POST request for the drain handler.
+func signedDrainRequest(t *testing.T, body []byte, secret []byte) *http.Request {
+	t.Helper()
+	ts := time.Now().Unix()
+	nonce, err := freshNonce()
+	require.NoError(t, err)
+	sig := signDrain(secret, ts, nonce, body)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/commander/_internal/drain", bytes.NewReader(body))
+	req.RemoteAddr = "10.0.0.5:12345" // non-loopback so auth is required
+	req.ContentLength = int64(len(body))
+	req.Header.Set("X-Forward-Ts", formatInt64(ts))
+	req.Header.Set("X-Forward-Nonce", nonce)
+	req.Header.Set("X-Forward-Sig", sig)
+	return req
+}
 
 // TestIsLoopbackRemoteAddr_Loopback tests that loopback addresses are recognized.
 func TestIsLoopbackRemoteAddr_Loopback(t *testing.T) {
@@ -101,4 +142,89 @@ func TestDrainHandler_GetMethodAllowed(t *testing.T) {
 
 	h.drainHandler(w, req)
 	require.Equal(t, http.StatusOK, w.Code, "GET from loopback should return 200 OK")
+}
+
+// ---------------------------------------------------------------------------
+// Fix #1: drain nonce insert + domain separation tests
+// ---------------------------------------------------------------------------
+
+// TestDrain_NonceReplay_Rejected verifies that a second drain with the same
+// nonce is rejected with 403 (replay detection via insertNonce).
+func TestDrain_NonceReplay_Rejected(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	secret := []byte("drain-secret")
+	h := drainHubWithDB(t, db, secret)
+	body := []byte(`{}`)
+
+	// Simulate replay: nonce already in DB (0 rows affected).
+	mock.ExpectExec(insertNonceSQL).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	req := signedDrainRequest(t, body, secret)
+	w := httptest.NewRecorder()
+	h.drainHandler(w, req)
+
+	require.Equal(t, http.StatusForbidden, w.Code, "replayed drain nonce must be rejected with 403")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestDrain_ReplayForwardRequest_Rejected verifies that a request signed with
+// signForward (purpose="forward") is rejected at the drain endpoint because
+// verifyDrain uses purpose="drain" — preventing cross-endpoint replay.
+func TestDrain_ReplayForwardRequest_Rejected(t *testing.T) {
+	db, _, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	secret := []byte("shared-secret")
+	h := drainHubWithDB(t, db, secret)
+	body := []byte(`{}`)
+
+	// Sign with "forward" purpose — should NOT validate at /drain.
+	ts := time.Now().Unix()
+	nonce, nerr := freshNonce()
+	require.NoError(t, nerr)
+	sig := signForward(secret, ts, nonce, body) // wrong purpose
+
+	req := httptest.NewRequest(http.MethodPost, "/api/commander/_internal/drain", bytes.NewReader(body))
+	req.RemoteAddr = "10.0.0.5:12345"
+	req.ContentLength = int64(len(body))
+	req.Header.Set("X-Forward-Ts", formatInt64(ts))
+	req.Header.Set("X-Forward-Nonce", nonce)
+	req.Header.Set("X-Forward-Sig", sig)
+
+	w := httptest.NewRecorder()
+	h.drainHandler(w, req)
+
+	// HMAC mismatch due to purpose prefix → 403 before any nonce insert.
+	require.Equal(t, http.StatusForbidden, w.Code, "forward-signed request must be rejected at /drain (purpose mismatch)")
+	// No nonce insert expectation means sqlmock would fail if insertNonce was called.
+}
+
+// TestDrain_NoncePGError_503 verifies that when insertNonce returns a PG error,
+// the drain endpoint responds with 503 (fail closed).
+func TestDrain_NoncePGError_503(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	secret := []byte("drain-secret")
+	h := drainHubWithDB(t, db, secret)
+	body := []byte(`{}`)
+
+	// PG error on nonce insert → fail closed.
+	mock.ExpectExec(insertNonceSQL).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnError(sql.ErrConnDone)
+
+	req := signedDrainRequest(t, body, secret)
+	w := httptest.NewRecorder()
+	h.drainHandler(w, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, "PG error must return 503 (fail closed)")
+	require.NoError(t, mock.ExpectationsWereMet())
 }
