@@ -385,8 +385,17 @@ One JSON object per line on `os.Stderr`:
 | `run_id` | string | the validated run_id                                       |
 | `kind`   | string | the FaultKind string literal                               |
 | `hook`   | string | the HookPoint string literal                               |
-| `action` | string | always `"injected"` in this version (reserved for future)  |
-| `seq`    | int    | the directive's monotonic seq                              |
+| `action` | string | `"registered"` (from /inject) or `"injected"` (from hook fire) |
+| `seq`    | int    | the directive's lifetime-monotonic seq for that run_id     |
+
+`(run_id, seq)` is the per-record discriminator. `seq` is monotonic
+across the full lifetime of a process for any given `run_id` —
+specifically, it is NOT reset by `Clear`. This is intentional: the
+`inject → clear → inject` test pattern is common, and resetting `seq`
+would emit two audit lines with the same `(run_id, seq)` key, leaving
+forensics ambiguous. The counter is cheap (one `map[string]int` entry
+per run_id, process-local), so making it lifetime-monotonic is
+strictly cheaper than the alternative.
 
 ## 9. Acceptance
 

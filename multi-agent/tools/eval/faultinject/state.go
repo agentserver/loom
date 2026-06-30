@@ -107,7 +107,14 @@ func (s *Store) Add(runID string, kind FaultKind, target string, params map[stri
 }
 
 // Clear drops every directive for runID and resets the rate counters for
-// the run. Returns the number of directives that were cleared and nil on
+// the run. The per-run Seq counter is intentionally NOT reset: the
+// audit log uses (run_id, seq) as a discriminator, so re-using seq=1
+// after a clear+inject cycle would produce ambiguous audit lines for a
+// test pattern as common as `inject → clear → inject`. The counter is
+// cheap and process-local, so lifetime-monotonic seq is the right
+// trade.
+//
+// Returns the number of directives that were cleared and nil on
 // success, or (0, ErrInjectionRunIDInvalid) for a malformed runID.
 //
 // Clearing an unknown-but-well-formed runID is a no-op and returns
@@ -121,7 +128,7 @@ func (s *Store) Clear(runID string) (int, error) {
 	n := len(s.perRun[runID])
 	delete(s.perRun, runID)
 	delete(s.perRunKind, runID)
-	delete(s.seq, runID)
+	// s.seq[runID] deliberately retained — see doc comment above.
 	return n, nil
 }
 

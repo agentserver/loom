@@ -72,7 +72,9 @@ func TestStore_AddListLookup(t *testing.T) {
 	}
 }
 
-// F4: Clear resets the per-(run, kind) counter; injection 101 succeeds.
+// F4: Clear resets the per-(run, kind) rate counter; injection past
+// the prior limit succeeds. The per-run Seq counter, however, is
+// LIFETIME-MONOTONIC across clear cycles — see TestStore_SeqMonotonicAcrossClear.
 func TestStore_ClearResetsCounter(t *testing.T) {
 	s := newTestStore(t)
 	const runID = "run-clearcounter"
@@ -92,14 +94,49 @@ func TestStore_ClearResetsCounter(t *testing.T) {
 	if n != MaxInjectionsPerRun {
 		t.Errorf("Clear count = %d, want %d", n, MaxInjectionsPerRun)
 	}
-	// After clear, counter is 0 and the next inject succeeds.
-	if _, err := s.Add(runID, FaultMissingFile, "", nil); err != nil {
+	// After clear, the rate counter is 0 and the next inject succeeds.
+	post, err := s.Add(runID, FaultMissingFile, "", nil)
+	if err != nil {
 		t.Fatalf("Add after Clear: %v", err)
 	}
-	// List sees only the fresh inject.
+	// List sees only the fresh inject — but its Seq must be
+	// MaxInjectionsPerRun+1, not 1 (lifetime-monotonic, see fix for
+	// PR #54 round-2 reviewer P1).
+	if post.Seq != MaxInjectionsPerRun+1 {
+		t.Errorf("post-clear Seq = %d, want %d (lifetime-monotonic)", post.Seq, MaxInjectionsPerRun+1)
+	}
 	got, _ := s.List(runID)
-	if len(got) != 1 || got[0].Seq != 1 {
-		t.Errorf("post-clear List = %v; want 1 directive with Seq=1", got)
+	if len(got) != 1 || got[0].Seq != post.Seq {
+		t.Errorf("post-clear List = %v; want 1 directive with Seq=%d", got, post.Seq)
+	}
+}
+
+// New (round-2 reviewer P1): seq must be lifetime-monotonic per run_id.
+// Audit log uses (run_id, seq) as a discriminator; if Clear reset seq,
+// inject → clear → inject would emit two audit lines with the same key.
+func TestStore_SeqMonotonicAcrossClear(t *testing.T) {
+	s := newTestStore(t)
+	const runID = "run-seqmonotonic"
+	const cycles = 10
+	const perCycle = 5
+	seenSeq := make(map[int]bool)
+	for c := 0; c < cycles; c++ {
+		for i := 0; i < perCycle; i++ {
+			d, err := s.Add(runID, FaultMissingFile, "", nil)
+			if err != nil {
+				t.Fatalf("cycle %d add %d: %v", c, i, err)
+			}
+			if seenSeq[d.Seq] {
+				t.Fatalf("Seq %d appeared twice (cycle %d) — must be lifetime-monotonic", d.Seq, c)
+			}
+			seenSeq[d.Seq] = true
+		}
+		if _, err := s.Clear(runID); err != nil {
+			t.Fatalf("cycle %d clear: %v", c, err)
+		}
+	}
+	if got := len(seenSeq); got != cycles*perCycle {
+		t.Errorf("distinct seq values = %d, want %d", got, cycles*perCycle)
 	}
 }
 

@@ -51,23 +51,33 @@ const (
 )
 
 // bridge is the live binding from a Store into the driver/executor
-// hook setters. Install / Uninstall are mutex-serialised so tests cannot
-// double-install accidentally.
+// hook setters. Bridges live on a package-level stack (installStack);
+// the active hook is always the top of the stack. detach removes the
+// bridge from the stack and reinstalls whatever bridge — if any — is
+// now on top. This makes Install/closer safe for any close order, not
+// just strict LIFO. A bridge that is detached while still on top is
+// the common case; a bridge detached from the middle is still safe
+// because the stack is recomputed.
 type bridge struct {
-	mu     sync.Mutex
-	store  *Store
-	audit  *AuditWriter
-	prevDr driver.Hook
-	prevEx executor.Hook
-	on     bool
+	store *Store
+	audit *AuditWriter
+	on    bool // true while the bridge is on installStack
 }
 
+var (
+	installStackMu sync.Mutex
+	installStack   []*bridge // bottom (index 0) → top (last)
+	preInstallDr   driver.Hook
+	preInstallEx   executor.Hook
+)
+
 // Install wires store + audit into driver.SetHook + executor.SetHook.
-// Returns a closer that restores the previously-installed hooks (or
-// the noop fast path if there were none). Calls stack LIFO: nesting
-// `c2 := Install(...); ...; c2()` inside another `c1 := Install(...);
-// ...; c1()` works correctly because each bridge captures the hook
-// that was active at the moment it ran.
+// Returns a closer that removes this bridge from the package-level
+// install stack and reinstalls whatever bridge is now on top — or
+// restores the hook that was active before any bridge was installed,
+// if the stack is empty. The closer is safe to call multiple times
+// (subsequent calls are no-ops) and safe to call out of order with
+// respect to other bridges' closers.
 func Install(store *Store, audit *AuditWriter) func() {
 	b := &bridge{store: store, audit: audit}
 	b.attach()
@@ -75,22 +85,46 @@ func Install(store *Store, audit *AuditWriter) func() {
 }
 
 func (b *bridge) attach() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.prevDr = driver.SetHook(b.driverHook)
-	b.prevEx = executor.SetHook(b.executorHook)
+	installStackMu.Lock()
+	defer installStackMu.Unlock()
+	if len(installStack) == 0 {
+		// First bridge — capture whatever hook was active before any of
+		// us so detach can restore it once the stack empties.
+		preInstallDr = driver.SetHook(b.driverHook)
+		preInstallEx = executor.SetHook(b.executorHook)
+	} else {
+		driver.SetHook(b.driverHook)
+		executor.SetHook(b.executorHook)
+	}
+	installStack = append(installStack, b)
 	b.on = true
 }
 
 func (b *bridge) detach() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	installStackMu.Lock()
+	defer installStackMu.Unlock()
 	if !b.on {
 		return
 	}
-	driver.SetHook(b.prevDr)
-	executor.SetHook(b.prevEx)
+	// Remove b from the stack regardless of position.
+	for i, x := range installStack {
+		if x == b {
+			installStack = append(installStack[:i], installStack[i+1:]...)
+			break
+		}
+	}
 	b.on = false
+	// Reinstall whatever is now on top, or restore the pre-install hook.
+	if n := len(installStack); n > 0 {
+		top := installStack[n-1]
+		driver.SetHook(top.driverHook)
+		executor.SetHook(top.executorHook)
+	} else {
+		driver.SetHook(preInstallDr)
+		executor.SetHook(preInstallEx)
+		preInstallDr = nil
+		preInstallEx = nil
+	}
 }
 
 // driverHook dispatches on HookPoint → FaultKind. The mapping mirrors

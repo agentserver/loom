@@ -314,8 +314,8 @@ func TestHookBridge_AllEightKinds_MatrixSmoke(t *testing.T) {
 }
 
 // Belt: nested Install/closer stack works LIFO so concurrent tests do
-// not corrupt each other's bridge state. (Each Install captures the
-// hook installed at the moment it ran; closer restores it.)
+// not corrupt each other's bridge state. Active hook is always the
+// top of the install stack.
 func TestHookBridge_NestedInstallStacksLIFO(t *testing.T) {
 	store1 := NewStore()
 	audit1 := NewAuditWriter(nil, nil)
@@ -347,4 +347,53 @@ func TestHookBridge_NestedInstallStacksLIFO(t *testing.T) {
 	if err := executor.InjectIfActive(context.Background(), runID, executor.HookPointExecutorFileOpen, nil); err != nil {
 		t.Fatalf("after c1() pop: want nil, got %v", err)
 	}
+}
+
+// New (round-2 reviewer P1): non-LIFO close must not silently uninstall
+// a still-active inner bridge. The stack-based detach guarantees that
+// removing a middle bridge leaves the top bridge active.
+func TestHookBridge_NonLIFOClose_PreservesActiveBridge(t *testing.T) {
+	// Install A, then Install B. B is active (top of stack).
+	storeA := NewStore()
+	cA := Install(storeA, NewAuditWriter(nil, nil))
+
+	storeB := NewStore()
+	cB := Install(storeB, NewAuditWriter(nil, nil))
+
+	const runID = "run-nonlifo01"
+	if _, err := storeB.Add(runID, FaultMissingFile, "", nil); err != nil {
+		t.Fatalf("Add storeB: %v", err)
+	}
+
+	// Close A FIRST (out of order). B should still be active.
+	cA()
+
+	// Fault on storeB must still fire.
+	if err := executor.InjectIfActive(context.Background(), runID, executor.HookPointExecutorFileOpen, nil); err == nil {
+		t.Fatalf("after non-LIFO close of A: storeB's fault did not fire (B was silently uninstalled)")
+	}
+
+	// Close B; we're back to the pre-install state (no hook).
+	cB()
+	if err := executor.InjectIfActive(context.Background(), runID, executor.HookPointExecutorFileOpen, nil); err != nil {
+		t.Fatalf("after both closers: want nil, got %v", err)
+	}
+}
+
+// New (round-2 reviewer P2): double-call closer is idempotent.
+func TestHookBridge_DoubleCloseIsNoOp(t *testing.T) {
+	store := NewStore()
+	closer := Install(store, NewAuditWriter(nil, nil))
+	closer()
+	closer() // must not panic, must not corrupt the next Install
+	// A fresh install must still work cleanly.
+	c2 := Install(store, NewAuditWriter(nil, nil))
+	const runID = "run-double001"
+	if _, err := store.Add(runID, FaultMissingFile, "", nil); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := executor.InjectIfActive(context.Background(), runID, executor.HookPointExecutorFileOpen, nil); err == nil {
+		t.Fatalf("fault did not fire after double-close + reinstall")
+	}
+	c2()
 }
