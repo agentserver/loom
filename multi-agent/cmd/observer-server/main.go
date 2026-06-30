@@ -192,10 +192,16 @@ func main() {
 	cfgPath := flag.String("config", "observer.yaml", "path to observer config")
 	migrateOnly := flag.Bool("migrate-only", false, "run database migrations and exit")
 	retentionCleanup := flag.Bool("retention-cleanup", false, "delete expired telemetry events and exit")
+	drainLocal := flag.Bool("drain-local", false, "POST to the local internal drain endpoint and exit (used by preStop hook)")
+	internalPort := flag.Int("internal-port", 0, "internal listener port for --drain-local (overrides config cluster.internal_listen_addr port)")
 	flag.Parse()
 
 	cfg, err := loadConfig(*cfgPath)
 	if err != nil {
+		if *drainLocal {
+			// On drain, config errors are fatal — the operator must fix them.
+			log.Fatalf("drain-local: failed to load config: %v", err)
+		}
 		log.Fatal(err)
 	}
 	if *migrateOnly {
@@ -211,6 +217,12 @@ func main() {
 			log.Fatal(err)
 		}
 		log.Printf("observer-server retention cleanup deleted %d events", deleted)
+		return
+	}
+	if *drainLocal {
+		if err := runDrainLocal(cfg, *internalPort); err != nil {
+			log.Fatalf("drain-local: %v", err)
+		}
 		return
 	}
 
@@ -466,6 +478,73 @@ func needsCommanderDDL(cfg *Config) bool {
 		return true
 	}
 	return false
+}
+
+// runDrainLocal is the implementation of the --drain-local subcommand used by
+// the Kubernetes preStop hook. It POSTs to the local internal drain endpoint
+// so that in-flight daemon WebSocket connections are gracefully closed before
+// the pod terminates. The loopback bypass on the internal listener (see C5)
+// means no auth header is required.
+//
+// Exit behaviour (called via log.Fatalf in main):
+//   - Returns non-nil on config-read errors (→ exit 1).
+//   - Returns nil (success) on HTTP 200 from the drain endpoint.
+//   - Returns nil on connection-refused — the server may already have stopped;
+//     this is not treated as an error so Kubernetes does not mark the preStop
+//     as failed (which would cause an immediate SIGKILL rather than the
+//     configured terminationGracePeriodSeconds).
+func runDrainLocal(cfg *Config, portOverride int) error {
+	// Determine the internal port to contact.
+	internalAddr := cfg.Cluster.InternalListenAddr
+	if portOverride > 0 {
+		internalAddr = fmt.Sprintf(":%d", portOverride)
+	}
+	if internalAddr == "" {
+		// Cluster mode is disabled or the config is incomplete; nothing to drain.
+		log.Printf("drain-local: cluster.internal_listen_addr not set; skipping drain")
+		return nil
+	}
+
+	// Extract port from the listen addr (e.g. ":8091" → "8091").
+	_, port, err := net.SplitHostPort(internalAddr)
+	if err != nil {
+		return fmt.Errorf("cannot parse cluster.internal_listen_addr %q: %w", internalAddr, err)
+	}
+	drainURL := fmt.Sprintf("http://127.0.0.1:%s/api/commander/_internal/drain", port)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, drainURL, nil)
+	if err != nil {
+		return fmt.Errorf("building drain request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		// connection-refused means the server already stopped — not an error.
+		if isConnectionRefused(err) {
+			log.Printf("drain-local: server already stopped (connection refused); exiting cleanly")
+			return nil
+		}
+		return fmt.Errorf("drain POST to %s: %w", drainURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("drain endpoint returned %d (expected 200)", resp.StatusCode)
+	}
+	log.Printf("drain-local: drain complete (HTTP 200 from %s)", drainURL)
+	return nil
+}
+
+// isConnectionRefused reports whether err (from http.Client.Do) is a
+// connection-refused error, which means the server has already exited.
+func isConnectionRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "connection refused")
 }
 
 func runRetentionCleanup(cfg *Config) (int64, error) {

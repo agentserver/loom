@@ -185,7 +185,7 @@ spec:
                   - --config
                   - /etc/observer/observer.yaml
                   - --drain-local
-                  - --internal-port=8091
+                  - --internal-port={{ .Values.cluster.internalServicePort }}
           {{- end }}
           readinessProbe:
             httpGet:
