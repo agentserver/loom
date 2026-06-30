@@ -287,6 +287,25 @@ commits make the RED/GREEN evidence reviewable).
      check → nil target check → mutex → duplicate check → store). Re-run;
      expect all 4 to pass.
 
+3.5. **Register target-aliasing rejection** *(post-review addition; the §7
+     (c) target-aliasing arm of the security mitigation)*
+   - RED: extend `Register`'s test surface with
+     `TestRegister_SameTargetUnderTwoNames_Rejected` and
+     `TestRegister_SamePairTwice_ErrAlreadyRegistered`. The first will
+     fail at compile time (`ErrTargetAlreadyRegistered` does not yet
+     exist); the second will fail at runtime because the implementation
+     from step 3 will silently accept the second Register and write
+     through the duplicate target.
+   - GREEN: add the `ErrTargetAlreadyRegistered` sentinel to
+     `errors.go`. In `Register`, after the name-duplicate check (which
+     by the spec §7 (c) precedence rule takes priority), add a linear
+     scan over `r.targets` rejecting the call if any existing entry has
+     the same `*bool`. The pre-existing FlagName of the conflicting
+     target is NOT surfaced in the sentinel; spec §2.5's `%w`-wrapping
+     rule reserves that surface for a future enrichment.
+   - Verify both tests now GREEN; verify the original `TestRegister_*`
+     tests still GREEN.
+
 4. **SetByName + List**
    - RED: leave `SetByName` and `List` as stubs (`func (r *Registry)
      SetByName(string, bool) error { return nil }`, `func (r *Registry)
@@ -336,12 +355,18 @@ commits make the RED/GREEN evidence reviewable).
    - GREEN: add `var Default = NewRegistry()` to `registry.go`. Re-run;
      expect pass.
 
-7. **Final smoke test**
+7. **Final smoke tests**
    - Add `TestSentinels_AreDistinct` as a non-RED regression smoke test
      (it cannot meaningfully fail at this point — two distinct
      `errors.New` values are distinct — and is included only to guard
      against an accidental `var ErrFoo = ErrBar` aliasing in a future
      refactor). Document this intent in a comment on the test function.
+   - Add `TestZeroValueRegistry_DoesNotPanic` (post-review addition)
+     covering `var r ablation.Registry; r.Register(...)`, which a
+     non-lazy `Register` would panic on (nil-map write). The current
+     implementation lazy-inits `r.targets` under the mutex; the test
+     pins that contract so a future refactor that removes the nil-check
+     fails here instead of in production.
 
 8. **Refactor pass**
    - Run `gofmt -w`, `go vet`, look for duplication.

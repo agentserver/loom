@@ -2,6 +2,7 @@ package ablation
 
 import (
 	"errors"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -13,18 +14,32 @@ import (
 func TestKnownFlags_CopyIsolation(t *testing.T) {
 	t.Parallel()
 	got := KnownFlags()
-	if len(got) != 8 {
-		t.Fatalf("KnownFlags(): want length 8, got %d (%v)", len(got), got)
+
+	// Spec §2.2 + §6 acceptance item 4: the 8 known flags must be returned
+	// in the documented declaration order. A weaker test (length-only or
+	// element-0-only) would let a maintainer alphabetise the slice and
+	// silently break consumers that index into it (e.g. CLI binders).
+	want := []FlagName{
+		NoCapabilityDiscovery,
+		NoTypedContracts,
+		NoDryRun,
+		NoContractFormalization,
+		NoUserPromotionPath,
+		NoAcceptanceGate,
+		NoRegistryLookup,
+		NoObserver,
 	}
-	if got[0] != NoCapabilityDiscovery {
-		t.Errorf("KnownFlags()[0]: want %q, got %q", NoCapabilityDiscovery, got[0])
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("KnownFlags() order:\n  want %v\n  got  %v", want, got)
 	}
 
-	// Mutate the returned slice; a subsequent call must be unaffected.
+	// Mutate the returned slice; a subsequent call must be unaffected
+	// (spec §4: callers may modify the returned slice; the package
+	// canonical source must not share-mutate).
 	got[0] = FlagName("CORRUPTED")
 	again := KnownFlags()
-	if again[0] != NoCapabilityDiscovery {
-		t.Errorf("KnownFlags()[0] after caller mutation: want %q, got %q (caller mutation leaked into registry)", NoCapabilityDiscovery, again[0])
+	if !reflect.DeepEqual(again, want) {
+		t.Errorf("KnownFlags() after caller mutation:\n  want %v\n  got  %v (caller mutation leaked into registry)", want, again)
 	}
 }
 
@@ -161,8 +176,16 @@ func TestRegister_SamePairTwice_ErrAlreadyRegistered(t *testing.T) {
 	if !errors.Is(err, ErrAlreadyRegistered) {
 		t.Errorf("Register(NoCapabilityDiscovery, &b) twice: want errors.Is ErrAlreadyRegistered, got %v", err)
 	}
+	// Today this assertion is trivially true (the sentinels are distinct
+	// bare errors.New values, so errors.Is(ErrAlreadyRegistered,
+	// ErrTargetAlreadyRegistered) is necessarily false). The check earns
+	// its keep once spec §2.5's %w-wrapping rule is exercised by a
+	// future enrichment that could otherwise produce a composite error
+	// satisfying both sentinels at once — flagging the precedence as
+	// part of the public contract rather than an artefact of bare
+	// returns.
 	if errors.Is(err, ErrTargetAlreadyRegistered) {
-		t.Errorf("Register of identical (name, target): unexpectedly matched ErrTargetAlreadyRegistered too (precedence rule broken)")
+		t.Errorf("Register of identical (name, target): also matched ErrTargetAlreadyRegistered (precedence rule violated under future %%w wrapping)")
 	}
 }
 

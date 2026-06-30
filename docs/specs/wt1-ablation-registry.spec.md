@@ -316,7 +316,8 @@ Mapped 1:1 to the todo_list row "接口 + 8 个 const 名；`go test
 6. Methods `Register(FlagName, *bool) error`, `SetByName(string, bool) error`,
    `List() []FlagName` exist and behave per §3.
 7. Sentinel errors `ErrUnknownFlag`, `ErrNilTarget`, `ErrAlreadyRegistered`,
-   `ErrNotRegistered` exist and are returned by the cases in §3.
+   `ErrNotRegistered`, and `ErrTargetAlreadyRegistered` (the §7 (c)
+   target-aliasing sentinel) exist and are returned by the cases in §3.
 8. `go test ./internal/ablation/... -count=1 -shuffle=on -race` passes.
 9. `go vet ./internal/ablation/...` clean; `gofmt -l internal/ablation/`
    empty.
