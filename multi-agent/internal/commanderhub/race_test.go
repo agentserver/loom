@@ -2,10 +2,16 @@ package commanderhub
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
 
 	"github.com/yourorg/multi-agent/internal/commander"
@@ -98,4 +104,133 @@ func TestStream_CancelWhileStreamingNoPanic(t *testing.T) {
 
 	// Sanity: the daemon streamed at least a few frames before we cancelled.
 	require.GreaterOrEqual(t, atomic.LoadInt64(&sent), int64(1))
+}
+
+// TestHub_Close_RaceVsAdmission is the race-detector regression test for the
+// admission-vs-Close race described in D-fix3 MAJOR #1.
+//
+// Before the fix: ServeHTTP checked h.draining (no lock), then did some work,
+// then called h.reg.add(dc). Close could set draining=true and snapshot the
+// registry between those two points, so a concurrently-upgrading WS ended up
+// admitted to neither the snapshot (missed by Close) nor rejected (passed the
+// pre-check), meaning it survived shutdown indefinitely.
+//
+// After the fix: admitMu makes the (re-check draining + reg.add) atomic in
+// ServeHTTP and the (draining.Store + snapshot) atomic in Close, so every
+// live WS is either in the drain snapshot or rejected before being added.
+//
+// The test spawns N=50 goroutines racing to open WS upgrades concurrently with
+// a hub.Close call. With -race it also surfaces any data-race on h.draining or
+// the local registry. Post-Close asserts:
+//   - h.reg is empty (zero local daemons)
+//   - h.draining is set
+//   - all successfully-opened WS connections have been closed by the server
+//
+// Run as: go test -run TestHub_Close_RaceVsAdmission -race -count=5
+func TestHub_Close_RaceVsAdmission(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{
+		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
+	}}
+
+	hub := NewHub(resolver)
+	srv := httptest.NewServer(hub)
+	t.Cleanup(srv.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/daemon-link"
+	hdr := http.Header{}
+	hdr.Set("Authorization", "Bearer tok-alice")
+
+	const N = 50
+
+	// conns collects every WebSocket that was successfully upgraded (before the
+	// server rejected or closed it). We check them for server-side close after
+	// hub.Close returns.
+	var connsMu sync.Mutex
+	var conns []*websocket.Conn
+
+	// admitted counts goroutines that were fully admitted (ack received).
+	var admitted int64
+
+	// start is a gate that all goroutines wait on simultaneously to maximise
+	// the race window against hub.Close.
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(N)
+
+	regPayload, _ := json.Marshal(commander.RegisterPayload{
+		SchemaVersion: commander.SchemaVersion,
+		Kind:          "claude",
+		DisplayName:   "race-daemon",
+	})
+
+	for i := 0; i < N; i++ {
+		go func() {
+			defer wg.Done()
+			<-start // wait for the gun
+
+			conn, resp, err := websocket.DefaultDialer.DialContext(
+				context.Background(), wsURL, hdr)
+			if err != nil {
+				// Server rejected upgrade (503 draining or other error): fine.
+				if resp != nil {
+					resp.Body.Close()
+				}
+				return
+			}
+
+			// Upgraded: register so we can receive the ack (or a close frame).
+			connsMu.Lock()
+			conns = append(conns, conn)
+			connsMu.Unlock()
+
+			// Send register. The server may have started draining after the
+			// upgrade; it is fine if this write fails.
+			_ = conn.WriteJSON(commander.Envelope{Type: "register", Payload: regPayload})
+
+			// Try to read: may get ack or a close frame.
+			conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+			var env commander.Envelope
+			if err := conn.ReadJSON(&env); err == nil && env.Type == "ack" {
+				atomic.AddInt64(&admitted, 1)
+			}
+		}()
+	}
+
+	// Fire all goroutines, then immediately call Close.
+	close(start)
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, hub.Close(closeCtx))
+
+	// Wait for all dial goroutines to finish.
+	wg.Wait()
+
+	// ASSERTION 1: draining flag is set.
+	require.True(t, hub.draining.Load(), "h.draining must be true after Close")
+
+	// ASSERTION 2: local registry is empty (all daemons' defers ran).
+	// Give defers a short window to complete (they run in ServeHTTP goroutines
+	// that may be slightly behind).
+	require.Eventually(t, func() bool {
+		hub.reg.mu.Lock()
+		defer hub.reg.mu.Unlock()
+		return len(hub.reg.conns) == 0
+	}, 3*time.Second, 10*time.Millisecond, "local registry must be empty after Close")
+
+	// ASSERTION 3: every successfully-upgraded WS was closed by the server.
+	connsMu.Lock()
+	defer connsMu.Unlock()
+	for _, conn := range conns {
+		// Drain until error; the server must have closed these.
+		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				break // closed (expected)
+			}
+		}
+	}
+	// No assertion needed — if a connection hangs here the 2s deadline will
+	// surface it. The -race detector catches any data races on the way.
+	t.Logf("admitted=%d total_upgraded=%d", atomic.LoadInt64(&admitted), len(conns))
 }

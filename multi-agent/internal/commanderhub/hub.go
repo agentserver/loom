@@ -55,9 +55,22 @@ type Hub struct {
 	sessionCache *sessionListCache
 	cmdSeq       atomic.Int64 // generates per-command IDs (see proxy.go)
 
-	// draining is set to 1 when Close is called. ServeHTTP checks this flag and
-	// returns 503 for any new daemon WebSocket upgrade attempts during shutdown.
+	// draining is set to true when Close (or drainHandler) is called. ServeHTTP
+	// checks this flag and returns 503 for any new daemon WebSocket upgrade
+	// attempts during shutdown.
 	draining atomic.Bool
+
+	// admitMu serialises the draining-flag check + h.reg.add(dc) admission
+	// window in ServeHTTP against the draining-flag set + registry snapshot in
+	// Close/drainHandler. Holding admitMu for the entire WS read loop would
+	// deadlock; it is held only for the narrow critical section:
+	//   ServeHTTP:  Lock → re-check draining → reg.add → Unlock
+	//   Close:      Lock → draining.Store(true) → snapshot → Unlock → drain
+	// Any concurrent upgrade either finishes add before Close snapshots (and
+	// gets included in the drain snapshot), or sees draining=true after Close
+	// sets it (and returns 503 without adding to the registry). The read path
+	// (readLoop, routeFrame) never touches admitMu.
+	admitMu sync.Mutex
 
 	// TurnTimeout is the observer-side safety max applied to a session_turn
 	// command. Turns continue draining after the browser/SSE client disconnects;
@@ -80,8 +93,8 @@ func NewHub(resolver identity.Resolver) *Hub {
 
 // ServeHTTP implements GET /api/daemon-link.
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Reject new daemon registrations while the hub is draining. Returning 503
-	// causes the daemon client to back off and reconnect to another pod.
+	// Fast pre-check (no lock). If we are already draining we can bail out
+	// before doing any token resolution or WS upgrade — cheap path.
 	if h.draining.Load() {
 		http.Error(w, "observer draining", http.StatusServiceUnavailable)
 		return
@@ -199,7 +212,24 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	routingID := dc.routingID()
 
+	// Admission critical section: re-check draining and add to local registry
+	// atomically under admitMu so that Close cannot snapshot the registry between
+	// the check and the add, leaving a live connection un-drained.
+	h.admitMu.Lock()
+	if h.draining.Load() {
+		h.admitMu.Unlock()
+		// We passed the fast pre-check but Close raced us here. Reject the
+		// upgrade: send a close frame and close the connection.
+		dc.writeMu.Lock()
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseServiceRestart, "observer draining"),
+			time.Now().Add(wsWriteWait))
+		dc.writeMu.Unlock()
+		conn.Close()
+		return
+	}
 	h.reg.add(dc)
+	h.admitMu.Unlock()
 
 	// Teardown (reverse order of setup):
 	// 1. Stop heartbeat first so it cannot touch conn after we start removing.
@@ -281,18 +311,24 @@ func (h *Hub) attachSharedRegistry(cluster ClusterRuntime, sr *sharedRegistry, f
 //  4. Wait on each dc.done channel up to the ctx deadline (WaitGroup + ctx select).
 //  5. Close idle HTTP connections held by the forwardClient (if any).
 func (h *Hub) Close(ctx context.Context) error {
-	// Step 1: Mark as draining so no new daemon WS upgrades are admitted.
+	// Step 1+2 (atomic): Under admitMu, set draining=true and snapshot the
+	// local registry. Any concurrent ServeHTTP that is between the pre-check
+	// and its admitMu.Lock will either:
+	//   (a) see draining=true after acquiring admitMu and bail out, OR
+	//   (b) have already called h.reg.add(dc) before we acquired admitMu and
+	//       its dc is therefore already in the snapshot below.
+	// Either way, no live WS connection escapes the drain.
+	h.admitMu.Lock()
 	h.draining.Store(true)
-
-	// Step 2: Snapshot all local daemons under the registry lock.
-	h.reg.mu.Lock()
 	var daemons []*daemonConn
+	h.reg.mu.Lock()
 	for _, m := range h.reg.conns {
 		for _, dc := range m {
 			daemons = append(daemons, dc)
 		}
 	}
 	h.reg.mu.Unlock()
+	h.admitMu.Unlock()
 
 	// Step 3: Send observer_draining event and close WS for every local daemon.
 	// This mirrors drainAllLocalDaemons but we also need the dc.done channel
