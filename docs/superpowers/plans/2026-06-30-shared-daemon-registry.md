@@ -1385,7 +1385,13 @@ git add internal/commanderhub/turn_state.go \
         internal/commanderhub/turn_state_test.go \
         internal/commanderhub/hub.go \
         internal/commanderhub/http.go \
-        internal/commanderhub/tree.go
+        internal/commanderhub/http_test.go \
+        internal/commanderhub/tree.go \
+        internal/commanderhub/tree_test.go \
+        internal/commanderhub/race_test.go \
+        internal/commanderhub/livelock_test.go \
+        internal/commanderhub/e2e_test.go \
+        internal/commanderhub/integration_test.go
 git commit -m "refactor(commanderhub): turnKey.daemonID → shortID; extract turnStateBackend interface
 
 In-memory turnStateStore becomes *memTurnStore implementing a new
@@ -2586,7 +2592,7 @@ func TestServeHTTP_ClusterMode_RefusesWSOnUpsertFailure(t *testing.T) {
 	require.Equal(t, commander.ErrCodeBackendUnavailable, ep.Code)
 
 	require.NoError(t, mock.ExpectationsWereMet())
-	require.Zero(t, hub.reg.daemons(owner{userID: "alice", workspaceID: "W1"}), "must not admit to localReg on failed upsert")
+	require.Empty(t, hub.reg.daemons(owner{userID: "alice", workspaceID: "W1"}), "must not admit to localReg on failed upsert")
 }
 
 func TestServeHTTP_ClusterMode_RequiresShortID(t *testing.T) {
