@@ -135,3 +135,16 @@ CREATE TABLE IF NOT EXISTS commander_telemetry_buckets (
 );
 CREATE INDEX IF NOT EXISTS commander_telemetry_buckets_updated_idx
     ON commander_telemetry_buckets (updated_at);
+
+-- Identity revocation propagation table (D4).
+-- Pods poll this table to learn about cross-pod cache invalidations.
+-- Rows are trimmed by the subscriber's cleanup goroutine after 1 hour.
+CREATE TABLE IF NOT EXISTS commander_identity_revocations (
+    seq         BIGSERIAL    PRIMARY KEY,
+    key         TEXT         NOT NULL,
+    revoked_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_commander_identity_revocations_seq
+    ON commander_identity_revocations (seq);
+CREATE INDEX IF NOT EXISTS idx_commander_identity_revocations_revoked_at
+    ON commander_identity_revocations (revoked_at);

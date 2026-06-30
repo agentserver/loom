@@ -641,11 +641,19 @@ func buildIdentityResolver(cfg *Config, st observerstore.ManagedStore) (identity
 			BaseURL: strings.TrimSpace(cfg.Identity.Agentserver.URL),
 			Timeout: cfg.Identity.Agentserver.RequestTimeout.Duration(),
 		})
+		var cacheOpts []identity.Option
+		// In postgres (multi-pod) mode, attach a cross-pod revocation channel so
+		// token invalidations propagate to all pods without waiting for TTL expiry.
+		if cfg.Store.Driver == "postgres" {
+			cacheOpts = append(cacheOpts,
+				identity.WithRevocationChannel(identity.NewPGRevocationChannel(st.DB())),
+			)
+		}
 		resolvers = append(resolvers, identity.NewCache(upstream, identity.CacheConfig{
 			FreshTTL:   cfg.Identity.Agentserver.FreshTTL.Duration(),
 			StaleGrace: cfg.Identity.Agentserver.StaleGrace.Duration(),
 			Capacity:   cfg.Identity.Agentserver.CacheCapacity,
-		}))
+		}, cacheOpts...))
 	}
 	if len(resolvers) == 0 {
 		return nil, errors.New("at least one identity source must be enabled")

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"log"
 	"math/rand"
 	"sync"
 	"time"
@@ -17,7 +18,36 @@ const (
 	defaultFreshTTL      = 180 * time.Second
 	defaultStaleGrace    = 15 * time.Minute
 	defaultCacheCapacity = 65536
+
+	// recentPublishCapacity is the size of the dedupe ring used to suppress
+	// re-logging when self-published revocations loop back via Subscribe.
+	recentPublishCapacity = 32
 )
+
+// RevocationChannel propagates identity cache invalidations across pods.
+type RevocationChannel interface {
+	// Subscribe starts delivering revocation events to onRevoke.
+	// Returns a stop func; safe to call from any goroutine.
+	// Events deliver only the cache key string (a hex-encoded SHA-256 of the
+	// token) — never the secret material itself.
+	Subscribe(ctx context.Context, onRevoke func(key string)) (stop func(), err error)
+	// Publish broadcasts a revocation to all subscribers (including self).
+	Publish(ctx context.Context, key string) error
+}
+
+// Option is a functional option for NewCache.
+type Option func(*cacheOptions)
+
+type cacheOptions struct {
+	revocation RevocationChannel
+}
+
+// WithRevocationChannel attaches a cross-pod revocation channel to the cache.
+// When a cache entry is evicted locally the key is published; when a remote
+// revocation arrives the local entry is evicted.
+func WithRevocationChannel(c RevocationChannel) Option {
+	return func(o *cacheOptions) { o.revocation = c }
+}
 
 type CacheConfig struct {
 	FreshTTL   time.Duration
@@ -31,11 +61,13 @@ type CacheConfig struct {
 type cacheResolver struct {
 	delegate Resolver
 	cfg      CacheConfig
+	opts     cacheOptions
 
-	mu      sync.Mutex
-	entries map[string]*list.Element
-	lru     *list.List
-	group   singleflight.Group
+	mu            sync.Mutex
+	entries       map[string]*list.Element
+	lru           *list.List
+	recentPublish []string // ring buffer for dedupe
+	group         singleflight.Group
 }
 
 type cacheEntry struct {
@@ -50,7 +82,11 @@ type resolveResult struct {
 	err      error
 }
 
-func NewCache(delegate Resolver, cfg CacheConfig) Resolver {
+// NewCache returns a caching Resolver wrapping delegate.
+// Optional Option values (e.g. WithRevocationChannel) extend the cache
+// with cross-pod invalidation; callers that pass no opts retain the
+// existing single-pod behaviour unchanged.
+func NewCache(delegate Resolver, cfg CacheConfig, opts ...Option) Resolver {
 	if delegate == nil {
 		panic("identity: nil cache delegate")
 	}
@@ -71,12 +107,21 @@ func NewCache(delegate Resolver, cfg CacheConfig) Resolver {
 			return 0.8 + rand.Float64()*0.4
 		}
 	}
-	return &cacheResolver{
+	var options cacheOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+	c := &cacheResolver{
 		delegate: delegate,
 		cfg:      cfg,
+		opts:     options,
 		entries:  make(map[string]*list.Element),
 		lru:      list.New(),
 	}
+	if options.revocation != nil {
+		c.subscribe()
+	}
+	return c
 }
 
 func (c *cacheResolver) Resolve(ctx context.Context, token string) (Identity, error) {
@@ -168,12 +213,75 @@ func (c *cacheResolver) put(key string, ident Identity, now time.Time) {
 	}
 }
 
+// evict removes a key from the local cache and, if a revocation channel is
+// configured, publishes the invalidation to other pods.
 func (c *cacheResolver) evict(key string) {
+	c.localEvict(key)
+	if c.opts.revocation != nil {
+		// Pre-register this key so that when the subscribe loop receives the
+		// broadcast of our own publish, it can suppress the redundant log.
+		c.markSelfPublished(key)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := c.opts.revocation.Publish(ctx, key); err != nil {
+			log.Printf("identity cache: revocation publish error key_prefix=%s len=%d: %v",
+				keyPrefix(key), len(key), err)
+		}
+	}
+}
+
+// localEvict removes a key from the local cache only. Safe to call when a
+// remote revocation arrives — does not trigger a further Publish.
+func (c *cacheResolver) localEvict(key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if elem, ok := c.entries[key]; ok {
 		c.removeElement(elem)
 	}
+}
+
+// subscribe starts the background goroutine that receives remote revocations
+// and applies them via localEvict. The goroutine exits when the cache is
+// garbage-collected (we use a background context; real lifetime management is
+// left to the caller via RevocationChannel.Subscribe's stop func, but we
+// deliberately never call stop here to keep the cache live for the process
+// lifetime — matching the existing single-pod cache lifecycle).
+func (c *cacheResolver) subscribe() {
+	ctx := context.Background()
+	_, err := c.opts.revocation.Subscribe(ctx, func(key string) {
+		if c.isSelfPublished(key) {
+			// Self-loop: localEvict would be a no-op; suppress the log.
+			return
+		}
+		c.localEvict(key)
+	})
+	if err != nil {
+		log.Printf("identity cache: revocation subscribe error: %v", err)
+	}
+}
+
+// markSelfPublished records key in the dedupe ring so that the subscribe
+// callback can recognise it as a self-loop and suppress logging.
+func (c *cacheResolver) markSelfPublished(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.recentPublish) >= recentPublishCapacity {
+		copy(c.recentPublish, c.recentPublish[1:])
+		c.recentPublish = c.recentPublish[:len(c.recentPublish)-1]
+	}
+	c.recentPublish = append(c.recentPublish, key)
+}
+
+// isSelfPublished returns true if this pod recently published key itself.
+func (c *cacheResolver) isSelfPublished(key string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, k := range c.recentPublish {
+		if k == key {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *cacheResolver) removeElement(elem *list.Element) {
@@ -187,4 +295,12 @@ func (c *cacheResolver) removeElement(elem *list.Element) {
 func tokenKey(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
+}
+
+// keyPrefix returns the first 8 characters of a key for safe logging.
+func keyPrefix(key string) string {
+	if len(key) >= 8 {
+		return key[:8]
+	}
+	return key
 }
