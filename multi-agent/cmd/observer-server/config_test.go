@@ -184,6 +184,41 @@ func TestValidateConfig_RejectsEnabledWithoutInternalAddr(t *testing.T) {
 	require.Contains(t, err.Error(), "internal_listen_addr")
 }
 
+// TestValidateConfig_ExplicitStringDurations verifies that human-readable
+// duration strings (e.g. "45s") parse correctly from YAML into time.Duration.
+func TestValidateConfig_ExplicitStringDurations(t *testing.T) {
+	cfg := loadConfigFromString(t, `
+listen_addr: ":8090"
+store:
+  driver: postgres
+  postgres:
+    dsn_env: OBSERVER_DATABASE_URL
+identity:
+  legacy_api_keys:
+    enabled: true
+api_keys:
+  - id: ak-default
+    key: ak_secret
+cluster:
+  enabled: true
+  advertise_url: https://observer-pod-1.svc:8443
+  internal_listen_addr: ":8444"
+  secret: `+validClusterSecret+`
+  heartbeat_interval: 45s
+  heartbeat_jitter: 3s
+  sweep_interval: 90s
+  daemon_expiry_after: 120s
+  forward_timeout: 8s
+  drain_timeout: 15s
+`)
+	require.Equal(t, 45*time.Second, cfg.Cluster.HeartbeatInterval)
+	require.Equal(t, 3*time.Second, cfg.Cluster.HeartbeatJitter)
+	require.Equal(t, 90*time.Second, cfg.Cluster.SweepInterval)
+	require.Equal(t, 120*time.Second, cfg.Cluster.DaemonExpiryAfter)
+	require.Equal(t, 8*time.Second, cfg.Cluster.ForwardTimeout)
+	require.Equal(t, 15*time.Second, cfg.Cluster.DrainTimeout)
+}
+
 // TestAdvertiseHash verifies the helper produces a 4-char hex prefix.
 func TestAdvertiseHash(t *testing.T) {
 	h := advertiseHash("https://observer-pod-1.svc:8443")
