@@ -383,6 +383,60 @@ func TestEnforceContract_BothAblations_ContractEntirelyWins(t *testing.T) {
 		"NoContractFormalization wins — NoTypedContracts skip line must NOT appear because Validate is never reached")
 }
 
+// TestDraftTaskContract_OutputPassesEnforceContract pins the round-trip
+// invariant: the contract emitted by draft_task_contract MUST be
+// acceptable to EnforceContract without any further operator edits
+// beyond a recovery_hint (which the draft tool leaves empty and prompts
+// the operator to fill via clarification_questions).
+//
+// Regression: pre-fix, the draft tool left ReadArtifacts as a nil
+// slice; the operator's subsequent submit_contract_task call would
+// then fail with "data_contract.read_artifacts is required" — a poor
+// UX hazard caught by PR review.
+func TestDraftTaskContract_OutputPassesEnforceContract(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) { return nil, nil },
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) { return nil, nil },
+	}
+	tools := newTestTools(t, sdk)
+	draftTool := toolByName(t, tools, "draft_task_contract")
+
+	// Minimum-input draft: only goal. All other fields take defaults.
+	draftRaw, err := draftTool.Call(context.Background(),
+		json.RawMessage(`{"goal":"do a thing"}`))
+	require.NoError(t, err)
+
+	var draftResp struct {
+		Contract               contract.TaskContract `json:"contract"`
+		ClarificationQuestions []string              `json:"clarification_questions"`
+	}
+	require.NoError(t, json.Unmarshal(draftRaw, &draftResp))
+
+	// The drafted contract intentionally leaves recovery_hint empty so
+	// the operator fills it via the clarification flow. Fill it here to
+	// simulate a fully-completed-then-submitted contract.
+	require.Empty(t, draftResp.Contract.RecoveryHint,
+		"draft tool should NOT auto-fill recovery_hint (operator must own this)")
+	draftResp.Contract.RecoveryHint = "fill-in by operator before submit"
+
+	// EnforceContract should now accept the contract. Pre-fix this
+	// failed because ReadArtifacts was a nil slice.
+	require.NoError(t, contract.EnforceContract(&draftResp.Contract),
+		"draft tool output must be valid after operator fills recovery_hint")
+
+	// And the clarification flow must explicitly tell the operator
+	// recovery_hint is required.
+	var sawRecoveryHintQuestion bool
+	for _, q := range draftResp.ClarificationQuestions {
+		if strings.Contains(q, "recovery_hint") {
+			sawRecoveryHintQuestion = true
+			break
+		}
+	}
+	require.True(t, sawRecoveryHintQuestion,
+		"clarification_questions must mention recovery_hint; got: %v", draftResp.ClarificationQuestions)
+}
+
 // --- helpers ---
 
 // filepathAbs returns the absolute path of the test file's directory.

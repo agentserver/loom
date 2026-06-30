@@ -614,12 +614,76 @@ func TestPresentFields_TrimmedStringAbsent(t *testing.T) {
 	}
 }
 
+// TestPresentFields_WriteTargetsCarveOut pins the §2.6 carve-out for
+// DataContract.WriteTargets: unlike ReadArtifacts (where non-nil empty
+// IS a declaration of "no inputs"), an empty write_targets slice
+// declares a task that produces nothing observable, which collectMissing
+// rejects under schema-enforce. The bitmap mirrors that rejection.
+//
+// Regression guard: under DisableSchemaEnforce, a contract with
+// WriteTargets=[]WriteTarget{} previously emitted a 7/7 completeness
+// event (presentFields reported write_targets as "present" while
+// collectMissing would have rejected it). The two signals must agree.
+func TestPresentFields_WriteTargetsCarveOut(t *testing.T) {
+	t.Run("empty slice is absent", func(t *testing.T) {
+		c := validContract()
+		c.DataContract.WriteTargets = []WriteTarget{}
+		got := presentFields(c)
+		if containsString(got, lifecycleWriteTargets) {
+			t.Errorf("empty WriteTargets must NOT be in bitmap (productive-field carve-out); got %v", got)
+		}
+	})
+	t.Run("nil slice is absent", func(t *testing.T) {
+		c := validContract()
+		c.DataContract.WriteTargets = nil
+		got := presentFields(c)
+		if containsString(got, lifecycleWriteTargets) {
+			t.Errorf("nil WriteTargets must NOT be in bitmap; got %v", got)
+		}
+	})
+	t.Run("one entry is present", func(t *testing.T) {
+		c := validContract() // already has one entry
+		got := presentFields(c)
+		if !containsString(got, lifecycleWriteTargets) {
+			t.Errorf("WriteTargets with one entry must be in bitmap; got %v", got)
+		}
+	})
+}
+
+// TestPresentFields_BitmapAgreesWithCollectMissingForWriteTargets pins
+// the invariant that presentFields and collectMissing always agree on
+// write_targets: a contract is rejected by collectMissing iff
+// presentFields counts the field as absent. Without this pin, the two
+// could drift again on a future refactor.
+func TestPresentFields_BitmapAgreesWithCollectMissingForWriteTargets(t *testing.T) {
+	cases := []struct {
+		name         string
+		writeTargets []WriteTarget
+	}{
+		{"nil", nil},
+		{"empty", []WriteTarget{}},
+		{"one entry", []WriteTarget{{Type: WriteTargetArtifact, Kind: "code", Name: "x.go"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validContract()
+			c.DataContract.WriteTargets = tc.writeTargets
+			missing := collectMissing(c)
+			inBitmap := containsString(presentFields(c), lifecycleWriteTargets)
+			rejected := containsString(missing, "data_contract.write_targets")
+			if rejected == inBitmap {
+				t.Errorf("collectMissing.rejected=%v but presentFields.inBitmap=%v — signals must agree (write_targets=%v)", rejected, inBitmap, tc.writeTargets)
+			}
+		})
+	}
+}
+
 // TestPresentFields_SuccessCriteriaCarveOut pins the §2.6 carve-out for
-// Intent.SuccessCriteria: unlike ReadArtifacts/WriteTargets (where
-// non-nil empty IS a declaration), an empty success_criteria is a
-// meaningless oracle and counts as ABSENT. A future refactor that
-// "unifies" the slice rule across all slice-typed fields would silently
-// drift the completeness signal; this test fails loudly in that case.
+// Intent.SuccessCriteria: unlike ReadArtifacts (where non-nil empty IS
+// a declaration), an empty success_criteria is a meaningless oracle and
+// counts as ABSENT. A future refactor that "unifies" the slice rule
+// across all slice-typed fields would silently drift the completeness
+// signal; this test fails loudly in that case.
 func TestPresentFields_SuccessCriteriaCarveOut(t *testing.T) {
 	t.Run("empty slice is absent", func(t *testing.T) {
 		c := validContract()
@@ -647,38 +711,81 @@ func TestPresentFields_SuccessCriteriaCarveOut(t *testing.T) {
 	})
 }
 
-// T35 — sink swap under concurrency is race-free.
+// T35 — sink swap under concurrency is race-free AND visibility-correct.
+//
+// Split into two parts:
+//
+//  1. Concurrent fan-out — many goroutines hammer Validate while a
+//     swap happens mid-run; `-race` catches torn reads/writes and
+//     the total-events assertion catches a swap that drops events.
+//  2. Deterministic visibility — explicit before/after sequencing to
+//     prove the swap is observable: events emitted AFTER the swap
+//     land in the new sink, events emitted BEFORE land in the old.
+//
+// Without part 2, a regression like "Swap stores the new sink but
+// currentSink reads from a stale cache" would still pass the
+// total-only assertion of the old version of this test.
 func TestEventSink_SwapAtomic(t *testing.T) {
-	// Two spies; many goroutines hammer Validate; final assertion is
-	// `-race` clean + at least one event in each spy.
-	old := RegisterCompletenessSink(nil)
-	t.Cleanup(func() { RegisterCompletenessSink(old) })
+	t.Run("concurrent fan-out is race-free and lossless", func(t *testing.T) {
+		old := RegisterCompletenessSink(nil)
+		t.Cleanup(func() { RegisterCompletenessSink(old) })
 
-	spyA := &spySink{}
-	spyB := &spySink{}
-	RegisterCompletenessSink(spyA)
+		spyA := &spySink{}
+		spyB := &spySink{}
+		RegisterCompletenessSink(spyA)
 
-	const N = 100
-	var wg sync.WaitGroup
-	wg.Add(N + 1)
-	c := validContract()
-	go func() {
-		defer wg.Done()
-		// Mid-run swap: half the events land in A, half in B (ish).
-		RegisterCompletenessSink(spyB)
-	}()
-	for i := 0; i < N; i++ {
+		const N = 100
+		var wg sync.WaitGroup
+		wg.Add(N + 1)
+		c := validContract()
 		go func() {
 			defer wg.Done()
-			_ = c.Validate()
+			RegisterCompletenessSink(spyB)
 		}()
-	}
-	wg.Wait()
+		for i := 0; i < N; i++ {
+			go func() {
+				defer wg.Done()
+				_ = c.Validate()
+			}()
+		}
+		wg.Wait()
 
-	total := len(spyA.snapshot()) + len(spyB.snapshot())
-	if total != N {
-		t.Errorf("total events across both spies = %d, want %d", total, N)
-	}
+		total := len(spyA.snapshot()) + len(spyB.snapshot())
+		if total != N {
+			t.Errorf("total events across both spies = %d, want %d", total, N)
+		}
+	})
+
+	t.Run("swap visibility is sequenced — before-swap events land in old sink, after-swap in new", func(t *testing.T) {
+		old := RegisterCompletenessSink(nil)
+		t.Cleanup(func() { RegisterCompletenessSink(old) })
+
+		spyA := &spySink{}
+		spyB := &spySink{}
+		c := validContract()
+
+		// Emit one event before the swap.
+		RegisterCompletenessSink(spyA)
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		// Swap. Returned value is the prior sink.
+		prior := RegisterCompletenessSink(spyB)
+		if prior != spyA {
+			t.Errorf("RegisterCompletenessSink returned prior=%v, want spyA=%v", prior, spyA)
+		}
+		// Emit one event after the swap.
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+
+		if got := len(spyA.snapshot()); got != 1 {
+			t.Errorf("spyA received %d events, want 1 (event emitted before swap must land in spyA)", got)
+		}
+		if got := len(spyB.snapshot()); got != 1 {
+			t.Errorf("spyB received %d events, want 1 (event emitted after swap must land in spyB)", got)
+		}
+	})
 }
 
 // T36 — nil sink is a no-op (no panic).

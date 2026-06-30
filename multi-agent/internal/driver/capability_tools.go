@@ -75,7 +75,9 @@ func (d *draftTaskContractTool) InputSchema() json.RawMessage {
 			"goal":{"type":"string"},
 			"business_context":{"type":"string"},
 			"success_criteria":{"type":"array","items":{"type":"string"}},
+			"read_artifacts":{"type":"array","items":{"type":"object","properties":{"artifact_id":{"type":"string"},"kind":{"type":"string"},"name":{"type":"string"},"sha256":{"type":"string"}}}},
 			"write_targets":{"type":"array","items":{"type":"object","properties":{"type":{"type":"string"},"kind":{"type":"string"},"name":{"type":"string"}}}},
+			"recovery_hint":{"type":"string"},
 			"required_skills":{"type":"array","items":{"type":"string"}},
 			"required_tools":{"type":"array","items":{"type":"string"}},
 			"resources":{"type":"object"},
@@ -92,7 +94,9 @@ func (d *draftTaskContractTool) Call(ctx context.Context, raw json.RawMessage) (
 		Goal            string                 `json:"goal"`
 		BusinessContext string                 `json:"business_context"`
 		SuccessCriteria []string               `json:"success_criteria"`
+		ReadArtifacts   []contract.ArtifactRef `json:"read_artifacts"`
 		WriteTargets    []contract.WriteTarget `json:"write_targets"`
+		RecoveryHint    string                 `json:"recovery_hint"`
 		RequiredSkills  []string               `json:"required_skills"`
 		RequiredTools   []string               `json:"required_tools"`
 		Resources       json.RawMessage        `json:"resources"`
@@ -112,6 +116,23 @@ func (d *draftTaskContractTool) Call(ctx context.Context, raw json.RawMessage) (
 	if len(args.WriteTargets) == 0 {
 		args.WriteTargets = []contract.WriteTarget{{Type: contract.WriteTargetArtifact, Kind: "document", Name: "result.md"}}
 	}
+	// §A2 lifecycle: read_artifacts must be a non-nil slice. The operator
+	// can pass an explicit `[]` (or simply not pass the key at all and
+	// rely on this default) to declare "no inputs". Leaving the field
+	// nil here would produce a draft that fails subsequent
+	// submit_contract_task with a cryptic "data_contract.read_artifacts
+	// is required" — a poor UX hazard worth absorbing here.
+	if args.ReadArtifacts == nil {
+		args.ReadArtifacts = []contract.ArtifactRef{}
+	}
+	// Same UX hazard for capability_requirements: the draft tool must
+	// emit a contract that passes EnforceContract end-to-end. We default
+	// the skills slice to non-nil empty so the §2.6 capability_requirements
+	// "any sub-field non-nil = present" check passes. The operator can
+	// override by passing required_skills / required_tools / resources.
+	if args.RequiredSkills == nil && args.RequiredTools == nil && len(args.Resources) == 0 {
+		args.RequiredSkills = []string{}
+	}
 	for idx := range args.WriteTargets {
 		if args.WriteTargets[idx].Type == "" {
 			args.WriteTargets[idx].Type = contract.WriteTargetArtifact
@@ -129,7 +150,11 @@ func (d *draftTaskContractTool) Call(ctx context.Context, raw json.RawMessage) (
 			BusinessContext: args.BusinessContext,
 			SuccessCriteria: args.SuccessCriteria,
 		},
-		DataContract: contract.DataContract{WriteTargets: args.WriteTargets},
+		DataContract: contract.DataContract{
+			ReadArtifacts: args.ReadArtifacts,
+			WriteTargets:  args.WriteTargets,
+		},
+		RecoveryHint: args.RecoveryHint,
 		ExecutionPolicy: contract.ExecutionPolicy{
 			Routing:        routing,
 			AllowedTargets: args.AllowedTargets,

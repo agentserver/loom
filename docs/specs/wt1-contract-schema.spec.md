@@ -366,26 +366,37 @@ order, so a downstream serializer can compute the bitmap deterministically.
 
 `PresentFields` bitmap-counting rule (precise, addresses round-2 review):
 
-- `ReadArtifacts` and `WriteTargets` (slice-typed): present iff the
-  slice is non-nil — length zero is fine. This matches §2.2.1's
-  nil-vs-empty rule: declaring `[]` IS a declaration of "I considered
-  the inputs/outputs; there are none".
-- `Intent.SuccessCriteria` (slice-typed) is a deliberate carve-out:
-  present iff the slice is non-nil AND contains at least one
-  trimmed-non-empty entry. This field is the success_oracle per §A2 —
-  an empty slice or a slice of whitespace-only strings is a
-  meaningless oracle, not an "I considered there are none"
-  declaration, and `collectMissing` correctly rejects such a contract
-  under schema-enforce (§2.2 #2). The bitmap mirrors that rejection so
-  the completeness signal does not contradict the validity signal. The
-  asymmetry vs ReadArtifacts/WriteTargets is intentional and stems
-  from the field's semantic role (oracle, not inventory).
-- A struct-typed field (`CapabilityRequirements`, `ExecutionPolicy`)
-  counts as present iff at least one of its sub-fields is non-zero (for
-  `CapabilityRequirements`: `len(Skills)+len(Tools)+len(Resources) > 0`;
-  for `ExecutionPolicy`: any of `Routing`, `CodePersistence`,
-  `ExposeCodeToUser`, `WriteMode` non-empty — typically true after
-  `ApplyDefaults`).
+- `ReadArtifacts` (slice-typed): present iff the slice is non-nil —
+  length zero is fine. This matches §2.2.1's nil-vs-empty rule:
+  declaring `[]` IS a declaration of "I considered the inputs; there
+  are none". Inputs can legitimately be empty (e.g. "generate hello
+  world" has no read artifacts).
+- `Intent.SuccessCriteria` and `DataContract.WriteTargets` (slice-typed)
+  are deliberate carve-outs: present iff the slice contains at least
+  one trimmed-non-empty entry (for SuccessCriteria) / at least one
+  entry (for WriteTargets). Both are productive fields: an empty
+  success_criteria is a meaningless oracle, and an empty write_targets
+  declares a task that produces nothing observable — neither is an "I
+  considered there are none" statement in any useful sense.
+  `collectMissing` correctly rejects both under schema-enforce
+  (§2.2 #2, §2.2 #4); the bitmap mirrors that rejection so the
+  completeness signal does not contradict the validity signal. The
+  asymmetry vs ReadArtifacts is intentional and stems from the
+  productive-vs-inventory distinction.
+- `CapabilityRequirements` (struct-typed): present iff at least one
+  sub-field is non-nil — the §2.2.1 nil-vs-empty rule applied across
+  the three sub-fields (`Skills`, `Tools`, `Resources`). A contract
+  that declares `Skills: []string{}` (or any one of the three as
+  non-nil empty) is communicating "I considered capability
+  requirements; there are none required" — a valid declaration for an
+  opaque/generic task. A fully-zero struct (all three sub-fields nil)
+  is what fails — that is the "operator forgot the field entirely"
+  case.
+- `ExecutionPolicy` (struct-typed) is present iff any of `Routing`,
+  `CodePersistence`, `ExposeCodeToUser`, `WriteMode` is non-empty.
+  After `ApplyDefaults` this is always true (the policy enums get
+  filled). The check exists for the test path that constructs a
+  zero-value policy and skips `ApplyDefaults`.
 - A string field (`Intent.Goal`, `RecoveryHint`) counts as present iff
   `strings.TrimSpace(...) != ""`.
 

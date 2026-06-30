@@ -134,7 +134,16 @@ func presentFields(tc TaskContract) []string {
 	if tc.DataContract.ReadArtifacts != nil {
 		out = append(out, lifecycleReadArtifacts)
 	}
-	if tc.DataContract.WriteTargets != nil {
+	// WriteTargets parallels SuccessCriteria as a "must have at least one
+	// entry" field (§2.6 carve-out): an empty write_targets slice is a
+	// meaningless output declaration (the task produces nothing observable)
+	// rather than a "considered the outputs; there are none" statement, so
+	// the bitmap counts it as absent. This matches collectMissing's
+	// `len == 0` rejection rule so the validity and completeness signals
+	// agree. The asymmetry vs ReadArtifacts is intentional and parallels
+	// the SuccessCriteria carve-out: outputs and oracles are productive
+	// fields; inputs can legitimately be empty.
+	if len(tc.DataContract.WriteTargets) > 0 {
 		out = append(out, lifecycleWriteTargets)
 	}
 	if capabilityRequirementsPresent(tc.CapabilityRequirements) {
@@ -159,7 +168,14 @@ func hasNonEmptyEntry(values []string) bool {
 }
 
 func capabilityRequirementsPresent(cr CapabilityRequirements) bool {
-	return len(cr.Skills) > 0 || len(cr.Tools) > 0 || len(cr.Resources) > 0
+	// Present iff ANY sub-field is non-nil (slices and Resources alike).
+	// This matches the nil-vs-empty rule from §2.2.1 applied at the
+	// struct level: an explicit `Skills: []string{}` is a declaration
+	// of "I considered the skills; there are none required", which is
+	// a valid declaration for an opaque/generic task. A fully-zero
+	// CapabilityRequirements (all three fields nil) is what fails —
+	// that is the "operator forgot the field entirely" case.
+	return cr.Skills != nil || cr.Tools != nil || cr.Resources != nil
 }
 
 func executionPolicyPresent(p ExecutionPolicy) bool {
