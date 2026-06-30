@@ -215,6 +215,7 @@ references the spec §7 security mitigations.
 | `TestSetByName_Unknown_ErrUnknownFlag` | `SetByName("NoTpedContracts", true)` returns `ErrUnknownFlag`; explicitly NOT nil. This is the headline (b) test. | (b) |
 | `TestSetByName_NotRegistered_ErrNotRegistered` | Known flag, no prior Register → `ErrNotRegistered`. | (b) |
 | `TestSetByName_Flips` | true → false → true cycle on a registered target. | — |
+| `TestSetByName_DuplicateRegisterDoesNotOverwrite` | After `Register(NoDryRun, &first)` and a rejected `Register(NoDryRun, &second)`, a `SetByName("NoDryRun", true)` flips `first` (the originally wired target), NOT `second`. End-to-end pin of the §7 (c) "name-duplicate Register does not silently overwrite" contract — the SetByName half that TestRegister_Duplicate_ErrAlreadyRegistered's comment defers to. | (c) name-aliasing |
 | `TestList_Stable` | After registering an out-of-order subset (e.g. `NoObserver`, `NoDryRun`, `NoAcceptanceGate`), `List()` returns `[NoAcceptanceGate, NoDryRun, NoObserver]` — i.e. ascending string order — and a second call returns a slice equal element-by-element to the first. The expected slice is hand-rolled in the test, not derived from a second `sort.Slice` of the result. | (e) |
 | `TestKnownFlags_CopyIsolation` | Asserts the returned slice is `reflect.DeepEqual` to a hand-rolled `[]FlagName{NoCapabilityDiscovery, NoTypedContracts, NoDryRun, NoContractFormalization, NoUserPromotionPath, NoAcceptanceGate, NoRegistryLookup, NoObserver}` (the const-block order), then mutates element 0 of the returned slice and re-calls `KnownFlags()` and asserts the second call is also `DeepEqual` to the same want — pins both the spec §2.2 declaration order AND the §4 copy-isolation contract. | (e) — copy isolation per spec §4 last bullet + §2.2 / §6 acceptance #4 stable order |
 | `TestConcurrent_Register_Race` | 8 goroutines, each registering a different one of the 8 known flags concurrently (`sync.WaitGroup` + `t.Parallel()`); all return nil; final `len(r.List()) == 8`. Run with `-race`. | (a) |
@@ -321,11 +322,15 @@ commits make the RED/GREEN evidence reviewable).
         as a "package not linked" diagnostic.
      2. `TestSetByName_NotRegistered_ErrNotRegistered`
      3. `TestSetByName_Flips`
-     4. `TestList_Stable`
-   - Run; expect all four to fail.
+     4. `TestSetByName_DuplicateRegisterDoesNotOverwrite` — the
+        end-to-end SetByName half of the §7 (c) name-aliasing
+        no-overwrite contract that `TestRegister_Duplicate_ErrAlreadyRegistered`
+        defers to.
+     5. `TestList_Stable`
+   - Run; expect all five to fail.
    - GREEN: implement `SetByName` (canonicalSet check BEFORE map lookup —
      this is what makes test 1 pass with the correct sentinel) and `List`
-     (mutex, copy keys, `sort.Slice` ascending). Re-run; expect all four
+     (mutex, copy keys, `sort.Slice` ascending). Re-run; expect all five
      to pass.
 
 6. **Concurrent / race tests** *(post-GREEN verification step — see below

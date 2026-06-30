@@ -83,8 +83,8 @@ func TestRegister_Duplicate_ErrAlreadyRegistered(t *testing.T) {
 		t.Fatalf("second Register: want errors.Is ErrAlreadyRegistered, got %v", err)
 	}
 	// The wired-target behaviour (first vs second) is covered end-to-end
-	// in TestSetByName_DuplicateRegisterDoesNotOverwrite (step 4), which
-	// requires a working SetByName.
+	// in TestSetByName_DuplicateRegisterDoesNotOverwrite, which requires
+	// a working SetByName (plan §4 step 5).
 	_ = first
 	_ = second
 }

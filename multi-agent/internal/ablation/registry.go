@@ -155,7 +155,7 @@ func (r *Registry) SetByName(name string, v bool) error {
 //
 //	ablation.Default.Register(ablation.NoXxx, &xxx.DisableXxx)
 //
-// from init(). The Phase-2 CLI binder (WT-2-flag-integration) calls
+// from init(). The Phase 2 CLI binder (WT-2-flag-integration) calls
 // Default.SetByName(name, true) for each --ablation NAME value passed
 // on the command line.
 var Default = NewRegistry()
