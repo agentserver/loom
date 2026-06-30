@@ -1,6 +1,7 @@
 package contract
 
 import (
+	"bytes"
 	"strings"
 	"sync/atomic"
 )
@@ -168,14 +169,36 @@ func hasNonEmptyEntry(values []string) bool {
 }
 
 func capabilityRequirementsPresent(cr CapabilityRequirements) bool {
-	// Present iff ANY sub-field is non-nil (slices and Resources alike).
-	// This matches the nil-vs-empty rule from §2.2.1 applied at the
-	// struct level: an explicit `Skills: []string{}` is a declaration
-	// of "I considered the skills; there are none required", which is
-	// a valid declaration for an opaque/generic task. A fully-zero
-	// CapabilityRequirements (all three fields nil) is what fails —
-	// that is the "operator forgot the field entirely" case.
-	return cr.Skills != nil || cr.Tools != nil || cr.Resources != nil
+	// Present iff ANY sub-field is meaningfully declared.
+	//
+	// Slices (Skills, Tools): non-nil-vs-nil is the test, per §2.2.1.
+	// An explicit `Skills: []string{}` declares "I considered the
+	// skills; there are none required" — a valid declaration for an
+	// opaque/generic task.
+	//
+	// Resources (json.RawMessage = []byte): the nil-vs-non-nil test
+	// alone is NOT sufficient because Go's encoding/json decodes the
+	// literals `"resources": null` and `"resources": {}` to non-nil
+	// `[]byte("null")` and `[]byte("{}")` respectively — neither is a
+	// declaration of capability requirements. We treat both as
+	// equivalent to absence: the operator who writes either of them
+	// did not say "I considered resources; here is the (possibly
+	// empty) declaration". See PR #52 round-2 review P1-2 for the
+	// real-world bypass this guards against.
+	return cr.Skills != nil || cr.Tools != nil || resourcesDeclared(cr.Resources)
+}
+
+// resourcesDeclared returns true iff the RawMessage is non-nil AND its
+// trimmed content is not the literal token `null`. Empty object `{}` is
+// counted as a (trivial) declaration because the operator typed
+// something — they're saying "there is an object here, just empty".
+// JSON `null`, however, is the JSON way to say "no value", which is
+// semantically identical to the field being absent.
+func resourcesDeclared(r []byte) bool {
+	if len(r) == 0 {
+		return false
+	}
+	return !bytes.Equal(bytes.TrimSpace(r), []byte("null"))
 }
 
 func executionPolicyPresent(p ExecutionPolicy) bool {

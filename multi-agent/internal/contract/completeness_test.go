@@ -650,29 +650,131 @@ func TestPresentFields_WriteTargetsCarveOut(t *testing.T) {
 	})
 }
 
-// TestPresentFields_BitmapAgreesWithCollectMissingForWriteTargets pins
-// the invariant that presentFields and collectMissing always agree on
-// write_targets: a contract is rejected by collectMissing iff
-// presentFields counts the field as absent. Without this pin, the two
-// could drift again on a future refactor.
-func TestPresentFields_BitmapAgreesWithCollectMissingForWriteTargets(t *testing.T) {
+// TestValidate_ResourcesNullDoesNotBypassEnforce is the §7 (a)-adjacent
+// regression for PR #52 round-2 review P1-2. Background: Resources is
+// `json.RawMessage` ([]byte). Go's encoding/json decodes
+// `"resources": null` to a NON-nil `[]byte("null")` (4 bytes), not a
+// nil slice. A naive `cr.Resources != nil` check would therefore count
+// the field as declared, letting an operator pass an
+// otherwise-empty CapabilityRequirements through.
+//
+// The mitigation in `resourcesDeclared` is: present iff non-nil AND
+// trimmed content is not the literal `null` token. This test pins the
+// mitigation across JSON `null`, the empty object `{}`, and the
+// "field absent entirely" cases.
+func TestValidate_ResourcesNullDoesNotBypassEnforce(t *testing.T) {
+	freshSink(t)
 	cases := []struct {
-		name         string
-		writeTargets []WriteTarget
+		name      string
+		resources string
+		wantFail  bool
 	}{
-		{"nil", nil},
-		{"empty", []WriteTarget{}},
-		{"one entry", []WriteTarget{{Type: WriteTargetArtifact, Kind: "code", Name: "x.go"}}},
+		{"null literal must fail", `"resources": null`, true},
+		{"field absent must fail", "", true},
+		{"empty object passes (operator typed something)", `"resources": {}`, false},
+		{"populated object passes", `"resources": {"tags": ["a"]}`, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c := validContract()
-			c.DataContract.WriteTargets = tc.writeTargets
+			capReq := "{}"
+			if tc.resources != "" {
+				capReq = "{" + tc.resources + "}"
+			}
+			raw := []byte(`{
+				"version": 1,
+				"conversation_id": "p1-2-test",
+				"intent": {"goal": "g", "success_criteria": ["s"]},
+				"data_contract": {"read_artifacts": [], "write_targets": [{"type":"artifact","kind":"code","name":"x.go"}]},
+				"capability_requirements": ` + capReq + `,
+				"recovery_hint": "x"
+			}`)
+			var c TaskContract
+			if err := json.Unmarshal(raw, &c); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			c.ApplyDefaults()
+			err := c.Validate()
+			if tc.wantFail {
+				if err == nil {
+					t.Errorf("expected rejection (resources=%q implies no declaration); got nil", tc.resources)
+				}
+				if !containsString(missing(err), "capability_requirements") {
+					t.Errorf("expected Missing to include capability_requirements; got %v", missing(err))
+				}
+			} else if err != nil {
+				t.Errorf("expected pass for %q; got: %v", tc.resources, err)
+			}
+		})
+	}
+}
+
+// TestPresentFields_BitmapAgreesWithCollectMissing pins the invariant
+// that presentFields and collectMissing always agree across ALL 7
+// lifecycle fields: a contract is rejected by collectMissing iff
+// presentFields counts the field as absent.
+//
+// PR #52 round-1 review found write_targets drift; round-2 review
+// found this test was only pinning that one field. Generalize across
+// all 7 to catch the next drift wherever it appears (e.g. someone
+// changes resourcesDeclared without updating the bitmap rule).
+//
+// Each row: (a) name, (b) lifecycle field key in the bitmap,
+// (c) a mutator that pushes a valid contract into the field's "absent"
+// state. We assert rejected == !inBitmap on the mutated contract.
+func TestPresentFields_BitmapAgreesWithCollectMissing(t *testing.T) {
+	cases := []struct {
+		name      string
+		lifecycle string
+		mutate    func(*TaskContract)
+	}{
+		{"intent.goal trimmed empty", lifecycleIntentGoal, func(c *TaskContract) { c.Intent.Goal = "  \t " }},
+		{"intent.success_criteria nil", lifecycleSuccessCriteria, func(c *TaskContract) { c.Intent.SuccessCriteria = nil }},
+		{"intent.success_criteria all whitespace", lifecycleSuccessCriteria, func(c *TaskContract) {
+			c.Intent.SuccessCriteria = []string{"  ", "\t"}
+		}},
+		{"read_artifacts nil", lifecycleReadArtifacts, func(c *TaskContract) { c.DataContract.ReadArtifacts = nil }},
+		{"write_targets nil", lifecycleWriteTargets, func(c *TaskContract) { c.DataContract.WriteTargets = nil }},
+		{"write_targets empty", lifecycleWriteTargets, func(c *TaskContract) {
+			c.DataContract.WriteTargets = []WriteTarget{}
+		}},
+		{"capability_requirements fully nil", lifecycleCapabilityRequirements, func(c *TaskContract) {
+			c.CapabilityRequirements = CapabilityRequirements{}
+		}},
+		{"capability_requirements resources=null bytes", lifecycleCapabilityRequirements, func(c *TaskContract) {
+			c.CapabilityRequirements = CapabilityRequirements{Resources: []byte("null")}
+		}},
+		// execution_policy is always present after ApplyDefaults (the
+		// enums get filled); see TestValidate_MissingMultipleFields_AllReported
+		// for the "skip ApplyDefaults" path that hits its missing branch.
+		{"recovery_hint trimmed empty", lifecycleRecoveryHint, func(c *TaskContract) { c.RecoveryHint = " \t " }},
+	}
+
+	// collectMissing's name for a lifecycle is the same as the
+	// completeness bitmap name (we picked them to match).
+	missingName := map[string]string{
+		lifecycleIntentGoal:             "intent.goal",
+		lifecycleSuccessCriteria:        "intent.success_criteria",
+		lifecycleReadArtifacts:          "data_contract.read_artifacts",
+		lifecycleWriteTargets:           "data_contract.write_targets",
+		lifecycleCapabilityRequirements: "capability_requirements",
+		lifecycleExecutionPolicy:        "execution_policy",
+		lifecycleRecoveryHint:           "recovery_hint",
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validContract() // start from 7/7
+			tc.mutate(&c)
 			missing := collectMissing(c)
-			inBitmap := containsString(presentFields(c), lifecycleWriteTargets)
-			rejected := containsString(missing, "data_contract.write_targets")
+			inBitmap := containsString(presentFields(c), tc.lifecycle)
+			rejected := containsString(missing, missingName[tc.lifecycle])
 			if rejected == inBitmap {
-				t.Errorf("collectMissing.rejected=%v but presentFields.inBitmap=%v — signals must agree (write_targets=%v)", rejected, inBitmap, tc.writeTargets)
+				t.Errorf("%s: collectMissing.rejected=%v but presentFields.inBitmap=%v — signals must agree",
+					tc.lifecycle, rejected, inBitmap)
+			}
+			if !rejected {
+				t.Errorf("%s: expected collectMissing to reject after mutator, but it did not (missing=%v)",
+					tc.lifecycle, missing)
 			}
 		})
 	}

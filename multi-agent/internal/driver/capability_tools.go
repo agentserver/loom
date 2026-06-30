@@ -545,8 +545,18 @@ func clarificationQuestions(tc contract.TaskContract) []string {
 	if len(tc.DataContract.ReadArtifacts) == 0 {
 		questions = append(questions, "Which input files or artifact IDs should be read?")
 	}
+	// Ask about capability_requirements only when the operator hasn't
+	// actually declared a non-empty set of skills or tools AND the
+	// field as a whole reads "unconsidered" — i.e. both slices are
+	// length-zero AND the bitmap would NOT count this as present
+	// (which now means no non-nil-empty slice was supplied either).
+	// Once the draft tool's default (`Skills: []string{}` non-nil
+	// empty) is in place, this question fires for the natural "I
+	// have nothing to declare" case but not for the "I deliberately
+	// said 'none required'" case. Phrase the question accordingly:
+	// it's an offer to clarify, not an accusation of incompleteness.
 	if len(tc.CapabilityRequirements.Tools) == 0 && len(tc.CapabilityRequirements.Skills) == 0 {
-		questions = append(questions, "Which existing tools or skills are required, and may missing tools be built as MCP services?")
+		questions = append(questions, "Optional: list any required skills or tools (leave empty to declare 'none required'; missing tools may be built as MCP services).")
 	}
 	if len(tc.Intent.SuccessCriteria) == 1 && tc.Intent.SuccessCriteria[0] == "The requested result is produced as an artifact." {
 		questions = append(questions, "What exact checks should define a successful result?")

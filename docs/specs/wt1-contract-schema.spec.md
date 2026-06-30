@@ -129,7 +129,7 @@ Semantics:
 | 2 | `intent.success_criteria`       | yes (lifecycle) — serves as the success_oracle per §A2; the cell label "lifecycle" refers to this row's role in `PresentFields`, not to the oracle classification | `len(tc.Intent.SuccessCriteria) == 0` OR every entry trims to empty |
 | 3 | `data_contract.read_artifacts`  | yes (lifecycle) — see §2.2.1 for empty-vs-absent | `tc.DataContract.ReadArtifacts == nil` (nil slice — see §2.2.1)         |
 | 4 | `data_contract.write_targets`   | yes (lifecycle)                   | `len(tc.DataContract.WriteTargets) == 0`           |
-| 5 | `capability_requirements`       | yes (lifecycle)                   | `len(Skills) == 0 && len(Tools) == 0 && len(Resources) == 0` |
+| 5 | `capability_requirements`       | yes (lifecycle) — see §2.6 for the nil-vs-empty struct rule | `Skills == nil && Tools == nil && !resourcesDeclared(Resources)` (§2.6); equivalent to "operator didn't declare any sub-field". Non-nil empty Skills/Tools is treated as a valid declaration |
 | 6 | `execution_policy`              | yes (lifecycle)                   | `Routing == "" && CodePersistence == "" && ExposeCodeToUser == "" && WriteMode == ""` — i.e. caller passed a zero-value `ExecutionPolicy` and never invoked `ApplyDefaults` |
 | 7 | `recovery_hint`                 | yes (lifecycle) — new this worktree | `strings.TrimSpace(tc.RecoveryHint) == ""`        |
 | T1 | `version`                      | NO (trace; required but excluded from ratio) | `tc.Version != contract.Version`                  |
@@ -384,14 +384,20 @@ order, so a downstream serializer can compute the bitmap deterministically.
   asymmetry vs ReadArtifacts is intentional and stems from the
   productive-vs-inventory distinction.
 - `CapabilityRequirements` (struct-typed): present iff at least one
-  sub-field is non-nil — the §2.2.1 nil-vs-empty rule applied across
-  the three sub-fields (`Skills`, `Tools`, `Resources`). A contract
-  that declares `Skills: []string{}` (or any one of the three as
-  non-nil empty) is communicating "I considered capability
-  requirements; there are none required" — a valid declaration for an
-  opaque/generic task. A fully-zero struct (all three sub-fields nil)
-  is what fails — that is the "operator forgot the field entirely"
-  case.
+  sub-field is meaningfully declared. For the two slice sub-fields
+  (`Skills`, `Tools`) this is the §2.2.1 nil-vs-empty rule: non-nil
+  passes (even at length zero). For `Resources` (which is
+  `json.RawMessage` = `[]byte`) the rule is tighter: present iff
+  non-nil AND trimmed content is not the literal `null` token. The
+  tighter rule for Resources exists because Go's `encoding/json`
+  decodes both `"resources": null` and an absent key to different
+  zero values (non-nil `[]byte("null")` vs nil), and an operator
+  writing JSON `null` is **not** declaring capability requirements —
+  JSON `null` is the explicit "no value" marker. An explicit
+  `"resources": {}` (empty object) is treated as a (trivial)
+  declaration because the operator typed something. A fully-zero
+  struct (Skills nil, Tools nil, Resources nil-or-`null`) is what
+  fails — that is the "operator forgot the field entirely" case.
 - `ExecutionPolicy` (struct-typed) is present iff any of `Routing`,
   `CodePersistence`, `ExposeCodeToUser`, `WriteMode` is non-empty.
   After `ApplyDefaults` this is always true (the policy enums get
