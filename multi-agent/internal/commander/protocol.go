@@ -19,6 +19,13 @@ const (
 
 const MaxFilePreviewBytes int64 = 2 * 1024 * 1024
 
+// MaxFilePreviewEncodedBytes is the maximum size in bytes of a file's Content
+// field after JSON encoding. This defends against pathological files with all
+// control bytes, where JSON encoding expands ~6x (each control byte becomes
+// \uXXXX). A 1 MiB file of control bytes encodes to ~6 MiB, so we cap at 6 MiB
+// to avoid transport issues.
+const MaxFilePreviewEncodedBytes int64 = 6 * 1024 * 1024
+
 // Envelope is the JSON shell wrapping every WebSocket frame.
 //
 // Daemon-to-observer types: register, heartbeat, command_result, event, error.

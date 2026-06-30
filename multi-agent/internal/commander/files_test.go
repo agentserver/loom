@@ -300,3 +300,38 @@ func TestHandlerListFilesSortsDirsBeforeFilesCaseInsensitive(t *testing.T) {
 		t.Fatalf("names=%v want %v", names, want)
 	}
 }
+
+func TestHandlerReadFileCapsEncodedSizeAtSixMB(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "control.txt")
+	// Create a file with many escape-requiring characters (not null bytes, which would make it binary).
+	// Use characters like tab (0x09), newline (0x0A), etc. that JSON-encode to \uXXXX.
+	// When JSON-encoded, each of these becomes 6 chars, causing ~6x expansion.
+	// A 1 MiB file of escape chars becomes ~6 MiB when JSON-encoded.
+	content := make([]byte, 1024*1024) // 1 MiB
+	for i := 0; i < len(content); i++ {
+		// Use tab character (0x09) which needs escaping in JSON and is valid UTF-8
+		content[i] = '\t'
+	}
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{Backend: &fakeBackend{
+		getFn: func(context.Context, string) (agentbackend.Session, []agentbackend.SessionMessage, error) {
+			return agentbackend.Session{ID: "s1", WorkingDir: root}, nil, nil
+		},
+	}}
+
+	got, err := h.ReadFile(context.Background(), "s1", "control.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// File should be marked as too large because when JSON-encoded it exceeds the cap.
+	// The raw file is 1 MiB of tabs, but when JSON-encoded each tab becomes \t (2 bytes)
+	// or more in the worst case, but the estimate counts 6 bytes per char.
+	// So estimated size is 1M * 6 + 2 = 6000002 bytes, which exceeds MaxFilePreviewEncodedBytes (6 MiB).
+	if !got.TooLarge || got.Content != "" {
+		t.Fatalf("result=%+v want too_large=true and empty content", got)
+	}
+}

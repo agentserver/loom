@@ -458,6 +458,9 @@ func buildSlaveDaemon(cfg *config.Config, backend agentbackend.Backend) (*comman
 				DisplayName:   cfg.Discovery.DisplayName,
 				DriverVersion: "", // slave has no version constant; driver_version left empty
 				ShortID:       cfg.Credentials.ShortID,
+				Capabilities: []string{
+					commander.CapabilityFilePreviewEncodedCap,
+				},
 			},
 			HeartbeatInt:   time.Duration(cfg.Daemon.HeartbeatIntervalSec) * time.Second,
 			InitialBackoff: time.Duration(cfg.Daemon.InitialBackoffMs) * time.Millisecond,
