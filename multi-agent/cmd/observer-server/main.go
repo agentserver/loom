@@ -729,7 +729,9 @@ func loadConfig(path string) (*Config, error) {
 	// existingSecret deployments where secret.create=false.
 	nonsecretPath := filepath.Join(filepath.Dir(path), "nonsecret", "observer.nonsecret.yaml")
 	if nonsecretData, err := os.ReadFile(nonsecretPath); err == nil {
-		if err := yaml.Unmarshal(nonsecretData, &cfg); err != nil {
+		nsDec := yaml.NewDecoder(bytes.NewReader(nonsecretData))
+		nsDec.KnownFields(true)
+		if err := nsDec.Decode(&cfg); err != nil {
 			return nil, fmt.Errorf("observer.nonsecret.yaml: %w", err)
 		}
 	}

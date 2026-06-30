@@ -627,6 +627,31 @@ api_keys:
 	require.NotEmpty(t, cfg.Cluster.AdvertiseURL, "cluster.advertise_url must be resolved from env")
 }
 
+// TestLoadConfig_NonsecretRejectsUnknownKey asserts that loadConfig returns an
+// error when observer.nonsecret.yaml contains a key that the Config struct
+// does not recognise. This exercises the KnownFields(true) path added in the
+// final-fix1 finding-1 fix; without KnownFields the unknown key would be
+// silently swallowed, letting chart/binary schema drift go undetected.
+func TestLoadConfig_NonsecretRejectsUnknownKey(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write a minimal but valid secret YAML.
+	secretYAML := "listen_addr: \":8090\"\nstore:\n  driver: sqlite\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "observer.yaml"), []byte(secretYAML), 0o600))
+
+	// Write a nonsecret YAML that contains a key unknown to Config.
+	nonsecretDir := filepath.Join(dir, "nonsecret")
+	require.NoError(t, os.MkdirAll(nonsecretDir, 0o700))
+	nonsecretYAML := "bogus_field: 1\n"
+	require.NoError(t, os.WriteFile(filepath.Join(nonsecretDir, "observer.nonsecret.yaml"),
+		[]byte(nonsecretYAML), 0o600))
+
+	_, err := loadConfig(filepath.Join(dir, "observer.yaml"))
+	require.Error(t, err, "loadConfig must reject unknown fields in observer.nonsecret.yaml")
+	require.Contains(t, err.Error(), "observer.nonsecret.yaml",
+		"error message must mention the nonsecret file name")
+}
+
 // extractConfigMapValue extracts the YAML block for a given data key from a
 // Kubernetes ConfigMap rendered by helm template. The returned string is
 // de-indented (2 spaces of ConfigMap data indent removed).
