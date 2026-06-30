@@ -7,11 +7,14 @@
 {{- fail "replicaCount > 1 requires cluster.enabled=true (set cluster.enabled=true; provide secret.clusterSecret OR an existingSecret with key 'cluster-secret')" -}}
 {{- end -}}
 {{- if and .Values.cluster.enabled .Values.secret.create (not .Values.secret.clusterSecret) -}}
-{{- fail "cluster.enabled=true with secret.create=true requires secret.clusterSecret (must be >=32 chars of high-entropy random; e.g. `openssl rand -base64 48`)" -}}
+{{- fail "cluster.enabled=true with secret.create=true requires secret.clusterSecret (must be >=64 hex chars / 32 bytes; generate with: openssl rand -hex 32)" -}}
 {{- end -}}
 {{- if and .Values.cluster.enabled .Values.secret.create .Values.secret.clusterSecret -}}
-  {{- if lt (len .Values.secret.clusterSecret) 32 -}}
-  {{- fail (printf "secret.clusterSecret must be >=32 chars; got %d" (len .Values.secret.clusterSecret)) -}}
+  {{- if lt (len .Values.secret.clusterSecret) 64 -}}
+  {{- fail (printf "secret.clusterSecret must be >=64 hex chars (32 bytes); got %d chars — generate with: openssl rand -hex 32" (len .Values.secret.clusterSecret)) -}}
+  {{- end -}}
+  {{- if not (regexMatch "^[0-9a-fA-F]+$" .Values.secret.clusterSecret) -}}
+  {{- fail "secret.clusterSecret must be a hex string (only 0-9 a-f A-F); generate with: openssl rand -hex 32" -}}
   {{- end -}}
 {{- end -}}
 # observer chart validation passed

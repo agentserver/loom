@@ -142,7 +142,7 @@ production_stack="$(helm template observer-prod "$CHART_DIR" \
   -f "$CHART_DIR/values-production.example.yaml" \
   --set existingSecret= \
   --set secret.create=true \
-  --set "secret.clusterSecret=test-cluster-secret-32-chars-xxxx" \
+  --set "secret.clusterSecret=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" \
   --set secret.databaseUrl='postgres://observer:observer@observer-prod-observer-postgresql:5432/observer?sslmode=disable' \
   --set secret.s3AccessKey=minioadmin \
   --set secret.s3SecretKey=minioadmin \
@@ -229,10 +229,17 @@ echo "[test] E2.3 cluster enabled + secret.create without clusterSecret must fai
 out=$(helm template observer-test "$CHART_DIR" --set replicaCount=2 --set config.store.driver=postgres --set cluster.enabled=true --set secret.create=true 2>&1) && { echo "FAIL"; exit 1; }
 echo "$out" | grep -q "requires secret.clusterSecret" || { echo "FAIL: $out"; exit 1; }
 
-# Test E2.4: clusterSecret too short fails
-echo "[test] E2.4 clusterSecret < 32 chars must fail"
-out=$(helm template observer-test "$CHART_DIR" --set replicaCount=2 --set config.store.driver=postgres --set cluster.enabled=true --set secret.create=true --set secret.clusterSecret=shortvalue 2>&1) && { echo "FAIL"; exit 1; }
-echo "$out" | grep -q "must be >=32 chars" || { echo "FAIL: $out"; exit 1; }
+# Test E2.4: clusterSecret too short fails (< 64 hex chars)
+echo "[test] E2.4 clusterSecret < 64 hex chars must fail"
+out=$(helm template observer-test "$CHART_DIR" --set replicaCount=2 --set config.store.driver=postgres --set cluster.enabled=true --set secret.create=true --set secret.clusterSecret=deadbeef 2>&1) && { echo "FAIL"; exit 1; }
+echo "$out" | grep -q "must be >=64 hex chars" || { echo "FAIL: $out"; exit 1; }
+
+# Test E2.5: non-hex clusterSecret (sufficient length but not hex) fails
+echo "[test] E2.5 non-hex clusterSecret of sufficient length must fail"
+out=$(helm template observer-test "$CHART_DIR" --set replicaCount=2 --set config.store.driver=postgres --set cluster.enabled=true --set secret.create=true \
+  --set "secret.clusterSecret=GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG" 2>&1) && { echo "FAIL: expected fail for non-hex secret; got success"; exit 1; }
+echo "$out" | grep -q "not a hex string\|must be a hex\|hex string" || { echo "FAIL: expected hex error; got: $out"; exit 1; }
+echo "E2.5 passed"
 
 echo "E2 validation tests passed"
 
@@ -252,7 +259,7 @@ multi="$(helm template observer-test "$CHART_DIR" \
   --set replicaCount=2 \
   --set cluster.enabled=true \
   --set secret.create=true \
-  --set "secret.clusterSecret=$(head -c 48 /dev/urandom | base64 | tr -d '+/=' | head -c 48)" \
+  --set "secret.clusterSecret=$(openssl rand -hex 32)" \
   --set secret.databaseUrl='postgres://x' \
   --set secret.s3AccessKey=x --set secret.s3SecretKey=x \
   --set "secret.telemetryKeys.telemetry-global-key=x" \
@@ -297,7 +304,7 @@ echo "E5.4 passed"
 echo "[test] E5.5 secret.create + cluster: fresh_ttl + revocation_channel in Secret"
 secret_out="$(helm template observer-test "$CHART_DIR" \
   --set replicaCount=2 --set cluster.enabled=true --set secret.create=true \
-  --set secret.clusterSecret=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA \
+  --set secret.clusterSecret=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef \
   --set secret.databaseUrl='postgres://x' \
   --set secret.s3AccessKey=x --set secret.s3SecretKey=x \
   --set "secret.telemetryKeys.telemetry-global-key=x" \
@@ -317,7 +324,7 @@ echo "[test] E5.6 revocationChannel=disabled emits empty string"
 disabled="$(helm template observer-test "$CHART_DIR" \
   --set replicaCount=2 --set cluster.enabled=true \
   --set secret.create=true \
-  --set "secret.clusterSecret=$(head -c 48 /dev/urandom | base64 | tr -d '+/=' | head -c 48)" \
+  --set "secret.clusterSecret=$(openssl rand -hex 32)" \
   --set secret.databaseUrl='postgres://x' \
   --set secret.s3AccessKey=x --set secret.s3SecretKey=x \
   --set "secret.telemetryKeys.telemetry-global-key=x" \

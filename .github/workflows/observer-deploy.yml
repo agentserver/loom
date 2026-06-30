@@ -93,7 +93,7 @@ jobs:
           minio_user = "minio" + "".join(secrets.choice(alphabet) for _ in range(12))
           minio_password = "".join(secrets.choice(alphabet) for _ in range(32))
           telemetry_key = "".join(secrets.choice(alphabet) for _ in range(32))
-          cluster_secret = "".join(secrets.choice(alphabet) for _ in range(48))
+          cluster_secret = secrets.token_hex(32)
           cluster_secret_prev = ""
           release = os.environ["SMOKE_RELEASE"]
 

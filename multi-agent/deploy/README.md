@@ -159,10 +159,11 @@ authenticate inter-pod traffic with a shared `cluster-secret`.
 
 Before bringing up a cluster (or scaling from 1 to 2+ replicas):
 
-1. **Set the cluster secret.** Add a `cluster-secret` key (>=32 random chars)
-   to the Kubernetes Secret named by `existingSecret` (or set
-   `secret.clusterSecret` when `secret.create=true`). The init container
-   `assert-cluster-secret` will fail-fast if the key is absent or too short.
+1. **Set the cluster secret.** Add a `cluster-secret` key (64 hex chars / 32
+   bytes; generate with `openssl rand -hex 32`) to the Kubernetes Secret named
+   by `existingSecret` (or set `secret.clusterSecret` when `secret.create=true`).
+   The init container `assert-cluster-secret` will fail-fast if the key is
+   absent, too short, or not a hex string.
 2. **Set `cluster.enabled=true`** in your values file.
 3. **Scale to 2+ replicas** (`replicaCount: 2` minimum). A single-pod cluster
    is legal but defeats the purpose.
@@ -179,10 +180,15 @@ To rotate the cluster secret without a service interruption:
 **Phase A — introduce prev secret (mixed-secret window begins)**
 
 ```bash
+# Generate a new 64-hex-char (32-byte) secret:
+NEW=$(openssl rand -hex 32)
+# Retrieve the current secret (cluster-secret-prev = OLD value):
+OLD=$(kubectl -n "$NS" get secret observer-production-secret -o jsonpath='{.data.cluster-secret}' | base64 -d)
+
 # Add the OLD value as cluster-secret-prev and the NEW value as cluster-secret
 # to your Kubernetes Secret, then redeploy:
 kubectl -n "$NS" patch secret observer-production-secret \
-  --type=merge -p '{"stringData":{"cluster-secret-prev":"<OLD>","cluster-secret":"<NEW>"}}'
+  --type=merge -p "{\"stringData\":{\"cluster-secret-prev\":\"$OLD\",\"cluster-secret\":\"$NEW\"}}"
 helm upgrade observer ./deploy/charts/observer -f values-prod.yaml
 # All pods now accept both OLD and NEW. Traffic continues uninterrupted.
 ```

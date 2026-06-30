@@ -94,8 +94,12 @@ spec:
                   echo "check that the Secret has key {{ default "cluster-secret" .Values.cluster.secretKey }}" >&2
                   exit 1
               fi
-              if [ "$LEN" -lt 32 ]; then
-                  echo "{{ .Values.cluster.secretEnv }}: length $LEN < 32 (must be >=32 random bytes)" >&2
+              if [ "$LEN" -lt 64 ]; then
+                  echo "{{ .Values.cluster.secretEnv }}: length $LEN < 64 (must be >=64 hex chars / 32 bytes; generate with: openssl rand -hex 32)" >&2
+                  exit 1
+              fi
+              if ! printf '%s' "$CHECK_VAL" | grep -Eq '^[0-9a-fA-F]+$'; then
+                  echo "{{ .Values.cluster.secretEnv }}: not a hex string (must contain only 0-9 a-f A-F; generate with: openssl rand -hex 32)" >&2
                   exit 1
               fi
           env:
