@@ -7,6 +7,7 @@ package commanderhub
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -89,38 +90,50 @@ func (dc *daemonConn) routingID() string {
 // shared Postgres registry. SAFE in single-pod mode (returns true when
 // dc.hub == nil || dc.hub.sharedReg == nil). In shared mode, checks the
 // sticky dc.ownershipLost flag, else issues a 500ms-bounded SELECT.
-// On any deviation OR PG error, sets ownershipLost.Store(true) and returns false.
+//
+// Ownership-lost semantics (codex Phase-B r2 MAJOR #1):
+//   - Definitive loss (sibling pod owns row, or row missing entirely) →
+//     sticky-set ownershipLost AND return false. Future calls short-circuit.
+//   - Transient failure (caller ctx cancelled/timed out, PG transient
+//     error) → return false for THIS call, but DO NOT poison the connection.
+//     The next call retries. Otherwise a single cancelled HTTP request
+//     would brick the WS for the rest of its life.
+//
+// On definitive loss, the heartbeat goroutine's separate force-close path
+// is responsible for tearing the WS down; confirmOwnership itself does NOT
+// close the WS.
 func (dc *daemonConn) confirmOwnership(ctx context.Context) bool {
 	// Single-pod mode: no shared registry, always own the connection.
 	if dc.hub == nil || dc.hub.sharedReg == nil {
 		return true
 	}
 
-	// Fast path: ownership already marked as lost.
+	// Fast path: ownership already definitively lost.
 	if dc.ownershipLost.Load() {
 		return false
 	}
 
-	// Enforce 500ms deadline for the SELECT.
-	ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	// Enforce 500ms deadline for the SELECT (bounded even if caller ctx is
+	// unbounded). The shorter of caller ctx and 500ms wins.
+	queryCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 
-	row := dc.hub.sharedReg.db.QueryRowContext(ctx, confirmOwnershipSQL,
+	row := dc.hub.sharedReg.db.QueryRowContext(queryCtx, confirmOwnershipSQL,
 		dc.owner.userID, dc.owner.workspaceID, dc.shortID)
 	var ownerURL, connID string
 	if err := row.Scan(&ownerURL, &connID); err != nil {
-		if err == sql.ErrNoRows {
-			// Row was deleted (sweep or deliberate removal).
+		if errors.Is(err, sql.ErrNoRows) {
+			// Definitive: row absent (sweep deleted, never inserted).
 			dc.ownershipLost.Store(true)
 			return false
 		}
-		// PG error — mark ownership lost and return false.
-		dc.ownershipLost.Store(true)
+		// Transient: caller cancelled, query timeout, PG unreachable.
+		// Don't poison the conn — next call retries.
 		return false
 	}
 
-	// Check if the row still belongs to us (same pod + same connection).
 	if ownerURL != dc.hub.sharedReg.advertiseURL || connID != dc.id {
+		// Definitive: sibling pod owns row (or a newer same-pod conn).
 		dc.ownershipLost.Store(true)
 		return false
 	}

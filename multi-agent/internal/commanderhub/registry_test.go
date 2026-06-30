@@ -235,20 +235,25 @@ func TestDaemonConn_ConfirmOwnership_SharedPodRowDeleted(t *testing.T) {
 		hub:     hub,
 	}
 
-	// Expect the query to return no rows (row was deleted).
+	// Expect the query to return no rows (row was deleted). Empty
+	// sqlmock.NewRows makes Scan return sql.ErrNoRows — the definitive
+	// "row absent" signal that DOES sticky-set ownershipLost.
 	mock.ExpectQuery(`SELECT owning_instance_url, connection_id FROM commander_daemons WHERE user_id = \$1 AND workspace_id = \$2 AND short_id = \$3`).
 		WithArgs("alice", "W1", "daemon-1").
-		WillReturnError(context.Canceled) // This will be treated as no rows in the error check
+		WillReturnRows(sqlmock.NewRows([]string{"owning_instance_url", "connection_id"}))
 
 	result := dc.confirmOwnership(context.Background())
 	require.False(t, result, "confirmOwnership should return false when row is deleted")
-	require.True(t, dc.ownershipLost.Load(), "ownershipLost flag should be set")
+	require.True(t, dc.ownershipLost.Load(), "ownershipLost flag should be set on definitive row-missing")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-// TestDaemonConn_ConfirmOwnership_SharedPodPGError verifies that
-// confirmOwnership returns false and sets ownershipLost on any PG error.
-func TestDaemonConn_ConfirmOwnership_SharedPodPGError(t *testing.T) {
+// TestDaemonConn_ConfirmOwnership_TransientPGErrorDoesNotPoison verifies
+// that a transient PG error (caller ctx cancel, query timeout, PG
+// unreachable) returns false for this call but does NOT sticky-set
+// ownershipLost — otherwise a single cancelled HTTP request would brick
+// the WS for the rest of its life (codex Phase-B r2 MAJOR #1).
+func TestDaemonConn_ConfirmOwnership_TransientPGErrorDoesNotPoison(t *testing.T) {
 	o := owner{userID: "alice", workspaceID: "W1"}
 
 	db, mock, err := sqlmock.New()
@@ -268,14 +273,57 @@ func TestDaemonConn_ConfirmOwnership_SharedPodPGError(t *testing.T) {
 		hub:     hub,
 	}
 
-	// Expect the query to fail with a PG error.
+	// Expect the query to fail with a transient PG error.
 	mock.ExpectQuery(`SELECT owning_instance_url, connection_id FROM commander_daemons WHERE user_id = \$1 AND workspace_id = \$2 AND short_id = \$3`).
 		WithArgs("alice", "W1", "daemon-1").
 		WillReturnError(context.DeadlineExceeded)
 
 	result := dc.confirmOwnership(context.Background())
-	require.False(t, result, "confirmOwnership should return false on PG error")
-	require.True(t, dc.ownershipLost.Load(), "ownershipLost flag should be set on PG error")
+	require.False(t, result, "confirmOwnership returns false on transient PG error")
+	require.False(t, dc.ownershipLost.Load(), "transient PG error must NOT sticky-set ownershipLost")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestDaemonConn_ConfirmOwnership_CallerCancelDoesNotPoison verifies
+// that a caller ctx cancel does NOT sticky-set ownershipLost. The next
+// call should be able to re-query and succeed.
+func TestDaemonConn_ConfirmOwnership_CallerCancelDoesNotPoison(t *testing.T) {
+	o := owner{userID: "alice", workspaceID: "W1"}
+
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+
+	sr := &sharedRegistry{
+		db:           db,
+		advertiseURL: "pod-1.example.com",
+	}
+	hub := &Hub{sharedReg: sr}
+
+	dc := &daemonConn{
+		id:      "conn-abc",
+		owner:   o,
+		shortID: "daemon-1",
+		hub:     hub,
+	}
+
+	// First call: caller ctx already cancelled. database/sql short-circuits
+	// at QueryRowContext entry when ctx is cancelled and never reaches the
+	// driver — sqlmock sees no query. confirmOwnership's Scan returns
+	// context.Canceled.
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.False(t, dc.confirmOwnership(cancelledCtx))
+	require.False(t, dc.ownershipLost.Load(), "caller cancel must NOT sticky-set ownershipLost")
+
+	// Second call (fresh ctx): we still own → returns true. Proves the
+	// transient failure didn't poison the conn.
+	rows := sqlmock.NewRows([]string{"owning_instance_url", "connection_id"}).
+		AddRow("pod-1.example.com", "conn-abc")
+	mock.ExpectQuery(`SELECT owning_instance_url, connection_id FROM commander_daemons WHERE user_id = \$1 AND workspace_id = \$2 AND short_id = \$3`).
+		WithArgs("alice", "W1", "daemon-1").
+		WillReturnRows(rows)
+	require.True(t, dc.confirmOwnership(context.Background()))
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
