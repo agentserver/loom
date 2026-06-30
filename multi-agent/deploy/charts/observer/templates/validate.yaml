@@ -1,0 +1,17 @@
+{{- $multiPod   := gt (int .Values.replicaCount) 1 -}}
+{{- $isPostgres := eq .Values.config.store.driver "postgres" -}}
+{{- if and $multiPod (not $isPostgres) -}}
+{{- fail "replicaCount > 1 requires store.driver=postgres (sqlite is single-pod only)" -}}
+{{- end -}}
+{{- if and $multiPod (not .Values.cluster.enabled) -}}
+{{- fail "replicaCount > 1 requires cluster.enabled=true (set cluster.enabled=true; provide secret.clusterSecret OR an existingSecret with key 'cluster-secret')" -}}
+{{- end -}}
+{{- if and .Values.cluster.enabled .Values.secret.create (not .Values.secret.clusterSecret) -}}
+{{- fail "cluster.enabled=true with secret.create=true requires secret.clusterSecret (must be >=32 chars of high-entropy random; e.g. `openssl rand -base64 48`)" -}}
+{{- end -}}
+{{- if and .Values.cluster.enabled .Values.secret.create .Values.secret.clusterSecret -}}
+  {{- if lt (len .Values.secret.clusterSecret) 32 -}}
+  {{- fail (printf "secret.clusterSecret must be >=32 chars; got %d" (len .Values.secret.clusterSecret)) -}}
+  {{- end -}}
+{{- end -}}
+# observer chart validation passed

@@ -142,6 +142,7 @@ production_stack="$(helm template observer-prod "$CHART_DIR" \
   -f "$CHART_DIR/values-production.example.yaml" \
   --set existingSecret= \
   --set secret.create=true \
+  --set "secret.clusterSecret=test-cluster-secret-32-chars-xxxx" \
   --set secret.databaseUrl='postgres://observer:observer@observer-prod-observer-postgresql:5432/observer?sslmode=disable' \
   --set secret.s3AccessKey=minioadmin \
   --set secret.s3SecretKey=minioadmin \
@@ -210,3 +211,27 @@ grep -q 'cpu: 500m' <<<"$production_minio"
 grep -q 'memory: 1Gi' <<<"$production_minio"
 grep -q 'cpu: "2"' <<<"$production_minio"
 grep -q 'memory: 8Gi' <<<"$production_minio"
+
+# --- E2 validation guard tests ---
+
+# Test E2.1: replicaCount > 1 with sqlite fails
+echo "[test] E2.1 replicaCount > 1 + sqlite must fail"
+out=$(helm template observer-test "$CHART_DIR" --set replicaCount=2 --set config.store.driver=sqlite 2>&1) && { echo "FAIL: expected fail; got success"; exit 1; }
+echo "$out" | grep -q "replicaCount > 1 requires store.driver=postgres" || { echo "FAIL: error msg not found; got: $out"; exit 1; }
+
+# Test E2.2: replicaCount > 1 without cluster.enabled fails
+echo "[test] E2.2 replicaCount > 1 + cluster.enabled=false must fail"
+out=$(helm template observer-test "$CHART_DIR" --set replicaCount=2 --set config.store.driver=postgres --set cluster.enabled=false 2>&1) && { echo "FAIL"; exit 1; }
+echo "$out" | grep -q "replicaCount > 1 requires cluster.enabled=true" || { echo "FAIL: $out"; exit 1; }
+
+# Test E2.3: cluster.enabled + secret.create without secret.clusterSecret fails
+echo "[test] E2.3 cluster enabled + secret.create without clusterSecret must fail"
+out=$(helm template observer-test "$CHART_DIR" --set replicaCount=2 --set config.store.driver=postgres --set cluster.enabled=true --set secret.create=true 2>&1) && { echo "FAIL"; exit 1; }
+echo "$out" | grep -q "requires secret.clusterSecret" || { echo "FAIL: $out"; exit 1; }
+
+# Test E2.4: clusterSecret too short fails
+echo "[test] E2.4 clusterSecret < 32 chars must fail"
+out=$(helm template observer-test "$CHART_DIR" --set replicaCount=2 --set config.store.driver=postgres --set cluster.enabled=true --set secret.create=true --set secret.clusterSecret=shortvalue 2>&1) && { echo "FAIL"; exit 1; }
+echo "$out" | grep -q "must be >=32 chars" || { echo "FAIL: $out"; exit 1; }
+
+echo "E2 validation tests passed"
