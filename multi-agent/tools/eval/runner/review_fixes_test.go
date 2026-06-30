@@ -397,3 +397,123 @@ func TestReview_P2_GitEmailShim_MalformedWarns(t *testing.T) {
 		t.Errorf("missing warn line; stderr=%s", b)
 	}
 }
+
+// --- Round 3 review fixes ---
+
+// TestReviewR3_P2_OracleDotResolvesToRoot_Rejected — `success_oracle: "."`
+// resolves to the workload directory itself; pre-fix the runner would
+// try to exec that path and fail with `is a directory`. Now resolveOraclePath
+// catches it.
+func TestReviewR3_P2_OracleDotResolvesToRoot_Rejected(t *testing.T) {
+	root := t.TempDir()
+	for _, in := range []string{".", "./", "./."} {
+		_, err := resolveOraclePath(root, in)
+		if err == nil {
+			t.Errorf("resolveOraclePath(%q, %q) = nil; want error", root, in)
+		}
+	}
+}
+
+// TestReviewR3_P2_OracleWhitespace_Rejected — a single-space or tab-only
+// value used to slip past the `== ""` empty guard and resolve to
+// `<root>/ `; now trimmed first.
+func TestReviewR3_P2_OracleWhitespace_Rejected(t *testing.T) {
+	root := t.TempDir()
+	for _, in := range []string{" ", "\t", "  \t  ", ""} {
+		_, err := resolveOraclePath(root, in)
+		if err == nil {
+			t.Errorf("resolveOraclePath(%q, %q) = nil; want error", root, in)
+		}
+	}
+}
+
+// TestReviewR3_P2_OracleCanonicalForm_StillAccepted — defensive: the
+// canonical `./oracle.sh` form still resolves under workloadRoot after
+// the new dot/whitespace rejects.
+func TestReviewR3_P2_OracleCanonicalForm_StillAccepted(t *testing.T) {
+	root := t.TempDir()
+	got, err := resolveOraclePath(root, "./oracle.sh")
+	if err != nil {
+		t.Fatalf("canonical form rejected: %v", err)
+	}
+	if got != filepath.Join(root, "oracle.sh") {
+		t.Errorf("got %q, want %q", got, filepath.Join(root, "oracle.sh"))
+	}
+}
+
+// TestReviewR3_P2_OnTempdirPanic_StillCleansTempdir — a test hook that
+// panics inside OnTempdir used to leak ws.Root because Cleanup was an
+// outer statement. With cleanup now an inner defer, the tempdir is
+// removed even on panic.
+func TestReviewR3_P2_OnTempdirPanic_StillCleansTempdir(t *testing.T) {
+	root := findRepoModuleRoot(t)
+	withShims(t, commitMetaJSON(), "a@b|c@d")
+
+	var capturedPath string
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected OnTempdir panic to propagate")
+		}
+		if capturedPath == "" {
+			t.Fatal("OnTempdir never ran; test is broken")
+		}
+		if _, err := os.Stat(capturedPath); err == nil {
+			t.Errorf("tempdir %s leaked after OnTempdir panic", capturedPath)
+		}
+	}()
+
+	_ = Run(context.Background(), Opts{
+		WorkloadID:  "cross-device-code-mod",
+		WorkloadDir: filepath.Join(root, "tests/eval/workloads"),
+		StubListen:  pickFreePort(t),
+		StubBin:     stubBinaryPath(t),
+		OutCSV:      filepath.Join(t.TempDir(), "run.csv"),
+		Stderr:      discardStderr(t),
+		OnTempdir: func(p string) {
+			capturedPath = p
+			panic("test-induced panic")
+		},
+	})
+}
+
+// TestReviewR3_P2_LockedWriter_NoInterleave — concurrent Write calls from
+// two goroutines through the lockedWriter must produce well-formed
+// records, never byte-level torn output. Smoke at 1000 writes/goroutine
+// across 4 goroutines.
+func TestReviewR3_P2_LockedWriter_NoInterleave(t *testing.T) {
+	var buf bytes.Buffer
+	lw := &lockedWriter{w: &buf}
+	const (
+		gs       = 4
+		perG     = 1000
+		recordsz = 80
+	)
+	done := make(chan struct{}, gs)
+	payload := make([]byte, recordsz)
+	for i := range payload {
+		payload[i] = 'A' + byte(i%26)
+	}
+	payload[recordsz-1] = '\n'
+	for g := 0; g < gs; g++ {
+		go func() {
+			for i := 0; i < perG; i++ {
+				_, _ = lw.Write(payload)
+			}
+			done <- struct{}{}
+		}()
+	}
+	for i := 0; i < gs; i++ {
+		<-done
+	}
+	if got := buf.Len(); got != gs*perG*recordsz {
+		t.Errorf("byte count = %d, want %d", got, gs*perG*recordsz)
+	}
+	// Each newline must be at a record boundary.
+	for i, c := range buf.Bytes() {
+		isNL := c == '\n'
+		atBoundary := (i+1)%recordsz == 0
+		if isNL != atBoundary {
+			t.Fatalf("torn record at offset %d", i)
+		}
+	}
+}

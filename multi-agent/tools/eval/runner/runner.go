@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -126,10 +128,15 @@ func Run(ctx context.Context, opts Opts) Result {
 		return preflight(opts, err)
 	}
 	defer func() {
+		// Cleanup is registered as an INNER defer so a panicking
+		// OnTempdir hook (test seam) doesn't leak the tempdir on
+		// /tmp (PR #53 round 3 P2). LIFO defer ordering means
+		// ws.Cleanup runs after the hook returns on the normal
+		// path, and during stack unwind on the panic path.
+		defer ws.Cleanup()
 		if opts.OnTempdir != nil {
 			opts.OnTempdir(ws.Root)
 		}
-		ws.Cleanup()
 	}()
 
 	// Start agentserver-stub. The stub URL is injected as AGENTSERVER_URL
@@ -369,25 +376,35 @@ func LoadWorkloadSpec(path string) (*WorkloadSpec, error) {
 // this symmetry with §7(b) symlink-escape defense closes that gap
 // (PR #53 review P1).
 func resolveOraclePath(workloadRoot, successOracle string) (string, error) {
-	if successOracle == "" {
-		return "", errors.New("spec.success_oracle is empty")
+	// Trim surrounding whitespace before the empty check — a YAML value
+	// of ` ` or `\t` would otherwise slip past the "empty" guard and
+	// resolve to the workload root itself (PR #53 round 3 P2).
+	trimmed := strings.TrimSpace(successOracle)
+	if trimmed == "" {
+		return "", errors.New("spec.success_oracle is empty (or whitespace-only)")
 	}
 	// 13_workload_spec.md §1.3 mandates `./oracle.sh` — workload-relative.
 	// Reject absolute paths up front so a typo like `success_oracle:
 	// /etc/passwd` surfaces as a clear spec error instead of being
 	// silently rewritten by filepath.Join to a non-existent path inside
 	// the workload (PR #53 round 2 P2).
-	if filepath.IsAbs(successOracle) {
-		return "", fmt.Errorf("success_oracle must be workload-relative, got absolute path %q", successOracle)
+	if filepath.IsAbs(trimmed) {
+		return "", fmt.Errorf("success_oracle must be workload-relative, got absolute path %q", trimmed)
 	}
 	rootAbs, err := filepath.Abs(workloadRoot)
 	if err != nil {
 		return "", fmt.Errorf("abs(workloadRoot): %w", err)
 	}
-	joined := filepath.Join(rootAbs, strings.TrimPrefix(successOracle, "./"))
+	joined := filepath.Join(rootAbs, strings.TrimPrefix(trimmed, "./"))
 	cleaned := filepath.Clean(joined)
 	if cleaned != rootAbs && !strings.HasPrefix(cleaned, rootAbs+string(filepath.Separator)) {
-		return "", fmt.Errorf("success_oracle escapes workload dir: %q resolves to %q", successOracle, cleaned)
+		return "", fmt.Errorf("success_oracle escapes workload dir: %q resolves to %q", trimmed, cleaned)
+	}
+	// `.` or `./` resolve cleanly to the workload root itself; exec would
+	// later fail with `is a directory`/EACCES, which buries the real
+	// problem. Reject up front (PR #53 round 3 P2).
+	if cleaned == rootAbs {
+		return "", fmt.Errorf("success_oracle %q resolves to the workload directory itself; expected a file path", trimmed)
 	}
 	return cleaned, nil
 }
@@ -458,8 +475,16 @@ func startStub(ctx context.Context, opts Opts, stderr *os.File) (*stubProcess, e
 		}
 		return nil, fmt.Errorf("temp log: %w", err)
 	}
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	// exec spawns ONE copy goroutine per non-pipe writer; assigning the
+	// same *os.File to both Stdout and Stderr would have exec spawn two
+	// goroutines that race on Write() boundaries — for a regular file
+	// the kernel doesn't enforce PIPE_BUF atomicity, so writes can tear
+	// mid-line in the post-mortem log (PR #53 round 3 P2). Wrap the
+	// file in a mutex-guarded writer and hand the SAME writer to both
+	// streams; exec will still serialize through the lock.
+	stubLogWriter := &lockedWriter{w: logFile}
+	cmd.Stdout = stubLogWriter
+	cmd.Stderr = stubLogWriter
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
 		os.Remove(logFile.Name())
@@ -714,4 +739,19 @@ func deriveRunID(workload string) string {
 	var buf [4]byte
 	_, _ = rand.Read(buf[:])
 	return fmt.Sprintf("run-%d-%s-%s", time.Now().Unix(), workload, hex.EncodeToString(buf[:]))
+}
+
+// lockedWriter wraps an io.Writer with a Mutex so concurrent writers
+// (e.g. exec.Cmd's stdout+stderr copy goroutines pointed at the same
+// stub-log file) don't interleave at the syscall level. Used only for
+// the agentserver-stub debug log (PR #53 round 3 P2).
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }
