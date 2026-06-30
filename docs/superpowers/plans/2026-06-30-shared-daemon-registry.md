@@ -288,7 +288,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `internal/commander/files_test.go`. Use the existing test helper pattern from a sibling `TestReadFile_*` test (grep the file for `newReadFileTestHandler` or whatever the existing fixture builder is called; if no helper exists, follow the pattern of the closest existing test):
+The existing test helper at `internal/commander/files_test.go:16-22` is `handlerForFileRoot(root)` (returns a `*Handler` for session `"s1"` rooted at `root`). **The file does NOT currently import `testify/require` — use stdlib assertions.** Append to `internal/commander/files_test.go`:
 
 ```go
 func TestReadFile_EncodedSizeCapPreventsControlByteBlowup(t *testing.T) {
@@ -297,22 +297,33 @@ func TestReadFile_EncodedSizeCapPreventsControlByteBlowup(t *testing.T) {
 	// 1 MiB of 0x01 bytes: valid UTF-8, not binary, but each byte JSON-
 	// escapes as \uXXXX (6 bytes), so naive serialization would be ~6 MiB.
 	tricky := bytes.Repeat([]byte{0x01}, 1024*1024)
-	require.NoError(t, os.WriteFile(path, tricky, 0o644))
+	if err := os.WriteFile(path, tricky, 0o644); err != nil {
+		t.Fatal(err)
+	}
 
-	h, sessID := newReadFileTestHandler(t, root) // adapt to whatever the existing fixture is
-	res, err := h.ReadFile(context.Background(), sessID, "tricky.txt")
-	require.NoError(t, err)
-	require.True(t, res.TooLarge, "expected TooLarge=true")
-	require.Empty(t, res.Content, "expected Content empty when TooLarge")
+	h := handlerForFileRoot(root)
+	res, err := h.ReadFile(context.Background(), "s1", "tricky.txt")
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !res.TooLarge {
+		t.Fatalf("expected TooLarge=true; got Content len=%d, Binary=%v", len(res.Content), res.Binary)
+	}
+	if res.Content != "" {
+		t.Fatalf("expected Content empty when TooLarge; got len=%d", len(res.Content))
+	}
 
 	out, err := json.Marshal(res)
-	require.NoError(t, err)
-	require.LessOrEqual(t, int64(len(out)), int64(1<<20),
-		"encoded FileReadResult must stay under wsReadLimit (1 MiB)")
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if int64(len(out)) > 1<<20 {
+		t.Fatalf("encoded FileReadResult = %d bytes exceeds 1 MiB cap", len(out))
+	}
 }
 ```
 
-If the existing tests use a different fixture pattern, copy that pattern exactly. Add `"encoding/json"` and `"bytes"` to the test file imports if missing.
+Add `"encoding/json"` to the test file imports if missing (`grep '"encoding/json"' internal/commander/files_test.go` — likely absent; `bytes` is already imported).
 
 - [ ] **Step 2: Run; expect failure**
 
@@ -388,30 +399,45 @@ Replace with:
 go test ./internal/commander -count=1 -race
 ```
 
-- [ ] **Step 5: Advertise capability in both daemon binaries**
+- [ ] **Step 5: ADD `Capabilities` field to both daemon binaries' RegisterPayload**
 
-Open `cmd/driver-agent/main.go`. Locate the `commander.RegisterPayload{...}` literal (around line 361 — search for `Capabilities:`). Add `commander.CapabilityFilePreviewEncodedCap` to the slice. Example transform: if the existing literal is
+NOTE (codex plan round-1 MAJOR #7): NEITHER `cmd/driver-agent/main.go` NOR `cmd/slave-agent/main.go` currently has a `Capabilities:` field in their `RegisterPayload` literal. The field exists on the struct (`commander.RegisterPayload.Capabilities []string`) but is omitted (so the slice is nil; the hub code at `hub.go:115-124` then merges-in defaults `CapabilitySessions` + `CapabilityTurn`). **Phase A2 ADDS the field explicitly** so both daemons advertise the new file-preview capability and any future ones.
+
+Open `cmd/driver-agent/main.go`. Locate the `commander.RegisterPayload{...}` literal at line 361:
 
 ```go
-Capabilities: []string{
-    commander.CapabilitySessions,
-    commander.CapabilityTurn,
-    commander.CapabilityFiles,
+Register: commander.RegisterPayload{
+    SchemaVersion: commander.SchemaVersion,
+    Kind:          cfg.Agent.Kind,
+    AgentBin:      cfg.Agent.Bin,
+    AgentWorkDir:  cfg.Agent.WorkDir,
+    DisplayName:   cfg.Discovery.DisplayName,
+    DriverVersion: driverVersion,
+    ShortID:       cfg.Credentials.ShortID,
 },
 ```
 
-change to
+Add a `Capabilities` field at the end of the literal:
 
 ```go
-Capabilities: []string{
-    commander.CapabilitySessions,
-    commander.CapabilityTurn,
-    commander.CapabilityFiles,
-    commander.CapabilityFilePreviewEncodedCap,
+Register: commander.RegisterPayload{
+    SchemaVersion: commander.SchemaVersion,
+    Kind:          cfg.Agent.Kind,
+    AgentBin:      cfg.Agent.Bin,
+    AgentWorkDir:  cfg.Agent.WorkDir,
+    DisplayName:   cfg.Discovery.DisplayName,
+    DriverVersion: driverVersion,
+    ShortID:       cfg.Credentials.ShortID,
+    Capabilities: []string{
+        commander.CapabilitySessions,
+        commander.CapabilityTurn,
+        commander.CapabilityFiles,
+        commander.CapabilityFilePreviewEncodedCap,
+    },
 },
 ```
 
-Apply the same change in `cmd/slave-agent/main.go` (around line 453).
+Apply the equivalent change in `cmd/slave-agent/main.go` at line 453 (after the `ShortID` line).
 
 - [ ] **Step 6: Run daemon binary tests**
 
@@ -629,7 +655,7 @@ OBSERVER_POSTGRES_TEST_DSN="..." go test ./internal/commanderhub/authstore -coun
 - [ ] **Step 7: Commit**
 
 ```sh
-git add multi-agent/go.mod multi-agent/go.sum \
+git add go.mod go.sum \
         internal/commanderhub/authstore/schema_postgres.sql \
         internal/commanderhub/authstore/schema_postgres_rollback.sql \
         internal/commanderhub/authstore/postgres_test.go
@@ -648,14 +674,18 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task A4: Rename `registry` → `localRegistry`; add `removeIf`; key by `short_id`
+### Task A4: Rename `registry` → `localRegistry`; add `removeIf`; key by `short_id`; switch `DaemonInfo.DaemonID` to expose short_id; add `Hub.sharedReg` field
 
 **Files:**
+- Modify: `multi-agent/internal/commanderhub/registry.go:59-83` (`daemonConn.info()` — emit `shortID` as `DaemonInfo.DaemonID`)
 - Modify: `multi-agent/internal/commanderhub/registry.go:85-141` (type + constructor + methods)
 - Modify: `multi-agent/internal/commanderhub/registry.go:39-57` (`daemonConn` adds `ownershipLost atomic.Bool`)
-- Modify: `multi-agent/internal/commanderhub/registry_test.go` (append 2 tests)
-- Modify: `multi-agent/internal/commanderhub/hub.go:30,47` (Hub.reg field type + constructor call)
-- Modify: existing `*_test.go` literals that construct `daemonConn{}` — add `shortID:` field (verified rare; grep + sed)
+- Modify: `multi-agent/internal/commanderhub/registry_test.go` (append 3 tests)
+- Modify: `multi-agent/internal/commanderhub/hub.go:27-40` (Hub.reg field type + ADD `sharedReg *sharedRegistry` field — type defined in Phase B Task B1 but field is declared here so all later tasks can reference it without circular dependency)
+- Modify: `multi-agent/internal/commanderhub/hub.go:47` (`newRegistry()` → `newLocalRegistry()`)
+- Modify: existing `*_test.go` literals that construct `daemonConn{}` — add `shortID:` field (sentinel = existing `id` value for parity)
+
+**Single-pod regression invariant:** in single-pod mode (`h.sharedReg == nil`), `DaemonInfo.DaemonID` MUST continue to be a string that round-trips through the URL → `lookup` path. Today's code emits `dc.id` (per-connection); v2 emits `dc.shortID` (stable across reconnects). For existing tests that construct `daemonConn{id: "x"}` without `shortID`, the test fixture update in Step 6 sets `shortID: "x"` so the URL value still works. **Verification:** Step 7 runs full `commanderhub` test suite to catch any test that asserts the OLD `DaemonInfo.DaemonID = dc.id` contract.
 
 **Interfaces:**
 - Produces:
@@ -705,6 +735,21 @@ func TestLocalRegistry_LookupByShortID(t *testing.T) {
 	}
 	if _, ok := r.lookup(o, "conn-xyz"); ok {
 		t.Fatal("lookup must key by shortID, not connection id")
+	}
+}
+
+// DaemonInfo.DaemonID must round-trip with the same key that lookup uses
+// (the URL pattern /api/commander/daemons/{id}/... feeds it back into
+// lookup). v5/v6 spec switched this from per-connection id to stable
+// short_id so bookmarks survive daemon reconnect.
+func TestDaemonConn_Info_ExposesShortIDAsDaemonID(t *testing.T) {
+	dc := &daemonConn{id: "conn-xyz", shortID: "stable-agent-A", owner: owner{userID: "u", workspaceID: "w"}, displayName: "name", kind: "claude", driverVersion: "0.0.10"}
+	di := dc.info()
+	if di.DaemonID != "stable-agent-A" {
+		t.Fatalf("DaemonInfo.DaemonID = %q; want stable-agent-A (short_id)", di.DaemonID)
+	}
+	if di.ShortID != "stable-agent-A" {
+		t.Fatalf("DaemonInfo.ShortID = %q; want stable-agent-A", di.ShortID)
 	}
 }
 ```
@@ -866,33 +911,97 @@ type daemonConn struct {
 
 Add `"sync/atomic"` to imports if missing (`grep '"sync/atomic"' internal/commanderhub/registry.go` — if absent, add it).
 
-- [ ] **Step 5: Update Hub.reg field type + constructor**
+- [ ] **Step 5a: Update `daemonConn.info()` to expose shortID as DaemonInfo.DaemonID**
 
-In `internal/commanderhub/hub.go`, find:
+In `internal/commanderhub/registry.go`, find `(dc *daemonConn) info()` (currently around lines 59-83):
 
 ```go
+return DaemonInfo{
+    DaemonID:      dc.id,
+    ShortID:       dc.shortID,
+    DisplayName:   dc.displayName,
+    Kind:          dc.kind,
+    DriverVersion: dc.driverVersion,
+    Capabilities:  capabilities,
+    LastSeenAt:    lastSeenAt,
+}
+```
+
+Replace `DaemonID: dc.id` with `DaemonID: dc.shortID`. The full block becomes:
+
+```go
+return DaemonInfo{
+    DaemonID:      dc.shortID, // v5: stable short_id so UI bookmarks survive reconnect
+    ShortID:       dc.shortID,
+    DisplayName:   dc.displayName,
+    Kind:          dc.kind,
+    DriverVersion: dc.driverVersion,
+    Capabilities:  capabilities,
+    LastSeenAt:    lastSeenAt,
+}
+```
+
+- [ ] **Step 5b: Update Hub field declarations + constructor**
+
+In `internal/commanderhub/hub.go`, find the `Hub` struct (around lines 27-40). Replace:
+
+```go
+type Hub struct {
+	resolver     identity.Resolver
+	upgrader     websocket.Upgrader
 	reg          *registry
+	turns        *turnStateStore
+	sessionCache *sessionListCache
+	cmdSeq       atomic.Int64 // generates per-command IDs (see proxy.go)
+
+	// TurnTimeout is the observer-side safety max applied to a session_turn
+	// command. Turns continue draining after the browser/SSE client disconnects;
+	// this bounds daemon work that never sends a terminal frame. Defaults to
+	// defaultTurnTimeout (10 min); a caller may override it after NewHub.
+	TurnTimeout time.Duration
+}
 ```
 
-Replace with:
+with:
 
 ```go
+type Hub struct {
+	resolver     identity.Resolver
+	upgrader     websocket.Upgrader
 	reg          *localRegistry
+	sharedReg    *sharedRegistry // nil in single-pod mode; populated by attachSharedRegistry (Phase D Task D1)
+	forwardCli   *forwardClient  // nil iff sharedReg == nil; populated by attachSharedRegistry
+	turns        turnStateBackend
+	sessionCache *sessionListCache // nil in shared mode (cluster-wide disabled; see Phase D Task D1)
+	cmdSeq       atomic.Int64      // generates per-command IDs (see proxy.go)
+
+	// TurnTimeout is the observer-side safety max applied to a session_turn
+	// command. Turns continue draining after the browser/SSE client disconnects;
+	// this bounds daemon work that never sends a terminal frame. Defaults to
+	// defaultTurnTimeout (10 min); a caller may override it after NewHub.
+	TurnTimeout time.Duration
+}
 ```
+
+(`sharedRegistry` and `forwardClient` types are defined in Phase B Task B1 and Phase C Task C3 respectively. Declaring the fields here, in A4, lets all later tasks reference them without circular dependency. Field defaults to `nil`; in single-pod mode it stays nil and nothing dereferences it.)
 
 Find:
 
 ```go
 		reg:          newRegistry(),
+		turns:        newTurnStateStore(),
 ```
 
 Replace with:
 
 ```go
 		reg:          newLocalRegistry(),
+		turns:        newMemTurnStore(),
 ```
 
-- [ ] **Step 6: Fix existing test fixtures**
+(`newMemTurnStore` is defined in Task A5; A5 runs in the same Phase. If executing tasks strictly serially, do A5 first so this compiles. If parallel, both edits land in the same `Hub` constructor — coordinate.)
+
+- [ ] **Step 6: Fix existing test fixtures (daemonConn literals + register payloads in WS tests)**
 
 ```sh
 grep -nE '\bdaemonConn\{' internal/commanderhub/*_test.go > /tmp/dc-literals.txt
@@ -911,16 +1020,43 @@ After:
 hub.reg.add(&daemonConn{id: "a1", shortID: "a1", owner: owner{"alice", "W1"}, displayName: "alice-mac", kind: "claude"})
 ```
 
-Files to scan (from spec component map): `hub_test.go`, `proxy_test.go`, `http_test.go`, `tree_test.go`, `race_test.go`, `livelock_test.go`, `e2e_test.go`, `integration_test.go`. Tests that go through real WS handshake (`hub.ServeHTTP`) get `shortID` populated by hub.go:111 from `rp.ShortID`; only fixtures that construct daemonConn manually need the parity edit.
+Files to scan (from spec component map): `hub_test.go`, `proxy_test.go`, `http_test.go`, `tree_test.go`, `race_test.go`, `livelock_test.go`, `e2e_test.go`, `integration_test.go`. Tests that go through real WS handshake (`hub.ServeHTTP`) get `shortID` populated by hub.go:111 from `rp.ShortID`; verify those tests already supply a non-empty `ShortID` in their `RegisterPayload` (most do). If any WS test passes `ShortID: ""`, set it to e.g. `"agent-test"` so post-A4 `DaemonInfo.DaemonID` is non-empty.
 
-- [ ] **Step 7: Run; expect pass**
+- [ ] **Step 7: Update tests that access `hub.turns.{mu, m}` directly**
+
+Codex round-1 BLOCKER #4: existing `http_test.go` test fixtures grab `hub.turns.mu.Lock()` and write to `hub.turns.m` to seed turn state (currently at `http_test.go:255-262`). After A5 changes `Hub.turns` to interface type `turnStateBackend`, these direct field accesses no longer compile.
+
+```sh
+grep -nE 'hub\.turns\.(mu|m\[)' internal/commanderhub/*_test.go
+```
+
+For each hit, replace direct map mutation with explicit `hub.turns.begin/set/finish` calls. Example:
+
+Before (paraphrased from `http_test.go:255-262`):
+```go
+hub.turns.mu.Lock()
+hub.turns.m[key] = turnSnapshot{State: turnStateAnswering, InFlight: true, updatedAt: time.Now()}
+hub.turns.mu.Unlock()
+```
+
+After:
+```go
+ok, err := hub.turns.begin(context.Background(), key)
+require.NoError(t, err)
+require.True(t, ok)
+require.NoError(t, hub.turns.set(context.Background(), key, turnStateAnswering))
+```
+
+If the test needs to assert against the internal map, cast: `hub.turns.(*memTurnStore).m[key]`. Add a `_test.go`-only helper `(s *memTurnStore) snapshotFor(key turnKey) turnSnapshot` if more than a couple of sites need it (preferred — keeps Hub field type clean).
+
+- [ ] **Step 8: Run; expect pass**
 
 ```sh
 go vet ./internal/commanderhub/...
 go test ./internal/commanderhub -count=1 -race
 ```
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```sh
 git add internal/commanderhub/registry.go \
@@ -950,7 +1086,9 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Modify: `multi-agent/internal/commanderhub/turn_state_test.go` (existing fixtures: `daemonID:` → `shortID:`; method calls: add ctx + handle (bool, error))
 - Modify: `multi-agent/internal/commanderhub/hub.go` (`turns *turnStateStore` → `turns turnStateBackend`; `newTurnStateStore()` → `newMemTurnStore()`)
 - Modify: `multi-agent/internal/commanderhub/http.go` (10 caller sites for `turnKey{owner:..., daemonID:..., sessionID:...}` and `hub.turns.*` calls)
+- Modify: `multi-agent/internal/commanderhub/http_test.go` (DIRECT field access: `hub.turns.mu` / `hub.turns.m[key]` at lines 255-262, 376, 385, 391, 399, 408, 418, 430 — replace with interface calls or `(s.turns).(*memTurnStore)` cast)
 - Modify: `multi-agent/internal/commanderhub/tree.go` (`mergeCurrentTurnState`, `refreshSessionRows` — update key construction + add ctx threading)
+- Modify: `multi-agent/internal/commanderhub/race_test.go`, `livelock_test.go`, `e2e_test.go`, `integration_test.go` — grep for any other `hub.turns.{mu,m,begin,set,finish,fail,rekey,get}` direct calls; update for interface signature.
 
 **Interfaces:**
 - Produces:
@@ -1124,17 +1262,56 @@ Replace with:
 		turns:        newMemTurnStore(),
 ```
 
-- [ ] **Step 5: Update call sites in http.go and tree.go**
-
-Grep:
+- [ ] **Step 5: Update call sites in http.go, tree.go, and ALL `*_test.go`**
 
 ```sh
+# Production call sites
 grep -nE 'turnKey\{|hub\.turns\.|ch\.hub\.turns\.|\.turns\.' internal/commanderhub/*.go
+# Test call sites (CRITICAL — includes direct field access to hub.turns.mu, hub.turns.m)
+grep -nE 'turnKey\{|hub\.turns\.|\.turns\.(mu|m\[|begin|set|finish|fail|rekey|get)' internal/commanderhub/*_test.go
 ```
 
 For every literal `turnKey{owner: ..., daemonID: ..., sessionID: ...}`, change `daemonID:` → `shortID:`. The string value passed is still `daemonID` for now (the value happens to be the same string under v1 protocol since http.go gets it from URL path).
 
 For every method call on `Hub.turns.{begin,set,finish,fail,rekey,get}`, add `ctx` as first arg and handle the new `(bool, error)` / `error` returns. Use `r.Context()` in `http.go::ch.turn`. In `tree.go::cachedSessionRows` and below, use the `ctx` already in scope (or add it to function signatures where missing — `mergeCurrentTurnState` needs a new ctx parameter).
+
+**Test-only direct field access (codex plan round-1 BLOCKER #4 — `http_test.go:255-262` writes to `hub.turns.mu` and `hub.turns.m[key]` directly):** these no longer compile after Hub.turns becomes interface type. Two options:
+
+(a) Replace direct map writes with interface calls — e.g. instead of `hub.turns.m[key] = turnSnapshot{State: turnStateAnswering, InFlight: true}`, use `hub.turns.begin(context.Background(), key); hub.turns.set(context.Background(), key, turnStateAnswering)`.
+
+(b) Add a test-only accessor on `*memTurnStore`. Append to `turn_state.go` (NOT test file — needs to be reachable from `http_test.go` in the same package):
+```go
+// snapshotForTest is exported for in-package tests that need to assert
+// against the internal map. Not part of the turnStateBackend contract.
+// Only valid on *memTurnStore (single-pod tests).
+func (s *memTurnStore) snapshotForTest(key turnKey) (turnSnapshot, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snap, ok := s.m[key]
+	return snap, ok
+}
+
+// setForTest seeds an arbitrary snapshot for test fixtures that need to
+// install non-default state. Only valid on *memTurnStore.
+func (s *memTurnStore) setForTest(key turnKey, snap turnSnapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.m[key] = snap
+}
+```
+
+Then in `http_test.go` and other test files, replace:
+```go
+hub.turns.mu.Lock()
+hub.turns.m[key] = turnSnapshot{State: turnStateAnswering, InFlight: true, updatedAt: time.Now()}
+hub.turns.mu.Unlock()
+```
+with:
+```go
+hub.turns.(*memTurnStore).setForTest(key, turnSnapshot{State: turnStateAnswering, InFlight: true, updatedAt: time.Now()})
+```
+
+Grep all hits and apply.
 
 Example transform for `ch.turn` at `http.go:231`:
 
@@ -1496,10 +1673,15 @@ func TestSharedRegistry_HeartbeatStillOwn(t *testing.T) {
 	defer db.Close()
 
 	s := newSharedRegistry(db, "http://10.0.0.42:8091")
-	dc := &daemonConn{id: "conn-1", shortID: "agent-A", owner: owner{userID: "alice", workspaceID: "W1"}}
+	dc := &daemonConn{
+		id: "conn-1", shortID: "agent-A",
+		owner:         owner{userID: "alice", workspaceID: "W1"},
+		displayName:   "alice-mac", kind: "claude", driverVersion: "0.0.10",
+	}
 
+	// 9 args: user, workspace, short_id, conn_id, display, kind, driver, caps_json, owning_url
 	mock.ExpectExec(heartbeatUpsertSQL).
-		WithArgs("alice", "W1", "agent-A", "conn-1", "http://10.0.0.42:8091").
+		WithArgs("alice", "W1", "agent-A", "conn-1", "alice-mac", "claude", "0.0.10", sqlmock.AnyArg(), "http://10.0.0.42:8091").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	stillOwn, err := s.heartbeatUpsert(context.Background(), dc)
@@ -1514,11 +1696,15 @@ func TestSharedRegistry_HeartbeatOwnershipLost(t *testing.T) {
 	defer db.Close()
 
 	s := newSharedRegistry(db, "http://10.0.0.42:8091")
-	dc := &daemonConn{id: "conn-1", shortID: "agent-A", owner: owner{userID: "alice", workspaceID: "W1"}}
+	dc := &daemonConn{
+		id: "conn-1", shortID: "agent-A",
+		owner:         owner{userID: "alice", workspaceID: "W1"},
+		displayName:   "alice-mac", kind: "claude", driverVersion: "0.0.10",
+	}
 
-	// 0 rows affected ⇒ sibling claimed.
+	// 0 rows affected ⇒ sibling owns the row (ownership-guarded WHERE blocked SET).
 	mock.ExpectExec(heartbeatUpsertSQL).
-		WithArgs("alice", "W1", "agent-A", "conn-1", "http://10.0.0.42:8091").
+		WithArgs("alice", "W1", "agent-A", "conn-1", "alice-mac", "claude", "0.0.10", sqlmock.AnyArg(), "http://10.0.0.42:8091").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	stillOwn, err := s.heartbeatUpsert(context.Background(), dc)
@@ -1641,7 +1827,7 @@ import (
 
 const connectUpsertSQL = `INSERT INTO commander_daemons (user_id, workspace_id, short_id, connection_id, display_name, kind, driver_version, capabilities, owning_instance_url, last_seen_at, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, now(), now()) ON CONFLICT (user_id, workspace_id, short_id) DO UPDATE SET connection_id = EXCLUDED.connection_id, display_name = EXCLUDED.display_name, kind = EXCLUDED.kind, driver_version = EXCLUDED.driver_version, capabilities = EXCLUDED.capabilities, owning_instance_url = EXCLUDED.owning_instance_url, last_seen_at = now()`
 
-const heartbeatUpsertSQL = `UPDATE commander_daemons SET last_seen_at = now() WHERE user_id = $1 AND workspace_id = $2 AND short_id = $3 AND connection_id = $4 AND owning_instance_url = $5`
+const heartbeatUpsertSQL = `INSERT INTO commander_daemons (user_id, workspace_id, short_id, connection_id, display_name, kind, driver_version, capabilities, owning_instance_url, last_seen_at, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, now(), now()) ON CONFLICT (user_id, workspace_id, short_id) DO UPDATE SET last_seen_at = now(), display_name = EXCLUDED.display_name, kind = EXCLUDED.kind, driver_version = EXCLUDED.driver_version, capabilities = EXCLUDED.capabilities WHERE commander_daemons.owning_instance_url = EXCLUDED.owning_instance_url AND commander_daemons.connection_id = EXCLUDED.connection_id`
 
 const removeSQL = `DELETE FROM commander_daemons WHERE user_id = $1 AND workspace_id = $2 AND short_id = $3 AND owning_instance_url = $4 AND connection_id = $5`
 
@@ -1708,15 +1894,34 @@ func (s *sharedRegistry) connectUpsert(ctx context.Context, dc *daemonConn) erro
 }
 
 // heartbeatUpsert: refresh last_seen_at ONLY when this pod + this exact
-// connection still owns the row. 0 rows ⇒ ownership lost.
+// connection still owns the row. 0 rows ⇒ ownership lost (sibling pod or
+// newer same-pod connection took over).
 //
-// NOTE: implemented as a plain UPDATE (not UPSERT) so a row deleted by a
-// peer's sweep STAYS deleted; the next WS reconnect re-claims via
-// connectUpsert. If we used an UPSERT here, a stale heartbeat after
-// connection-loss could resurrect a dead row.
+// Implemented per spec v19 §"sharedRegistry methods" as an UPSERT with
+// ownership-guarded WHERE clause (NOT a plain UPDATE). Two distinct
+// behaviors arise from the WHERE:
+//   - Row exists AND we still own it → SET fires → RowsAffected=1.
+//   - Row exists AND sibling owns it → SET skipped (WHERE false) → RowsAffected=0.
+//   - Row missing (sweep deleted it during a long PG hiccup) → INSERT
+//     path fires → RowsAffected=1 → we re-claim ownership. This is
+//     intentional self-healing (see spec §"Daemon admission + teardown
+//     ordering" and the sweep TTL discussion: deleteAfter=5min >>
+//     onlineTTL=45s so this case is rare).
 func (s *sharedRegistry) heartbeatUpsert(ctx context.Context, dc *daemonConn) (stillOwn bool, err error) {
+	dc.metaMu.Lock()
+	capsList := make([]string, 0, len(dc.capabilities))
+	for cap, on := range dc.capabilities {
+		if on {
+			capsList = append(capsList, cap)
+		}
+	}
+	dc.metaMu.Unlock()
+	sort.Strings(capsList)
+	capsJSON, _ := json.Marshal(capsList)
 	res, err := s.db.ExecContext(ctx, heartbeatUpsertSQL,
-		dc.owner.userID, dc.owner.workspaceID, dc.shortID, dc.id, s.advertiseURL)
+		dc.owner.userID, dc.owner.workspaceID, dc.shortID, dc.id,
+		dc.displayName, dc.kind, dc.driverVersion, string(capsJSON),
+		s.advertiseURL)
 	if err != nil {
 		return false, err
 	}
@@ -1841,10 +2046,14 @@ func TestSharedRegistry_HeartbeatExitsOnCtxCancel(t *testing.T) {
 
 	s := newSharedRegistry(db, "http://10.0.0.42:8091")
 	s.heartbeatEvery = 10 * time.Millisecond // fast for test
-	dc := &daemonConn{id: "conn-1", shortID: "agent-A", owner: owner{userID: "alice", workspaceID: "W1"}}
+	dc := &daemonConn{
+		id: "conn-1", shortID: "agent-A",
+		owner:         owner{userID: "alice", workspaceID: "W1"},
+		displayName:   "alice-mac", kind: "claude", driverVersion: "0.0.10",
+	}
 
 	mock.ExpectExec(heartbeatUpsertSQL).
-		WithArgs("alice", "W1", "agent-A", "conn-1", "http://10.0.0.42:8091").
+		WithArgs("alice", "W1", "agent-A", "conn-1", "alice-mac", "claude", "0.0.10", sqlmock.AnyArg(), "http://10.0.0.42:8091").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1871,7 +2080,7 @@ func TestSharedRegistry_HeartbeatForceClosesOnOwnershipLoss(t *testing.T) {
 
 	// First tick: stillOwn=false (sibling claimed)
 	mock.ExpectExec(heartbeatUpsertSQL).
-		WithArgs("alice", "W1", "agent-A", "conn-1", "http://10.0.0.42:8091").
+		WithArgs("alice", "W1", "agent-A", "conn-1", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "http://10.0.0.42:8091").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	done := make(chan struct{})
@@ -1887,32 +2096,69 @@ func TestSharedRegistry_HeartbeatForceClosesOnOwnershipLoss(t *testing.T) {
 }
 ```
 
-Add a small test helper to the same file (or a new `registry_shared_helpers_test.go`):
+Add the helper to a new file `internal/commanderhub/registry_shared_helpers_test.go` (kept separate from `registry_shared_test.go` for clarity):
 
 ```go
+package commanderhub
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
+)
+
 // newOwnershipTestDaemonConn returns a daemonConn whose `conn` is a
-// real *websocket.Conn over a localhost pipe so dc.conn.Close() is
-// observable via ownershipTestConnIsClosed.
+// real server-side *websocket.Conn over a localhost loopback connection,
+// so dc.conn.Close() is observable via ownershipTestConnIsClosed.
+//
+// The server-side conn is what runHeartbeat will Close(); the client-side
+// conn is held by the cleanup so it doesn't get GC'd mid-test.
 func newOwnershipTestDaemonConn(t *testing.T, connID, shortID string, o owner) *daemonConn {
-	// Build a server/client websocket pair via httptest + dial.
-	// Implementation: spin up an httptest.Server with an upgrader,
-	// dial it from the test, and put the server-side *websocket.Conn
-	// into daemonConn.conn. Mirror the pattern in hub_test.go::
-	// dialDaemonWS or similar; if no helper exists, write one here.
-	// Returns a daemonConn ready for runHeartbeat to call Close on.
 	t.Helper()
-	// ... (full implementation: ~30 lines; cribbed from hub_test.go's existing dialer)
-	panic("TODO: implement helper using gorilla/websocket Upgrader + httptest.Server + websocket.DefaultDialer; mirror hub_test.go::dialDaemonWS pattern")
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	serverCh := make(chan *websocket.Conn, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("server upgrade: %v", err)
+			return
+		}
+		serverCh <- c
+	}))
+	t.Cleanup(srv.Close)
+
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	clientConn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	select {
+	case sc := <-serverCh:
+		return &daemonConn{
+			id: connID, shortID: shortID, owner: o, conn: sc,
+			pending: make(map[string]*pendingEntry),
+			done:    make(chan struct{}),
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server upgrade timeout")
+		return nil
+	}
 }
 
 func ownershipTestConnIsClosed(dc *daemonConn) bool {
-	// Probe by attempting a zero-byte write; gorilla returns
-	// websocket.ErrCloseSent or net error on closed conn.
-	return dc.conn.WriteMessage(websocket.PingMessage, nil) != nil
+	// Probe with a 100ms write deadline; gorilla returns websocket.ErrCloseSent
+	// or net.OpError on closed conn.
+	_ = dc.conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+	err := dc.conn.WriteMessage(websocket.PingMessage, nil)
+	return err != nil
 }
 ```
-
-When implementing the helper, look at existing `hub_test.go` for the precise pattern; cribbing it avoids fragile bespoke code.
 
 - [ ] **Step 2: Run; expect compile failure**
 
@@ -1994,13 +2240,24 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ### Task B3: `(dc *daemonConn).confirmOwnership` — per-send PG ownership check
 
 **Files:**
+- Modify: `multi-agent/internal/commanderhub/registry_shared.go` (add `confirmOwnershipSQL` const)
 - Modify: `multi-agent/internal/commanderhub/registry.go` (add `confirmOwnership` method to `daemonConn`)
 - Create: `multi-agent/internal/commanderhub/registry_ownership_test.go`
+
+**Prereq:** Task A4 added `Hub.sharedReg` field (so `dc.hub.sharedReg` compiles). Task B1 defined the `sharedRegistry` type itself. B3 wires per-send ownership confirmation between them.
 
 **Interfaces:**
 - Produces: `(dc *daemonConn) confirmOwnership(ctx context.Context) bool`. Returns false (denying writes) if `dc.ownershipLost.Load()` is already true (sticky negative cache). Otherwise issues a 500ms-bounded PG SELECT against `commander_daemons` and checks (owning_instance_url, connection_id) match. On any deviation OR PG error, sets `ownershipLost.Store(true)` and returns false. On match, returns true. **No positive cache** — every shared-mode SendCommand call pays one PG round-trip. Eliminates the v6/v7/v8 race window.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Add `confirmOwnershipSQL` const to production code**
+
+Append to `internal/commanderhub/registry_shared.go` (alongside the other SQL consts):
+
+```go
+const confirmOwnershipSQL = `SELECT owning_instance_url, connection_id FROM commander_daemons WHERE user_id = $1 AND workspace_id = $2 AND short_id = $3`
+```
+
+- [ ] **Step 2: Write the failing tests**
 
 Create `internal/commanderhub/registry_ownership_test.go`:
 
@@ -2016,8 +2273,6 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/require"
 )
-
-const confirmOwnershipSQL = `SELECT owning_instance_url, connection_id FROM commander_daemons WHERE user_id = $1 AND workspace_id = $2 AND short_id = $3`
 
 func TestDaemonConn_ConfirmOwnership_StillOwn(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
@@ -2102,9 +2357,9 @@ func TestDaemonConn_ConfirmOwnership_PGError(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run; expect compile failure**
+- [ ] **Step 3: Run; expect compile failure**
 
-- [ ] **Step 3: Add `confirmOwnership` to registry.go**
+- [ ] **Step 4: Add `confirmOwnership` to registry.go**
 
 Add to `internal/commanderhub/registry.go` (near the bottom):
 
@@ -2143,16 +2398,16 @@ func (dc *daemonConn) confirmOwnership(ctx context.Context) bool {
 
 Add `"context"` import if missing.
 
-- [ ] **Step 4: Run; expect pass**
+- [ ] **Step 5: Run; expect pass**
 
 ```sh
 go test ./internal/commanderhub -run TestDaemonConn_ConfirmOwnership -count=1 -race
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```sh
-git add internal/commanderhub/registry.go internal/commanderhub/registry_ownership_test.go
+git add internal/commanderhub/registry.go internal/commanderhub/registry_shared.go internal/commanderhub/registry_ownership_test.go
 git commit -m "feat(commanderhub): daemonConn.confirmOwnership pre-send PG check
 
 Per-send fresh ownership check against commander_daemons in shared mode.
@@ -2171,12 +2426,29 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task B4: `ServeHTTP` admission gating (shared-mode requires successful upsert before local admit)
+### Task B4: `ServeHTTP` admission gating (shared-mode requires successful upsert before local admit) + minimal `attachSharedRegistry`
 
 **Files:**
 - Modify: `multi-agent/internal/commanderhub/hub.go::ServeHTTP` (admission + teardown rewrite)
 - Modify: `multi-agent/internal/commanderhub/hub.go::newDaemonID` (128-bit + error return)
+- Modify: `multi-agent/internal/commanderhub/hub.go` (add minimal `attachSharedRegistry`; Phase D Task D1 expands it)
 - Modify: existing tests if any assert specific newDaemonID behavior (grep)
+
+**Minimal `attachSharedRegistry` for Phase B:**
+
+Phase D Task D1 expands this method to also accept `forwardClient`, `turnStateBackend`, and disable `sessionCache`. For Phase B we only need the `sharedReg` field set so B4's tests can construct a Hub with cluster mode enabled. Add to `internal/commanderhub/hub.go` (after `NewHub`):
+
+```go
+// attachSharedRegistry plugs in the cluster-mode runtime. Phase B
+// minimal version: only sets sharedReg. Phase D Task D1 extends to set
+// forwardCli, turns, sessionCache.
+//
+// Callers must hold no Hub mutex (no Hub-wide lock today; fields are
+// nilable-by-design and read by goroutines spawned after this returns).
+func (h *Hub) attachSharedRegistry(sr *sharedRegistry) {
+	h.sharedReg = sr
+}
+```
 
 **Interfaces:**
 - Produces:
@@ -2228,7 +2500,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/yourorg/multi-agent/internal/commander"
+	"github.com/yourorg/multi-agent/internal/identity"
 )
+
+// fakeResolver is duplicated from wiring_test.go (same package); if you'd
+// rather not duplicate, hoist it into a shared `*_test_helpers.go` file
+// in this same task.
 
 func TestServeHTTP_ClusterMode_RefusesWSOnUpsertFailure(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
@@ -2236,7 +2513,7 @@ func TestServeHTTP_ClusterMode_RefusesWSOnUpsertFailure(t *testing.T) {
 	defer db.Close()
 
 	hub := NewHub(&fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}})
-	hub.attachSharedRegistry(newSharedRegistry(db, "http://10.0.0.42:8091"), nil, nil)
+	hub.attachSharedRegistry(newSharedRegistry(db, "http://10.0.0.42:8091"))
 
 	mock.ExpectExec(connectUpsertSQL).
 		WithArgs("alice", "W1", "agent-A", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "http://10.0.0.42:8091").
@@ -2274,7 +2551,7 @@ func TestServeHTTP_ClusterMode_RequiresShortID(t *testing.T) {
 	defer db.Close()
 
 	hub := NewHub(&fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}})
-	hub.attachSharedRegistry(newSharedRegistry(db, "http://10.0.0.42:8091"), nil, nil)
+	hub.attachSharedRegistry(newSharedRegistry(db, "http://10.0.0.42:8091"))
 
 	srv := httptest.NewServer(hub)
 	defer srv.Close()
@@ -2331,6 +2608,8 @@ func newDaemonID() (string, error) {
 Add `"fmt"` to imports if missing.
 
 - [ ] **Step 4: Update `ServeHTTP` admission + teardown**
+
+Add `"context"` and `"log"` to `hub.go` imports (verify with `grep '"log"' internal/commanderhub/hub.go` — if absent, add).
 
 Find the existing admission/teardown block in `hub.go::ServeHTTP` (around lines 79-141). The current shape (paraphrased):
 
