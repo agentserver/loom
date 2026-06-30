@@ -697,3 +697,82 @@ func TestHub_InFlightAdmissions_Counter_NoLeak(t *testing.T) {
 		return len(hub.reg.conns) == 0
 	}, 3*time.Second, 10*time.Millisecond, "local registry must be empty after Close")
 }
+
+// TestHub_Close_DoesNotWaitForLiveWS_DrainsThemInstead is the regression test
+// for D-fix6 BLOCKER: Close must NOT block on inFlightAdmissions while a daemon
+// is in the live WS read loop.
+//
+// Before D-fix6: inFlightAdmissions.Add(1) was called near ServeHTTP entry and
+// defer Done() spanned the entire WS read loop (hours). Close blocked in
+// inFlightAdmissions.Wait() indefinitely — deadlock until ctx timeout.
+//
+// After D-fix6: the counter is released immediately after the admission decision
+// (reg.add or draining-rejection), before the read loop starts. Close's Wait()
+// returns in <5ms even with an admitted daemon spinning in the read loop.
+// Close then calls drainAllLocalDaemons, which closes the WS, causing the read
+// loop to return and its defers to clean up the registry entry.
+//
+// Run as: go test -run TestHub_Close_DoesNotWaitForLiveWS_DrainsThemInstead -race -count=5
+func TestHub_Close_DoesNotWaitForLiveWS_DrainsThemInstead(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{
+		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
+	}}
+
+	hub := NewHub(resolver)
+	srv := httptest.NewServer(hub)
+	t.Cleanup(srv.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/daemon-link"
+
+	// Connect a daemon and wait for the ack (admission complete, read loop running).
+	conn, _, err := websocket.DefaultDialer.DialContext(context.Background(), wsURL, wsDialHeader("tok-alice"))
+	require.NoError(t, err, "daemon dial must succeed")
+	t.Cleanup(func() { conn.Close() })
+
+	regPayload, _ := json.Marshal(commander.RegisterPayload{
+		SchemaVersion: commander.SchemaVersion,
+		Kind:          "claude",
+		DisplayName:   "live-ws-daemon",
+	})
+	require.NoError(t, conn.WriteJSON(commander.Envelope{Type: "register", Payload: regPayload}))
+
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var ack commander.Envelope
+	require.NoError(t, conn.ReadJSON(&ack))
+	require.Equal(t, "ack", ack.Type, "must receive ack — daemon admitted, read loop now running")
+
+	// Confirm daemon is in the local registry (admission complete, counter = 0).
+	o := owner{userID: "alice", workspaceID: "W1"}
+	require.Eventually(t, func() bool {
+		return len(hub.reg.daemons(o)) == 1
+	}, time.Second, 10*time.Millisecond, "daemon must appear in local registry")
+
+	// Assert counter is zero: the admission window is closed.
+	counterZeroBefore := make(chan struct{})
+	go func() {
+		hub.inFlightAdmissions.Wait()
+		close(counterZeroBefore)
+	}()
+	select {
+	case <-counterZeroBefore:
+	case <-time.After(time.Second):
+		t.Fatal("inFlightAdmissions counter did not reach zero after admission — counter leaks into read loop")
+	}
+
+	// Now call Close. It must return in <2s even though the daemon's read loop is
+	// still running. The old (broken) code would have blocked here for up to 30s
+	// (the wsReadTimeout) waiting on the counter.
+	closeDone := make(chan error, 1)
+	go func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		closeDone <- hub.Close(closeCtx)
+	}()
+
+	select {
+	case err := <-closeDone:
+		require.NoError(t, err, "Close must succeed")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close blocked for >2s with a live WS connection — counter leaks into read loop (D-fix6 regression)")
+	}
+}

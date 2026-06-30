@@ -121,11 +121,19 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Count this goroutine as in-flight so Close/drainHandler can wait for any
 	// post-upsert cleanup (sharedReg.remove in the draining-rejection branch)
-	// to finish before the process continues with shutdown. The defer fires at
-	// the very end of ServeHTTP — after the draining-rejection remove call or
-	// after the read loop returns — whichever path is taken.
+	// to finish before the process continues with shutdown.
+	//
+	// SCOPE: the counter covers only the admission window — from here until
+	// the admission decision (reg.add succeeds or draining-rejection completes).
+	// It must NOT span the WS read loop (which can last hours), otherwise
+	// Close/drainHandler blocks in inFlightAdmissions.Wait() indefinitely.
 	h.inFlightAdmissions.Add(1)
-	defer h.inFlightAdmissions.Done()
+	admissionDone := false
+	defer func() {
+		if !admissionDone {
+			h.inFlightAdmissions.Done()
+		}
+	}()
 
 	tok, ok := bearerToken(r.Header.Get("Authorization"))
 	if !ok {
@@ -265,6 +273,11 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			rmCancel()
 		}
+		// Admission window ends here: the draining-rejection cleanup (including any
+		// sharedReg.remove) is complete. Release the counter so Close/drainHandler
+		// can proceed; the WS close below is not part of the critical window.
+		h.inFlightAdmissions.Done()
+		admissionDone = true
 		dc.writeMu.Lock()
 		_ = conn.WriteControl(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseServiceRestart, "observer draining"),
@@ -275,6 +288,12 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	h.reg.add(dc)
 	h.admitMu.Unlock()
+
+	// Admission window ends here: the daemon is now in the local registry and will
+	// be included in any subsequent drainAllLocalDaemons snapshot. Release the
+	// counter so Close/drainHandler can proceed to drain admitted connections.
+	h.inFlightAdmissions.Done()
+	admissionDone = true
 
 	// Teardown (reverse order of setup):
 	// 1. Stop heartbeat first so it cannot touch conn after we start removing.
