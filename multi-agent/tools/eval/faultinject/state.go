@@ -114,6 +114,16 @@ func (s *Store) Add(runID string, kind FaultKind, target string, params map[stri
 // cheap and process-local, so lifetime-monotonic seq is the right
 // trade.
 //
+// As a consequence, the `s.seq` map grows monotonically with the number
+// of distinct run_ids the process has ever seen (one `string→int` entry
+// per run_id). For an eval rig that spins many short-lived run_ids over
+// a long-running harness process, this is technically a bounded memory
+// "leak" — bounded by the cardinality of historical run_ids. In
+// practice, the harness is a per-eval-run process whose own lifetime
+// equals the eval run's lifetime, so the map never grows past the
+// active run_id set. A long-lived host would want an Evict(runID) API,
+// which is intentionally out of scope until a real consumer needs it.
+//
 // Returns the number of directives that were cleared and nil on
 // success, or (0, ErrInjectionRunIDInvalid) for a malformed runID.
 //

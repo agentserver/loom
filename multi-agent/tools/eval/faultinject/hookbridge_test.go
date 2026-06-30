@@ -380,6 +380,28 @@ func TestHookBridge_NonLIFOClose_PreservesActiveBridge(t *testing.T) {
 	}
 }
 
+// New (round-3 reviewer P2): nil audit must not crash the hook path —
+// Install replaces nil with a default writer.
+func TestHookBridge_NilAuditIsSubstituted(t *testing.T) {
+	store := NewStore()
+	closer := Install(store, nil) // intentionally nil
+	defer closer()
+	const runID = "run-nilaud01"
+	if _, err := store.Add(runID, FaultModelRouteFailure, "", nil); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	// Fire the hook; the bridge's EmitInjected must not panic.
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("nil audit caused panic: %v", r)
+		}
+	}()
+	got := driver.InjectIfActive(context.Background(), runID, driver.HookPointDriverModelRoute, nil)
+	if !errors.Is(got, ErrFaultModelRoute503) {
+		t.Errorf("err = %v, want ErrFaultModelRoute503", got)
+	}
+}
+
 // New (round-2 reviewer P2): double-call closer is idempotent.
 func TestHookBridge_DoubleCloseIsNoOp(t *testing.T) {
 	store := NewStore()

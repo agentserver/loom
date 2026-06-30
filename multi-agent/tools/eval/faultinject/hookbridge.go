@@ -78,18 +78,30 @@ var (
 // if the stack is empty. The closer is safe to call multiple times
 // (subsequent calls are no-ops) and safe to call out of order with
 // respect to other bridges' closers.
+//
+// A nil audit is replaced with a default stderr-backed AuditWriter so
+// callers cannot accidentally produce nil-deref panics on the hot path.
 func Install(store *Store, audit *AuditWriter) func() {
+	if audit == nil {
+		audit = NewAuditWriter(nil, nil)
+	}
 	b := &bridge{store: store, audit: audit}
 	b.attach()
 	return b.detach
 }
 
+// attach pushes b onto the install stack and installs b's hooks as the
+// active pair. On the very first Install of the process, attach also
+// captures whatever hook was already present in driver/executor so
+// detach can restore it once the stack drains. Production code never
+// calls driver.SetHook / executor.SetHook outside this package, so in
+// practice the pre-install hook is nil; but if a future caller (e.g. a
+// telemetry shim) installs its own Hook before faultinject.Install
+// runs, that hook becomes the restore target.
 func (b *bridge) attach() {
 	installStackMu.Lock()
 	defer installStackMu.Unlock()
 	if len(installStack) == 0 {
-		// First bridge — capture whatever hook was active before any of
-		// us so detach can restore it once the stack empties.
 		preInstallDr = driver.SetHook(b.driverHook)
 		preInstallEx = executor.SetHook(b.executorHook)
 	} else {
