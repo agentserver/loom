@@ -118,10 +118,17 @@ func (b *bridge) detach() {
 	if !b.on {
 		return
 	}
-	// Remove b from the stack regardless of position.
+	// Remove b from the stack regardless of position. We copy the trailing
+	// elements down one slot and explicitly nil the now-unused tail slot
+	// so the detached *bridge (and its *Store / *AuditWriter / directives)
+	// can be garbage-collected instead of being retained in the underlying
+	// array until a future Install overwrites it.
 	for i, x := range installStack {
 		if x == b {
-			installStack = append(installStack[:i], installStack[i+1:]...)
+			copy(installStack[i:], installStack[i+1:])
+			n := len(installStack) - 1
+			installStack[n] = nil
+			installStack = installStack[:n]
 			break
 		}
 	}

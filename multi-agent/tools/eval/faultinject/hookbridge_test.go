@@ -8,9 +8,11 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/yourorg/multi-agent/internal/driver"
 	"github.com/yourorg/multi-agent/internal/executor"
@@ -377,6 +379,55 @@ func TestHookBridge_NonLIFOClose_PreservesActiveBridge(t *testing.T) {
 	cB()
 	if err := executor.InjectIfActive(context.Background(), runID, executor.HookPointExecutorFileOpen, nil); err != nil {
 		t.Fatalf("after both closers: want nil, got %v", err)
+	}
+}
+
+// New (round-4 reviewer P2): the install-stack splice must not leak
+// references to detached bridges. With the splice fix, calling a
+// bridge's closer AND dropping the closer's own reference (since the
+// closer is a method value that retains the bridge) lets the bridge
+// be GC-collected. Without the fix the bridge would remain pinned by
+// the underlying slice array.
+func TestHookBridge_DetachDoesNotLeakBridgePointer(t *testing.T) {
+	const N = 6
+	collected := make(chan struct{}, N)
+
+	// Install N bridges, finalize the top-of-stack pointer right after
+	// each install. We do NOT keep any reference to the bridge — only
+	// the closer (a method value) holds it, plus the installStack.
+	closers := make([]func(), 0, N)
+	for i := 0; i < N; i++ {
+		c := Install(NewStore(), NewAuditWriter(nil, nil))
+		installStackMu.Lock()
+		top := installStack[len(installStack)-1]
+		installStackMu.Unlock()
+		runtime.SetFinalizer(top, func(*bridge) { collected <- struct{}{} })
+		top = nil // drop our own reference
+		closers = append(closers, c)
+	}
+
+	// Detach all N. After detach + dropping the closer reference, no
+	// path to the bridge should remain (installStack splice nil'd the
+	// slot; closer method-value goes away when we overwrite closers[i]).
+	for i := N - 1; i >= 0; i-- {
+		closers[i]()
+		closers[i] = nil // release the method-value's reference
+	}
+	closers = nil
+
+	// Poke GC. Finalizers run asynchronously; we allow up to ~2s.
+	deadline := time.Now().Add(2 * time.Second)
+	done := 0
+	for done < N && time.Now().Before(deadline) {
+		runtime.GC()
+		select {
+		case <-collected:
+			done++
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	if done < N {
+		t.Errorf("detached bridges retained: only %d/%d finalizers ran (the install-stack splice may still pin pointers)", done, N)
 	}
 }
 

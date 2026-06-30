@@ -111,9 +111,14 @@ func (s *Server) Serve(ctx context.Context) error {
 	addr := ln.Addr().String()
 	s.addr.Store(&addr)
 
+	// Route ctx-cancellation through the gated Shutdown wrapper so the
+	// sync.Once in Shutdown is honored. http.Server.Shutdown is itself
+	// concurrent-safe, but Shutdown is the documented entry point and
+	// any future cleanup added inside its Once.Do body would otherwise
+	// race the inline shutdown.
 	go func() {
 		<-ctx.Done()
-		_ = s.httpSrv.Shutdown(context.Background())
+		_ = s.Shutdown(context.Background())
 	}()
 	if err := s.httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err

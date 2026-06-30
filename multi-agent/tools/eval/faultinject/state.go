@@ -107,12 +107,20 @@ func (s *Store) Add(runID string, kind FaultKind, target string, params map[stri
 }
 
 // Clear drops every directive for runID and resets the rate counters for
-// the run. The per-run Seq counter is intentionally NOT reset: the
-// audit log uses (run_id, seq) as a discriminator, so re-using seq=1
-// after a clear+inject cycle would produce ambiguous audit lines for a
-// test pattern as common as `inject → clear → inject`. The counter is
-// cheap and process-local, so lifetime-monotonic seq is the right
-// trade.
+// the run. The per-run Seq counter is intentionally NOT reset, so seq
+// is lifetime-monotonic per run_id. The motivation is registration-side
+// only: an audit line emitted from /inject (action="registered") is
+// uniquely keyable by (run_id, seq), and a fresh inject after Clear
+// should not collide with a prior registration's key. This makes
+// "which Add ever registered directive X?" answerable from the audit
+// log alone.
+//
+// Note: this does NOT make every audit line uniquely identifiable.
+// Hook-fire audits (action="injected") reuse the directive's seq for
+// every fire because Lookup returns the same first-matching directive
+// repeatedly. If a future consumer needs per-fire uniqueness, add a
+// fire_seq field to AuditRecord; do not overload `seq` for both
+// meanings.
 //
 // As a consequence, the `s.seq` map grows monotonically with the number
 // of distinct run_ids the process has ever seen (one `string→int` entry
