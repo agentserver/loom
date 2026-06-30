@@ -263,8 +263,15 @@ function, both call sites). All three checks fire in the §2.5 error format.
     Reason: operators sometimes render hints in HTML diagnostic pages
     (driver UI, observer trace viewer). A hint of the form `<script
     src=evil/>` rendered raw becomes XSS. This is defense-in-depth — the
-    renderer SHOULD escape, but this enforcement at the contract layer
-    means the bad value never makes it to the renderer in the first place.
+    renderer is the load-bearing defense (it MUST HTML-escape); this
+    enforcement at the contract layer is a best-effort second line that
+    catches the obvious shape. Best-effort because a determined
+    attacker can split tokens with zero-width spaces (`<​script>`)
+    or combining marks that pass the substring scan but get normalized
+    away by some HTML parsers. Tightening the check to strip such
+    characters before scanning would introduce false positives on
+    legitimate multilingual hints; the cost/benefit favors keeping the
+    check simple and relying on the renderer for normalize-then-escape.
     A legitimate hint that needs to literally discuss XSS can use
     backtick-quoting; this is an acceptable false-positive trade.
 
