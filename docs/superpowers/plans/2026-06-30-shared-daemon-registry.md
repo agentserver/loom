@@ -1396,3 +1396,1258 @@ All tests should pass. No behavior change should be observable — Phase A is pu
 
 ---
 
+## Phase B — Shared registry + heartbeat (5 tasks)
+
+Builds the Postgres-backed registry layer. Tasks B1–B5 are sequential (B2 needs B1's type; B3 needs `daemonConn` ownershipLost from A4 + sharedReg from B1; B4 wires it all into `ServeHTTP`; B5 adds the per-pod sweep goroutine).
+
+### Task B1: `*sharedRegistry` Go type + SQL (`connectUpsert`, `heartbeatUpsert`, `remove`, `lookupRemote`, `listAll`)
+
+**Files:**
+- Create: `multi-agent/internal/commanderhub/registry_shared.go`
+- Create: `multi-agent/internal/commanderhub/registry_shared_test.go` (sqlmock-driven)
+
+**Interfaces:**
+- Produces (in package `commanderhub`):
+
+```go
+type sharedRegistry struct {
+    db             *sql.DB
+    advertiseURL   string
+    onlineTTL      time.Duration // 45s; cells fresher than this are "online" to readers
+    deleteAfter    time.Duration // 5m; sweep deletes rows older than this (NOT 45s)
+    heartbeatEvery time.Duration // 15s
+    sweepEvery     time.Duration // 30s
+    nonceTTL       time.Duration // 120s; sweepNonces threshold (= 2× HMAC timestamp window)
+}
+
+func newSharedRegistry(db *sql.DB, advertiseURL string) *sharedRegistry
+
+// connectUpsert: INSERT … ON CONFLICT (user_id, workspace_id, short_id) DO
+// UPDATE … WITHOUT ownership guard (a new WS connect is allowed to claim
+// ownership; previous owner's heartbeat will see 0 rows and exit).
+// Returns error on PG failure; caller MUST refuse the WS to prevent
+// split-brain (cluster invisibility).
+func (s *sharedRegistry) connectUpsert(ctx context.Context, dc *daemonConn) error
+
+// heartbeatUpsert: ownership-guarded UPSERT. Returns:
+//   stillOwn = true  ⇒ row exists with our (advertiseURL, connection_id); refreshed last_seen_at.
+//   stillOwn = false ⇒ another pod or a newer same-pod connection claimed; caller MUST close WS.
+//   err              ⇒ transient PG; caller continues (next tick may succeed).
+func (s *sharedRegistry) heartbeatUpsert(ctx context.Context, dc *daemonConn) (stillOwn bool, err error)
+
+// remove: ownership-guarded DELETE. Only deletes when both
+// owning_instance_url AND connection_id match this pod+connection. Safe
+// during same-pod fast reconnect.
+func (s *sharedRegistry) remove(ctx context.Context, o owner, shortID, connectionID string) error
+
+// lookupRemote: returns peerURL+info iff a fresh (last_seen_at > now() -
+// onlineTTL) row exists AND owning_instance_url != s.advertiseURL.
+// Returns ok=false on stale row or self-owned row. Returns err on PG.
+func (s *sharedRegistry) lookupRemote(ctx context.Context, o owner, shortID string) (peerURL string, info DaemonInfo, ok bool, err error)
+
+// listAll: returns every fresh DaemonInfo for owner (this pod + peers).
+// Used by /api/commander/daemons, /tree, FanOutSessions.
+func (s *sharedRegistry) listAll(ctx context.Context, o owner) ([]DaemonInfo, error)
+```
+
+- [ ] **Step 1: Write the failing tests (sqlmock-driven)**
+
+Create `internal/commanderhub/registry_shared_test.go`:
+
+```go
+package commanderhub
+
+import (
+	"context"
+	"database/sql"
+	"testing"
+	"time"
+
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/stretchr/testify/require"
+)
+
+func TestSharedRegistry_ConnectUpsertSQL(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newSharedRegistry(db, "http://10.0.0.42:8091")
+	dc := &daemonConn{
+		id:            "conn-1",
+		shortID:       "agent-A",
+		owner:         owner{userID: "alice", workspaceID: "W1"},
+		displayName:   "alice-mac",
+		kind:          "claude",
+		driverVersion: "0.0.10",
+	}
+
+	mock.ExpectExec(connectUpsertSQL).
+		WithArgs("alice", "W1", "agent-A", "conn-1", "alice-mac", "claude", "0.0.10", sqlmock.AnyArg(), "http://10.0.0.42:8091").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	require.NoError(t, s.connectUpsert(context.Background(), dc))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSharedRegistry_HeartbeatStillOwn(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newSharedRegistry(db, "http://10.0.0.42:8091")
+	dc := &daemonConn{id: "conn-1", shortID: "agent-A", owner: owner{userID: "alice", workspaceID: "W1"}}
+
+	mock.ExpectExec(heartbeatUpsertSQL).
+		WithArgs("alice", "W1", "agent-A", "conn-1", "http://10.0.0.42:8091").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	stillOwn, err := s.heartbeatUpsert(context.Background(), dc)
+	require.NoError(t, err)
+	require.True(t, stillOwn)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSharedRegistry_HeartbeatOwnershipLost(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newSharedRegistry(db, "http://10.0.0.42:8091")
+	dc := &daemonConn{id: "conn-1", shortID: "agent-A", owner: owner{userID: "alice", workspaceID: "W1"}}
+
+	// 0 rows affected ⇒ sibling claimed.
+	mock.ExpectExec(heartbeatUpsertSQL).
+		WithArgs("alice", "W1", "agent-A", "conn-1", "http://10.0.0.42:8091").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	stillOwn, err := s.heartbeatUpsert(context.Background(), dc)
+	require.NoError(t, err)
+	require.False(t, stillOwn)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSharedRegistry_RemoveGuardsConnectionID(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newSharedRegistry(db, "http://10.0.0.42:8091")
+	o := owner{userID: "alice", workspaceID: "W1"}
+
+	mock.ExpectExec(removeSQL).
+		WithArgs("alice", "W1", "agent-A", "http://10.0.0.42:8091", "conn-1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	require.NoError(t, s.remove(context.Background(), o, "agent-A", "conn-1"))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSharedRegistry_LookupRemoteSkipsSelfOwned(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newSharedRegistry(db, "http://10.0.0.42:8091")
+	o := owner{userID: "alice", workspaceID: "W1"}
+
+	// Row exists, owned by THIS pod → ok=false (no peer URL).
+	rows := sqlmock.NewRows([]string{"owning_instance_url", "short_id", "display_name", "kind", "driver_version", "capabilities", "last_seen_at"}).
+		AddRow("http://10.0.0.42:8091", "agent-A", "alice-mac", "claude", "0.0.10", `[]`, time.Now())
+	mock.ExpectQuery(lookupRemoteSQL).
+		WithArgs("alice", "W1", "agent-A", sqlmock.AnyArg()).
+		WillReturnRows(rows)
+
+	_, _, ok, err := s.lookupRemote(context.Background(), o, "agent-A")
+	require.NoError(t, err)
+	require.False(t, ok, "self-owned row must not be returned as remote")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSharedRegistry_LookupRemotePeerOwned(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newSharedRegistry(db, "http://10.0.0.42:8091")
+	o := owner{userID: "alice", workspaceID: "W1"}
+
+	rows := sqlmock.NewRows([]string{"owning_instance_url", "short_id", "display_name", "kind", "driver_version", "capabilities", "last_seen_at"}).
+		AddRow("http://10.0.1.99:8091", "agent-A", "alice-mac", "claude", "0.0.10", `["sessions","turn"]`, time.Now())
+	mock.ExpectQuery(lookupRemoteSQL).
+		WithArgs("alice", "W1", "agent-A", sqlmock.AnyArg()).
+		WillReturnRows(rows)
+
+	peer, info, ok, err := s.lookupRemote(context.Background(), o, "agent-A")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "http://10.0.1.99:8091", peer)
+	require.Equal(t, "agent-A", info.DaemonID)
+	require.Equal(t, "alice-mac", info.DisplayName)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSharedRegistry_ListAllFreshOnly(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newSharedRegistry(db, "http://10.0.0.42:8091")
+	o := owner{userID: "alice", workspaceID: "W1"}
+
+	rows := sqlmock.NewRows([]string{"short_id", "display_name", "kind", "driver_version", "capabilities", "last_seen_at", "owning_instance_url"}).
+		AddRow("agent-A", "alice-mac", "claude", "0.0.10", `["sessions"]`, time.Now(), "http://10.0.0.42:8091").
+		AddRow("agent-B", "alice-laptop", "codex", "0.0.10", `["sessions"]`, time.Now(), "http://10.0.1.99:8091")
+	mock.ExpectQuery(listAllSQL).
+		WithArgs("alice", "W1", sqlmock.AnyArg()).
+		WillReturnRows(rows)
+
+	got, err := s.listAll(context.Background(), o)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	require.Equal(t, "agent-A", got[0].DaemonID)
+	require.Equal(t, "agent-B", got[1].DaemonID)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+```
+
+- [ ] **Step 2: Run; expect compile failure**
+
+```sh
+go test ./internal/commanderhub -run TestSharedRegistry_ -count=1
+```
+
+Expected: `undefined: newSharedRegistry`, `undefined: connectUpsertSQL`, etc.
+
+- [ ] **Step 3: Create `registry_shared.go`**
+
+Create `internal/commanderhub/registry_shared.go`:
+
+```go
+package commanderhub
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"sort"
+	"time"
+)
+
+// SQL statements as package-level consts so unit tests can assert exact
+// shape via sqlmock.QueryMatcherEqual. Indentation/whitespace must match
+// what the production code passes to db.ExecContext/QueryRowContext.
+
+const connectUpsertSQL = `INSERT INTO commander_daemons (user_id, workspace_id, short_id, connection_id, display_name, kind, driver_version, capabilities, owning_instance_url, last_seen_at, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, now(), now()) ON CONFLICT (user_id, workspace_id, short_id) DO UPDATE SET connection_id = EXCLUDED.connection_id, display_name = EXCLUDED.display_name, kind = EXCLUDED.kind, driver_version = EXCLUDED.driver_version, capabilities = EXCLUDED.capabilities, owning_instance_url = EXCLUDED.owning_instance_url, last_seen_at = now()`
+
+const heartbeatUpsertSQL = `UPDATE commander_daemons SET last_seen_at = now() WHERE user_id = $1 AND workspace_id = $2 AND short_id = $3 AND connection_id = $4 AND owning_instance_url = $5`
+
+const removeSQL = `DELETE FROM commander_daemons WHERE user_id = $1 AND workspace_id = $2 AND short_id = $3 AND owning_instance_url = $4 AND connection_id = $5`
+
+const lookupRemoteSQL = `SELECT owning_instance_url, short_id, display_name, kind, driver_version, capabilities, last_seen_at FROM commander_daemons WHERE user_id = $1 AND workspace_id = $2 AND short_id = $3 AND last_seen_at > $4`
+
+const listAllSQL = `SELECT short_id, display_name, kind, driver_version, capabilities, last_seen_at, owning_instance_url FROM commander_daemons WHERE user_id = $1 AND workspace_id = $2 AND last_seen_at > $3 ORDER BY display_name`
+
+const sweepDaemonsSQL = `DELETE FROM commander_daemons WHERE last_seen_at < $1`
+
+const sweepNoncesSQL = `DELETE FROM commander_forward_nonces WHERE received_at < $1`
+
+const sweepTelemetryBucketsSQL = `DELETE FROM commander_telemetry_buckets WHERE updated_at < $1`
+
+const (
+	defaultOnlineTTL      = 45 * time.Second
+	defaultDeleteAfter    = 5 * time.Minute
+	defaultHeartbeatEvery = 15 * time.Second
+	defaultSweepEvery     = 30 * time.Second
+	defaultNonceTTL       = 120 * time.Second
+)
+
+type sharedRegistry struct {
+	db             *sql.DB
+	advertiseURL   string
+	onlineTTL      time.Duration
+	deleteAfter    time.Duration
+	heartbeatEvery time.Duration
+	sweepEvery     time.Duration
+	nonceTTL       time.Duration
+}
+
+func newSharedRegistry(db *sql.DB, advertiseURL string) *sharedRegistry {
+	return &sharedRegistry{
+		db:             db,
+		advertiseURL:   advertiseURL,
+		onlineTTL:      defaultOnlineTTL,
+		deleteAfter:    defaultDeleteAfter,
+		heartbeatEvery: defaultHeartbeatEvery,
+		sweepEvery:     defaultSweepEvery,
+		nonceTTL:       defaultNonceTTL,
+	}
+}
+
+// connectUpsert: claim ownership on new WS connect. INSERT ... ON CONFLICT
+// DO UPDATE without ownership guard — the new connect is allowed to take
+// ownership. Previous owner's heartbeat will see 0 rows (its WHERE
+// includes connection_id) and exit.
+func (s *sharedRegistry) connectUpsert(ctx context.Context, dc *daemonConn) error {
+	dc.metaMu.Lock()
+	capsList := make([]string, 0, len(dc.capabilities))
+	for cap, on := range dc.capabilities {
+		if on {
+			capsList = append(capsList, cap)
+		}
+	}
+	dc.metaMu.Unlock()
+	sort.Strings(capsList)
+	capsJSON, _ := json.Marshal(capsList)
+	_, err := s.db.ExecContext(ctx, connectUpsertSQL,
+		dc.owner.userID, dc.owner.workspaceID, dc.shortID, dc.id,
+		dc.displayName, dc.kind, dc.driverVersion, string(capsJSON),
+		s.advertiseURL)
+	return err
+}
+
+// heartbeatUpsert: refresh last_seen_at ONLY when this pod + this exact
+// connection still owns the row. 0 rows ⇒ ownership lost.
+//
+// NOTE: implemented as a plain UPDATE (not UPSERT) so a row deleted by a
+// peer's sweep STAYS deleted; the next WS reconnect re-claims via
+// connectUpsert. If we used an UPSERT here, a stale heartbeat after
+// connection-loss could resurrect a dead row.
+func (s *sharedRegistry) heartbeatUpsert(ctx context.Context, dc *daemonConn) (stillOwn bool, err error) {
+	res, err := s.db.ExecContext(ctx, heartbeatUpsertSQL,
+		dc.owner.userID, dc.owner.workspaceID, dc.shortID, dc.id, s.advertiseURL)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// remove: ownership + connection-id-guarded DELETE.
+func (s *sharedRegistry) remove(ctx context.Context, o owner, shortID, connectionID string) error {
+	_, err := s.db.ExecContext(ctx, removeSQL,
+		o.userID, o.workspaceID, shortID, s.advertiseURL, connectionID)
+	return err
+}
+
+// lookupRemote: peerURL+info iff fresh AND peer-owned.
+func (s *sharedRegistry) lookupRemote(ctx context.Context, o owner, shortID string) (string, DaemonInfo, bool, error) {
+	row := s.db.QueryRowContext(ctx, lookupRemoteSQL,
+		o.userID, o.workspaceID, shortID, time.Now().Add(-s.onlineTTL))
+	var ownerURL, displayName, kind, driverVersion, capabilitiesJSON string
+	var sid string
+	var lastSeen time.Time
+	if err := row.Scan(&ownerURL, &sid, &displayName, &kind, &driverVersion, &capabilitiesJSON, &lastSeen); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", DaemonInfo{}, false, nil
+		}
+		return "", DaemonInfo{}, false, err
+	}
+	if ownerURL == s.advertiseURL {
+		return "", DaemonInfo{}, false, nil
+	}
+	var capabilities []string
+	_ = json.Unmarshal([]byte(capabilitiesJSON), &capabilities)
+	return ownerURL, DaemonInfo{
+		DaemonID:      sid,
+		ShortID:       sid,
+		DisplayName:   displayName,
+		Kind:          kind,
+		DriverVersion: driverVersion,
+		Capabilities:  capabilities,
+		LastSeenAt:    lastSeen.UTC().Format(time.RFC3339Nano),
+	}, true, nil
+}
+
+// listAll: every fresh row for owner (this pod + peers).
+func (s *sharedRegistry) listAll(ctx context.Context, o owner) ([]DaemonInfo, error) {
+	rows, err := s.db.QueryContext(ctx, listAllSQL,
+		o.userID, o.workspaceID, time.Now().Add(-s.onlineTTL))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]DaemonInfo, 0, 8)
+	for rows.Next() {
+		var sid, displayName, kind, driverVersion, capsJSON, ownerURL string
+		var lastSeen time.Time
+		if err := rows.Scan(&sid, &displayName, &kind, &driverVersion, &capsJSON, &lastSeen, &ownerURL); err != nil {
+			return nil, err
+		}
+		var caps []string
+		_ = json.Unmarshal([]byte(capsJSON), &caps)
+		out = append(out, DaemonInfo{
+			DaemonID:      sid,
+			ShortID:       sid,
+			DisplayName:   displayName,
+			Kind:          kind,
+			DriverVersion: driverVersion,
+			Capabilities:  caps,
+			LastSeenAt:    lastSeen.UTC().Format(time.RFC3339Nano),
+		})
+	}
+	return out, rows.Err()
+}
+```
+
+- [ ] **Step 4: Run; expect pass**
+
+```sh
+go test ./internal/commanderhub -run TestSharedRegistry_ -count=1 -race
+```
+
+- [ ] **Step 5: Commit**
+
+```sh
+git add internal/commanderhub/registry_shared.go \
+        internal/commanderhub/registry_shared_test.go
+git commit -m "feat(commanderhub): add sharedRegistry SQL layer (connectUpsert, heartbeat, remove, lookupRemote, listAll)
+
+Postgres-backed registry of online daemons. connectUpsert claims
+ownership on new WS connect; heartbeatUpsert is ownership-guarded (0
+rows ⇒ sibling claimed); remove is connection_id-guarded against
+same-pod fast reconnect; lookupRemote returns peer URL only when the
+row is owned by another advertiseURL; listAll returns fresh rows for
+all pods. SQL statements live as exported consts so sqlmock tests can
+assert exact shape via QueryMatcherEqual.
+
+Heartbeat is a plain UPDATE (not UPSERT) so a sweep-deleted dead row
+STAYS deleted; reconnect re-claims via connectUpsert.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+```
+
+---
+
+### Task B2: heartbeat goroutine + `runHeartbeat` (ownership-loss → force-close WS)
+
+**Files:**
+- Modify: `multi-agent/internal/commanderhub/registry_shared.go` (add `runHeartbeat`)
+- Modify: `multi-agent/internal/commanderhub/registry_shared_test.go` (add 2 tests)
+
+**Interfaces:**
+- Produces: `(s *sharedRegistry).runHeartbeat(ctx context.Context, dc *daemonConn)`. Loops every `heartbeatEvery` (15s) calling `heartbeatUpsert`. On `stillOwn=false`: marks `dc.ownershipLost.Store(true)`, **calls `dc.conn.Close()`** to force the WS read loop to exit (so ServeHTTP defers run + sibling's claim is honored), logs WARN, and returns. On `stillOwn=true`: logs nothing. On err: logs WARN at most once per 5 ticks per dc (avoid spam), continues. Exits when ctx cancelled.
+
+- [ ] **Step 1: Append failing tests**
+
+Append to `internal/commanderhub/registry_shared_test.go`:
+
+```go
+func TestSharedRegistry_HeartbeatExitsOnCtxCancel(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newSharedRegistry(db, "http://10.0.0.42:8091")
+	s.heartbeatEvery = 10 * time.Millisecond // fast for test
+	dc := &daemonConn{id: "conn-1", shortID: "agent-A", owner: owner{userID: "alice", workspaceID: "W1"}}
+
+	mock.ExpectExec(heartbeatUpsertSQL).
+		WithArgs("alice", "W1", "agent-A", "conn-1", "http://10.0.0.42:8091").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); s.runHeartbeat(ctx, dc) }()
+
+	time.Sleep(25 * time.Millisecond) // one tick
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runHeartbeat did not exit within 1s after ctx cancel")
+	}
+}
+
+func TestSharedRegistry_HeartbeatForceClosesOnOwnershipLoss(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newSharedRegistry(db, "http://10.0.0.42:8091")
+	s.heartbeatEvery = 5 * time.Millisecond
+	dc := newOwnershipTestDaemonConn(t, "conn-1", "agent-A", owner{userID: "alice", workspaceID: "W1"})
+
+	// First tick: stillOwn=false (sibling claimed)
+	mock.ExpectExec(heartbeatUpsertSQL).
+		WithArgs("alice", "W1", "agent-A", "conn-1", "http://10.0.0.42:8091").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	done := make(chan struct{})
+	go func() { defer close(done); s.runHeartbeat(context.Background(), dc) }()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runHeartbeat should exit after ownership loss")
+	}
+	require.True(t, dc.ownershipLost.Load(), "ownershipLost must be sticky-true after loss")
+	require.True(t, ownershipTestConnIsClosed(dc), "WS conn must be force-closed on ownership loss")
+}
+```
+
+Add a small test helper to the same file (or a new `registry_shared_helpers_test.go`):
+
+```go
+// newOwnershipTestDaemonConn returns a daemonConn whose `conn` is a
+// real *websocket.Conn over a localhost pipe so dc.conn.Close() is
+// observable via ownershipTestConnIsClosed.
+func newOwnershipTestDaemonConn(t *testing.T, connID, shortID string, o owner) *daemonConn {
+	// Build a server/client websocket pair via httptest + dial.
+	// Implementation: spin up an httptest.Server with an upgrader,
+	// dial it from the test, and put the server-side *websocket.Conn
+	// into daemonConn.conn. Mirror the pattern in hub_test.go::
+	// dialDaemonWS or similar; if no helper exists, write one here.
+	// Returns a daemonConn ready for runHeartbeat to call Close on.
+	t.Helper()
+	// ... (full implementation: ~30 lines; cribbed from hub_test.go's existing dialer)
+	panic("TODO: implement helper using gorilla/websocket Upgrader + httptest.Server + websocket.DefaultDialer; mirror hub_test.go::dialDaemonWS pattern")
+}
+
+func ownershipTestConnIsClosed(dc *daemonConn) bool {
+	// Probe by attempting a zero-byte write; gorilla returns
+	// websocket.ErrCloseSent or net error on closed conn.
+	return dc.conn.WriteMessage(websocket.PingMessage, nil) != nil
+}
+```
+
+When implementing the helper, look at existing `hub_test.go` for the precise pattern; cribbing it avoids fragile bespoke code.
+
+- [ ] **Step 2: Run; expect compile failure**
+
+- [ ] **Step 3: Add `runHeartbeat` to `registry_shared.go`**
+
+```go
+import (
+	"log"
+)
+
+// runHeartbeat ticks every s.heartbeatEvery, calling heartbeatUpsert.
+// On stillOwn=false: marks dc.ownershipLost (sticky), force-closes the
+// WS conn so the read loop exits and ServeHTTP defers run, then returns.
+// On err: logs at most once per 5 consecutive failures (rate-limited
+// noise), continues. Exits on ctx cancel.
+func (s *sharedRegistry) runHeartbeat(ctx context.Context, dc *daemonConn) {
+	ticker := time.NewTicker(s.heartbeatEvery)
+	defer ticker.Stop()
+	errCount := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		hbCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		stillOwn, err := s.heartbeatUpsert(hbCtx, dc)
+		cancel()
+		switch {
+		case err != nil:
+			errCount++
+			if errCount%5 == 1 {
+				log.Printf("commanderhub: heartbeatUpsert short_id=%s conn_id=%s pod=%s err=%v",
+					dc.shortID, dc.id, s.advertiseURL, err)
+			}
+		case !stillOwn:
+			log.Printf("commanderhub: heartbeat ownership lost short_id=%s conn_id=%s pod=%s; force-closing WS",
+				dc.shortID, dc.id, s.advertiseURL)
+			dc.ownershipLost.Store(true)
+			// Force-close so the read loop wakes with io.EOF; ServeHTTP
+			// defers then run localReg.removeIf + sharedReg.remove,
+			// neither of which delete the new owner's state (both are
+			// connection_id-guarded).
+			_ = dc.conn.Close()
+			return
+		default:
+			errCount = 0
+		}
+	}
+}
+```
+
+- [ ] **Step 4: Run; expect pass**
+
+```sh
+go test ./internal/commanderhub -run TestSharedRegistry_ -count=1 -race
+```
+
+- [ ] **Step 5: Commit**
+
+```sh
+git add internal/commanderhub/registry_shared.go internal/commanderhub/registry_shared_test.go
+git commit -m "feat(commanderhub): runHeartbeat goroutine with ownership-loss force-close
+
+Periodically refreshes commander_daemons.last_seen_at; on stillOwn=false
+(sibling pod claimed via newer connection_id or different advertiseURL),
+the goroutine force-closes the WS conn so the read loop wakes with EOF
+and ServeHTTP's defers run. Both removeIf (local) and remove (shared)
+are connection_id-guarded so neither deletes the new owner's state.
+
+PG transient errors are rate-limited to 1 log per 5 consecutive
+failures.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+```
+
+---
+
+### Task B3: `(dc *daemonConn).confirmOwnership` — per-send PG ownership check
+
+**Files:**
+- Modify: `multi-agent/internal/commanderhub/registry.go` (add `confirmOwnership` method to `daemonConn`)
+- Create: `multi-agent/internal/commanderhub/registry_ownership_test.go`
+
+**Interfaces:**
+- Produces: `(dc *daemonConn) confirmOwnership(ctx context.Context) bool`. Returns false (denying writes) if `dc.ownershipLost.Load()` is already true (sticky negative cache). Otherwise issues a 500ms-bounded PG SELECT against `commander_daemons` and checks (owning_instance_url, connection_id) match. On any deviation OR PG error, sets `ownershipLost.Store(true)` and returns false. On match, returns true. **No positive cache** — every shared-mode SendCommand call pays one PG round-trip. Eliminates the v6/v7/v8 race window.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `internal/commanderhub/registry_ownership_test.go`:
+
+```go
+package commanderhub
+
+import (
+	"context"
+	"database/sql"
+	"testing"
+	"time"
+
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/stretchr/testify/require"
+)
+
+const confirmOwnershipSQL = `SELECT owning_instance_url, connection_id FROM commander_daemons WHERE user_id = $1 AND workspace_id = $2 AND short_id = $3`
+
+func TestDaemonConn_ConfirmOwnership_StillOwn(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newSharedRegistry(db, "http://10.0.0.42:8091")
+	dc := &daemonConn{id: "conn-1", shortID: "agent-A", owner: owner{userID: "alice", workspaceID: "W1"}, hub: &Hub{sharedReg: s}}
+
+	rows := sqlmock.NewRows([]string{"owning_instance_url", "connection_id"}).
+		AddRow("http://10.0.0.42:8091", "conn-1")
+	mock.ExpectQuery(confirmOwnershipSQL).
+		WithArgs("alice", "W1", "agent-A").
+		WillReturnRows(rows)
+
+	require.True(t, dc.confirmOwnership(context.Background()))
+	require.False(t, dc.ownershipLost.Load())
+}
+
+func TestDaemonConn_ConfirmOwnership_DifferentPod(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newSharedRegistry(db, "http://10.0.0.42:8091")
+	dc := &daemonConn{id: "conn-1", shortID: "agent-A", owner: owner{userID: "alice", workspaceID: "W1"}, hub: &Hub{sharedReg: s}}
+
+	rows := sqlmock.NewRows([]string{"owning_instance_url", "connection_id"}).
+		AddRow("http://10.0.1.99:8091", "conn-other")
+	mock.ExpectQuery(confirmOwnershipSQL).
+		WithArgs("alice", "W1", "agent-A").
+		WillReturnRows(rows)
+
+	require.False(t, dc.confirmOwnership(context.Background()))
+	require.True(t, dc.ownershipLost.Load(), "ownershipLost must be sticky-true")
+}
+
+func TestDaemonConn_ConfirmOwnership_RowMissing(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newSharedRegistry(db, "http://10.0.0.42:8091")
+	dc := &daemonConn{id: "conn-1", shortID: "agent-A", owner: owner{userID: "alice", workspaceID: "W1"}, hub: &Hub{sharedReg: s}}
+
+	mock.ExpectQuery(confirmOwnershipSQL).
+		WithArgs("alice", "W1", "agent-A").
+		WillReturnRows(sqlmock.NewRows([]string{"owning_instance_url", "connection_id"}))
+
+	require.False(t, dc.confirmOwnership(context.Background()))
+	require.True(t, dc.ownershipLost.Load())
+}
+
+func TestDaemonConn_ConfirmOwnership_StickyNegativeNoQuery(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newSharedRegistry(db, "http://10.0.0.42:8091")
+	dc := &daemonConn{id: "conn-1", shortID: "agent-A", owner: owner{userID: "alice", workspaceID: "W1"}, hub: &Hub{sharedReg: s}}
+	dc.ownershipLost.Store(true)
+
+	// No mock.ExpectQuery — sticky negative cache must NOT touch PG.
+	require.False(t, dc.confirmOwnership(context.Background()))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDaemonConn_ConfirmOwnership_PGError(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newSharedRegistry(db, "http://10.0.0.42:8091")
+	dc := &daemonConn{id: "conn-1", shortID: "agent-A", owner: owner{userID: "alice", workspaceID: "W1"}, hub: &Hub{sharedReg: s}}
+
+	mock.ExpectQuery(confirmOwnershipSQL).
+		WithArgs("alice", "W1", "agent-A").
+		WillReturnError(sql.ErrConnDone)
+
+	require.False(t, dc.confirmOwnership(context.Background()))
+	require.True(t, dc.ownershipLost.Load(), "PG error must be fail-closed (treat as lost)")
+}
+```
+
+- [ ] **Step 2: Run; expect compile failure**
+
+- [ ] **Step 3: Add `confirmOwnership` to registry.go**
+
+Add to `internal/commanderhub/registry.go` (near the bottom):
+
+```go
+// confirmOwnership: pre-send check that this conn is still the cluster's
+// authoritative owner. Sticky-negative cache: once ownershipLost is true,
+// short-circuits all future calls without touching PG. Otherwise issues
+// a 500ms-bounded SELECT against commander_daemons.
+//
+// On any deviation (different owning_instance_url, different
+// connection_id, missing row, or PG error), sets ownershipLost=true
+// and returns false. Fail-closed semantics.
+//
+// Called by SendCommand[Stream] in shared mode before dc.writeEnvelope.
+// In single-pod mode (dc.hub.sharedReg == nil), callers MUST NOT call
+// this method (it would panic on nil dereference). The check belongs in
+// SendCommand[Stream]'s branch logic.
+func (dc *daemonConn) confirmOwnership(ctx context.Context) bool {
+	if dc.ownershipLost.Load() {
+		return false
+	}
+	cctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	var ownerURL, connID string
+	row := dc.hub.sharedReg.db.QueryRowContext(cctx, confirmOwnershipSQL,
+		dc.owner.userID, dc.owner.workspaceID, dc.shortID)
+	if err := row.Scan(&ownerURL, &connID); err != nil ||
+		ownerURL != dc.hub.sharedReg.advertiseURL ||
+		connID != dc.id {
+		dc.ownershipLost.Store(true)
+		return false
+	}
+	return true
+}
+```
+
+Add `"context"` import if missing.
+
+- [ ] **Step 4: Run; expect pass**
+
+```sh
+go test ./internal/commanderhub -run TestDaemonConn_ConfirmOwnership -count=1 -race
+```
+
+- [ ] **Step 5: Commit**
+
+```sh
+git add internal/commanderhub/registry.go internal/commanderhub/registry_ownership_test.go
+git commit -m "feat(commanderhub): daemonConn.confirmOwnership pre-send PG check
+
+Per-send fresh ownership check against commander_daemons in shared mode.
+Sticky-negative cache (atomic.Bool) avoids re-querying for the brief
+remaining lifetime of a displaced conn. PG error or any deviation in
+(owning_instance_url, connection_id) marks ownership lost (fail-closed),
+so SendCommand[Stream] returns ErrDaemonGone instead of writing to a
+stale WS that times out at TurnTimeout.
+
+Costs +1 sub-ms PG SELECT per SendCommand in cluster mode. Eliminates
+the v6/v7/v8 race window between sibling-claim and heartbeat-driven
+force-close.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+```
+
+---
+
+### Task B4: `ServeHTTP` admission gating (shared-mode requires successful upsert before local admit)
+
+**Files:**
+- Modify: `multi-agent/internal/commanderhub/hub.go::ServeHTTP` (admission + teardown rewrite)
+- Modify: `multi-agent/internal/commanderhub/hub.go::newDaemonID` (128-bit + error return)
+- Modify: existing tests if any assert specific newDaemonID behavior (grep)
+
+**Interfaces:**
+- Produces:
+  - `newDaemonID() (string, error)` — was `func() string` ignoring rand errors; now 16 bytes (128-bit) + propagates `crypto/rand` failure.
+  - ServeHTTP admission order in shared mode: validate `RegisterPayload.ShortID` non-empty → `sharedReg.connectUpsert(3s ctx)` → on error refuse WS with `ErrCodeBackendUnavailable`; on success → `localReg.add(dc)` → start heartbeat goroutine.
+  - ServeHTTP teardown defers (reverse-order): close `done`; `hbCancel + <-hbDone`; ownership-guarded `sharedReg.remove`; `localReg.removeIf(o, shortID, dc.id)`; `invalidateDaemonSessions`; `failAllPending`.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `internal/commanderhub/hub_test.go`:
+
+```go
+func TestNewDaemonID_128BitHexLength(t *testing.T) {
+	id, err := newDaemonID()
+	require.NoError(t, err)
+	// 16 bytes hex-encoded = 32 chars (v5: was 8 bytes / 16 chars).
+	require.Len(t, id, 32, "newDaemonID must return 32-char (128-bit) hex string")
+}
+
+func TestNewDaemonID_DistinctAcrossCalls(t *testing.T) {
+	seen := make(map[string]struct{}, 1000)
+	for i := 0; i < 1000; i++ {
+		id, err := newDaemonID()
+		require.NoError(t, err)
+		if _, dup := seen[id]; dup {
+			t.Fatalf("duplicate ID in 1000-call sample: %s", id)
+		}
+		seen[id] = struct{}{}
+	}
+}
+```
+
+For ServeHTTP admission gating, the test requires a working sharedRegistry. Use sqlmock to drive both connectUpsert and the WS dial path. Add to a new `hub_admission_test.go`:
+
+```go
+package commanderhub
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/require"
+
+	"github.com/yourorg/multi-agent/internal/commander"
+)
+
+func TestServeHTTP_ClusterMode_RefusesWSOnUpsertFailure(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	hub := NewHub(&fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}})
+	hub.attachSharedRegistry(newSharedRegistry(db, "http://10.0.0.42:8091"), nil, nil)
+
+	mock.ExpectExec(connectUpsertSQL).
+		WithArgs("alice", "W1", "agent-A", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "http://10.0.0.42:8091").
+		WillReturnError(errors.New("simulated PG unavailable"))
+
+	srv := httptest.NewServer(hub)
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/daemon-link"
+	hdr := map[string][]string{"Authorization": {"Bearer tok-alice"}}
+	conn, _, err := websocket.DefaultDialer.Dial(url, hdr)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	// Send register payload with non-empty ShortID.
+	rp := commander.RegisterPayload{SchemaVersion: commander.SchemaVersion, ShortID: "agent-A", DisplayName: "alice-mac", Kind: "claude"}
+	payload, _ := json.Marshal(rp)
+	require.NoError(t, conn.WriteJSON(commander.Envelope{Type: "register", Payload: payload}))
+
+	// Expect an error envelope back (backend_unavailable), then close.
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var env commander.Envelope
+	require.NoError(t, conn.ReadJSON(&env))
+	require.Equal(t, "error", env.Type)
+	var ep commander.ErrorPayload
+	require.NoError(t, json.Unmarshal(env.Payload, &ep))
+	require.Equal(t, commander.ErrCodeBackendUnavailable, ep.Code)
+
+	require.NoError(t, mock.ExpectationsWereMet())
+	require.Zero(t, hub.reg.daemons(owner{userID: "alice", workspaceID: "W1"}), "must not admit to localReg on failed upsert")
+}
+
+func TestServeHTTP_ClusterMode_RequiresShortID(t *testing.T) {
+	db, _, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+
+	hub := NewHub(&fakeResolver{mu: map[string]identity.Identity{"tok-alice": {UserID: "alice", WorkspaceID: "W1"}}})
+	hub.attachSharedRegistry(newSharedRegistry(db, "http://10.0.0.42:8091"), nil, nil)
+
+	srv := httptest.NewServer(hub)
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/daemon-link"
+	hdr := map[string][]string{"Authorization": {"Bearer tok-alice"}}
+	conn, _, err := websocket.DefaultDialer.Dial(url, hdr)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	rp := commander.RegisterPayload{SchemaVersion: commander.SchemaVersion} // ShortID empty
+	payload, _ := json.Marshal(rp)
+	require.NoError(t, conn.WriteJSON(commander.Envelope{Type: "register", Payload: payload}))
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var env commander.Envelope
+	require.NoError(t, conn.ReadJSON(&env))
+	require.Equal(t, "error", env.Type)
+	var ep commander.ErrorPayload
+	require.NoError(t, json.Unmarshal(env.Payload, &ep))
+	require.Equal(t, commander.ErrCodeInvalidRequest, ep.Code)
+}
+```
+
+(The `fakeResolver` type already exists in `wiring_test.go`; if not, copy the pattern from there.)
+
+- [ ] **Step 2: Run; expect compile failure**
+
+- [ ] **Step 3: Rewrite `newDaemonID` (128-bit + error)**
+
+In `internal/commanderhub/hub.go`, find:
+
+```go
+func newDaemonID() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
+```
+
+Replace with:
+
+```go
+// newDaemonID returns 128-bit hex random as the per-connection daemon_id.
+// Returns error so caller can refuse WS admission on entropy starvation.
+func newDaemonID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("newDaemonID: %w", err)
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+```
+
+Add `"fmt"` to imports if missing.
+
+- [ ] **Step 4: Update `ServeHTTP` admission + teardown**
+
+Find the existing admission/teardown block in `hub.go::ServeHTTP` (around lines 79-141). The current shape (paraphrased):
+
+```go
+dc := &daemonConn{ id: newDaemonID(), owner: o, conn: conn, ... }
+// reads register frame; sets dc.shortID etc.
+h.reg.add(dc)
+defer h.reg.remove(o, dc.id)
+defer h.invalidateDaemonSessions(o, dc.id)
+defer close(dc.done)
+defer dc.failAllPending()
+// ack + readLoop
+```
+
+Replace with (interleaved comments mark the v5/v15 changes — read the spec §"Daemon admission + teardown ordering"):
+
+```go
+dcID, err := newDaemonID()
+if err != nil {
+	log.Printf("commanderhub: newDaemonID failed: %v", err)
+	conn.Close()
+	return
+}
+dc := &daemonConn{
+	id:      dcID,
+	owner:   o,
+	conn:    conn,
+	pending: make(map[string]*pendingEntry),
+	done:    make(chan struct{}),
+	hub:     h,
+}
+
+// First frame must be register; validate schema before admitting.
+reg, err := readFrame(conn)
+if err != nil {
+	conn.Close()
+	return
+}
+if reg.Type != "register" {
+	conn.Close()
+	return
+}
+var rp commander.RegisterPayload
+if err := json.Unmarshal(reg.Payload, &rp); err != nil {
+	conn.Close()
+	return
+}
+if rp.SchemaVersion != commander.SchemaVersion {
+	_ = dc.writeEnvelope(errorEnvelope("", commander.ErrCodeSchemaVersionMismatch, "schema version mismatch"))
+	dc.writeMu.Lock()
+	_ = conn.WriteControl(websocket.CloseMessage, nil, time.Now().Add(wsWriteWait))
+	dc.writeMu.Unlock()
+	conn.Close()
+	return
+}
+
+// Shared-mode requires non-empty ShortID — the registry PK depends on it,
+// and reconnecting clients without a stable short_id would each create a
+// new row instead of taking over.
+if h.sharedReg != nil && strings.TrimSpace(rp.ShortID) == "" {
+	_ = dc.writeEnvelope(errorEnvelope("", commander.ErrCodeInvalidRequest, "short_id is required when observer is in cluster mode"))
+	conn.Close()
+	return
+}
+
+dc.shortID = rp.ShortID
+dc.displayName = rp.DisplayName
+dc.kind = rp.Kind
+dc.driverVersion = rp.DriverVersion
+capabilities := map[string]bool{
+	commander.CapabilitySessions: true,
+	commander.CapabilityTurn:     true,
+}
+for _, capability := range rp.Capabilities {
+	capability = strings.TrimSpace(capability)
+	if capability != "" {
+		capabilities[capability] = true
+	}
+}
+dc.metaMu.Lock()
+dc.capabilities = capabilities
+dc.lastSeenAt = time.Now().UTC()
+dc.metaMu.Unlock()
+
+// SHARED MODE admission: write DB row BEFORE local admit. On failure,
+// refuse the WS — a locally-admitted-but-cluster-invisible daemon is
+// worse than a refused reconnect (split brain). Daemon wsclient will
+// retry within seconds.
+hbCtx, hbCancel := context.WithCancel(context.Background())
+hbDone := make(chan struct{})
+if h.sharedReg != nil {
+	upsertCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	err := h.sharedReg.connectUpsert(upsertCtx, dc)
+	cancel()
+	if err != nil {
+		log.Printf("commanderhub: shared registry connectUpsert failed (refusing WS to avoid split-brain): %v", err)
+		_ = dc.writeEnvelope(errorEnvelope("", commander.ErrCodeBackendUnavailable, "observer registry unavailable"))
+		conn.Close()
+		hbCancel()  // never started; safe to cancel
+		close(hbDone)
+		return
+	}
+	go func() {
+		defer close(hbDone)
+		h.sharedReg.runHeartbeat(hbCtx, dc)
+	}()
+} else {
+	close(hbDone) // single-pod: nothing to wait on
+}
+
+// Only after shared-registry row is durable do we admit locally.
+h.reg.add(dc)
+
+defer h.reg.removeIf(o, dc.shortID, dc.id)
+defer h.invalidateDaemonSessions(o, dc.shortID)
+defer close(dc.done)
+defer dc.failAllPending()
+defer func() {
+	if h.sharedReg != nil {
+		hbCancel()
+		<-hbDone // wait for heartbeat goroutine to exit
+		removeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = h.sharedReg.remove(removeCtx, o, dc.shortID, dc.id)
+		cancel()
+	}
+}()
+
+// Ack: PR-2 WSClient only flips linked=true on receipt.
+if err := dc.writeEnvelope(commander.Envelope{Type: "ack"}); err != nil {
+	return
+}
+
+dc.readLoop()
+```
+
+Note the order:
+1. Generate dc.id (may fail).
+2. Read register frame; validate schema; require ShortID in shared mode.
+3. Populate dc metadata.
+4. **Shared-mode upsert** under 3s ctx; refuse WS on failure.
+5. Start heartbeat goroutine.
+6. `localReg.add`.
+7. defer chain (LIFO order: failAllPending → close(done) → invalidate → removeIf → heartbeat-stop+remove).
+
+- [ ] **Step 5: Update callers of `newDaemonID()`**
+
+```sh
+grep -nE 'newDaemonID\(' internal/commanderhub
+```
+
+The only caller is `hub.go::ServeHTTP` (already updated). Tests that call `newDaemonID` directly need to handle the new error return; grep `*_test.go` and fix.
+
+- [ ] **Step 6: Run; expect pass**
+
+```sh
+go test ./internal/commanderhub -count=1 -race
+```
+
+- [ ] **Step 7: Commit**
+
+```sh
+git add internal/commanderhub/hub.go internal/commanderhub/hub_test.go internal/commanderhub/hub_admission_test.go internal/commanderhub/*_test.go
+git commit -m "feat(commanderhub): ServeHTTP shared-mode admission gating + 128-bit dc.id
+
+newDaemonID returns (string, error) and uses 16 random bytes (was 8).
+ServeHTTP refuses WS admission if shared-mode connectUpsert fails (3s
+ctx) — locally-admitted-but-cluster-invisible daemons create split
+brain that's worse than a refused reconnect. Heartbeat goroutine starts
+after upsert, exits on hbCancel; deferred sharedReg.remove waits for
+hbDone before running (ownership-guarded DELETE, safe). Shared mode
+also requires non-empty RegisterPayload.ShortID (registry PK column).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+```
+
+---
+
+### Task B5: Sweep goroutine (`commander_daemons` + `commander_forward_nonces` + `commander_telemetry_buckets`)
+
+**Files:**
+- Modify: `multi-agent/internal/commanderhub/registry_shared.go` (add `sweep`, `sweepNonces`, `sweepTelemetryBuckets`, `runSweep`)
+- Modify: `multi-agent/internal/commanderhub/registry_shared_test.go` (add tests)
+
+**Interfaces:**
+- Produces:
+  - `(s *sharedRegistry).sweep(ctx) error` — `DELETE FROM commander_daemons WHERE last_seen_at < now() - 5min`.
+  - `(s *sharedRegistry).sweepNonces(ctx) error` — `DELETE FROM commander_forward_nonces WHERE received_at < now() - 120s`.
+  - `(s *sharedRegistry).sweepTelemetryBuckets(ctx) error` — `DELETE FROM commander_telemetry_buckets WHERE updated_at < now() - 1h`.
+  - `(s *sharedRegistry).runSweep(ctx)` — ticks every `sweepEvery` (30s); runs all three sweeps each tick; logs errors rate-limited.
+
+Note: `deleteAfter` (5min) is deliberately MUCH longer than `onlineTTL` (45s). A 60s PG hiccup on the owning pod makes daemons briefly invisible (readers filter by `onlineTTL`) but NOT deleted; recovery resumes via next heartbeat. See spec §"Honest race window" + spec §"Wire sizing".
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `registry_shared_test.go`:
+
+```go
+func TestSharedRegistry_SweepDeletesOldDaemons(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newSharedRegistry(db, "http://10.0.0.42:8091")
+	mock.ExpectExec(sweepDaemonsSQL).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 3))
+
+	require.NoError(t, s.sweep(context.Background()))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSharedRegistry_RunSweepRunsAllThree(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newSharedRegistry(db, "http://10.0.0.42:8091")
+	s.sweepEvery = 5 * time.Millisecond
+	mock.MatchExpectationsInOrder(false)
+	mock.ExpectExec(sweepDaemonsSQL).WithArgs(sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(sweepNoncesSQL).WithArgs(sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(sweepTelemetryBucketsSQL).WithArgs(sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); s.runSweep(ctx) }()
+
+	time.Sleep(15 * time.Millisecond)
+	cancel()
+	<-done
+
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+```
+
+- [ ] **Step 2: Run; expect compile failure**
+
+- [ ] **Step 3: Add sweep methods + runSweep**
+
+Append to `registry_shared.go`:
+
+```go
+const defaultTelemetryBucketIdleTTL = time.Hour
+
+func (s *sharedRegistry) sweep(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, sweepDaemonsSQL, time.Now().Add(-s.deleteAfter))
+	return err
+}
+
+func (s *sharedRegistry) sweepNonces(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, sweepNoncesSQL, time.Now().Add(-s.nonceTTL))
+	return err
+}
+
+func (s *sharedRegistry) sweepTelemetryBuckets(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, sweepTelemetryBucketsSQL, time.Now().Add(-defaultTelemetryBucketIdleTTL))
+	return err
+}
+
+// runSweep ticks every s.sweepEvery and runs all three sweeps. Errors
+// are logged but the goroutine continues. Exits on ctx cancel.
+func (s *sharedRegistry) runSweep(ctx context.Context) {
+	t := time.NewTicker(s.sweepEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		swCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		if err := s.sweep(swCtx); err != nil {
+			log.Printf("commanderhub: sweep commander_daemons err=%v", err)
+		}
+		if err := s.sweepNonces(swCtx); err != nil {
+			log.Printf("commanderhub: sweep commander_forward_nonces err=%v", err)
+		}
+		if err := s.sweepTelemetryBuckets(swCtx); err != nil {
+			log.Printf("commanderhub: sweep commander_telemetry_buckets err=%v", err)
+		}
+		cancel()
+	}
+}
+```
+
+- [ ] **Step 4: Run; expect pass**
+
+- [ ] **Step 5: Commit**
+
+```sh
+git add internal/commanderhub/registry_shared.go internal/commanderhub/registry_shared_test.go
+git commit -m "feat(commanderhub): per-pod sweep goroutine for daemons + nonces + telemetry buckets
+
+sweep deletes commander_daemons rows older than deleteAfter (5min);
+NOTE deleteAfter is much longer than onlineTTL (45s) so a transient PG
+outage on the owning pod doesn't let a peer's sweep delete the row.
+sweepNonces purges commander_forward_nonces older than nonceTTL (120s,
+2× HMAC timestamp window). sweepTelemetryBuckets purges idle buckets
+(1h). runSweep ticks every sweepEvery (30s) and runs all three.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+```
+
+---
+
+### Phase B Gate
+
+```sh
+cd multi-agent
+go vet ./...
+go test ./internal/commanderhub -count=1 -race
+```
+
+All Phase A + Phase B tests pass. `hub.reg.add(...)` callers still compile. `sharedRegistry` SQL shape is locked by `sqlmock.QueryMatcherEqual`.
+
+**Dispatch to codex for Phase B review** before starting Phase C.
+
+---
+
+
