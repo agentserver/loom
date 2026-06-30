@@ -276,7 +276,72 @@ func TestNoContractFormalization_FallsBackButLogsDrop(t *testing.T) {
 	// Log line MUST contain the §3.2 + §7 (c) substrings.
 	got := buf.String()
 	require.Contains(t, got, "[ablation] NoContractFormalization: dropped contract body")
-	require.Contains(t, got, "conversation=conv-fb-1")
+	require.Contains(t, got, `conversation="conv-fb-1"`)
+}
+
+// TestNoContractFormalization_LogIsInjectionResistant pins that a
+// malicious conversation_id with embedded newlines cannot forge a
+// second "[ablation] ..." line in the audit trail. See
+// internal/contract/ablation_test.go::TestNoTypedContracts_LogIsInjectionResistant
+// for the same mitigation on the contract-package log line. Round-3
+// review P1-2.
+func TestNoContractFormalization_LogIsInjectionResistant(t *testing.T) {
+	withAblationFlagDriver(t, &contract.DisableContractEntirely, true)
+	buf := captureDriverLog(t)
+
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "sbx-driver", DisplayName: "driver", Status: "available", Card: json.RawMessage(`{"skills":[]}`)},
+				{AgentID: "slave-a", DisplayName: "slave-a", Status: "available", Card: json.RawMessage(`{"skills":["chat"],"short_id":"sa"}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			return &agentsdk.DelegateTaskResponse{TaskID: "t-inj"}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+
+	args, _ := json.Marshal(map[string]any{
+		"contract": map[string]any{
+			"version":         1,
+			"conversation_id": "conv-attack\n[ablation] FAKE: dropped contract body on conversation=evil",
+			"intent":          map[string]any{"goal": "do", "success_criteria": []string{"done"}},
+		},
+		"prompt":              "raw",
+		"skill":               "chat",
+		"target_display_name": "slave-a",
+	})
+	_, err := submitContractToolForTest(t, tools).Call(context.Background(), args)
+	require.NoError(t, err)
+
+	got := buf.String()
+	// The forgery test: an attacker tried to inject a SECOND line that
+	// starts with "[ablation]". We assert only ONE line in the output
+	// starts with that token. (The string `[ablation]` appears twice
+	// inside the captured log — once at line-start as the real entry,
+	// once inside the %q-escaped quoted attacker payload — that second
+	// occurrence is NOT at the start of a line, so it cannot be
+	// confused with a real ablation event by a line-oriented log
+	// grep.) The %q escape collapses the attacker's "\n" to two
+	// literal characters, so the whole payload stays on one physical
+	// line.
+	lines := strings.Split(got, "\n")
+	starts := 0
+	for _, ln := range lines {
+		if strings.HasPrefix(ln, "[ablation]") {
+			starts++
+		}
+	}
+	if starts != 1 {
+		t.Errorf("audit log contains %d lines starting with [ablation], want exactly 1 — possible log injection; full log:\n%s",
+			starts, got)
+	}
+	// Sanity: the attacker payload IS in the log (we captured it), but
+	// escaped as literal "\n[ablation] FAKE".
+	if !strings.Contains(got, `\n[ablation] FAKE`) {
+		t.Errorf("attacker payload not properly escaped — expected literal \\n escape; got:\n%s", got)
+	}
 }
 
 // T27 — body-selection table per spec §4 fallback rules.
@@ -381,6 +446,42 @@ func TestEnforceContract_BothAblations_ContractEntirelyWins(t *testing.T) {
 	require.Contains(t, got, "dropped contract body")
 	require.NotContains(t, got, "skipped enforce",
 		"NoContractFormalization wins — NoTypedContracts skip line must NOT appear because Validate is never reached")
+}
+
+// TestDraftTaskContract_NullResourcesProducesValidContract pins
+// PR #52 round-3 review P1-1: an operator who passes
+// `"resources": null` to the draft tool gets `[]byte("null")` (4
+// bytes, non-nil) at the args struct level. Without the
+// "effectively absent" extension in the default-fill condition, the
+// drafted contract carries nil Skills + nil Tools + non-nil
+// `[]byte("null")` Resources, which `resourcesDeclared` rejects —
+// the operator's next submit_contract_task fails with the cryptic
+// "capability_requirements is required". This test pins the fix.
+func TestDraftTaskContract_NullResourcesProducesValidContract(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) { return nil, nil },
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) { return nil, nil },
+	}
+	tools := newTestTools(t, sdk)
+	draftTool := toolByName(t, tools, "draft_task_contract")
+
+	for _, payload := range []string{
+		`{"goal":"x","resources":null}`,
+		`{"goal":"x","resources":{}}`,
+		`{"goal":"x"}`, // baseline (already covered by sibling test) — re-verified here
+	} {
+		t.Run(payload, func(t *testing.T) {
+			draftRaw, err := draftTool.Call(context.Background(), json.RawMessage(payload))
+			require.NoError(t, err)
+			var draftResp struct {
+				Contract contract.TaskContract `json:"contract"`
+			}
+			require.NoError(t, json.Unmarshal(draftRaw, &draftResp))
+			draftResp.Contract.RecoveryHint = "operator-filled"
+			require.NoError(t, contract.EnforceContract(&draftResp.Contract),
+				"drafted contract must pass EnforceContract after operator fills recovery_hint; payload=%s", payload)
+		})
+	}
 }
 
 // TestDraftTaskContract_OutputPassesEnforceContract pins the round-trip

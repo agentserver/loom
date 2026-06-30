@@ -84,6 +84,23 @@ func TestValidate_FullContract_OK(t *testing.T) {
 	if got, want := len(events[0].PresentFields), 7; got != want {
 		t.Errorf("len(PresentFields) = %d, want %d (fields=%v)", got, want, events[0].PresentFields)
 	}
+	// PR #52 round-3 review P1-3 — pin the §2.2 table ordering. The
+	// PresentFields wire contract documents lifecycleFieldOrder as the
+	// emit order, and downstream eval consumers depend on it. Without
+	// this assertion, a future refactor that swaps two `if` blocks in
+	// presentFields() would silently change the wire order.
+	wantOrder := []string{
+		lifecycleIntentGoal,
+		lifecycleSuccessCriteria,
+		lifecycleReadArtifacts,
+		lifecycleWriteTargets,
+		lifecycleCapabilityRequirements,
+		lifecycleExecutionPolicy,
+		lifecycleRecoveryHint,
+	}
+	if !equalSlices(events[0].PresentFields, wantOrder) {
+		t.Errorf("PresentFields order = %v, want %v (must follow §2.2 table — wire contract)", events[0].PresentFields, wantOrder)
+	}
 }
 
 // T3 — missing recovery_hint → ErrMissingFields with recovery_hint listed.

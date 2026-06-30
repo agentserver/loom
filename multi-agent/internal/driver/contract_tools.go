@@ -339,7 +339,13 @@ func (s *submitContractTaskTool) callNaturalLanguageFallback(
 ) (json.RawMessage, error) {
 	// §3.2 + §7 (c): log line MUST contain the literal substring
 	// "dropped contract body" plus "conversation=". T26 greps for these.
-	log.Printf("[ablation] NoContractFormalization: dropped contract body on conversation=%s", tc.ConversationID)
+	//
+	// %q (Go-quoted, escapes \n / \r / control chars) defeats log
+	// injection via an attacker-controlled conversation_id containing
+	// newlines — a literal newline would otherwise let an operator
+	// forge a second "[ablation] ..." line in the audit trail. See
+	// PR #52 round-3 review P1-2.
+	log.Printf("[ablation] NoContractFormalization: dropped contract body on conversation=%q", tc.ConversationID)
 
 	body := strings.TrimSpace(args.Prompt)
 	if body == "" {

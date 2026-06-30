@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -130,7 +131,18 @@ func (d *draftTaskContractTool) Call(ctx context.Context, raw json.RawMessage) (
 	// the skills slice to non-nil empty so the §2.6 capability_requirements
 	// "any sub-field non-nil = present" check passes. The operator can
 	// override by passing required_skills / required_tools / resources.
-	if args.RequiredSkills == nil && args.RequiredTools == nil && len(args.Resources) == 0 {
+	//
+	// "Effectively absent" mirrors contract.resourcesDeclared: a nil
+	// RawMessage AND a literal `null` (which Unmarshal decodes to the
+	// non-nil 4-byte sequence `[]byte("null")`) BOTH count as "operator
+	// did not declare resources". Without this, an operator who passes
+	// `"resources": null` to the draft tool would get a drafted contract
+	// that fails the subsequent submit_contract_task with a cryptic
+	// "capability_requirements is required" — the P1-1 hazard found in
+	// PR #52 round-3 review.
+	resourcesEffectivelyAbsent := len(args.Resources) == 0 ||
+		bytes.Equal(bytes.TrimSpace(args.Resources), []byte("null"))
+	if args.RequiredSkills == nil && args.RequiredTools == nil && resourcesEffectivelyAbsent {
 		args.RequiredSkills = []string{}
 	}
 	for idx := range args.WriteTargets {

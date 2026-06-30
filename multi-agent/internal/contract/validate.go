@@ -338,7 +338,14 @@ func EnforceContract(tc *TaskContract) error {
 		// correlation. The literal "[ablation] NoTypedContracts:" is
 		// the substring T24 greps for; do not soften this wording
 		// without updating the test.
-		log.Printf("[ablation] NoTypedContracts: skipped enforce on conversation=%s", tc.ConversationID)
+		//
+		// Use %q (Go-quoted, escapes \n / \r / control chars / non-
+		// printable) instead of %s to defeat log-injection via an
+		// attacker-controlled conversation_id containing newlines:
+		// a literal newline in conversation_id would otherwise let
+		// the operator forge a second "[ablation] ..." line in the
+		// audit trail. See PR #52 round-3 review P1-2.
+		log.Printf("[ablation] NoTypedContracts: skipped enforce on conversation=%q", tc.ConversationID)
 		// Validate still runs to handle policy enum checks and the
 		// T1 version requirement; ablation just skips the §2.2 +
 		// §2.4 paths.

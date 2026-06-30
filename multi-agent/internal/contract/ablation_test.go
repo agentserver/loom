@@ -92,8 +92,59 @@ func TestNoTypedContracts_LogsSkip(t *testing.T) {
 	if !strings.Contains(got, "[ablation] NoTypedContracts: skipped enforce") {
 		t.Errorf("log did not contain required substring; got: %q", got)
 	}
-	if !strings.Contains(got, "conversation=conv-log-skip-test") {
+	if !strings.Contains(got, `conversation="conv-log-skip-test"`) {
 		t.Errorf("log did not name the conversation; got: %q", got)
+	}
+}
+
+// TestNoTypedContracts_LogIsInjectionResistant pins that a malicious
+// conversation_id containing a newline cannot forge a second
+// "[ablation] ..." line in the audit trail. Round-3 review P1-2
+// found that `%s` formatting allowed an operator to construct a
+// fake log entry indistinguishable from a real one — the audit
+// trail is the post-mortem evidence chain for ablation runs, so a
+// silent forgery is a real audit-integrity issue.
+//
+// The mitigation is `log.Printf("...%q", convID)` (Go-quoted
+// escaping). This test pins the escape: a `\n` in the input must
+// appear as the literal two-character escape `\n` in the output.
+func TestNoTypedContracts_LogIsInjectionResistant(t *testing.T) {
+	withAblationFlag(t, &DisableSchemaEnforce, true)
+	freshSink(t)
+	buf := captureLog(t)
+
+	c := validContract()
+	// Attacker-controlled conversation_id includes a newline plus a
+	// forged ablation line. If the log formatter used %s, the newline
+	// would split the output into two lines and the forgery would be
+	// byte-identical to a real ablation event.
+	c.ConversationID = "conv-attack\n[ablation] FAKE: spoofed log on conversation=evil"
+	if err := EnforceContract(&c); err != nil {
+		t.Fatalf("EnforceContract: %v", err)
+	}
+
+	got := buf.String()
+	// %q quotes the whole conversation_id and escapes the newline as
+	// literal "\n". The forged second [ablation] line must NOT appear
+	// as its own line. The token "[ablation]" appears twice in the
+	// captured log — once at line-start (the real entry) and once
+	// inside the %q-escaped attacker payload (NOT at line-start) — so
+	// we count line-starts, not raw substring matches.
+	lines := strings.Split(got, "\n")
+	starts := 0
+	for _, ln := range lines {
+		if strings.HasPrefix(ln, "[ablation]") {
+			starts++
+		}
+	}
+	if starts != 1 {
+		t.Errorf("audit log contains %d lines starting with [ablation], want exactly 1 — possible log injection; full log:\n%s", starts, got)
+	}
+	// And the forged keyword "FAKE" must appear (we captured what the
+	// attacker tried to write) but inside the quoted string, not as
+	// an independent log line.
+	if !strings.Contains(got, `\n[ablation] FAKE`) {
+		t.Errorf("attacker payload not properly escaped — expected literal \\n escape in the audit log; got:\n%s", got)
 	}
 }
 
