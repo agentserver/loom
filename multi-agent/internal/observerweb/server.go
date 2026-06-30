@@ -94,6 +94,18 @@ func NewWithResolver(s Store, usHandler *userspace.Handler, resolver identity.Re
 }
 
 func NewWithResolverOptions(s Store, usHandler *userspace.Handler, resolver identity.Resolver, opts Options) http.Handler {
+	app, _ := newWithResolverOptionsInternal(s, usHandler, resolver, opts)
+	return app
+}
+
+// NewWithResolverOptionsHub is like NewWithResolverOptions but also returns the
+// *commanderhub.Hub so the caller can call hub.Close(ctx) during graceful shutdown.
+// Returns nil if commander is not mounted (AgentserverURL == "").
+func NewWithResolverOptionsHub(s Store, usHandler *userspace.Handler, resolver identity.Resolver, opts Options) (http.Handler, *commanderhub.Hub) {
+	return newWithResolverOptionsInternal(s, usHandler, resolver, opts)
+}
+
+func newWithResolverOptionsInternal(s Store, usHandler *userspace.Handler, resolver identity.Resolver, opts Options) (http.Handler, *commanderhub.Hub) {
 	if resolver == nil {
 		resolver = static.New(s)
 	}
@@ -125,13 +137,14 @@ func NewWithResolverOptions(s Store, usHandler *userspace.Handler, resolver iden
 	}
 	mux := http.NewServeMux()
 	mountRoutes(mux, h, usHandler)
+	var hub *commanderhub.Hub
 	if opts.AgentserverURL != "" {
 		if opts.AuthStore == nil {
 			panic("observerweb: AuthStore is required when AgentserverURL is set (see internal/commanderhub/authstore)")
 		}
-		commanderhub.MountAll(mux, opts.InternalMux, resolver, opts.AgentserverURL, opts.AuthStore, opts.Cluster)
+		hub = commanderhub.MountAll(mux, opts.InternalMux, resolver, opts.AgentserverURL, opts.AuthStore, opts.Cluster)
 	}
-	return mux
+	return mux, hub
 }
 
 func mountRoutes(mux *http.ServeMux, h *handler, usHandler *userspace.Handler) {
