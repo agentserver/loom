@@ -1,15 +1,18 @@
 # Multi-observer local development stack
 #
-# Boots 1 Postgres + 2 observer-server instances + 1 nginx load balancer.
-# Observers share the same Postgres DB and cluster secret; nginx round-robins
-# requests across both on port 8090.
+# Boots 1 Postgres + a migration job + 2 observer-server instances + 1 nginx
+# load balancer. Observers share the same Postgres DB and cluster secret; nginx
+# round-robins requests across both on port 8090.
 #
 # Usage: see dev/README.md → "make multi-observer-up"
 #
 # Required env (set in a .env file next to this file, or export before running):
-#   OBSERVER_CLUSTER_SECRET   — >=32 random chars, shared across both observers
+#   OBSERVER_CLUSTER_SECRET   — 64 hex chars (32 bytes); generate with:
+#                               openssl rand -hex 32
 #   OBSERVER_IMAGE            — (optional) image ref; defaults to observer-server:dev
-#   ANTHROPIC_API_KEY         — passed through for any observer identity check
+#
+# The Postgres DSN is hardcoded below (observer/observer@postgres/observer) so
+# you do not need to set OBSERVER_DSN unless you want a different DB.
 
 services:
   postgres:
@@ -29,20 +32,41 @@ services:
     networks:
       - observer-net
 
+  # One-shot migration job — runs before the observer instances start.
+  # Both observers depend on this service completing successfully.
+  observer-migrate:
+    image: ${OBSERVER_IMAGE:-observer-server:dev}
+    command:
+      - --config
+      - /etc/observer/observer.yaml
+      - --migrate-only
+    environment:
+      OBSERVER_DSN: "postgres://observer:observer@postgres:5432/observer?sslmode=disable"
+      OBSERVER_CLUSTER_SECRET: "${OBSERVER_CLUSTER_SECRET}"
+      OBSERVER_ADVERTISE_URL: "http://observer-1:8091"
+    volumes:
+      - ./configs/observer.multi-pod.yaml:/etc/observer/observer.yaml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - observer-net
+
   observer-1:
     image: ${OBSERVER_IMAGE:-observer-server:dev}
     command:
       - --config
       - /etc/observer/observer.yaml
     environment:
+      OBSERVER_DSN: "postgres://observer:observer@postgres:5432/observer?sslmode=disable"
       OBSERVER_ADVERTISE_URL: "http://observer-1:8091"
       OBSERVER_CLUSTER_SECRET: "${OBSERVER_CLUSTER_SECRET}"
-      OBSERVER_DATABASE_URL: "postgres://observer:observer@postgres:5432/observer?sslmode=disable"
     volumes:
-      - ./configs/observer.example.yaml:/etc/observer/observer.yaml:ro
+      - ./configs/observer.multi-pod.yaml:/etc/observer/observer.yaml:ro
     depends_on:
-      postgres:
-        condition: service_healthy
+      observer-migrate:
+        condition: service_completed_successfully
     ports:
       - "18091:8090"
     restart: unless-stopped
@@ -55,14 +79,14 @@ services:
       - --config
       - /etc/observer/observer.yaml
     environment:
+      OBSERVER_DSN: "postgres://observer:observer@postgres:5432/observer?sslmode=disable"
       OBSERVER_ADVERTISE_URL: "http://observer-2:8091"
       OBSERVER_CLUSTER_SECRET: "${OBSERVER_CLUSTER_SECRET}"
-      OBSERVER_DATABASE_URL: "postgres://observer:observer@postgres:5432/observer?sslmode=disable"
     volumes:
-      - ./configs/observer.example.yaml:/etc/observer/observer.yaml:ro
+      - ./configs/observer.multi-pod.yaml:/etc/observer/observer.yaml:ro
     depends_on:
-      postgres:
-        condition: service_healthy
+      observer-migrate:
+        condition: service_completed_successfully
     ports:
       - "18092:8090"
     restart: unless-stopped
