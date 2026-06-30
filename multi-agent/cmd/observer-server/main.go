@@ -202,7 +202,7 @@ func main() {
 	internalPort := flag.Int("internal-port", 0, "internal listener port for --drain-local (overrides config cluster.internal_listen_addr port)")
 	flag.Parse()
 
-	cfg, err := loadConfig(*cfgPath)
+	cfg, err := loadConfig(*cfgPath, *migrateOnly || *retentionCleanup)
 	if err != nil {
 		if *drainLocal {
 			// On drain, config errors are fatal — the operator must fix them.
@@ -699,7 +699,7 @@ func openObjectStore(cfg *Config) (objectstore.Store, error) {
 	}
 }
 
-func loadConfig(path string) (*Config, error) {
+func loadConfig(path string, jobMode bool) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -812,7 +812,7 @@ func loadConfig(path string) (*Config, error) {
 			cfg.Cluster.DrainTimeout = 10 * time.Second
 		}
 	}
-	if err := validateConfig(&cfg); err != nil {
+	if err := validateConfig(&cfg, jobMode); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
@@ -860,7 +860,7 @@ func userspaceBlobRoot(sqlitePath string) string {
 	return filepath.Join(filepath.Dir(sqlitePath), "userspace-blobs")
 }
 
-func validateConfig(cfg *Config) error {
+func validateConfig(cfg *Config, skipCluster bool) error {
 	if !cfg.Identity.LegacyAPIKeys.Enabled && !cfg.Identity.Agentserver.Enabled {
 		return fmt.Errorf("at least one identity source must be enabled")
 	}
@@ -926,8 +926,15 @@ func validateConfig(cfg *Config) error {
 		}
 	}
 
-	if err := validateClusterConfig(&cfg.Cluster, cfg.Store.Driver); err != nil {
-		return err
+	// Job modes (--migrate-only, --retention-cleanup) don't run forwarding,
+	// drain, or heartbeat — they don't need the cluster runtime. Skip cluster
+	// validation so the mounted nonsecret ConfigMap (which sets cluster.enabled:
+	// true) doesn't cause a crashloop when the job container lacks the cluster
+	// env vars that the Deployment carries.
+	if !skipCluster {
+		if err := validateClusterConfig(&cfg.Cluster, cfg.Store.Driver); err != nil {
+			return err
+		}
 	}
 
 	return nil

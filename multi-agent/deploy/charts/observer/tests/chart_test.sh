@@ -401,3 +401,18 @@ grep -q '/etc/observer/nonsecret' <<<"$cronjob_yaml" || { echo "FAIL: /etc/obser
 echo "E-fix4.1b retention cronjob nonsecret mount: passed"
 
 echo "E-fix4.1 passed"
+
+# --- E-fix4.2: migration job and retention cronjob must NOT carry cluster env vars ---
+# Jobs run in --migrate-only / --retention-cleanup mode which skips cluster
+# validation.  Having OBSERVER_ADVERTISE_URL or OBSERVER_CLUSTER_SECRET in the
+# job would be confusing and unnecessary; assert they are absent.
+echo "[test] E-fix4.2 migration job and retention cronjob must not expose cluster env vars"
+! grep -q 'OBSERVER_ADVERTISE_URL' <<<"$job_yaml" || { echo "FAIL: OBSERVER_ADVERTISE_URL must not appear in migration Job env"; exit 1; }
+! grep -q 'OBSERVER_CLUSTER_SECRET' <<<"$job_yaml" || { echo "FAIL: OBSERVER_CLUSTER_SECRET must not appear in migration Job env"; exit 1; }
+echo "E-fix4.2a migration job has no cluster env vars: passed"
+
+! grep -q 'OBSERVER_ADVERTISE_URL' <<<"$cronjob_yaml" || { echo "FAIL: OBSERVER_ADVERTISE_URL must not appear in retention CronJob env"; exit 1; }
+! grep -q 'OBSERVER_CLUSTER_SECRET' <<<"$cronjob_yaml" || { echo "FAIL: OBSERVER_CLUSTER_SECRET must not appear in retention CronJob env"; exit 1; }
+echo "E-fix4.2b retention cronjob has no cluster env vars: passed"
+
+echo "E-fix4.2 passed"

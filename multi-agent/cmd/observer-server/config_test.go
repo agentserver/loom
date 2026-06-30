@@ -522,7 +522,7 @@ identity:
 api_keys:
   - id: ak-default
     key: ak_secret
-`))
+`), false)
 	require.Error(t, err, "unknown revocation_channel value must be rejected")
 	require.Contains(t, err.Error(), "revocation_channel")
 }
@@ -619,7 +619,7 @@ api_keys:
 
 	// loadConfig must succeed — if it returns an error the chart rendered a
 	// field the binary doesn't know or the schema diverged.
-	cfg, err := loadConfig(filepath.Join(dir, "observer.yaml"))
+	cfg, err := loadConfig(filepath.Join(dir, "observer.yaml"), false)
 	require.NoError(t, err, "loadConfig must accept the YAML rendered by helm template; chart/binary schema diverged")
 
 	// Sanity: env-based cluster fields should have been resolved.
@@ -646,7 +646,7 @@ func TestLoadConfig_NonsecretRejectsUnknownKey(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(nonsecretDir, "observer.nonsecret.yaml"),
 		[]byte(nonsecretYAML), 0o600))
 
-	_, err := loadConfig(filepath.Join(dir, "observer.yaml"))
+	_, err := loadConfig(filepath.Join(dir, "observer.yaml"), false)
 	require.Error(t, err, "loadConfig must reject unknown fields in observer.nonsecret.yaml")
 	require.Contains(t, err.Error(), "observer.nonsecret.yaml",
 		"error message must mention the nonsecret file name")
