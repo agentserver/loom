@@ -97,18 +97,23 @@ var (
 // commonly-leaked raw credential token shapes. Used by both
 // NewCredentialAlias (construction-time defence) and JSONContainsRawToken
 // (pre-write defence in observerstore). Adding a new shape hardens both
-// surfaces at once.
+// surfaces at once. See spec §7(a) for the Phase-1 catalogue; §7.1 lists
+// known gaps deferred to future worktrees (AWS secret access keys,
+// Stripe sk_live_, Twilio AC… etc. — all too ambiguous to regex without
+// an entropy check that this Phase-1 deliverable does not implement).
 //
-// All patterns are CASE-INSENSITIVE (`(?i)`) per spec §7(a) — leaked
-// tokens often arrive uppercased in screenshots/log dumps, and the
-// pre-write guard must reject `SK-...` / `GHP_...` / `XOXB-...` just as
-// firmly as their canonical lowercase forms.
+// All patterns are CASE-INSENSITIVE (`(?i)`) — leaked tokens often
+// arrive uppercased in screenshots/log dumps, and the pre-write guard
+// must reject `SK-...` / `GHP_...` / `XOXB-...` just as firmly as their
+// canonical lowercase forms.
 var rawTokenPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)sk-[A-Z0-9_-]{10,}`),    // OpenAI / Anthropic-shaped API keys
-	regexp.MustCompile(`(?i)eyJ[A-Z0-9_-]{10,}\.`),  // JWT / OIDC tokens — header + '.' delimiter
-	regexp.MustCompile(`(?i)AKIA[0-9A-Z]{16,}`),     // AWS access key ID
-	regexp.MustCompile(`(?i)ghp_[A-Z0-9]{20,}`),     // GitHub personal access token
-	regexp.MustCompile(`(?i)xox[baprs]-[A-Z0-9-]+`), // Slack bot/app/user/refresh/legacy tokens (spec §7(a): 1+ chars)
+	regexp.MustCompile(`(?i)sk-[A-Z0-9_-]{10,}`),        // OpenAI / Anthropic-shaped API keys (incl. sk-ant-api03-…)
+	regexp.MustCompile(`(?i)eyJ[A-Z0-9_-]{10,}\.`),      // JWT / OIDC tokens — header + '.' delimiter
+	regexp.MustCompile(`(?i)AKIA[0-9A-Z]{16,}`),         // AWS access key ID
+	regexp.MustCompile(`(?i)ghp_[A-Z0-9]{20,}`),         // GitHub classic personal access token
+	regexp.MustCompile(`(?i)github_pat_[A-Z0-9_]{20,}`), // GitHub fine-grained personal access token
+	regexp.MustCompile(`(?i)AIza[A-Z0-9_-]{30,}`),       // Google API key
+	regexp.MustCompile(`(?i)xox[bapres]-[A-Z0-9-]+`),    // Slack bot/app/user/refresh/eshare/legacy tokens (incl. xoxe-)
 }
 
 // aliasShapeRe enforces the §3.4 alias regex on the CredentialAlias type.

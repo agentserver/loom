@@ -35,17 +35,20 @@ ON CONFLICT(hash) DO NOTHING;
 
 // WriteSnapshot persists snap to the capability_snapshots table.
 //
-// Behaviour (spec §5.2):
+// Behaviour (spec §5.2 + §7.2):
 //
 //   - canonical JSON marshalling fails (only reachable when the caller
 //     hand-built a Snapshot with a malformed MCPTools.InputSchema rather
 //     than going through NewSnapshot): return the wrapped error before
 //     any side-effect.
+//   - canonical JSON contains any raw-token regex match: return
+//     ErrSnapshotContainsSecret; nothing is written, no skip log is
+//     emitted (§7(e) + §7.2). This check runs BEFORE the ablation
+//     short-circuit so an embedded raw token surfaces as a hard error
+//     regardless of upload state — the two concerns are orthogonal.
 //   - capability.DisableUpload == true: log a skip line via the standard
 //     logger and return nil. The local snapshot collection on the slave
 //     is unaffected — this only gates upload (§7(d)).
-//   - canonical JSON contains any raw-token regex match: return
-//     ErrSnapshotContainsSecret; nothing is written (§7(e)).
 //   - otherwise: ExecContext insert with `ON CONFLICT(hash) DO NOTHING`,
 //     making duplicate inserts idempotent.
 //
@@ -72,12 +75,17 @@ func WriteSnapshot(
 	sum := sha256.Sum256(body)
 	hash := hex.EncodeToString(sum[:])
 
+	// Secret-scan BEFORE the ablation short-circuit (spec §7.2): a
+	// snapshot carrying a leaked token is a programmer-error condition
+	// in the descriptor source, orthogonal to whether the run is
+	// experimentally ablated. Suppressing the scan under ablation would
+	// silently hide that signal.
+	if capability.JSONContainsRawToken(body) {
+		return ErrSnapshotContainsSecret
+	}
 	if capability.DisableUpload {
 		log.Printf("[ablation] NoCapabilityDiscovery: skipped snapshot hash=%s", hash)
 		return nil
-	}
-	if capability.JSONContainsRawToken(body) {
-		return ErrSnapshotContainsSecret
 	}
 	if _, err := db.ExecContext(ctx, insertCapabilitySnapshotSQL,
 		hash, agentID, workspaceID, nowUTC().Format(time.RFC3339Nano), string(body),

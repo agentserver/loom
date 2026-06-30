@@ -515,6 +515,40 @@ func TestComputeHash_TotalSortOnMCPToolsNearDuplicate(t *testing.T) {
 	}
 }
 
+// §7(a) Phase-1 catalogue additions: github_pat_…, AIza…, sk-ant-…,
+// xoxe-. (Reviewer round 4 P2 — catalogue gaps.)
+func TestCredentialAlias_RejectsExpandedTokenCatalogue(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"sk-ant-api03":        "sk-ant-api03-ABCDEFGHIJKLMNOP1234567890",
+		"github fine-grained": "github_pat_11ABCDEFG0123456789012345_abcdefghijklmnopqrstuvwxyz",
+		"google api key":      "AIzaSyA-1234567890abcdefghijklmnopqrstuvwx",
+		"slack refresh":       "xoxe-12345-67890-abcdefABCDEF",
+	}
+	for label, in := range cases {
+		_, err := NewCredentialAlias(in)
+		if !errors.Is(err, ErrLooksLikeRawCredential) {
+			t.Errorf("NewCredentialAlias(%s = %q): want ErrLooksLikeRawCredential, got %v", label, in, err)
+		}
+	}
+}
+
+// Same expanded catalogue is enforced at pre-write scan time.
+func TestJSONContainsRawToken_ExpandedCatalogue(t *testing.T) {
+	t.Parallel()
+	cases := [][]byte{
+		[]byte(`{"description":"use github_pat_11ABCDEFG0123456789012345_abcdefghij to push"}`),
+		[]byte(`{"description":"google key AIzaSyA-1234567890abcdefghijklmnopqrstuvwx"}`),
+		[]byte(`{"description":"sk-ant-api03-ABCDEFGHIJKLMNOP1234567890 for claude"}`),
+		[]byte(`{"description":"slack xoxe-12345-67890-abcdef refresh"}`),
+	}
+	for _, body := range cases {
+		if !JSONContainsRawToken(body) {
+			t.Errorf("JSONContainsRawToken(%q) = false; want true (expanded catalogue gap)", body)
+		}
+	}
+}
+
 // §7(a) spec wording for Slack tokens is `xox[baprs]-[A-Za-z0-9-]+`
 // (1+ chars after the prefix). A regression that tightened that to 10+
 // would silently let short Slack-shaped values through; this test

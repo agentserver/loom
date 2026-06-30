@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/commandiface"
@@ -274,6 +275,66 @@ func TestWriteSnapshot_ReturnsErrorOnMalformedSnapshot(t *testing.T) {
 	err := WriteSnapshot(ctx, store.db, "agent-1", "ws-1", bad)
 	if err == nil {
 		t.Fatalf("WriteSnapshot(malformed snap): want error, got nil")
+	}
+}
+
+// §7.2 — secret-scan runs BEFORE the ablation short-circuit so a
+// leaky descriptor still surfaces as ErrSnapshotContainsSecret even
+// when uploads are ablated off. (Reviewer round 4 P2.)
+func TestNoCapabilityDiscovery_SecretScanRunsBeforeAblationSkip(t *testing.T) {
+	prev := capability.DisableUpload
+	capability.DisableUpload = true
+	t.Cleanup(func() { capability.DisableUpload = prev })
+
+	store := openInMemoryStore(t)
+	snap, err := capability.NewSnapshot(capability.Snapshot{
+		OS:       "linux",
+		Arch:     "amd64",
+		Platform: commandiface.Platform{OS: "linux", Arch: "amd64"},
+		Network:  capability.NetworkInternet,
+		MCPTools: []capability.MCPToolDescriptor{{
+			Server:      "srv",
+			Name:        "tool",
+			Description: "use sk-abc123def4567890xyz to authenticate",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewSnapshot: %v", err)
+	}
+	ctx := context.Background()
+
+	err = WriteSnapshot(ctx, store.db, "agent-1", "ws-1", snap)
+	if !errors.Is(err, ErrSnapshotContainsSecret) {
+		t.Fatalf("WriteSnapshot(ablation=on, embedded secret): want ErrSnapshotContainsSecret, got %v", err)
+	}
+}
+
+// Spec §5.2 contract: tests substitute a deterministic value through
+// nowUTC and assert it round-trips into the created_at column. This
+// test runs serially (no t.Parallel) because nowUTC is a package
+// global with no internal lock; t.Cleanup restores.
+func TestWriteSnapshot_PersistedCreatedAt(t *testing.T) {
+	prev := nowUTC
+	fixed := time.Date(2025, 1, 2, 3, 4, 5, 678901234, time.UTC)
+	nowUTC = func() time.Time { return fixed }
+	t.Cleanup(func() { nowUTC = prev })
+
+	store := openInMemoryStore(t)
+	snap := validSnap(t)
+	ctx := context.Background()
+
+	if err := WriteSnapshot(ctx, store.db, "agent-1", "ws-1", snap); err != nil {
+		t.Fatalf("WriteSnapshot: %v", err)
+	}
+
+	var got string
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT created_at FROM capability_snapshots WHERE hash = ?`, snap.Hash()).Scan(&got); err != nil {
+		t.Fatalf("query created_at: %v", err)
+	}
+	want := fixed.Format(time.RFC3339Nano)
+	if got != want {
+		t.Errorf("created_at = %q; want %q", got, want)
 	}
 }
 

@@ -486,8 +486,12 @@ Behaviour:
 
 `created_at` is set inside `WriteSnapshot` from a clock parameter exposed
 to tests via package-private `var nowUTC = func() time.Time { return time.Now().UTC() }`
-so tests can substitute a deterministic value (the testing helper in the
-test file flips and restores `nowUTC` per-`t.Run`).
+so a test can substitute a deterministic value when it needs to assert
+the persisted `created_at`. Tests that flip `nowUTC` MUST be serial (no
+`t.Parallel()`) and MUST restore via `t.Cleanup`, since the global has
+no internal lock and concurrent `WriteSnapshot` calls would race.
+`TestWriteSnapshot_PersistedCreatedAt` exercises the override path so
+the test contract is wired even if no other test currently needs it.
 
 ### 5.3 Sentinel errors
 
@@ -592,15 +596,17 @@ construct a `CredentialAlias`. The factory:
    13号§3.4 regex). Returns `ErrAliasInvalidShape`.
 2. **Additionally**, before the shape check, rejects strings whose case-
    insensitive content matches any of these raw-token prefixes (the
-   "common leaked token" catalogue):
+   Phase-1 leaked-token catalogue; not exhaustive — see §7.1 below):
 
    | Pattern | Source |
    |---|---|
-   | `^sk-[A-Za-z0-9_-]{10,}$` | OpenAI / Anthropic-shaped API keys |
-   | `^eyJ[A-Za-z0-9_-]{10,}\.` | JWT / OIDC tokens (header.) |
-   | `^AKIA[0-9A-Z]{16,}$` | AWS access key ID |
-   | `^ghp_[A-Za-z0-9]{20,}$` | GitHub personal access token |
-   | `^xox[baprs]-[A-Za-z0-9-]+$` | Slack bot/app/user/refresh/legacy tokens |
+   | `(?i)sk-[A-Z0-9_-]{10,}` | OpenAI / Anthropic-shaped API keys (catches `sk-ant-api03-…` too) |
+   | `(?i)eyJ[A-Z0-9_-]{10,}\.` | JWT / OIDC tokens (header.) |
+   | `(?i)AKIA[0-9A-Z]{16,}` | AWS access key ID |
+   | `(?i)ghp_[A-Z0-9]{20,}` | GitHub classic PAT |
+   | `(?i)github_pat_[A-Z0-9_]{20,}` | GitHub fine-grained PAT |
+   | `(?i)AIza[A-Z0-9_-]{30,}` | Google API key |
+   | `(?i)xox[bapres]-[A-Z0-9-]+` | Slack bot/app/user/refresh/eshare/legacy tokens (including refresh-token class `xoxe-`) |
 
    Returns `ErrLooksLikeRawCredential`. Note: the alias-shape regex itself
    already rejects uppercase letters, so order matters only because the
@@ -608,6 +614,17 @@ construct a `CredentialAlias`. The factory:
    `ErrLooksLikeRawCredential` immediately understand the bug, while
    `ErrAliasInvalidShape` would obscure it. We test both shape-only and
    raw-token-shaped inputs explicitly.
+
+   #### §7.1 Catalogue coverage
+
+   This is a **Phase-1 catalogue**, not exhaustive. Known gaps a future
+   worktree should close: AWS secret access keys (40-char base64 — too
+   ambiguous to regex without high false-positive rate; needs an entropy
+   check), Stripe `sk_live_…` (overlapping with `sk-`), Twilio
+   `AC[0-9a-f]{32}` (high false-positive rate). The catalogue is the
+   single source of truth for both `NewCredentialAlias` (construction
+   defence) and `JSONContainsRawToken` (pre-write defence) — adding a
+   shape hardens both surfaces at once.
 
 3. The 64-character upper bound on the alias-shape regex stops at
    `[a-z0-9_]{2,63}` (1 + 63 = 64) and matches the schema in
@@ -656,9 +673,12 @@ the row must be retrievable verbatim.
 - `Snapshot` construction (the slave still inspects its own
   capabilities to refuse impossible tasks early)
 - `Snapshot.MarshalJSON` (caller may still serialise for stdout debug)
+- The `(e)` secret-scan (see §7.2 below — runs BEFORE the ablation
+  short-circuit so an embedded raw token surfaces as
+  `ErrSnapshotContainsSecret` regardless of upload state)
 
-When `DisableUpload == true`, `WriteSnapshot` writes exactly one log line
-through `log.Default()` of the form
+When `DisableUpload == true` AND the secret-scan passes, `WriteSnapshot`
+writes exactly one log line through `log.Default()` of the form
 `[ablation] NoCapabilityDiscovery: skipped snapshot hash=<hex>` and
 returns `nil`. The log line is required so post-hoc ablation auditors can
 distinguish "snapshot intentionally skipped" from "writer crashed silently".
@@ -667,6 +687,25 @@ The default value of `DisableUpload` at process start is `false`.
 Phase 2 `WT-2-flag-integration` will flip it via
 `ablation.Default.SetByName("NoCapabilityDiscovery", true)` from the CLI;
 no other call site flips it.
+
+#### §7.2 Ordering of secret-scan vs ablation skip
+
+`WriteSnapshot`'s prologue runs in this order:
+
+1. `CanonicalJSON(snap)` — returns error if hand-built malformed input.
+2. SHA-256 → `hash` (derived from the same bytes that will be stored).
+3. `JSONContainsRawToken(body)` — return `ErrSnapshotContainsSecret`
+   if any raw-token regex matches the canonical bytes.
+4. `DisableUpload` short-circuit — log skip line, return nil.
+5. `db.ExecContext` insert.
+
+Putting (3) before (4) is intentional: a snapshot carrying a leaked
+token is a programmer error in the MCP descriptor source, and the
+ablation flag exists to disable upload for **experimental** reasons,
+not to suppress real correctness diagnostics. A leaky descriptor will
+not start leaking just because the run is ablated — and conversely a
+clean descriptor will not start producing false negatives because the
+ablation toggled on. The two concerns are orthogonal.
 
 ### (e) Pre-write secret-strip on canonical JSON
 
