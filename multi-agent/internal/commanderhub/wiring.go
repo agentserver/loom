@@ -38,9 +38,10 @@ func MountAll(publicMux *http.ServeMux, internalMux *http.ServeMux, resolver ide
 	if cluster.AdvertiseURL != "" {
 		sr := newSharedRegistry(cluster.DB, cluster.AdvertiseURL)
 		fc := newForwardClient(cluster.Secret, cluster.PrevSecret, cluster.AdvertiseURL)
-		// TODO(D2): pass pgTurnStore once implemented; for now pass nil so Hub
-		// keeps its memTurnStore.
 		var turns turnStateBackend
+		if cluster.DB != nil {
+			turns = newPGTurnStore(cluster.DB)
+		}
 		hub.attachSharedRegistry(cluster, sr, fc, turns)
 
 		if internalMux != nil {
