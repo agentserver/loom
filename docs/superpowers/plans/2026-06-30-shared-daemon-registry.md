@@ -18,7 +18,7 @@
 - **Loopback bypass restricted to `/api/commander/_internal/drain` only**, NEVER `/forward`. Bypass triggers when `RemoteAddr` resolves to a loopback IP via `net.IP.IsLoopback`.
 - **Bug-for-bug parity in single-pod cmdID:** `nextCmdID()` in single-pod (`h.sharedReg == nil`) MUST emit `strconv.FormatInt(seq, 36)` byte-for-byte unchanged (no prefix, no dash). Shared mode emits `<podHash>-<base36>` where `podHash = hex(sha256(advertiseURL))[:4]`.
 - **TDD discipline.** Every task starts with a failing test, then minimal code, then a passing test, then commit. Race detector mandatory: `go test -race -count=1`.
-- **Postgres integration tests are env-skipped** on `OBSERVER_POSTGRES_TEST_DSN`; CI does not require these. Unit tests on `*sql.DB` use `github.com/DATA-DOG/go-sqlmock` (new dependency added by Task A3).
+- **Postgres integration tests are env-skipped** on `OBSERVER_POSTGRES_TEST_DSN`; CI does not require these. Unit tests on `*sql.DB` use `github.com/DATA-DOG/go-sqlmock` (new dependency added by Task B1 — its first importer).
 - **Commit prefixes:** Go in `commanderhub` → `feat(commanderhub): …` or `fix(commanderhub): …`. Go in `commander` (shared) → `feat(commander): …`. observer-server → `feat(observer-server): …`. identity → `feat(identity): …`. observerweb → `feat(observerweb): …`. Chart → `chore(chart): …`. CI → `ci(observer-deploy): …`. Docs → `docs(…): …`. All commits MUST end with the existing `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>` line per CLAUDE.md.
 - **No `go.work`.** Run all `go` commands from `multi-agent/`.
 
@@ -2353,7 +2353,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 **Prereq:** Task A4 added `Hub.sharedReg` field (so `dc.hub.sharedReg` compiles). Task B1 defined the `sharedRegistry` type itself. B3 wires per-send ownership confirmation between them.
 
 **Interfaces:**
-- Produces: `(dc *daemonConn) confirmOwnership(ctx context.Context) bool`. Returns false (denying writes) if `dc.ownershipLost.Load()` is already true (sticky negative cache). Otherwise issues a 500ms-bounded PG SELECT against `commander_daemons` and checks (owning_instance_url, connection_id) match. On any deviation OR PG error, sets `ownershipLost.Store(true)` and returns false. On match, returns true. **No positive cache** — every shared-mode SendCommand call pays one PG round-trip. Eliminates the v6/v7/v8 race window.
+- Produces: `(dc *daemonConn) confirmOwnership(ctx context.Context) bool`. **Single-pod safe (codex round-8 MAJOR #2):** returns `true` immediately when `dc.hub == nil || dc.hub.sharedReg == nil` (single-pod mode has no PG to confirm against; callers MAY call this method unconditionally). Otherwise: returns false if `dc.ownershipLost.Load()` is already true (sticky negative cache); else issues a 500ms-bounded PG SELECT against `commander_daemons` and checks (owning_instance_url, connection_id) match. On any deviation OR PG error, sets `ownershipLost.Store(true)` and returns false. On match, returns true. **No positive cache** — every shared-mode SendCommand call pays one PG round-trip. Eliminates the v6/v7/v8 race window.
 
 - [ ] **Step 1: Add `confirmOwnershipSQL` const to production code**
 
@@ -2464,6 +2464,21 @@ func TestDaemonConn_ConfirmOwnership_PGError(t *testing.T) {
 	require.True(t, dc.ownershipLost.Load(), "PG error must be fail-closed (treat as lost)")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+// Single-pod regression: confirmOwnership must NOT touch PG when sharedReg
+// is nil. SendCommand[Stream] in single-pod mode calls confirmOwnership
+// unconditionally (after the proxy.go refactor); without this early-return
+// it would nil-deref.
+func TestDaemonConn_ConfirmOwnership_SinglePodReturnsTrue(t *testing.T) {
+	// Hub with no sharedReg (single-pod mode).
+	dc := &daemonConn{id: "conn-1", shortID: "agent-A", owner: owner{userID: "alice", workspaceID: "W1"}, hub: &Hub{ /* sharedReg nil */ }}
+	require.True(t, dc.confirmOwnership(context.Background()))
+	require.False(t, dc.ownershipLost.Load(), "single-pod must not flip ownershipLost")
+
+	// dc.hub == nil also safe.
+	dc2 := &daemonConn{id: "conn-2", shortID: "agent-B", owner: owner{userID: "u", workspaceID: "w"}, hub: nil}
+	require.True(t, dc2.confirmOwnership(context.Background()))
+}
 ```
 
 - [ ] **Step 3: Run; expect compile failure**
@@ -2478,15 +2493,20 @@ Add to `internal/commanderhub/registry.go` (near the bottom):
 // short-circuits all future calls without touching PG. Otherwise issues
 // a 500ms-bounded SELECT against commander_daemons.
 //
+// Single-pod safe: when dc.hub == nil OR dc.hub.sharedReg == nil,
+// returns true immediately (no cluster state to confirm against;
+// callers MAY call this unconditionally without branching on
+// sharedReg).
+//
 // On any deviation (different owning_instance_url, different
 // connection_id, missing row, or PG error), sets ownershipLost=true
 // and returns false. Fail-closed semantics.
 //
-// Called by SendCommand[Stream] in shared mode before dc.writeEnvelope.
-// In single-pod mode (dc.hub.sharedReg == nil), callers MUST NOT call
-// this method (it would panic on nil dereference). The check belongs in
-// SendCommand[Stream]'s branch logic.
+// Called by SendCommand[Stream] before dc.writeEnvelope.
 func (dc *daemonConn) confirmOwnership(ctx context.Context) bool {
+	if dc.hub == nil || dc.hub.sharedReg == nil {
+		return true
+	}
 	if dc.ownershipLost.Load() {
 		return false
 	}
