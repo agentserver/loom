@@ -401,6 +401,75 @@ func TestEnvelopeCodec_RealWorldRegister(t *testing.T) {
 	require.NotNil(t, decoded.Payload)
 }
 
+// ---------------------------------------------------------------------------
+// Fix #2: negative/signed length prefix rejection (panic guard)
+// ---------------------------------------------------------------------------
+
+func TestDecoder_RejectsNegativeLength(t *testing.T) {
+	// "-1\n" — strconv.Atoi would succeed with -1, make([]byte,-1) would panic.
+	data := "-1\n"
+	dec := NewEnvelopeDecoder(strings.NewReader(data))
+	_, err := dec.Decode()
+	require.ErrorIs(t, err, ErrInvalidLength, "negative length prefix must return ErrInvalidLength")
+}
+
+func TestDecoder_RejectsPositiveSignedLength(t *testing.T) {
+	// "+1\n" — the '+' sign is not a decimal digit.
+	data := "+1\n"
+	dec := NewEnvelopeDecoder(strings.NewReader(data))
+	_, err := dec.Decode()
+	require.ErrorIs(t, err, ErrInvalidLength, "positive-signed length prefix must return ErrInvalidLength")
+}
+
+func TestDecoder_RejectsEmptyLengthPrefix(t *testing.T) {
+	// "\n" — empty prefix before the newline.
+	data := "\n"
+	dec := NewEnvelopeDecoder(strings.NewReader(data))
+	_, err := dec.Decode()
+	require.ErrorIs(t, err, ErrInvalidLength, "empty length prefix must return ErrInvalidLength")
+}
+
+func TestDecodeInto_RejectsNegativeLength(t *testing.T) {
+	data := "-1\n"
+	dec := NewEnvelopeDecoder(strings.NewReader(data))
+	err := dec.DecodeInto(&commander.Envelope{})
+	require.ErrorIs(t, err, ErrInvalidLength, "DecodeInto: negative length must return ErrInvalidLength")
+}
+
+func TestDecodeInto_RejectsPositiveSignedLength(t *testing.T) {
+	data := "+1\n"
+	dec := NewEnvelopeDecoder(strings.NewReader(data))
+	err := dec.DecodeInto(&commander.Envelope{})
+	require.ErrorIs(t, err, ErrInvalidLength, "DecodeInto: positive-signed length must return ErrInvalidLength")
+}
+
+func TestDecodeInto_RejectsEmptyLengthPrefix(t *testing.T) {
+	data := "\n"
+	dec := NewEnvelopeDecoder(strings.NewReader(data))
+	err := dec.DecodeInto(&commander.Envelope{})
+	require.ErrorIs(t, err, ErrInvalidLength, "DecodeInto: empty length prefix must return ErrInvalidLength")
+}
+
+// ---------------------------------------------------------------------------
+// Fix #3: encoder size cap
+// ---------------------------------------------------------------------------
+
+func TestEncoder_RejectsOversized(t *testing.T) {
+	// Create a payload that makes the marshaled envelope exceed 1 MiB.
+	// Use a raw payload of 2 MiB; the marshaled Envelope will include the
+	// JSON overhead but 2 MiB payload alone already exceeds maxEnvelopeSize.
+	largePayload := bytes.Repeat([]byte("x"), 2*maxEnvelopeSize)
+	env := &commander.Envelope{
+		Type:    "event",
+		Payload: json.RawMessage(`"` + string(largePayload) + `"`),
+	}
+	var buf bytes.Buffer
+	enc := NewEnvelopeEncoder(&buf)
+	err := enc.Encode(env)
+	require.ErrorIs(t, err, ErrEnvelopeTooLarge, "encoder must reject oversized envelopes")
+	require.Equal(t, 0, buf.Len(), "nothing should be written on oversized rejection")
+}
+
 func TestEnvelopeCodec_RealWorldEvent(t *testing.T) {
 	payload := json.RawMessage(`{
 		"event_kind": "text",

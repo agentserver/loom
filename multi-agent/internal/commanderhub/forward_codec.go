@@ -26,7 +26,25 @@ var (
 	ErrNoNewline = errors.New("no newline found in length prefix")
 	// ErrInvalidLength is returned when the length prefix is not valid decimal ASCII.
 	ErrInvalidLength = errors.New("invalid length prefix (not decimal)")
+	// ErrEnvelopeTooLarge is returned by Encode when the marshaled envelope exceeds maxEnvelopeSize.
+	ErrEnvelopeTooLarge = errors.New("envelope too large to encode (exceeds 1 MiB limit)")
 )
+
+// isAllDigits reports true only when b is non-empty and every byte is an ASCII
+// decimal digit ('0'–'9'). This rejects negative ("-1") and positive-signed
+// ("+1") prefixes that strconv.Atoi would otherwise accept, preventing a
+// negative make([]byte, n) panic in the decode path.
+func isAllDigits(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	for _, c := range b {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
 
 // EnvelopeEncoder writes length-prefixed JSON envelopes to a writer.
 type EnvelopeEncoder struct {
@@ -40,11 +58,17 @@ func NewEnvelopeEncoder(w io.Writer) *EnvelopeEncoder {
 
 // Encode writes an Envelope as a length-prefixed JSON line.
 // Format: <decimal-length>\n<json-bytes>
+// Returns ErrEnvelopeTooLarge without writing if the marshaled size exceeds maxEnvelopeSize.
 func (e *EnvelopeEncoder) Encode(env *commander.Envelope) error {
 	// Marshal envelope to JSON
 	jsonBytes, err := json.Marshal(env)
 	if err != nil {
 		return fmt.Errorf("marshal envelope: %w", err)
+	}
+
+	// Enforce size cap before writing anything.
+	if len(jsonBytes) > maxEnvelopeSize {
+		return ErrEnvelopeTooLarge
 	}
 
 	// Write length as decimal ASCII, then newline, then JSON
@@ -102,8 +126,16 @@ func (d *EnvelopeDecoder) Decode() (*commander.Envelope, error) {
 		return nil, ErrNoNewline
 	}
 
+	// Validate: prefix must be all ASCII decimal digits (rejects "-1", "+1", etc.)
+	// This check prevents make([]byte, negative) panics from strconv.Atoi accepting
+	// signed integers.
+	prefixBytes := lengthBytes[:len(lengthBytes)-1]
+	if !isAllDigits(prefixBytes) {
+		return nil, fmt.Errorf("%w: %q", ErrInvalidLength, prefixBytes)
+	}
+
 	// Parse length (strip trailing \n)
-	lengthStr := string(lengthBytes[:len(lengthBytes)-1])
+	lengthStr := string(prefixBytes)
 	length, err := strconv.Atoi(lengthStr)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidLength, err)
@@ -159,8 +191,16 @@ func (d *EnvelopeDecoder) DecodeInto(dest *commander.Envelope) error {
 		return ErrNoNewline
 	}
 
+	// Validate: prefix must be all ASCII decimal digits (rejects "-1", "+1", etc.)
+	// This check prevents make([]byte, negative) panics from strconv.Atoi accepting
+	// signed integers.
+	prefixBytes := lengthBytes[:lengthLen-1]
+	if !isAllDigits(prefixBytes) {
+		return fmt.Errorf("%w: %q", ErrInvalidLength, prefixBytes)
+	}
+
 	// Parse length (strip trailing \n)
-	lengthStr := string(lengthBytes[:lengthLen-1])
+	lengthStr := string(prefixBytes)
 	length, err := strconv.Atoi(lengthStr)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidLength, err)
