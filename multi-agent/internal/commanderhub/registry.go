@@ -53,7 +53,10 @@ type daemonConn struct {
 
 	// heartbeatErrCount counts consecutive heartbeat write failures. The
 	// heartbeat loop terminates the connection after a threshold is reached.
-	heartbeatErrCount atomic.Int32
+	// int64 to match Phase B's planned atomic.AddInt64/StoreInt64 usage in
+	// runHeartbeatOnce — atomic.Int32 would force Phase B to use a wider
+	// integer type at the call site.
+	heartbeatErrCount atomic.Int64
 
 	metaMu       sync.Mutex
 	capabilities map[string]bool

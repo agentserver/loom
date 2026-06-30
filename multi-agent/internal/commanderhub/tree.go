@@ -173,7 +173,7 @@ func (h *Hub) cachedSessionRows(ctx context.Context, o owner, info DaemonInfo) (
 	if ent, ok := h.sessionCache.entries[key]; ok && now.Before(ent.expires) {
 		rows := append([]SessionRow(nil), ent.rows...)
 		h.sessionCache.mu.Unlock()
-		h.mergeCurrentTurnState(o, info.DaemonID, rows)
+		h.mergeCurrentTurnState(ctx, o, info.DaemonID, rows)
 		return rows, nil
 	}
 	h.sessionCache.mu.Unlock()
@@ -221,9 +221,9 @@ func (h *Hub) refreshSessionRows(ctx context.Context, o owner, info DaemonInfo) 
 	return rows, nil
 }
 
-func (h *Hub) mergeCurrentTurnState(o owner, daemonID string, rows []SessionRow) {
+func (h *Hub) mergeCurrentTurnState(ctx context.Context, o owner, daemonID string, rows []SessionRow) {
 	for i := range rows {
-		snap, _ := h.turns.get(context.Background(), turnKey{owner: o, shortID: daemonID, sessionID: rows[i].SessionID})
+		snap, _ := h.turns.get(ctx, turnKey{owner: o, shortID: daemonID, sessionID: rows[i].SessionID})
 		state := string(snap.State)
 		if state == "" {
 			state = string(turnStateIdle)
