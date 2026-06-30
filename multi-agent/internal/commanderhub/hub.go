@@ -73,6 +73,16 @@ type Hub struct {
 	// (readLoop, routeFrame) never touches admitMu.
 	admitMu sync.Mutex
 
+	// inFlightAdmissions tracks ServeHTTP goroutines that have passed the fast
+	// draining pre-check and are somewhere between token resolution and the end
+	// of the WS handler. Close and drainHandler wait on this WaitGroup (after
+	// setting draining=true and releasing admitMu) to ensure that any goroutine
+	// in the post-upsert / draining-rejection cleanup window has finished its
+	// sharedReg.remove call before the process proceeds with shutdown. Without
+	// this wait there is a race: Close returns before the 5s remove-timeout
+	// goroutine finishes, so the process may exit leaving a ghost shared row.
+	inFlightAdmissions sync.WaitGroup
+
 	// TurnTimeout is the observer-side safety max applied to a session_turn
 	// command. Turns continue draining after the browser/SSE client disconnects;
 	// this bounds daemon work that never sends a terminal frame. Defaults to
@@ -108,6 +118,14 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "observer draining", http.StatusServiceUnavailable)
 		return
 	}
+
+	// Count this goroutine as in-flight so Close/drainHandler can wait for any
+	// post-upsert cleanup (sharedReg.remove in the draining-rejection branch)
+	// to finish before the process continues with shutdown. The defer fires at
+	// the very end of ServeHTTP — after the draining-rejection remove call or
+	// after the read loop returns — whichever path is taken.
+	h.inFlightAdmissions.Add(1)
+	defer h.inFlightAdmissions.Done()
 
 	tok, ok := bearerToken(r.Header.Get("Authorization"))
 	if !ok {
@@ -356,6 +374,20 @@ func (h *Hub) Close(ctx context.Context) error {
 	}
 	h.reg.mu.Unlock()
 	h.admitMu.Unlock()
+
+	// Wait for any ServeHTTP goroutine that passed the pre-check before we set
+	// draining=true to finish its post-upsert cleanup (sharedReg.remove in the
+	// draining-rejection branch). Without this wait, Close can return while a
+	// 5s remove call is still in progress, leaving a ghost shared row if the
+	// process exits. We release admitMu first so those goroutines can acquire
+	// it, see draining=true, and proceed to their remove+WS-close path.
+	inFlightDone := make(chan struct{})
+	go func() { h.inFlightAdmissions.Wait(); close(inFlightDone) }()
+	select {
+	case <-inFlightDone:
+	case <-ctx.Done():
+		log.Printf("commanderhub: Close ctx deadline reached waiting for in-flight admissions; proceeding with drain")
+	}
 
 	// Step 3: Send observer_draining event and close WS for every local daemon.
 	// This mirrors drainAllLocalDaemons but we also need the dc.done channel

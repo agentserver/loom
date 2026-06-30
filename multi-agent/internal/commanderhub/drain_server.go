@@ -1,6 +1,7 @@
 package commanderhub
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -43,9 +44,33 @@ func (h *Hub) drainHandler(w http.ResponseWriter, r *http.Request) {
 	h.draining.Store(true)
 	h.admitMu.Unlock()
 
+	// Wait for any ServeHTTP goroutine that passed the pre-check before we set
+	// draining=true to finish its post-upsert cleanup (sharedReg.remove in the
+	// draining-rejection branch). admitMu is released above so those goroutines
+	// can acquire it, see draining=true, and complete their remove+WS-close path.
+	// We bound the wait by the request context deadline (k8s preStop timeout).
+	inFlightDone := make(chan struct{})
+	go func() { h.inFlightAdmissions.Wait(); close(inFlightDone) }()
+	select {
+	case <-inFlightDone:
+	case <-r.Context().Done():
+		log.Printf("commanderhub: drainHandler ctx deadline reached waiting for in-flight admissions; proceeding with drain")
+	}
+
 	// Drain all local daemons.
 	h.drainAllLocalDaemons("observer-restart")
 	w.WriteHeader(http.StatusOK)
+}
+
+// waitInFlightAdmissions blocks until all in-flight admission goroutines have
+// finished or ctx is cancelled. Exposed for testing.
+func (h *Hub) waitInFlightAdmissions(ctx context.Context) {
+	done := make(chan struct{})
+	go func() { h.inFlightAdmissions.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }
 
 // isLoopbackRemoteAddr parses the remote address and checks if the host is a

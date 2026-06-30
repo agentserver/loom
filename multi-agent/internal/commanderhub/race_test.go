@@ -338,3 +338,362 @@ func TestHub_Admission_RejectedAfterUpsert_RemovesSharedRow(t *testing.T) {
 	o := owner{userID: "alice", workspaceID: "W1"}
 	require.Empty(t, hub.reg.daemons(o), "local registry must be empty: daemon was rejected before add")
 }
+
+// TestHub_Close_WaitsForInFlightUpsertCleanup is the regression test for
+// D-fix5 MAJOR #1: Close must not return before in-flight post-upsert cleanup
+// (sharedReg.remove in the draining-rejection branch) has finished.
+//
+// Before the fix: Close set draining=true, snapshotted the registry, and
+// returned — a goroutine that passed the fast pre-check was still executing
+// sharedReg.remove (up to 5s timeout). If the process exited immediately after
+// Close, that remove never completed → ghost row.
+//
+// After the fix: Close calls inFlightAdmissions.Wait() after releasing admitMu
+// so in-flight goroutines can complete their remove call before Close returns.
+//
+// Arrangement:
+//   - sqlmock DB records connectUpsert then remove SQL in order.
+//   - testHookPostUpsert blocks until a gate channel is closed (simulating the
+//     goroutine being paused in the race window).
+//   - Close is called from another goroutine.
+//   - We assert Close has not returned while the hook is still blocking.
+//   - Then we unblock the hook (releasing the goroutine to execute remove).
+//   - We assert Close returns after that.
+//
+// Run as: go test -run TestHub_Close_WaitsForInFlightUpsertCleanup -race -count=5
+func TestHub_Close_WaitsForInFlightUpsertCleanup(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{
+		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
+	}}
+
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+
+	const advertiseURL = "http://pod-a:8091"
+
+	// Expect 1: connectUpsert succeeds.
+	mock.ExpectExec(connectUpsertSQL).
+		WithArgs(
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), advertiseURL,
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	// Expect 2: remove is called from the draining-rejection branch.
+	mock.ExpectExec(removeSQL).
+		WithArgs(
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			advertiseURL, sqlmock.AnyArg(),
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	hub := NewHub(resolver)
+	sr := newSharedRegistry(db, advertiseURL)
+	hub.attachSharedRegistry(ClusterRuntime{DB: db, AdvertiseURL: advertiseURL}, sr, nil, nil)
+
+	// gate controls when the hook releases the in-flight goroutine. The hook
+	// is called after connectUpsert but BEFORE admitMu acquisition. It blocks
+	// until gate is closed, keeping the goroutine in the race window while
+	// Close runs in parallel.
+	gate := make(chan struct{})
+	hookEntered := make(chan struct{})
+
+	hub.testHookPostUpsert = func() {
+		close(hookEntered)
+		<-gate // block until test releases
+		// Now set draining=true inside admitMu (simulating Close having raced).
+		hub.admitMu.Lock()
+		hub.draining.Store(true)
+		hub.admitMu.Unlock()
+	}
+
+	srv := httptest.NewServer(hub)
+	t.Cleanup(srv.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/daemon-link"
+
+	// Dial and send register in a goroutine; it will block in the hook.
+	dialDone := make(chan struct{})
+	go func() {
+		defer close(dialDone)
+		conn, _, dialErr := websocket.DefaultDialer.DialContext(context.Background(), wsURL, wsDialHeader("tok-alice"))
+		if dialErr != nil {
+			return
+		}
+		defer conn.Close()
+		regPayload, _ := json.Marshal(commander.RegisterPayload{
+			SchemaVersion: commander.SchemaVersion,
+			Kind:          "claude",
+			DisplayName:   "race-daemon",
+			ShortID:       "agent-waitclose",
+		})
+		_ = conn.WriteJSON(commander.Envelope{Type: "register", Payload: regPayload})
+		// Drain until closed.
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Wait until the goroutine is stuck in the hook (after connectUpsert).
+	select {
+	case <-hookEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("hook never entered: goroutine did not reach post-upsert window")
+	}
+
+	// Call Close in a goroutine; it must block waiting for the in-flight admission.
+	closeDone := make(chan struct{})
+	go func() {
+		defer close(closeDone)
+		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		require.NoError(t, hub.Close(closeCtx))
+	}()
+
+	// Close must NOT have returned yet — the hook is still holding the goroutine.
+	select {
+	case <-closeDone:
+		t.Fatal("Close returned before in-flight admission cleanup finished")
+	case <-time.After(50 * time.Millisecond):
+		// expected: Close is still waiting
+	}
+
+	// Release the hook → goroutine executes draining-rejection → sharedReg.remove.
+	close(gate)
+
+	// Now Close must return (with enough budget for the remove to complete).
+	select {
+	case <-closeDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return after in-flight admission cleanup finished")
+	}
+
+	// The dial goroutine must also finish.
+	select {
+	case <-dialDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("dial goroutine did not finish")
+	}
+
+	// Verify both SQL calls were made.
+	require.Eventually(t, func() bool {
+		return mock.ExpectationsWereMet() == nil
+	}, 2*time.Second, 10*time.Millisecond,
+		"sqlmock: connectUpsert and remove must both have been called")
+}
+
+// TestHub_DrainHandler_WaitsForInFlightUpsertCleanup verifies that the preStop
+// drain handler also waits for in-flight post-upsert cleanup before returning.
+//
+// This mirrors TestHub_Close_WaitsForInFlightUpsertCleanup but exercises the
+// drainHandler code path (POST /api/commander/_internal/drain from loopback).
+//
+// Run as: go test -run TestHub_DrainHandler_WaitsForInFlightUpsertCleanup -race -count=5
+func TestHub_DrainHandler_WaitsForInFlightUpsertCleanup(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{
+		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
+	}}
+
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+
+	const advertiseURL = "http://pod-b:8091"
+
+	mock.ExpectExec(connectUpsertSQL).
+		WithArgs(
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), advertiseURL,
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectExec(removeSQL).
+		WithArgs(
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			advertiseURL, sqlmock.AnyArg(),
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	hub := NewHub(resolver)
+	sr := newSharedRegistry(db, advertiseURL)
+	hub.attachSharedRegistry(ClusterRuntime{DB: db, AdvertiseURL: advertiseURL}, sr, nil, nil)
+
+	gate := make(chan struct{})
+	hookEntered := make(chan struct{})
+
+	hub.testHookPostUpsert = func() {
+		close(hookEntered)
+		<-gate
+		hub.admitMu.Lock()
+		hub.draining.Store(true)
+		hub.admitMu.Unlock()
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/api/daemon-link", hub)
+	mux.HandleFunc("/api/commander/_internal/drain", hub.drainHandler)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/daemon-link"
+
+	dialDone := make(chan struct{})
+	go func() {
+		defer close(dialDone)
+		conn, _, dialErr := websocket.DefaultDialer.DialContext(context.Background(), wsURL, wsDialHeader("tok-alice"))
+		if dialErr != nil {
+			return
+		}
+		defer conn.Close()
+		regPayload, _ := json.Marshal(commander.RegisterPayload{
+			SchemaVersion: commander.SchemaVersion,
+			Kind:          "claude",
+			DisplayName:   "race-daemon",
+			ShortID:       "agent-waitdrain",
+		})
+		_ = conn.WriteJSON(commander.Envelope{Type: "register", Payload: regPayload})
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Wait until goroutine is in the hook window.
+	select {
+	case <-hookEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("hook never entered")
+	}
+
+	// POST the drain endpoint from loopback; it must block while the hook holds.
+	drainURL := srv.URL + "/api/commander/_internal/drain"
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, drainURL, nil)
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		resp.Body.Close()
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+	}()
+
+	// Drain must not have returned yet.
+	select {
+	case <-drainDone:
+		t.Fatal("drainHandler returned before in-flight admission cleanup finished")
+	case <-time.After(50 * time.Millisecond):
+		// expected
+	}
+
+	// Release the hook.
+	close(gate)
+
+	select {
+	case <-drainDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("drainHandler did not return after in-flight admission cleanup finished")
+	}
+
+	select {
+	case <-dialDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("dial goroutine did not finish")
+	}
+
+	require.Eventually(t, func() bool {
+		return mock.ExpectationsWereMet() == nil
+	}, 2*time.Second, 10*time.Millisecond,
+		"sqlmock: connectUpsert and remove must both have been called")
+}
+
+// TestHub_InFlightAdmissions_Counter_NoLeak runs N=100 concurrent admissions
+// interleaved with a hub.Close and asserts:
+//  1. The inFlightAdmissions counter returns to zero (no goroutine leak).
+//  2. After Close, the local registry is empty.
+//
+// Run as: go test -run TestHub_InFlightAdmissions_Counter_NoLeak -race -count=3
+func TestHub_InFlightAdmissions_Counter_NoLeak(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{
+		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
+	}}
+
+	hub := NewHub(resolver)
+	srv := httptest.NewServer(hub)
+	t.Cleanup(srv.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/daemon-link"
+
+	const N = 100
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(N)
+
+	regPayload, _ := json.Marshal(commander.RegisterPayload{
+		SchemaVersion: commander.SchemaVersion,
+		Kind:          "claude",
+		DisplayName:   "leak-test-daemon",
+	})
+
+	for i := 0; i < N; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			conn, resp, dialErr := websocket.DefaultDialer.DialContext(
+				context.Background(), wsURL, wsDialHeader("tok-alice"))
+			if dialErr != nil {
+				if resp != nil {
+					resp.Body.Close()
+				}
+				return
+			}
+			defer conn.Close()
+			_ = conn.WriteJSON(commander.Envelope{Type: "register", Payload: regPayload})
+			conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+			// Drain until closed.
+			for {
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		}()
+	}
+
+	// Fire all goroutines then immediately Close.
+	close(start)
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, hub.Close(closeCtx))
+
+	// Wait for all dial goroutines to finish.
+	wg.Wait()
+
+	// ASSERTION 1: inFlightAdmissions counter must be zero (no leak).
+	// WaitGroup.Wait() is not exported for checking the counter directly, but
+	// we can call Wait() on it again: if it returns immediately, counter is zero.
+	counterZero := make(chan struct{})
+	go func() {
+		hub.inFlightAdmissions.Wait()
+		close(counterZero)
+	}()
+	select {
+	case <-counterZero:
+	case <-time.After(time.Second):
+		t.Fatal("inFlightAdmissions counter did not reach zero after all goroutines finished")
+	}
+
+	// ASSERTION 2: local registry is empty.
+	require.Eventually(t, func() bool {
+		hub.reg.mu.Lock()
+		defer hub.reg.mu.Unlock()
+		return len(hub.reg.conns) == 0
+	}, 3*time.Second, 10*time.Millisecond, "local registry must be empty after Close")
+}
