@@ -3,6 +3,7 @@ package commander
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,8 @@ import (
 	"time"
 	"unicode/utf8"
 )
+
+const maxEncodedFileResponse = 768 * 1024
 
 var (
 	errFileRequest     = errors.New("commander: invalid file request")
@@ -127,14 +130,23 @@ func (h *Handler) ReadFile(ctx context.Context, sessionID, rel string) (FileRead
 		res.Binary = true
 		return res, nil
 	}
-	// Check if the estimated JSON-encoded size exceeds the cap.
-	// This defends against files with many control bytes that would balloon
-	// when JSON-encoded (e.g., \uXXXX for each control byte).
-	if estimateJSONEncodedSize(body) > MaxFilePreviewEncodedBytes {
-		res.TooLarge = true
-		return res, nil
-	}
 	res.Content = string(body)
+
+	// Encoded-size guard: marshalling can balloon valid-but-control-heavy
+	// text up to 6x. If encoded form exceeds maxEncodedFileResponse,
+	// surface TooLarge with empty content so the wire never carries a
+	// payload that would breach wsReadLimit / forward cap.
+	encoded, err := json.Marshal(res)
+	if err != nil {
+		return FileReadResult{}, fileRequestError(err)
+	}
+	if int64(len(encoded)) > maxEncodedFileResponse {
+		over := FileReadResult{Path: res.Path, Size: res.Size, TooLarge: true}
+		if over.Size < MaxFilePreviewBytes+1 {
+			over.Size = MaxFilePreviewBytes + 1
+		}
+		return over, nil
+	}
 	return res, nil
 }
 
@@ -233,19 +245,3 @@ func pathWithinRoot(root, target string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rel))
 }
 
-// estimateJSONEncodedSize estimates the size of a byte slice after JSON string encoding.
-// It counts actual escaping: control bytes (0x00-0x1F), quote, backslash, and high bytes
-// (0x80-0xFF) each become 6 bytes (\uXXXX). All other bytes stay 1 byte. Plus 2 for quotes.
-func estimateJSONEncodedSize(b []byte) int64 {
-	var size int64 = 2 // for the surrounding quotes
-	for _, c := range b {
-		// Control bytes (0x00-0x1F), quote (0x22), backslash (0x5C), and high bytes (0x80-0xFF)
-		// need 6-byte escaping in JSON (\uXXXX)
-		if c < 0x20 || c == '"' || c == '\\' || c >= 0x80 {
-			size += 6
-		} else {
-			size += 1
-		}
-	}
-	return size
-}
