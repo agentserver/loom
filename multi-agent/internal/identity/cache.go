@@ -22,6 +22,17 @@ const (
 	// recentPublishCapacity is the size of the dedupe ring used to suppress
 	// re-logging when self-published revocations loop back via Subscribe.
 	recentPublishCapacity = 32
+
+	// invalidPublishDedupeWindow is the minimum interval between Publish calls
+	// for the same bad-token key. Prevents a single attacker-controlled token
+	// from producing a PG NOTIFY per request.
+	invalidPublishDedupeWindow = time.Second
+
+	// invalidPublishGlobalCap is the maximum number of invalid-token Publish
+	// calls allowed per invalidPublishGlobalWindow. Exceeding this cap drops
+	// the publish and increments a counter (DoS protection).
+	invalidPublishGlobalCap    = 20
+	invalidPublishGlobalWindow = time.Second
 )
 
 // RevocationChannel propagates identity cache invalidations across pods.
@@ -67,7 +78,15 @@ type cacheResolver struct {
 	entries       map[string]*list.Element
 	lru           *list.List
 	recentPublish []string // ring buffer for dedupe
-	group         singleflight.Group
+
+	// invalidPublish tracks the last time each bad-token key was published so
+	// we can dedupe within a 1s window and enforce a global publish rate cap.
+	// Protected by mu.
+	invalidLastPublish   map[string]time.Time // key → last published time
+	invalidGlobalCount   int                  // publishes in current window
+	invalidGlobalWindowT time.Time            // start of current window
+
+	group singleflight.Group
 }
 
 type cacheEntry struct {
@@ -112,11 +131,12 @@ func NewCache(delegate Resolver, cfg CacheConfig, opts ...Option) Resolver {
 		opt(&options)
 	}
 	c := &cacheResolver{
-		delegate: delegate,
-		cfg:      cfg,
-		opts:     options,
-		entries:  make(map[string]*list.Element),
-		lru:      list.New(),
+		delegate:           delegate,
+		cfg:                cfg,
+		opts:               options,
+		entries:            make(map[string]*list.Element),
+		lru:                list.New(),
+		invalidLastPublish: make(map[string]time.Time),
 	}
 	if options.revocation != nil {
 		c.subscribe()
@@ -145,7 +165,15 @@ func (c *cacheResolver) Resolve(ctx context.Context, token string) (Identity, er
 			c.put(key, ident, now)
 			return resolveResult{identity: ident}, nil
 		}
-		if errors.Is(err, ErrInvalid) || errors.Is(err, ErrRevoked) {
+		if errors.Is(err, ErrInvalid) {
+			// Use rate-limited eviction for bad tokens to prevent a spray of
+			// attacker-controlled invalid tokens from triggering a PG NOTIFY per
+			// request. Legitimate ErrRevoked from valid-but-revoked tokens takes
+			// the unrestricted evict path below.
+			c.evictInvalid(key)
+			return resolveResult{err: err}, nil
+		}
+		if errors.Is(err, ErrRevoked) {
 			c.evict(key)
 			return resolveResult{err: err}, nil
 		}
@@ -228,6 +256,60 @@ func (c *cacheResolver) evict(key string) {
 				keyPrefix(key), len(key), err)
 		}
 	}
+}
+
+// evictInvalid is like evict but applies a per-key dedupe window and a global
+// publish-rate cap before calling Publish. This prevents a spray of bad tokens
+// from producing one PG NOTIFY per request (DoS vector).
+//
+// The local eviction is unconditional; only the Publish is rate-limited.
+func (c *cacheResolver) evictInvalid(key string) {
+	c.localEvict(key)
+	if c.opts.revocation != nil && c.allowInvalidPublish(key) {
+		c.markSelfPublished(key)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := c.opts.revocation.Publish(ctx, key); err != nil {
+			log.Printf("identity cache: revocation publish (invalid) error key_prefix=%s len=%d: %v",
+				keyPrefix(key), len(key), err)
+		}
+	}
+}
+
+// allowInvalidPublish returns true if it is okay to Publish a revocation for
+// this key at the current time. It enforces two limits under mu:
+//  1. Per-key dedupe: the same key may not be published more than once per
+//     invalidPublishDedupeWindow (default 1s).
+//  2. Global cap: at most invalidPublishGlobalCap Publish calls per
+//     invalidPublishGlobalWindow across all keys.
+//
+// Both are conservative defaults that have no impact on normal revocation
+// traffic (legitimate revocations arrive through ErrRevoked, not ErrInvalid).
+func (c *cacheResolver) allowInvalidPublish(key string) bool {
+	now := c.cfg.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Per-key dedupe.
+	if last, ok := c.invalidLastPublish[key]; ok {
+		if now.Sub(last) < invalidPublishDedupeWindow {
+			return false
+		}
+	}
+
+	// Global rate cap: reset window if expired, then check.
+	if now.Sub(c.invalidGlobalWindowT) >= invalidPublishGlobalWindow {
+		c.invalidGlobalWindowT = now
+		c.invalidGlobalCount = 0
+	}
+	if c.invalidGlobalCount >= invalidPublishGlobalCap {
+		return false
+	}
+
+	// Allow: record state.
+	c.invalidLastPublish[key] = now
+	c.invalidGlobalCount++
+	return true
 }
 
 // localEvict removes a key from the local cache only. Safe to call when a
