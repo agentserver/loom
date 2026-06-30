@@ -2,6 +2,7 @@ package commanderhub
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
@@ -204,5 +205,99 @@ func TestSharedRegistry_HeartbeatOnce_ForceClosesOnOwnershipLoss(t *testing.T) {
 	require.False(t, keepRunning, "ownership loss must signal stop")
 	require.True(t, dc.ownershipLost.Load(), "ownershipLost must be sticky-true")
 	require.True(t, ownershipTestConnIsClosed(dc), "WS conn must be force-closed on ownership loss")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// Sweep tests use sqlmock + the runSweepOnce helper (NO timer flakes).
+
+func TestSharedRegistry_Sweep_DeletesStale(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newSharedRegistry(db, "http://10.0.0.42:8091")
+
+	mock.ExpectExec(sweepDaemonsSQL).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 3))
+
+	err = s.sweep(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSharedRegistry_SweepNonces_DeletesStale(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newSharedRegistry(db, "http://10.0.0.42:8091")
+
+	mock.ExpectExec(sweepNoncesSQL).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 5))
+
+	err = s.sweepNonces(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSharedRegistry_SweepTelemetryBuckets_DeletesStale(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newSharedRegistry(db, "http://10.0.0.42:8091")
+
+	mock.ExpectExec(sweepTelemetryBucketsSQL).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+
+	err = s.sweepTelemetryBuckets(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSharedRegistry_SweepOnce_CallsAllThree(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newSharedRegistry(db, "http://10.0.0.42:8091")
+
+	// Expect all three sweep SQL statements in order
+	mock.ExpectExec(sweepDaemonsSQL).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 3))
+	mock.ExpectExec(sweepNoncesSQL).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 5))
+	mock.ExpectExec(sweepTelemetryBucketsSQL).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+
+	s.runSweepOnce(context.Background())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSharedRegistry_SweepOnce_ContinuesOnError(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newSharedRegistry(db, "http://10.0.0.42:8091")
+
+	// First sweep fails, but subsequent sweeps should still execute
+	mock.ExpectExec(sweepDaemonsSQL).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnError(sql.ErrConnDone)
+	mock.ExpectExec(sweepNoncesSQL).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 5))
+	mock.ExpectExec(sweepTelemetryBucketsSQL).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+
+	s.runSweepOnce(context.Background())
 	require.NoError(t, mock.ExpectationsWereMet())
 }

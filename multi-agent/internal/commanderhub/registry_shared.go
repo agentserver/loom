@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log"
 	"sort"
+	"sync/atomic"
 	"time"
 )
 
@@ -41,13 +42,16 @@ const (
 )
 
 type sharedRegistry struct {
-	db             *sql.DB
-	advertiseURL   string
-	onlineTTL      time.Duration
-	deleteAfter    time.Duration
-	heartbeatEvery time.Duration
-	sweepEvery     time.Duration
-	nonceTTL       time.Duration
+	db                              *sql.DB
+	advertiseURL                    string
+	onlineTTL                       time.Duration
+	deleteAfter                     time.Duration
+	heartbeatEvery                  time.Duration
+	sweepEvery                      time.Duration
+	nonceTTL                        time.Duration
+	sweepErrCount                   int32
+	sweepNoncesErrCount             int32
+	sweepTelemetryBucketsErrCount   int32
 }
 
 func newSharedRegistry(db *sql.DB, advertiseURL string) *sharedRegistry {
@@ -238,4 +242,74 @@ func (s *sharedRegistry) listAll(ctx context.Context, o owner) ([]DaemonInfo, er
 		})
 	}
 	return out, rows.Err()
+}
+
+// sweep: delete stale daemons (last_seen_at < now - deleteAfter).
+func (s *sharedRegistry) sweep(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, sweepDaemonsSQL,
+		time.Now().Add(-s.deleteAfter))
+	return err
+}
+
+// sweepNonces: delete stale nonces (received_at < now - nonceTTL).
+func (s *sharedRegistry) sweepNonces(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, sweepNoncesSQL,
+		time.Now().Add(-s.nonceTTL))
+	return err
+}
+
+// sweepTelemetryBuckets: delete stale buckets (updated_at < now - 1h).
+func (s *sharedRegistry) sweepTelemetryBuckets(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, sweepTelemetryBucketsSQL,
+		time.Now().Add(-1*time.Hour))
+	return err
+}
+
+// runSweepOnce executes one tick body: all three sweeps. Errors are
+// logged but not fatal — the loop continues on transient PG issues.
+//
+// Exposed as a method (not a closure) so tests can call it directly
+// without relying on timer races.
+func (s *sharedRegistry) runSweepOnce(ctx context.Context) {
+	sweepCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	if err := s.sweep(sweepCtx); err != nil {
+		n := atomic.AddInt32(&s.sweepErrCount, 1)
+		if n%5 == 1 {
+			log.Printf("commanderhub: sweep daemons pod=%s err=%v",
+				s.advertiseURL, err)
+		}
+	}
+
+	if err := s.sweepNonces(sweepCtx); err != nil {
+		n := atomic.AddInt32(&s.sweepNoncesErrCount, 1)
+		if n%5 == 1 {
+			log.Printf("commanderhub: sweep nonces pod=%s err=%v",
+				s.advertiseURL, err)
+		}
+	}
+
+	if err := s.sweepTelemetryBuckets(sweepCtx); err != nil {
+		n := atomic.AddInt32(&s.sweepTelemetryBucketsErrCount, 1)
+		if n%5 == 1 {
+			log.Printf("commanderhub: sweep telemetry buckets pod=%s err=%v",
+				s.advertiseURL, err)
+		}
+	}
+}
+
+// runSweep ticks every s.sweepEvery, calling runSweepOnce.
+// Exits on ctx cancel.
+func (s *sharedRegistry) runSweep(ctx context.Context) {
+	ticker := time.NewTicker(s.sweepEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		s.runSweepOnce(ctx)
+	}
 }
