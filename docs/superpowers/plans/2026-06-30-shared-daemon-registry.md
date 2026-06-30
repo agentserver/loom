@@ -3627,7 +3627,7 @@ func TestForwardClient_Send_RoundTrip(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := newForwardClient(secret, nil)
+	c := newForwardClient(secret, nil, "http://test-pod:8091")
 	res, err := c.send(context.Background(), srv.URL, forwardRequest{
 		Owner: owner{userID: "alice", workspaceID: "W1"}, ShortID: "agent-A",
 		Command: "list_sessions",
@@ -3655,7 +3655,7 @@ func TestForwardClient_Send_RetryOnPrevSecret(t *testing.T) {
 	defer srv.Close()
 
 	// Sender's PrevSecret = oldSecret; receiver accepts old only.
-	c := newForwardClient(newSecret, oldSecret)
+	c := newForwardClient(newSecret, oldSecret, "http://test-pod:8091")
 	_, err := c.send(context.Background(), srv.URL, forwardRequest{
 		Owner: owner{userID: "alice", workspaceID: "W1"}, ShortID: "agent-A",
 		Command: "list_sessions",
@@ -3670,7 +3670,7 @@ func TestForwardClient_Send_404_MapsToErrDaemonNotFound(t *testing.T) {
 		http.Error(w, "not found", http.StatusNotFound)
 	}))
 	defer srv.Close()
-	c := newForwardClient(secret, nil)
+	c := newForwardClient(secret, nil, "http://test-pod:8091")
 	_, err := c.send(context.Background(), srv.URL, forwardRequest{
 		Owner: owner{userID: "alice", workspaceID: "W1"}, ShortID: "ghost",
 		Command: "list_sessions",
@@ -3685,7 +3685,7 @@ func TestForwardClient_Send_426_MapsToDaemonUpgradeRequired(t *testing.T) {
 		_, _ = fmt.Fprint(w, `{"error":{"code":"daemon_upgrade_required","message":"upgrade your daemon"}}`)
 	}))
 	defer srv.Close()
-	c := newForwardClient(secret, nil)
+	c := newForwardClient(secret, nil, "http://test-pod:8091")
 	_, err := c.send(context.Background(), srv.URL, forwardRequest{
 		Owner: owner{userID: "alice", workspaceID: "W1"}, ShortID: "old-daemon",
 		Command: "read_file",
@@ -3712,7 +3712,7 @@ func TestForwardClient_Stream_RoundTrip(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	c := newForwardClient(secret, nil)
+	c := newForwardClient(secret, nil, "http://test-pod:8091")
 	ch, err := c.stream(context.Background(), srv.URL, forwardRequest{
 		Owner: owner{userID: "alice", workspaceID: "W1"}, ShortID: "agent-A",
 		Command: "session_turn", Streaming: true,
@@ -3736,7 +3736,7 @@ func TestForwardClient_Send_OversizedBody_Rejected(t *testing.T) {
 	// Build an args payload that pushes wire body > 1.5 MiB.
 	huge := strings.Repeat("x", int(forwardRequestBodyMaxBytes)+1)
 	args := json.RawMessage(`"` + huge + `"`)
-	c := newForwardClient(secret, nil)
+	c := newForwardClient(secret, nil, "http://test-pod:8091")
 	_, err := c.send(context.Background(), srv.URL, forwardRequest{
 		Owner: owner{userID: "alice", workspaceID: "W1"}, ShortID: "agent-A",
 		Command: "session_turn", Args: args,
@@ -3768,7 +3768,7 @@ func TestForwardClient_Stream_CancelClosesChannel(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := newForwardClient(secret, nil)
+	c := newForwardClient(secret, nil, "http://test-pod:8091")
 	ctx, cancel := context.WithCancel(context.Background())
 	ch, err := c.stream(ctx, srv.URL, forwardRequest{
 		Owner: owner{userID: "alice", workspaceID: "W1"}, ShortID: "agent-A",
@@ -3811,12 +3811,39 @@ func TestForwardClient_Send_NeitherSecretMatches_Errors(t *testing.T) {
 	defer srv.Close()
 
 	// Client has wrong secret AND no PrevSecret — single attempt, expect ErrDaemonGone.
-	c := newForwardClient(clientSecret, nil)
+	c := newForwardClient(clientSecret, nil, "http://test-pod:8091")
 	_, err := c.send(context.Background(), srv.URL, forwardRequest{
 		Owner: owner{userID: "alice", workspaceID: "W1"}, ShortID: "agent-A",
 		Command: "list_sessions",
 	})
 	require.ErrorIs(t, err, ErrDaemonGone)
+}
+
+func TestForwardClient_Send_LoopRefused_SelfURL(t *testing.T) {
+	secret := []byte("supersecret-32-chars-padding-aaaa")
+	c := newForwardClient(secret, nil, "http://test-pod:8091")
+	// peer == self: refuse without dialing.
+	_, err := c.send(context.Background(), "http://test-pod:8091", forwardRequest{
+		Owner: owner{userID: "alice", workspaceID: "W1"}, ShortID: "agent-A",
+		Command: "list_sessions",
+	})
+	require.ErrorIs(t, err, ErrDaemonNotFound)
+}
+
+func TestForwardClient_Send_LoopRefused_LoopbackURL(t *testing.T) {
+	secret := []byte("supersecret-32-chars-padding-aaaa")
+	c := newForwardClient(secret, nil, "http://10.0.0.42:8091")
+	for _, peerURL := range []string{
+		"http://127.0.0.1:8091",
+		"http://localhost:8091",
+		"http://[::1]:8091",
+	} {
+		_, err := c.send(context.Background(), peerURL, forwardRequest{
+			Owner: owner{userID: "alice", workspaceID: "W1"}, ShortID: "agent-A",
+			Command: "list_sessions",
+		})
+		require.ErrorIsf(t, err, ErrDaemonNotFound, "loopback peer URL %s must be refused", peerURL)
+	}
 }
 
 // _ = bufio.NewReader keeps the import live for codec-internal tests
@@ -3842,7 +3869,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -3889,15 +3918,22 @@ const forwardEndpoint = "/api/commander/_internal/forward"
 const forwardRequestBodyMaxBytes int64 = (1 << 20) + (1 << 19) // 1.5 MiB
 
 type forwardClient struct {
-	secret     []byte
-	prevSecret []byte
-	httpClient *http.Client
+	secret       []byte
+	prevSecret   []byte
+	advertiseURL string // self URL; used to short-circuit self-forwards (loop prevention)
+	httpClient   *http.Client
 }
 
-func newForwardClient(secret, prevSecret []byte) *forwardClient {
+// newForwardClient: advertiseURL is the current pod's own URL. The client
+// uses it to refuse any peer URL equal to itself OR pointing at loopback
+// (127.0.0.1/[::1] without a port match) — spec v19 §"Loop prevention".
+// Loop happens when sharedReg.lookupRemote returns this pod's own URL
+// (e.g. due to a misconfigured advertise_url or a stale row).
+func newForwardClient(secret, prevSecret []byte, advertiseURL string) *forwardClient {
 	return &forwardClient{
-		secret:     secret,
-		prevSecret: prevSecret,
+		secret:       secret,
+		prevSecret:   prevSecret,
+		advertiseURL: advertiseURL,
 		httpClient: &http.Client{
 			Timeout: 0, // per-call ctx bounds; long streams need no client-side timeout
 			Transport: &http.Transport{
@@ -3906,6 +3942,32 @@ func newForwardClient(secret, prevSecret []byte) *forwardClient {
 			},
 		},
 	}
+}
+
+// wouldLoop reports whether peerURL targets THIS pod (self-forward) or
+// a loopback address. Returns true to refuse the forward.
+func (c *forwardClient) wouldLoop(peerURL string) bool {
+	if peerURL == "" {
+		return true
+	}
+	if peerURL == c.advertiseURL {
+		return true
+	}
+	// Parse host; loopback hosts (127.x, ::1) are a misconfigured peer URL
+	// in cluster mode (the receiver would be us, via the same pod's
+	// internal listener).
+	u, err := url.Parse(peerURL)
+	if err != nil {
+		return true
+	}
+	host := u.Hostname()
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return true
+	}
+	return false
 }
 
 func (c *forwardClient) buildRequest(ctx context.Context, peerURL string, req forwardRequest, useSecret []byte) (*http.Request, []byte, error) {
@@ -3945,6 +4007,10 @@ func (c *forwardClient) send(ctx context.Context, peerURL string, req forwardReq
 	if req.Streaming {
 		return nil, fmt.Errorf("forward: send() called with Streaming=true; use stream()")
 	}
+	if c.wouldLoop(peerURL) {
+		c.audit("forward.sent.loop_refused", peerURL, req.ShortID, req.Command, nil)
+		return nil, ErrDaemonNotFound // spec: refuse with ErrDaemonNotFound, surface as 404 to user
+	}
 	keys := c.keysToTry() // [secret] or [secret, prevSecret]
 	for i, key := range keys {
 		httpReq, _, err := c.buildRequest(ctx, peerURL, req, key)
@@ -3976,6 +4042,10 @@ func (c *forwardClient) send(ctx context.Context, peerURL string, req forwardReq
 func (c *forwardClient) stream(ctx context.Context, peerURL string, req forwardRequest) (<-chan commander.Envelope, error) {
 	if !req.Streaming {
 		return nil, fmt.Errorf("forward: stream() called with Streaming=false; use send()")
+	}
+	if c.wouldLoop(peerURL) {
+		c.audit("forward.stream.loop_refused", peerURL, req.ShortID, req.Command, nil)
+		return nil, ErrDaemonNotFound
 	}
 	var resp *http.Response
 	var lastErr error
@@ -4176,6 +4246,7 @@ Add a test in `proxy_test.go` (extending the existing local-path tests): assert 
 
 **Receiver pipeline (STRICT ORDER per spec v19 §"Receiver"):**
 
+0. **Shared-mode guard (codex CDE r4 MAJOR #1).** If `h.sharedReg == nil` OR `len(h.cluster.Secret) == 0` OR `h.sharedReg.db == nil`: respond 503 with `{"error":{"code":"backend_unavailable","message":"observer is not in cluster mode"}}` AND audit `forward.received.503.not_shared_mode`. This catches the misconfiguration where the internal mux is somehow exposed without the shared runtime being installed (e.g. a buggy MountAll, or a binary running with the old wiring). It also avoids panicking on `h.sharedReg.db.ExecContext` later in the pipeline.
 1. If `r.Method != http.MethodPost` → 405.
 2. If `r.ContentLength > forwardRequestBodyMaxBytes` (1.5 MiB) → 413.
 3. Parse header `X-Observer-Cluster-Timestamp` via `parseHMACTimestamp` → 400 on err.
@@ -4216,6 +4287,7 @@ type ClusterRuntime struct {
 ```
 
 **Tests** (concrete, full coverage):
+0. `TestForwardServer_ReceiverNotSharedMode_503` — Hub built via `NewHub(resolver)` WITHOUT `attachSharedRegistry`; POST to `/api/commander/_internal/forward` returns 503 with body `{"error":{"code":"backend_unavailable",...}}`. Asserts that the auth/nonce pipeline never runs (no PG mock expectations are violated).
 1. `TestForwardServer_AcceptsValidRequest` — full round-trip non-streaming.
 2. `TestForwardServer_405_Method` — GET → 405.
 3. `TestForwardServer_413_ContentLength` — Content-Length > 1.5 MiB → 413, body never read.
@@ -4305,7 +4377,7 @@ Phase D wires the new pieces into existing code paths. Each task in summary form
 
 ### Task D1: `Hub.attachSharedRegistry` + `listDaemons` + `lookupDaemon` + caller migration + `Hub.Close`
 
-- Files: `wiring.go` (modify `MountAll` signature to `(publicMux, internalMux *http.ServeMux, resolver, agentserverURL, store, cluster ClusterRuntime)`; inside, build `sharedRegistry`/`forwardClient`/`pgTurnStore` when `cluster.AdvertiseURL != ""` then call `hub.attachSharedRegistry(cluster, sr, fc, turns)`; mount `/api/commander/_internal/forward` + `/api/commander/_internal/drain` on internalMux; start sweeper goroutine), `hub.go` (`attachSharedRegistry(cluster ClusterRuntime, sr *sharedRegistry, fc *forwardClient, turns turnStateBackend)` ASSIGNS `h.cluster = cluster; h.sharedReg = sr; h.forwardCli = fc; h.turns = turns; h.sessionCache = nil`; add `(h *Hub).Close(ctx context.Context) error` — see signature below), `proxy.go` (branch SendCommand[Stream]: localReg hit → sendCommandToLocal which calls confirmOwnership internally; miss → sharedReg.lookupRemote → forwardCli.send/stream), `http.go` (`ch.daemons`/`ch.tree`/`ch.sessionsFanout` use `hub.listDaemons`; `ch.turn` existence guard uses `hub.lookupDaemon`; `writeSendCmdError` adds 426 for `ErrCodeDaemonUpgradeRequired`), `tree.go` (`CommanderTree` → listDaemons; `cachedSessionRows` skips cache when `h.sessionCache == nil`).
+- Files: `wiring.go` (modify `MountAll` signature to `(publicMux, internalMux *http.ServeMux, resolver, agentserverURL, store, cluster ClusterRuntime)`; inside, build `sharedRegistry`/`forwardClient` (`newForwardClient(cluster.Secret, cluster.PrevSecret, cluster.AdvertiseURL)`)/`pgTurnStore` when `cluster.AdvertiseURL != ""` then call `hub.attachSharedRegistry(cluster, sr, fc, turns)`; mount `/api/commander/_internal/forward` + `/api/commander/_internal/drain` on internalMux; start sweeper goroutine), `hub.go` (`attachSharedRegistry(cluster ClusterRuntime, sr *sharedRegistry, fc *forwardClient, turns turnStateBackend)` ASSIGNS `h.cluster = cluster; h.sharedReg = sr; h.forwardCli = fc; h.turns = turns; h.sessionCache = nil`; add `(h *Hub).Close(ctx context.Context) error` — see signature below), `proxy.go` (branch SendCommand[Stream]: localReg hit → sendCommandToLocal which calls confirmOwnership internally; miss → sharedReg.lookupRemote → forwardCli.send/stream), `http.go` (`ch.daemons`/`ch.tree`/`ch.sessionsFanout` use `hub.listDaemons`; `ch.turn` existence guard uses `hub.lookupDaemon`; `writeSendCmdError` adds 426 for `ErrCodeDaemonUpgradeRequired`), `tree.go` (`CommanderTree` → listDaemons; `cachedSessionRows` skips cache when `h.sessionCache == nil`).
 
 - **`attachSharedRegistry` signature (codex CDE r2 BLOCKER #2):** takes `ClusterRuntime` as first arg AND assigns `h.cluster = cluster` so `forwardHandler` (added by C4) can read `h.cluster.Secret`/`PrevSecret`. Without this assignment, C4's HMAC verify uses zero-value secrets and the forward auth flow either rejects every legitimate request or (worse) accepts forged ones.
 
