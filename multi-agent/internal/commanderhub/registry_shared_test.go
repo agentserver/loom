@@ -160,3 +160,49 @@ func TestSharedRegistry_ListAllFreshOnly(t *testing.T) {
 	require.Equal(t, "agent-B", got[1].DaemonID)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+// To avoid timer-based race conditions, the production runHeartbeat is
+// factored to expose runHeartbeatOnce(ctx, dc) which executes EXACTLY
+// one tick body. Tests call it directly; runHeartbeat is just the for-
+// loop wrapper.
+
+func TestSharedRegistry_HeartbeatOnce_StillOwn(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newSharedRegistry(db, "http://10.0.0.42:8091")
+	dc := &daemonConn{
+		id: "conn-1", shortID: "agent-A",
+		owner:         owner{userID: "alice", workspaceID: "W1"},
+		displayName:   "alice-mac", kind: "claude", driverVersion: "0.0.10",
+	}
+
+	mock.ExpectExec(heartbeatUpsertSQL).
+		WithArgs("alice", "W1", "agent-A", "conn-1", "alice-mac", "claude", "0.0.10", sqlmock.AnyArg(), "http://10.0.0.42:8091").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	keepRunning := s.runHeartbeatOnce(context.Background(), dc)
+	require.True(t, keepRunning, "stillOwn should let the loop continue")
+	require.False(t, dc.ownershipLost.Load())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSharedRegistry_HeartbeatOnce_ForceClosesOnOwnershipLoss(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := newSharedRegistry(db, "http://10.0.0.42:8091")
+	dc := newOwnershipTestDaemonConn(t, "conn-1", "agent-A", owner{userID: "alice", workspaceID: "W1"})
+
+	mock.ExpectExec(heartbeatUpsertSQL).
+		WithArgs("alice", "W1", "agent-A", "conn-1", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "http://10.0.0.42:8091").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	keepRunning := s.runHeartbeatOnce(context.Background(), dc)
+	require.False(t, keepRunning, "ownership loss must signal stop")
+	require.True(t, dc.ownershipLost.Load(), "ownershipLost must be sticky-true")
+	require.True(t, ownershipTestConnIsClosed(dc), "WS conn must be force-closed on ownership loss")
+	require.NoError(t, mock.ExpectationsWereMet())
+}

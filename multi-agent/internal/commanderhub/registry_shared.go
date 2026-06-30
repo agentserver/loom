@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log"
 	"sort"
 	"time"
 )
@@ -151,6 +152,60 @@ func (s *sharedRegistry) lookupRemote(ctx context.Context, o owner, shortID stri
 		Capabilities:  capabilities,
 		LastSeenAt:    lastSeen.UTC().Format(time.RFC3339Nano),
 	}, true, nil
+}
+
+// runHeartbeatOnce executes one tick body: heartbeatUpsert + handle
+// result. Returns false when the loop must stop (ownership lost OR
+// ctx canceled). Returns true otherwise (still own, or transient PG
+// error — caller continues looping).
+//
+// Exposed as a method (not a closure) so tests can call it directly
+// without relying on timer races.
+func (s *sharedRegistry) runHeartbeatOnce(ctx context.Context, dc *daemonConn) bool {
+	hbCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	stillOwn, err := s.heartbeatUpsert(hbCtx, dc)
+	switch {
+	case err != nil:
+		// Transient PG error — rate-limited log; caller continues looping.
+		n := dc.heartbeatErrCount.Add(1)
+		if n%5 == 1 {
+			log.Printf("commanderhub: heartbeatUpsert short_id=%s conn_id=%s pod=%s err=%v",
+				dc.shortID, dc.id, s.advertiseURL, err)
+		}
+		return true
+	case !stillOwn:
+		log.Printf("commanderhub: heartbeat ownership lost short_id=%s conn_id=%s pod=%s; force-closing WS",
+			dc.shortID, dc.id, s.advertiseURL)
+		dc.ownershipLost.Store(true)
+		// Force-close so the read loop wakes with io.EOF; ServeHTTP
+		// defers then run localReg.removeIf + sharedReg.remove,
+		// neither of which delete the new owner's state (both are
+		// connection_id-guarded).
+		_ = dc.conn.Close()
+		return false
+	default:
+		dc.heartbeatErrCount.Store(0)
+		return true
+	}
+}
+
+// runHeartbeat ticks every s.heartbeatEvery, calling runHeartbeatOnce.
+// Exits on ctx cancel OR when runHeartbeatOnce returns false (ownership
+// loss).
+func (s *sharedRegistry) runHeartbeat(ctx context.Context, dc *daemonConn) {
+	ticker := time.NewTicker(s.heartbeatEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if !s.runHeartbeatOnce(ctx, dc) {
+			return
+		}
+	}
 }
 
 // listAll: every fresh row for owner (this pod + peers).
