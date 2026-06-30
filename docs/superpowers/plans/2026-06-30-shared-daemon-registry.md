@@ -1050,41 +1050,16 @@ hub.reg.add(&daemonConn{id: "a1", shortID: "a1", owner: owner{"alice", "W1"}, di
 
 Files to scan (from spec component map): `hub_test.go`, `proxy_test.go`, `http_test.go`, `tree_test.go`, `race_test.go`, `livelock_test.go`, `e2e_test.go`, `integration_test.go`. Tests that go through real WS handshake (`hub.ServeHTTP`) get `shortID` populated by hub.go:111 from `rp.ShortID`; verify those tests already supply a non-empty `ShortID` in their `RegisterPayload` (most do). If any WS test passes `ShortID: ""`, set it to e.g. `"agent-test"` so post-A4 `DaemonInfo.DaemonID` is non-empty.
 
-- [ ] **Step 7: Update tests that access `hub.turns.{mu, m}` directly**
-
-Codex round-1 BLOCKER #4: existing `http_test.go` test fixtures grab `hub.turns.mu.Lock()` and write to `hub.turns.m` to seed turn state (currently at `http_test.go:255-262`). After A5 changes `Hub.turns` to interface type `turnStateBackend`, these direct field accesses no longer compile.
-
-```sh
-grep -nE 'hub\.turns\.(mu|m\[)' internal/commanderhub/*_test.go
-```
-
-For each hit, replace direct map mutation with explicit `hub.turns.begin/set/finish` calls. Example:
-
-Before (paraphrased from `http_test.go:255-262`):
-```go
-hub.turns.mu.Lock()
-hub.turns.m[key] = turnSnapshot{State: turnStateAnswering, InFlight: true, updatedAt: time.Now()}
-hub.turns.mu.Unlock()
-```
-
-After:
-```go
-ok, err := hub.turns.begin(context.Background(), key)
-require.NoError(t, err)
-require.True(t, ok)
-require.NoError(t, hub.turns.set(context.Background(), key, turnStateAnswering))
-```
-
-If the test needs to assert against the internal map, cast: `hub.turns.(*memTurnStore).m[key]`. Add a `_test.go`-only helper `(s *memTurnStore) snapshotFor(key turnKey) turnSnapshot` if more than a couple of sites need it (preferred — keeps Hub field type clean).
-
-- [ ] **Step 8: Run; expect pass**
+- [ ] **Step 7: Run; expect pass**
 
 ```sh
 go vet ./internal/commanderhub/...
 go test ./internal/commanderhub -count=1 -race
 ```
 
-- [ ] **Step 9: Commit**
+(The `hub.turns.{mu,m}` direct-field test sites are addressed in Task A5 Step 5, which is the task that actually changes `Hub.turns` to interface type. A4 leaves `hub.turns` as the concrete `*turnStateStore` type; A4's tests still compile against today's field access.)
+
+- [ ] **Step 8: Commit**
 
 ```sh
 git add internal/commanderhub/registry.go \
@@ -1665,7 +1640,6 @@ package commanderhub
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 	"time"
 
@@ -2793,8 +2767,14 @@ if h.sharedReg != nil {
 // Only after shared-registry row is durable do we admit locally.
 h.reg.add(dc)
 
-defer h.reg.removeIf(o, dc.shortID, dc.id)
-defer h.invalidateDaemonSessions(o, dc.shortID)
+// Local registry / cache teardown uses routingID() — matches the key
+// localReg.add used in cluster (= shortID) AND in single-pod legacy (=
+// dc.id when ShortID empty). Shared-registry teardown below uses raw
+// dc.shortID because cluster mode requires non-empty short_id (refused
+// at admission above) and the PG row's PK is short_id, never dc.id.
+routingID := dc.routingID()
+defer h.reg.removeIf(o, routingID, dc.id)
+defer h.invalidateDaemonSessions(o, routingID)
 defer close(dc.done)
 defer dc.failAllPending()
 defer func() {
