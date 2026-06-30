@@ -8,6 +8,8 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/require"
+
+	"github.com/yourorg/multi-agent/internal/commander"
 )
 
 func TestSharedRegistry_ConnectUpsertSQL(t *testing.T) {
@@ -341,4 +343,77 @@ func TestSharedRegistry_ZeroConfigFallsBackToDefaults(t *testing.T) {
 	require.Equal(t, defaultOnlineTTL, sr.onlineTTL, "zero config must keep default onlineTTL")
 	require.Equal(t, defaultDeleteAfter, sr.deleteAfter, "zero config must keep default deleteAfter")
 	require.Equal(t, defaultNonceTTL, sr.nonceTTL, "zero config must keep default nonceTTL")
+}
+
+// fakeTurnStore is a minimal turnStateBackend used only in sweep tests.
+// It records cleanupOrphans calls and returns a preconfigured error.
+type fakeTurnStore struct {
+	cleanupCalls int
+	cleanupArg   time.Duration
+	cleanupErr   error
+}
+
+func (f *fakeTurnStore) begin(_ context.Context, _ turnKey) (bool, error)                          { return false, nil }
+func (f *fakeTurnStore) set(_ context.Context, _ turnKey, _ turnState) error                       { return nil }
+func (f *fakeTurnStore) finish(_ context.Context, _ turnKey, _ turnState) error                    { return nil }
+func (f *fakeTurnStore) fail(_ context.Context, _ turnKey, _ string) error                         { return nil }
+func (f *fakeTurnStore) rekey(_ context.Context, _, _ turnKey) error                               { return nil }
+func (f *fakeTurnStore) get(_ context.Context, _ turnKey) (turnSnapshot, error)                    { return turnSnapshot{}, nil }
+func (f *fakeTurnStore) updateFromEnvelope(_ context.Context, _ turnKey, _ string, _ commander.Envelope) error { return nil }
+func (f *fakeTurnStore) cleanupOrphans(_ context.Context, older time.Duration) error {
+	f.cleanupCalls++
+	f.cleanupArg = older
+	return f.cleanupErr
+}
+
+// TestRunSweepOnce_CallsCleanupOrphans verifies that runSweepOnce invokes
+// cleanupOrphans on each tick when a turns backend is attached, and that a
+// transient error from cleanupOrphans does not abort the sweep cycle
+// (i.e. the turn error counter increments but no panic/early-return occurs).
+// This exercises the final-fix1 finding-3 fix.
+func TestRunSweepOnce_CallsCleanupOrphans(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	sr := newSharedRegistry(db, "http://10.0.0.42:8091")
+
+	fts := &fakeTurnStore{}
+	const wantTimeout = 10 * time.Minute
+	sr.attachTurns(fts, wantTimeout)
+
+	// Expect all three SQL sweeps to proceed (cleanupOrphans uses the fake, not SQL).
+	mock.ExpectExec(sweepDaemonsSQL).WithArgs(sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(sweepNoncesSQL).WithArgs(sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(sweepTelemetryBucketsSQL).WithArgs(sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	sr.runSweepOnce(context.Background())
+
+	require.Equal(t, 1, fts.cleanupCalls, "cleanupOrphans must be called once per sweep tick")
+	require.Equal(t, wantTimeout, fts.cleanupArg, "cleanupOrphans must receive hub.TurnTimeout")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestRunSweepOnce_CleanupOrphansErrorDoesNotAbort verifies that a transient
+// error from cleanupOrphans does not prevent the three SQL sweeps from running.
+func TestRunSweepOnce_CleanupOrphansErrorDoesNotAbort(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	defer db.Close()
+
+	sr := newSharedRegistry(db, "http://10.0.0.42:8091")
+
+	fts := &fakeTurnStore{cleanupErr: sql.ErrConnDone}
+	sr.attachTurns(fts, 10*time.Minute)
+
+	mock.ExpectExec(sweepDaemonsSQL).WithArgs(sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(sweepNoncesSQL).WithArgs(sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(sweepTelemetryBucketsSQL).WithArgs(sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	// Must not panic or early-return despite cleanupOrphans returning an error.
+	sr.runSweepOnce(context.Background())
+
+	require.Equal(t, 1, fts.cleanupCalls, "cleanupOrphans must still be called despite prior sweep errors")
+	require.Equal(t, int32(1), sr.sweepTurnsErrCount, "sweepTurnsErrCount must be incremented on error")
+	require.NoError(t, mock.ExpectationsWereMet())
 }

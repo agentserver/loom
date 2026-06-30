@@ -52,6 +52,12 @@ type sharedRegistry struct {
 	sweepErrCount                   int32
 	sweepNoncesErrCount             int32
 	sweepTelemetryBucketsErrCount   int32
+	sweepTurnsErrCount              int32
+	// turns, when non-nil, has cleanupOrphans called on each sweep tick so
+	// rows stuck in queued/answering after a pod crash are transitioned to
+	// disconnected and subsequent begin() calls can proceed.
+	turns       turnStateBackend
+	turnTimeout time.Duration
 }
 
 // SharedRegistryConfig carries optional timing overrides for newSharedRegistry.
@@ -295,8 +301,19 @@ func (s *sharedRegistry) sweepTelemetryBuckets(ctx context.Context) error {
 	return err
 }
 
-// runSweepOnce executes one tick body: all three sweeps. Errors are
-// logged but not fatal — the loop continues on transient PG issues.
+// attachTurns wires a turn-state backend into the sweeper so that
+// cleanupOrphans is called on each tick. Must be called before the
+// sweeper goroutine is started. timeout is passed verbatim to
+// cleanupOrphans; zero disables the turn sweep.
+func (s *sharedRegistry) attachTurns(turns turnStateBackend, timeout time.Duration) {
+	s.turns = turns
+	s.turnTimeout = timeout
+}
+
+// runSweepOnce executes one tick body: daemon sweep, nonce sweep,
+// telemetry-bucket sweep, and (when turns is wired) orphaned-turn cleanup.
+// Errors are logged but not fatal — the loop continues on transient PG
+// issues.
 //
 // Exposed as a method (not a closure) so tests can call it directly
 // without relying on timer races.
@@ -325,6 +342,16 @@ func (s *sharedRegistry) runSweepOnce(ctx context.Context) {
 		if n%5 == 1 {
 			log.Printf("commanderhub: sweep telemetry buckets pod=%s err=%v",
 				s.advertiseURL, err)
+		}
+	}
+
+	if s.turns != nil && s.turnTimeout > 0 {
+		if err := s.turns.cleanupOrphans(sweepCtx, s.turnTimeout); err != nil {
+			n := atomic.AddInt32(&s.sweepTurnsErrCount, 1)
+			if n%5 == 1 {
+				log.Printf("commanderhub: cleanup orphan turns pod=%s err=%v",
+					s.advertiseURL, err)
+			}
 		}
 	}
 }

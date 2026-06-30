@@ -60,6 +60,14 @@ func MountAll(publicMux *http.ServeMux, internalMux *http.ServeMux, resolver ide
 		}
 		hub.attachSharedRegistry(cluster, sr, fc, turns)
 
+		// Wire turn-orphan cleanup into the sweeper. TurnTimeout comes from
+		// hub.TurnTimeout (set by NewHub to defaultTurnTimeout, overrideable
+		// by the caller). A nil turns backend (single-pod memTurnStore path)
+		// is safe: attachTurns is a no-op when turns == nil or timeout == 0.
+		if turns != nil {
+			sr.attachTurns(turns, hub.TurnTimeout)
+		}
+
 		if internalMux != nil {
 			internalMux.HandleFunc("/api/commander/_internal/forward", hub.forwardHandler)
 			internalMux.HandleFunc("/api/commander/_internal/drain", hub.drainHandler)
