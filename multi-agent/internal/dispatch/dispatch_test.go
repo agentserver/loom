@@ -1,10 +1,13 @@
 package dispatch
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -498,4 +501,196 @@ func TestDispatcher_ReplayCompletedChatTaskWithEmptySessionEnvelopeUnwrapsToSumm
 	require.NoError(t, err)
 	require.Equal(t, "ok", res.Summary, "replay must unwrap the envelope and surface the inner summary, not the envelope text")
 	require.Empty(t, res.WrappedOutput, "empty-session_id final envelope must replay without WrappedOutput so the wire shape matches the normal path")
+}
+
+// ----------------------------------------------------------------------------
+// WT-1-routing-trace: Dispatcher.Run integration tests.
+
+func withCaptureWriter(t *testing.T) *capture {
+	t.Helper()
+	c := &capture{}
+	SetWriter(c)
+	t.Cleanup(func() { SetWriter(nil) })
+	return c
+}
+
+func TestDispatch_TwoCandidates_TraceWhyChosen(t *testing.T) {
+	cap := withCaptureWriter(t)
+	bashExec := &stubExec{res: executor.Result{Summary: "bash-ok"}}
+	chatExec := &stubExec{res: executor.Result{Summary: "chat-ok"}}
+	d := New(map[string]executor.Executor{"bash": bashExec, "chat": chatExec}, &stubJournal{}, newStore(t), nil)
+	_, err := d.Run(context.Background(), executor.Task{ID: "T", Skill: "chat", Prompt: "hi"})
+	require.NoError(t, err)
+	require.Len(t, cap.got, 1)
+	dec := cap.got[0]
+	require.Equal(t, "chat", dec.SelectedAgentID)
+	require.False(t, dec.SelectedNone)
+	require.Equal(t, ReasonCapabilityMatch, dec.ReasonCode)
+	require.Len(t, dec.Candidates, 2)
+	var bashCand, chatCand Candidate
+	for _, c := range dec.Candidates {
+		if c.AgentID == "bash" {
+			bashCand = c
+		} else {
+			chatCand = c
+		}
+	}
+	require.Equal(t, ReasonNoCapabilityMatch, bashCand.Reason)
+	require.Equal(t, ReasonCapabilityMatch, chatCand.Reason)
+}
+
+func TestDispatch_NoCandidates_TraceFailure(t *testing.T) {
+	cap := withCaptureWriter(t)
+	d := New(map[string]executor.Executor{}, &stubJournal{}, newStore(t), nil)
+	_, err := d.Run(context.Background(), executor.Task{ID: "T", Skill: "unknown", Prompt: "hi"})
+	require.Error(t, err)
+	require.Len(t, cap.got, 1)
+	require.True(t, cap.got[0].SelectedNone)
+	require.Equal(t, "", cap.got[0].SelectedAgentID)
+	require.Equal(t, ReasonNoCapabilityMatch, cap.got[0].ReasonCode)
+}
+
+func TestDispatch_FinalizeAndEmit_DeferCoversEarlyReturns(t *testing.T) {
+	t.Run("malformed-envelope", func(t *testing.T) {
+		cap := withCaptureWriter(t)
+		d := New(map[string]executor.Executor{"": &stubExec{}}, &stubJournal{}, newStore(t), nil)
+		malformed := contract.EnvelopeStart + "\n{\"version\":1}\n"
+		_, err := d.Run(context.Background(), executor.Task{ID: "TM", Skill: "chat", Prompt: malformed})
+		require.Error(t, err)
+		require.Len(t, cap.got, 1)
+	})
+	t.Run("no-executor", func(t *testing.T) {
+		cap := withCaptureWriter(t)
+		d := New(map[string]executor.Executor{}, &stubJournal{}, newStore(t), nil)
+		_, err := d.Run(context.Background(), executor.Task{ID: "TN", Skill: "x"})
+		require.Error(t, err)
+		require.Len(t, cap.got, 1)
+	})
+	t.Run("executor-error", func(t *testing.T) {
+		cap := withCaptureWriter(t)
+		d := New(map[string]executor.Executor{"": &stubExec{err: errors.New("oops")}}, &stubJournal{}, newStore(t), nil)
+		_, err := d.Run(context.Background(), executor.Task{ID: "TE"})
+		require.Error(t, err)
+		require.Len(t, cap.got, 1)
+	})
+	t.Run("insert-if-absent-error", func(t *testing.T) {
+		// Force InsertIfAbsent to error by closing the underlying store
+		// before Run. The defer must still write a trace row.
+		cap := withCaptureWriter(t)
+		s := newStore(t)
+		require.NoError(t, s.Close())
+		d := New(map[string]executor.Executor{"chat": &stubExec{}}, &stubJournal{}, s, nil)
+		_, err := d.Run(context.Background(), executor.Task{ID: "TI", Skill: "chat", Prompt: "hi"})
+		require.Error(t, err)
+		require.Len(t, cap.got, 1, "InsertIfAbsent error path must still emit trace")
+	})
+	t.Run("duplicate-running-sentinel", func(t *testing.T) {
+		cap := withCaptureWriter(t)
+		s := newStore(t)
+		ok, err := s.InsertIfAbsent(store.Task{ID: "TD", Skill: "chat"})
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.NoError(t, s.MarkRunning("TD"))
+		d := New(map[string]executor.Executor{"chat": &stubExec{}}, &stubJournal{}, s, nil)
+		_, err = d.Run(context.Background(), executor.Task{ID: "TD", Skill: "chat"})
+		require.ErrorIs(t, err, ErrDuplicateTaskRunning)
+		require.Len(t, cap.got, 1)
+	})
+}
+
+// TestDispatch_StoreCompleteFails_TraceRecordsFailure verifies that when
+// exec.Run returned a result but store.Complete fails afterwards, the
+// trace's ReasonText annotates the persistence failure instead of leaving
+// the row reading like a clean "matched skill X" success.
+func TestDispatch_StoreCompleteFails_TraceRecordsFailure(t *testing.T) {
+	cap := withCaptureWriter(t)
+	s := newStore(t)
+	// Pre-mark the task as completed in the store so a subsequent
+	// Complete-after-success path hits an error. We mimic that by closing
+	// the store right before the executor's Complete call: the executor
+	// has already run (we don't block it), so when the dispatcher tries
+	// to call store.Complete the underlying DB is closed.
+	d := New(map[string]executor.Executor{"chat": &closingExec{store: s}}, &stubJournal{}, s, nil)
+	_, err := d.Run(context.Background(), executor.Task{ID: "T-sc", Skill: "chat", Prompt: "hi"})
+	require.Error(t, err, "Complete error must propagate up")
+	require.Len(t, cap.got, 1)
+	require.Contains(t, cap.got[0].ReasonText, "store.Complete failed",
+		"ReasonText must record the post-success persistence failure so the audit trail does not misrepresent the outcome")
+}
+
+// closingExec returns success but closes the store mid-run, so when the
+// dispatcher calls store.Complete afterwards it fails. Used to exercise
+// the post-Run/pre-Complete failure path.
+type closingExec struct{ store *store.Store }
+
+func (e *closingExec) Run(_ context.Context, _ executor.Task, sink executor.Sink) (executor.Result, error) {
+	sink.Close()
+	_ = e.store.Close()
+	return executor.Result{Summary: "ok"}, nil
+}
+
+func TestDispatch_FallbackExecutor_SelectedAsCapabilityMatch(t *testing.T) {
+	cap := withCaptureWriter(t)
+	fallback := &stubExec{res: executor.Result{Summary: "fallback-ok"}}
+	d := New(map[string]executor.Executor{"": fallback}, &stubJournal{}, newStore(t), nil)
+	_, err := d.Run(context.Background(), executor.Task{ID: "T-fb", Skill: "xyzzy", Prompt: "hi"})
+	require.NoError(t, err)
+	require.Len(t, cap.got, 1)
+	require.Equal(t, "", cap.got[0].SelectedAgentID)
+	require.False(t, cap.got[0].SelectedNone, "fallback selected is NOT a lookup failure")
+	require.Equal(t, ReasonCapabilityMatch, cap.got[0].ReasonCode)
+	require.Len(t, cap.got[0].Candidates, 1)
+	require.Equal(t, "", cap.got[0].Candidates[0].AgentID)
+	require.Equal(t, ReasonCapabilityMatch, cap.got[0].Candidates[0].Reason)
+}
+
+func TestDispatch_ConversationIDFallback_UsesTaskID(t *testing.T) {
+	cap := withCaptureWriter(t)
+	d := New(map[string]executor.Executor{"": &stubExec{res: executor.Result{Summary: "ok"}}}, &stubJournal{}, newStore(t), nil)
+	_, err := d.Run(context.Background(), executor.Task{ID: "fallback-tid", Prompt: "plain"})
+	require.NoError(t, err)
+	require.Equal(t, "fallback-tid", cap.got[0].ConversationID)
+}
+
+func TestWriter_FailLogged_DispatchContinues(t *testing.T) {
+	cap := &capture{err: errors.New("kaboom")}
+	SetWriter(cap)
+	t.Cleanup(func() { SetWriter(nil) })
+
+	var buf bytes.Buffer
+	prevOut := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prevOut) })
+
+	d := New(map[string]executor.Executor{"": &stubExec{res: executor.Result{Summary: "ok"}}}, &stubJournal{}, newStore(t), nil)
+	res, err := d.Run(context.Background(), executor.Task{ID: "T-log"})
+	require.NoError(t, err, "dispatch must NOT propagate writer error")
+	require.Equal(t, "ok", res.Summary)
+	require.Contains(t, buf.String(), "[route-trace] write failed:")
+	require.Contains(t, buf.String(), "kaboom")
+	require.Contains(t, buf.String(), "conv=T-log")
+	require.Regexp(t, `decision=[a-f0-9]{32}`, buf.String(),
+		"log line must include decision=<id> so the incident can be traced")
+}
+
+func TestDispatch_TimestampDetached_PreservesTraceOnCtxCancel(t *testing.T) {
+	cap := withCaptureWriter(t)
+	d := New(map[string]executor.Executor{"": &stubExec{res: executor.Result{Summary: "ok"}}}, &stubJournal{}, newStore(t), nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled
+	_, _ = d.Run(ctx, executor.Task{ID: "T-cancel"})
+	require.Len(t, cap.got, 1, "trace must still be written even when parent ctx was cancelled")
+}
+
+func TestDispatch_Run_SignatureUnchanged(t *testing.T) {
+	rt := reflect.TypeOf((*Dispatcher)(nil))
+	for i := 0; i < rt.NumMethod(); i++ {
+		if rt.Method(i).Name == "Run" {
+			require.Equal(t,
+				"func(*dispatch.Dispatcher, context.Context, executor.Task) (executor.Result, error)",
+				rt.Method(i).Type.String())
+			return
+		}
+	}
+	t.Fatal("Run method not found")
 }
