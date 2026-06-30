@@ -233,6 +233,18 @@ func main() {
 	// commander_sessions and shouldn't pay the migration cost or be coupled to
 	// new DDL during rollouts.
 	opts := observerWebOptions(cfg, objects)
+	if cfg.Telemetry.Enabled && cfg.Store.Driver == "postgres" {
+		// Use the shared-Postgres token-bucket limiter so rate-limit state is
+		// consistent across pods. Phase D D5 will additionally gate this on
+		// cluster.enabled; for now any Postgres+telemetry deployment gets the
+		// durable limiter (safe: single-pod Postgres deployments benefit too).
+		observerweb.SetPGTelemetryLimiter(
+			&opts,
+			st.DB(),
+			cfg.Telemetry.RateLimit.PerMinute,
+			cfg.Telemetry.RateLimit.Burst,
+		)
+	}
 	if opts.AgentserverURL != "" {
 		authStore, err := buildCommanderAuthStore(cfg, st.DB())
 		if err != nil {

@@ -57,6 +57,12 @@ type Options struct {
 	// AgentserverURL is set and AuthStore is nil — silent in-memory fallback
 	// would re-introduce the multi-pod login bug this package was built to fix.
 	AuthStore authstore.Store
+
+	// TelemetryLimiter overrides the default in-memory token-bucket limiter.
+	// When non-nil (e.g. *pgTelemetryLimiter in cluster+postgres mode),
+	// TelemetryRateLimit is ignored. When nil, NewWithResolverOptions builds
+	// the in-memory limiter from TelemetryRateLimit as before.
+	TelemetryLimiter telemetryAllower
 }
 
 // New constructs the observerweb HTTP handler. If usHandler is non-nil,
@@ -92,13 +98,17 @@ func NewWithResolverOptions(s Store, usHandler *userspace.Handler, resolver iden
 	if opts.MaxObjectProxyBytes <= 0 {
 		opts.MaxObjectProxyBytes = defaultMaxObjectProxyBytes
 	}
+	limiter := opts.TelemetryLimiter
+	if limiter == nil {
+		limiter = newTelemetryLimiter(opts.TelemetryRateLimit.PerMinute, opts.TelemetryRateLimit.Burst)
+	}
 	h := &handler{
 		s:                   s,
 		resolver:            resolver,
 		registerEnabled:     !opts.RegisterDisabled,
 		objects:             opts.Objects,
 		objectProxyEnabled:  !opts.DisableObjectProxy,
-		telemetryLimiter:    newTelemetryLimiter(opts.TelemetryRateLimit.PerMinute, opts.TelemetryRateLimit.Burst),
+		telemetryLimiter:    limiter,
 		maxEventBodyBytes:   opts.MaxEventBodyBytes,
 		maxObjectProxyBytes: opts.MaxObjectProxyBytes,
 	}
