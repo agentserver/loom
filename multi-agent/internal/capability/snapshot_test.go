@@ -783,6 +783,159 @@ func TestNewSnapshot_InputSchemaDistinctNumbersHashDistinctly(t *testing.T) {
 	}
 }
 
+// §4.0.1 — tiny fractions must NOT collide with zero (round-7 audit P1).
+// Round-6's canonicaliser capped precision at 64, so 1e-100 truncated
+// to "0" and collided with the real 0; 1.5e-64 rounded to "2e-64". The
+// round-7 fix computes exact decimal precision from the denominator's
+// 2 and 5 factors, guaranteed to be finite for any JSON literal.
+func TestNewSnapshot_InputSchemaTinyFractionsDoNotCollideWithZero(t *testing.T) {
+	t.Parallel()
+	mk := func(schema string) Snapshot {
+		s, err := NewSnapshot(Snapshot{
+			OS: "linux", Arch: "amd64",
+			Platform: commandiface.Platform{OS: "linux", Arch: "amd64"},
+			Network:  NetworkInternet,
+			MCPTools: []MCPToolDescriptor{{
+				Server: "srv", Name: "tool",
+				InputSchema: json.RawMessage(schema),
+			}},
+		})
+		if err != nil {
+			t.Fatalf("NewSnapshot(%s): %v", schema, err)
+		}
+		return s
+	}
+	zero := ComputeHash(mk(`{"n":0}`))
+	cases := []string{
+		`{"n":1e-30}`,
+		`{"n":1e-60}`,
+		`{"n":0.00000000000000000000000000000001}`, // 1e-32 written long-form
+	}
+	for _, c := range cases {
+		if got := ComputeHash(mk(c)); got == zero {
+			t.Errorf("%s collides with 0; both hash=%s", c, got)
+		}
+	}
+
+	// And distinct tiny fractions must remain distinct.
+	if ComputeHash(mk(`{"n":1e-30}`)) == ComputeHash(mk(`{"n":1.5e-30}`)) {
+		t.Fatal("1e-30 and 1.5e-30 hashed identically")
+	}
+	if ComputeHash(mk(`{"n":1.5e-30}`)) == ComputeHash(mk(`{"n":2e-30}`)) {
+		t.Fatal("1.5e-30 and 2e-30 hashed identically (round-6 fallback bug)")
+	}
+}
+
+// §4.0.1 — semantically-equal tiny fractions must still hash the same
+// (positive proof for the exact-decimal path).
+func TestNewSnapshot_CanonicalisesTinyFractionShapes(t *testing.T) {
+	t.Parallel()
+	mk := func(schema string) Snapshot {
+		s, err := NewSnapshot(Snapshot{
+			OS: "linux", Arch: "amd64",
+			Platform: commandiface.Platform{OS: "linux", Arch: "amd64"},
+			Network:  NetworkInternet,
+			MCPTools: []MCPToolDescriptor{{
+				Server: "srv", Name: "tool",
+				InputSchema: json.RawMessage(schema),
+			}},
+		})
+		if err != nil {
+			t.Fatalf("NewSnapshot(%s): %v", schema, err)
+		}
+		return s
+	}
+	pairs := [][2]string{
+		{`{"n":1e-10}`, `{"n":0.0000000001}`},   // exponent vs long form
+		{`{"n":1.500e-10}`, `{"n":1.5e-10}`},    // trailing zeros in mantissa
+		{`{"n":-1e-10}`, `{"n":-0.0000000001}`}, // negative
+	}
+	for _, p := range pairs {
+		a, b := ComputeHash(mk(p[0])), ComputeHash(mk(p[1]))
+		if a != b {
+			t.Errorf("hash diverges for semantically-equal tiny fractions %q vs %q:\n  a=%s\n  b=%s", p[0], p[1], a, b)
+		}
+	}
+}
+
+// §4.0.1 — round-7 DoS defence: an adversarial number literal exceeding
+// maxNumberLiteralLen bytes must be rejected before it feeds big.Rat.
+// Legitimate JSON schema numbers comfortably fit; only crafted attack
+// payloads (`1e999999`) exceed the cap.
+func TestNewSnapshot_RejectsAdversarialLongNumberLiteral(t *testing.T) {
+	t.Parallel()
+	// Build a >64-byte literal: 65-char decimal integer.
+	long := "1" + strings.Repeat("0", 65)
+	schema := `{"n":` + long + `}`
+	_, err := NewSnapshot(Snapshot{
+		OS: "linux", Arch: "amd64",
+		Platform: commandiface.Platform{OS: "linux", Arch: "amd64"},
+		Network:  NetworkInternet,
+		MCPTools: []MCPToolDescriptor{{
+			Server: "srv", Name: "tool",
+			InputSchema: json.RawMessage(schema),
+		}},
+	})
+	if !errors.Is(err, ErrSnapshotInvalid) {
+		t.Fatalf("NewSnapshot(long-literal): want ErrSnapshotInvalid, got %v", err)
+	}
+}
+
+// §4.0.1 — belt-and-braces: NEGATIVE tiny fractions must not collide
+// with zero, and must not collide with their positive counterparts.
+func TestNewSnapshot_InputSchemaNegativeTinyFractionsDistinguished(t *testing.T) {
+	t.Parallel()
+	mk := func(schema string) Snapshot {
+		s, err := NewSnapshot(Snapshot{
+			OS: "linux", Arch: "amd64",
+			Platform: commandiface.Platform{OS: "linux", Arch: "amd64"},
+			Network:  NetworkInternet,
+			MCPTools: []MCPToolDescriptor{{
+				Server: "srv", Name: "tool",
+				InputSchema: json.RawMessage(schema),
+			}},
+		})
+		if err != nil {
+			t.Fatalf("NewSnapshot: %v", err)
+		}
+		return s
+	}
+	zero := ComputeHash(mk(`{"n":0}`))
+	if ComputeHash(mk(`{"n":-1e-30}`)) == zero {
+		t.Fatal("-1e-30 collided with 0")
+	}
+	if ComputeHash(mk(`{"n":-1e-30}`)) == ComputeHash(mk(`{"n":1e-30}`)) {
+		t.Fatal("-1e-30 and 1e-30 hashed identically (sign lost)")
+	}
+}
+
+// §4.0.1 — canonicalJSONBytes must be idempotent: canonicalising a
+// snapshot's InputSchema twice must yield the same bytes. Ensures a
+// downstream re-canonicalisation (e.g. by an auditor) does not shift
+// the hash.
+func TestNewSnapshot_CanonicalJSONBytesIdempotent(t *testing.T) {
+	t.Parallel()
+	inputs := []string{
+		`{"n":1.5e-10}`,
+		`{"a":1,"b":[2,3],"c":{"d":4.5}}`,
+		`{"n":-1e-30,"m":100}`,
+		`{"n":9007199254740993}`,
+	}
+	for _, in := range inputs {
+		once, err := canonicalJSONBytes(json.RawMessage(in))
+		if err != nil {
+			t.Fatalf("canonicalJSONBytes(%q): %v", in, err)
+		}
+		twice, err := canonicalJSONBytes(once)
+		if err != nil {
+			t.Fatalf("canonicalJSONBytes(canonicalJSONBytes(%q)): %v", in, err)
+		}
+		if string(once) != string(twice) {
+			t.Errorf("not idempotent for %q:\n  once =%s\n  twice=%s", in, once, twice)
+		}
+	}
+}
+
 // §7(a) — eyJ regex must require a second base64 segment, otherwise it
 // false-positives on innocuous "identifier.name" phrasings in tool
 // descriptions.

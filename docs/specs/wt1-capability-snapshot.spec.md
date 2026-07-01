@@ -397,20 +397,47 @@ audit caught this as a P1 dedup defeat.
 `json.Number` with a `canonicalNumber` wrapper that emits ONE literal
 form per numeric value:
 
-- integers (denominator = 1) emit as `N` (no `.0`, no exponent);
-- non-integers emit the shortest exact decimal reached by
-  `big.Rat.FloatString(prec)` (`prec` grows from 1 to 64 until the
-  string round-trips through `big.Rat` back to the same value; trailing
-  zeros are trimmed);
-- pathological rationals (e.g. `1/3`) cap at 64 fractional digits, which
-  is deterministic across runs.
+- integers (lowest-terms denominator = 1) emit as `N` (no `.0`, no
+  exponent, no leading `+`);
+- non-integers emit `big.Rat.FloatString(prec)` with **exact** `prec`
+  computed from the denominator's 2-and-5 factorisation via
+  `exactDecimalPrec`, trailing zeros trimmed. Every JSON literal parses
+  to a rational whose lowest-terms denominator is `2^a * 5^b` (JSON
+  numbers are finite decimals `m * 10^e`), so `prec = max(a, b)` yields
+  the shortest exact decimal — no round-trip probe loop, no truncation,
+  no small-fraction collisions.
+- a hand-built rational with any other denominator prime factor (e.g.
+  `1/3`) is impossible from a JSON input and returns
+  `ErrSnapshotInvalid` from the canonicaliser rather than silently
+  emitting a truncated form.
 
 `big.Rat` handles every JSON-representable number without float64
 precision loss (`9007199254740993` stays distinct from
-`9007199254740992`). Distinct numeric values still hash distinctly —
-tests `TestNewSnapshot_CanonicalisesInputSchemaNumberLiteralShapes`
-(collapse-on-equal) and `TestNewSnapshot_InputSchemaDistinctNumbersHashDistinctly`
-(distinguish-on-unequal) cover both directions.
+`9007199254740992`; `1e-100` stays distinct from `0`).
+
+DoS defence (round-7 audit P2): `canonicaliseNumbers` rejects any
+`json.Number` literal whose byte length exceeds `maxNumberLiteralLen`
+(64). Legitimate JSON schema numbers fit; an adversarial MCP tool with
+`{"n":1e999999}` (which would allocate ~1MB per snapshot inside
+`big.Int`) is rejected as `ErrSnapshotInvalid`.
+
+Regression coverage:
+- `TestNewSnapshot_CanonicalisesInputSchemaNumberLiteralShapes` — 9
+  pairs of semantically-equal integer/short-fraction shapes → same hash.
+- `TestNewSnapshot_InputSchemaDistinctNumbersHashDistinctly` — integers,
+  short fractions, `2^53±1` boundary → different hashes.
+- `TestNewSnapshot_InputSchemaTinyFractionsDoNotCollideWithZero` —
+  `1e-30`, `1e-60`, long-form `1e-32` → distinct from `0`; `1.5e-30` /
+  `2e-30` distinguished (round-6 fallback regression guard).
+- `TestNewSnapshot_CanonicalisesTinyFractionShapes` — exponent vs long
+  form vs trailing-zero mantissa collapse for tiny fractions.
+- `TestNewSnapshot_InputSchemaNegativeTinyFractionsDistinguished` —
+  `-1e-30` distinct from `0` and from `1e-30`.
+- `TestNewSnapshot_RejectsAdversarialLongNumberLiteral` — 65+ byte
+  literals rejected.
+- `TestNewSnapshot_CanonicalJSONBytesIdempotent` — canonicalising
+  canonicalised bytes yields byte-equal output for representative
+  inputs.
 
 ### 4.1 Canonical encoding mechanics
 

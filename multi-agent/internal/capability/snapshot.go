@@ -267,7 +267,10 @@ func canonicalJSONBytes(b json.RawMessage) (json.RawMessage, error) {
 	if dec.More() {
 		return nil, fmt.Errorf("canonical json: trailing tokens after value")
 	}
-	v = canonicaliseNumbers(v)
+	v, err := canonicaliseNumbers(v)
+	if err != nil {
+		return nil, err
+	}
 	out, err := json.Marshal(v)
 	if err != nil {
 		return nil, err
@@ -275,51 +278,96 @@ func canonicalJSONBytes(b json.RawMessage) (json.RawMessage, error) {
 	return json.RawMessage(out), nil
 }
 
-// canonicalNumber is a wrapper around big.Rat that marshals to one
-// canonical decimal form: integer values as `N`, non-integers as the
-// shortest decimal reached by trimming trailing zeros from
-// FloatString(prec). No leading `+`, no uppercase `E`, no exponent.
+// maxNumberLiteralLen bounds the byte length of a json.Number literal
+// the canonicaliser will process. Motivation (round-7 audit P2): an
+// adversarial MCP tool descriptor with `{"n":1e1000000}` forces the
+// canonicaliser to allocate ~1MB per snapshot inside big.Int, DoSing
+// every capability collector on the network. Legitimate JSON-schema
+// numeric constraints comfortably fit in 64 bytes.
+const maxNumberLiteralLen = 64
+
+// canonicalNumber is a wrapper around big.Rat that marshals to a single
+// canonical decimal literal per rational value. Integer values emit as
+// `N`; non-integers emit the EXACT shortest decimal (all trailing zeros
+// trimmed). No leading `+`, no uppercase `E`, no exponent notation.
+//
+// The exact-decimal property holds for every rational whose denominator
+// (in lowest terms) is 2^a * 5^b — which is EVERY rational parseable
+// from a JSON literal, since JSON numbers are finite decimals of the
+// form m * 10^e (denominator = 10^(-e) = 2^(-e) * 5^(-e)). This is
+// exploited by exactDecimalPrec: no round-trip probe loop, no
+// truncation, no small-fraction collisions (round-7 audit P1).
 type canonicalNumber struct{ r *big.Rat }
 
-// MarshalJSON emits the canonical form. Never fails.
+// MarshalJSON emits the canonical form. Errors only if the value is
+// (impossibly, for JSON-derived inputs) a repeating decimal like 1/3.
 func (c canonicalNumber) MarshalJSON() ([]byte, error) {
-	// If the rational has denominator 1 it is an integer; emit as `N`.
 	if c.r.IsInt() {
 		return []byte(c.r.Num().String()), nil
 	}
-	// Non-integer: probe increasing precisions until FloatString round-
-	// trips back to the same rational. That gives the minimum-precision
-	// exact decimal form. Bound the loop at 64 fractional digits — the
-	// widest legitimate JSON schema value we expect (float64 max
-	// precision is ~17; 64 gives head-room for arbitrary-precision
-	// inputs like 1/3 that never terminate — we cap and accept a
-	// controlled loss for the pathological case).
-	const maxPrec = 64
-	for prec := 1; prec <= maxPrec; prec++ {
-		s := c.r.FloatString(prec)
-		s = trimTrailingZeros(s)
-		back, ok := new(big.Rat).SetString(s)
-		if ok && back.Cmp(c.r) == 0 {
-			return []byte(s), nil
-		}
+	prec, ok := exactDecimalPrec(c.r)
+	if !ok {
+		// Repeating decimal — unreachable from any JSON literal input,
+		// but a hand-built big.Rat like 1/3 would land here. Refuse to
+		// emit a truncated form rather than silently collide two
+		// different rationals to the same string. The caller sees
+		// this as a canonicalisation error and either fixes the source
+		// or accepts that this exotic path was never on the input
+		// contract.
+		return nil, fmt.Errorf("canonical json: number %s has a repeating decimal expansion", c.r.String())
 	}
-	// Fallback: emit the maxPrec form even though it lost precision.
-	// Rationals like 1/3 land here. Any 1/3-shaped schema value hashes
-	// consistently at 64-digit precision, which is deterministic across
-	// runs (that's what we care about for dedup).
-	return []byte(trimTrailingZeros(c.r.FloatString(maxPrec))), nil
+	s := c.r.FloatString(prec)
+	return []byte(trimTrailingZeros(s)), nil
+}
+
+// exactDecimalPrec returns the minimum k such that r.FloatString(k) is
+// an EXACT decimal representation of r. For a rational whose lowest-
+// terms denominator factors as 2^a * 5^b, that k = max(a, b). Returns
+// (0, false) if the denominator has any other prime factor (i.e. the
+// rational has a repeating decimal). Every JSON-literal-derived rational
+// satisfies the 2-and-5-only condition.
+func exactDecimalPrec(r *big.Rat) (int, bool) {
+	d := new(big.Int).Set(r.Denom())
+	two, five := big.NewInt(2), big.NewInt(5)
+	tmp := new(big.Int)
+	a := 0
+	for {
+		tmp.Mod(d, two)
+		if tmp.Sign() != 0 {
+			break
+		}
+		d.Quo(d, two)
+		a++
+	}
+	b := 0
+	for {
+		tmp.Mod(d, five)
+		if tmp.Sign() != 0 {
+			break
+		}
+		d.Quo(d, five)
+		b++
+	}
+	if d.Cmp(big.NewInt(1)) != 0 {
+		return 0, false
+	}
+	if a > b {
+		return a, true
+	}
+	return b, true
 }
 
 // trimTrailingZeros strips redundant fractional trailing zeros from a
 // decimal produced by big.Rat.FloatString. "1.500" → "1.5"; "2.000"
-// → "2"; "0.0" → "0".
+// → "2"; "0.0" → "0"; "-0.000" → "0" (big.Rat normalises signed zero,
+// but the guard covers the edge case).
 func trimTrailingZeros(s string) string {
 	if !strings.Contains(s, ".") {
 		return s
 	}
 	s = strings.TrimRight(s, "0")
 	s = strings.TrimSuffix(s, ".")
-	if s == "" || s == "-" {
+	if s == "" || s == "-" || s == "-0" {
 		return "0"
 	}
 	return s
@@ -328,32 +376,45 @@ func trimTrailingZeros(s string) string {
 // canonicaliseNumbers walks a decoded JSON value tree, replacing every
 // json.Number with a canonicalNumber wrapper. Non-numeric nodes pass
 // through unchanged. Recurses into maps and slices.
-func canonicaliseNumbers(v interface{}) interface{} {
+//
+// Numeric literals longer than maxNumberLiteralLen bytes are rejected
+// via ErrSnapshotInvalid (surfaced by NewSnapshot's caller) — see the
+// DoS-defence rationale on maxNumberLiteralLen.
+func canonicaliseNumbers(v interface{}) (interface{}, error) {
 	switch t := v.(type) {
 	case json.Number:
+		if len(string(t)) > maxNumberLiteralLen {
+			return nil, fmt.Errorf("canonical json: number literal %q exceeds %d-byte cap (adversarial-DoS defence)", string(t), maxNumberLiteralLen)
+		}
 		// big.Rat.SetString accepts JSON number grammar (decimal +
-		// exponent). If it can't parse, fall back to the raw string —
-		// json.Marshal will re-emit it and the hash will remain
-		// deterministic per that raw form (a UseNumber value that
-		// parses back as JSON is by definition parseable, so this
-		// fallback is a belt-and-braces path).
+		// exponent). If it can't parse, that means json.Number handed
+		// us bytes json.Decode itself would reject on re-parse — belt-
+		// and-braces error.
 		r, ok := new(big.Rat).SetString(string(t))
 		if !ok {
-			return t
+			return nil, fmt.Errorf("canonical json: json.Number %q not a valid rational", string(t))
 		}
-		return canonicalNumber{r: r}
+		return canonicalNumber{r: r}, nil
 	case map[string]interface{}:
 		for k, child := range t {
-			t[k] = canonicaliseNumbers(child)
+			nc, err := canonicaliseNumbers(child)
+			if err != nil {
+				return nil, err
+			}
+			t[k] = nc
 		}
-		return t
+		return t, nil
 	case []interface{}:
 		for i, child := range t {
-			t[i] = canonicaliseNumbers(child)
+			nc, err := canonicaliseNumbers(child)
+			if err != nil {
+				return nil, err
+			}
+			t[i] = nc
 		}
-		return t
+		return t, nil
 	default:
-		return v
+		return v, nil
 	}
 }
 
