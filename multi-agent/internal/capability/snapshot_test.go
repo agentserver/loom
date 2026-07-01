@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/yourorg/multi-agent/internal/ablation"
 	"github.com/yourorg/multi-agent/internal/commandiface"
@@ -878,6 +879,92 @@ func TestNewSnapshot_RejectsAdversarialLongNumberLiteral(t *testing.T) {
 	})
 	if !errors.Is(err, ErrSnapshotInvalid) {
 		t.Fatalf("NewSnapshot(long-literal): want ErrSnapshotInvalid, got %v", err)
+	}
+}
+
+// §4.0.1 — round-8 audit P1: a short literal with a huge negative
+// exponent must be rejected before it costs seconds of CPU. The
+// literal-length cap alone is insufficient — `1e-100000` is 9 bytes
+// but parses to a rational whose denominator has ~332,000 bits, which
+// under the round-7 exact-decimal algorithm burned ~12s of wall time
+// per snapshot. A denominator BitLen cap catches it.
+func TestNewSnapshot_RejectsShortLiteralWithHugeNegativeExponent(t *testing.T) {
+	t.Parallel()
+	// Deadline: if we take more than 500ms, the cap has failed.
+	deadline := time.NewTimer(500 * time.Millisecond)
+	defer deadline.Stop()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := NewSnapshot(Snapshot{
+			OS: "linux", Arch: "amd64",
+			Platform: commandiface.Platform{OS: "linux", Arch: "amd64"},
+			Network:  NetworkInternet,
+			MCPTools: []MCPToolDescriptor{{
+				Server: "srv", Name: "tool",
+				InputSchema: json.RawMessage(`{"a":1e-100000}`),
+			}},
+		})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrSnapshotInvalid) {
+			t.Fatalf("NewSnapshot(1e-100000): want ErrSnapshotInvalid, got %v", err)
+		}
+	case <-deadline.C:
+		t.Fatal("NewSnapshot(1e-100000) exceeded 500ms deadline — DoS cap failed to reject the short-literal huge-exponent attack")
+	}
+}
+
+// Symmetric coverage: huge POSITIVE exponent produces a huge numerator
+// which also triggers the BitLen cap.
+func TestNewSnapshot_RejectsShortLiteralWithHugePositiveExponent(t *testing.T) {
+	t.Parallel()
+	_, err := NewSnapshot(Snapshot{
+		OS: "linux", Arch: "amd64",
+		Platform: commandiface.Platform{OS: "linux", Arch: "amd64"},
+		Network:  NetworkInternet,
+		MCPTools: []MCPToolDescriptor{{
+			Server: "srv", Name: "tool",
+			InputSchema: json.RawMessage(`{"a":1e100000}`),
+		}},
+	})
+	if !errors.Is(err, ErrSnapshotInvalid) {
+		t.Fatalf("NewSnapshot(1e100000): want ErrSnapshotInvalid, got %v", err)
+	}
+}
+
+// Legitimate schema magnitudes must still be accepted. `1e1000` sits
+// comfortably under the 4096-bit cap (log2(10^1000) ~ 3322 bits).
+func TestNewSnapshot_AcceptsLegitimateLargeMagnitudes(t *testing.T) {
+	t.Parallel()
+	// 1e1000 is a 6-byte literal, numerator BitLen ~3322 (< 4096 cap).
+	_, err := NewSnapshot(Snapshot{
+		OS: "linux", Arch: "amd64",
+		Platform: commandiface.Platform{OS: "linux", Arch: "amd64"},
+		Network:  NetworkInternet,
+		MCPTools: []MCPToolDescriptor{{
+			Server: "srv", Name: "tool",
+			InputSchema: json.RawMessage(`{"a":1e1000}`),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewSnapshot(1e1000): unexpected err %v", err)
+	}
+	// 1e-1000 symmetric on the denominator side.
+	_, err = NewSnapshot(Snapshot{
+		OS: "linux", Arch: "amd64",
+		Platform: commandiface.Platform{OS: "linux", Arch: "amd64"},
+		Network:  NetworkInternet,
+		MCPTools: []MCPToolDescriptor{{
+			Server: "srv", Name: "tool",
+			InputSchema: json.RawMessage(`{"a":1e-1000}`),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewSnapshot(1e-1000): unexpected err %v", err)
 	}
 }
 

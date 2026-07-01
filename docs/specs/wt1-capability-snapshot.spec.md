@@ -415,11 +415,22 @@ form per numeric value:
 precision loss (`9007199254740993` stays distinct from
 `9007199254740992`; `1e-100` stays distinct from `0`).
 
-DoS defence (round-7 audit P2): `canonicaliseNumbers` rejects any
-`json.Number` literal whose byte length exceeds `maxNumberLiteralLen`
-(64). Legitimate JSON schema numbers fit; an adversarial MCP tool with
-`{"n":1e999999}` (which would allocate ~1MB per snapshot inside
-`big.Int`) is rejected as `ErrSnapshotInvalid`.
+DoS defence (round-7 audit P2 + round-8 audit P1) — TWO caps, both
+required:
+
+- `maxNumberLiteralLen` (64) — first line of defence. Rejects literals
+  like `1e999999` whose byte length alone signals adversarial intent.
+- `maxNumberBitLen` (4096) — second line of defence, applied to the
+  parsed rational's numerator AND denominator BitLen. Rejects
+  `1e-100000` (9 bytes, but denominator = 10^100000 has ~332,000 bits)
+  and `1e100000` (numerator has ~332,000 bits). Without this second
+  cap, `exactDecimalPrec`'s trial-division loop runs O(log2(denom))
+  iterations, and `FloatString(prec)` allocates O(prec) bytes — a
+  9-byte literal could pin a CPU for 12 seconds.
+
+The `maxNumberBitLen = 4096` bound covers magnitudes up to ~1e1233 —
+well beyond any legitimate JSON schema value — while capping the
+worst-case output at ~1.2KB and worst-case compute at sub-millisecond.
 
 Regression coverage:
 - `TestNewSnapshot_CanonicalisesInputSchemaNumberLiteralShapes` — 9
@@ -434,7 +445,14 @@ Regression coverage:
 - `TestNewSnapshot_InputSchemaNegativeTinyFractionsDistinguished` —
   `-1e-30` distinct from `0` and from `1e-30`.
 - `TestNewSnapshot_RejectsAdversarialLongNumberLiteral` — 65+ byte
-  literals rejected.
+  literals rejected (first cap).
+- `TestNewSnapshot_RejectsShortLiteralWithHugeNegativeExponent` —
+  9-byte `1e-100000` rejected within 500ms (second cap; round-8
+  regression guard).
+- `TestNewSnapshot_RejectsShortLiteralWithHugePositiveExponent` —
+  symmetric on numerator BitLen (`1e100000`).
+- `TestNewSnapshot_AcceptsLegitimateLargeMagnitudes` — `1e1000` and
+  `1e-1000` still accepted (bit-cap does not block legitimate use).
 - `TestNewSnapshot_CanonicalJSONBytesIdempotent` — canonicalising
   canonicalised bytes yields byte-equal output for representative
   inputs.

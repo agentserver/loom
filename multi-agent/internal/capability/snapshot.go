@@ -286,6 +286,19 @@ func canonicalJSONBytes(b json.RawMessage) (json.RawMessage, error) {
 // numeric constraints comfortably fit in 64 bytes.
 const maxNumberLiteralLen = 64
 
+// maxNumberBitLen bounds the BitLen of a parsed rational's numerator
+// AND denominator (each). Motivation (round-8 audit P1): the literal-
+// length cap is necessary but NOT sufficient — a short literal like
+// `1e-100000` (9 bytes) parses to 1/10^100000 whose denominator has
+// ~332,000 bits, sending exactDecimalPrec into a ~12-second loop and
+// FloatString into a ~100KB allocation. Bounding BitLen bounds both
+// the trial-division loop count (which is at most log2(denom)) AND
+// the output string size (~BitLen / 3.3 decimal chars). 4096 covers
+// integer/decimal magnitudes up to ~1e1233 — well beyond any
+// legitimate JSON schema value — while capping the worst-case output
+// at ~1.2KB and worst-case compute at sub-millisecond.
+const maxNumberBitLen = 4096
+
 // canonicalNumber is a wrapper around big.Rat that marshals to a single
 // canonical decimal literal per rational value. Integer values emit as
 // `N`; non-integers emit the EXACT shortest decimal (all trailing zeros
@@ -393,6 +406,18 @@ func canonicaliseNumbers(v interface{}) (interface{}, error) {
 		r, ok := new(big.Rat).SetString(string(t))
 		if !ok {
 			return nil, fmt.Errorf("canonical json: json.Number %q not a valid rational", string(t))
+		}
+		// Second DoS cap (round-8 audit P1): a short literal like
+		// "1e-100000" (9 bytes) parses to a rational whose DENOMINATOR
+		// has ~332,000 bits, sending exactDecimalPrec into a multi-
+		// second loop and FloatString into a large allocation. Bounding
+		// numerator+denominator BitLen bounds both the trial-division
+		// loop and the output string size.
+		if bl := r.Num().BitLen(); bl > maxNumberBitLen {
+			return nil, fmt.Errorf("canonical json: number literal %q parses to a rational whose numerator has %d bits (cap %d, adversarial-DoS defence)", string(t), bl, maxNumberBitLen)
+		}
+		if bl := r.Denom().BitLen(); bl > maxNumberBitLen {
+			return nil, fmt.Errorf("canonical json: number literal %q parses to a rational whose denominator has %d bits (cap %d, adversarial-DoS defence)", string(t), bl, maxNumberBitLen)
 		}
 		return canonicalNumber{r: r}, nil
 	case map[string]interface{}:
