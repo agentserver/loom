@@ -308,6 +308,57 @@ def test_whitespace_case_name_rejected(synth_cases) -> None:
     assert "'name' must be a non-empty string" in r.stderr, r.stderr
 
 
+@pytest.mark.parametrize("bad_tool,type_name", [
+    ({"nested": "x"}, "dict"),
+    ([1, 2], "list"),
+    (None, "NoneType"),
+    (True, "bool"),
+    (42, "int"),
+    (3.14, "float"),
+    ("", "str"),
+    ("   ", "str"),
+])
+def test_non_string_tool_rejected(synth_cases, bad_tool, type_name: str) -> None:
+    """Round-3 PR #57 review: (a) non-hashable tool (dict/list) crashed
+    with TypeError → exit 1, violating the pre-flight→exit-2 contract;
+    (b) hashable non-string tool (bool/int/None) leaked past the type
+    check and produced a misleading "update toolAllowedFields" message.
+    Both classes now fail at load with a clear 'tool must be non-empty
+    string' error."""
+    cases = synth_cases([
+        {"name": "x", "tool": bad_tool,
+         "input": {"path": "/tmp/x"}, "expected_error": "y"},
+    ], suffix=f"-tool-{type_name}")
+    r = _run_runner(cases, server_cmd="true")
+    assert r.returncode == 2, (
+        f"tool={bad_tool!r} expected exit 2, got {r.returncode}\n"
+        f"stderr:\n{r.stderr}"
+    )
+    assert "'tool' must be a non-empty string" in r.stderr, r.stderr
+    # Type name should surface for debug clarity.
+    assert type_name in r.stderr, (
+        f"expected type name {type_name!r} in stderr:\n{r.stderr}"
+    )
+
+
+def test_missing_expected_produces_targeted_message(synth_cases) -> None:
+    """Round-3 PR #57 review: an otherwise-golden case that omits both
+    expected and expected_error used to hit the shape classifier as
+    "mixed", producing a misleading "mixes golden and legacy shapes"
+    error. Should now say what actually needs fixing."""
+    cases = synth_cases([
+        {"name": "x", "tool": "csv_profile",
+         "input": {"path": "/tmp/x"}},  # missing both expected/expected_error
+    ])
+    r = _run_runner(cases, server_cmd="true")
+    assert r.returncode == 2, (r.returncode, r.stderr)
+    assert "exactly one of {expected, expected_error} required" in r.stderr, r.stderr
+    # Explicitly assert we did NOT report the old (wrong) "mixes" msg.
+    assert "mixes golden" not in r.stderr, (
+        f"regression: incomplete-golden case reported as 'mixes shapes':\n{r.stderr}"
+    )
+
+
 # ---- §3 (c) case-sensitive substring ---------------------------------
 
 

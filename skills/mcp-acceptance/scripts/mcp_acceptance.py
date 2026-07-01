@@ -254,12 +254,23 @@ def _resolve_cases_path(path: str) -> Path:
 
 
 def _classify_line(obj: dict[str, Any]) -> str:
-    """Return 'golden' | 'legacy' | 'mixed' for one parsed JSON case."""
+    """Return 'golden' | 'legacy' | 'incomplete_golden' | 'mixed'.
+
+    'incomplete_golden' means the line uses the golden `input` field but
+    is missing both `expected` and `expected_error`. It is still routed
+    through the golden loader (which then raises the targeted
+    "missing one of {expected, expected_error}" error) — so downstream
+    error messages tell operators what to fix instead of the misleading
+    "mixes golden and legacy" wording. PR #57 round-3 review caught
+    the previous behaviour.
+    """
     has_input = "input" in obj
     has_args = "args" in obj
     has_expected = "expected" in obj or "expected_error" in obj
     if has_input and has_expected and not has_args:
         return "golden"
+    if has_input and not has_expected and not has_args:
+        return "incomplete_golden"
     if has_args and not has_input and not has_expected:
         return "legacy"
     return "mixed"
@@ -311,6 +322,13 @@ def load_cases(path: str) -> tuple[list[dict[str, Any]], str, Path | None]:
         )
 
     shapes = {shape for _, _, shape in parsed}
+    # "incomplete_golden" lines share the golden mode's downstream
+    # validator (which raises a targeted "missing one of {expected,
+    # expected_error}" error). Merge them into "golden" for mode
+    # detection so we don't mis-report an incomplete file as
+    # "mixes shapes".
+    if shapes == {"golden", "incomplete_golden"} or shapes == {"incomplete_golden"}:
+        shapes = {"golden"}
     if "mixed" in shapes or len(shapes) > 1:
         # If any line is "mixed" (neither pure golden nor pure legacy),
         # or if golden and legacy lines are both present, refuse.
@@ -355,6 +373,19 @@ def load_cases(path: str) -> tuple[list[dict[str, Any]], str, Path | None]:
         if not isinstance(obj["name"], str) or not obj["name"].strip():
             raise GoldenLoadError(
                 f"cases line {i}: 'name' must be a non-empty string"
+            )
+        # tool must be a non-empty string. PR #57 round-3 review caught
+        # two failure modes: (1) a non-hashable value (dict/list) crashed
+        # with a bare TypeError at `tools_seen.add(tool_name)` → exit 1,
+        # violating the "pre-flight → exit 2" contract; (2) a hashable
+        # non-string (bool/int/float/None) leaked past the type check
+        # and hit the TOOL_ALLOWED_FIELDS lookup, producing a misleading
+        # "tool True has no input allowlist; update toolAllowedFields..."
+        # message that asks the maintainer to register a bad-type value.
+        if not isinstance(obj["tool"], str) or not obj["tool"].strip():
+            raise GoldenLoadError(
+                f"cases line {i}: 'tool' must be a non-empty string, "
+                f"got {type(obj['tool']).__name__}"
             )
         if "expected" not in obj and "expected_error" not in obj:
             raise GoldenLoadError(
