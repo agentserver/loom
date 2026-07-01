@@ -89,13 +89,16 @@ field set:
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `name` | string | ✅ | Case slug (snake_case); used for report aggregation. |
-| `tool` | string | ✅ | Tool name; **only one distinct value is allowed across the whole file** (§13 §2.5 #1, also enforced by `golden_schema_test.go:TestAcceptanceCasesAreValid`). |
-| `input` | object | ✅ | Passed to the MCP tool as `arguments` in `tools/call`. Each key MUST appear in the per-tool allowlist (§2.5 #3, §3 (f)). |
+| `name` | non-empty string | ✅ | Case slug (snake_case); used for report aggregation. Whitespace-only is rejected. Must be **unique within the file** (mirrors `multi-agent/tests/eval/golden/golden_schema_test.go:TestAcceptanceCasesAreValid`). |
+| `tool` | non-empty string | ✅ | Tool name; whitespace-only rejected. Non-hashable types (dict/list) and non-string primitives (bool/int/float/None) are rejected with `'tool' must be a non-empty string, got <type>`. **Only one distinct value is allowed across the whole file** (§13 §2.5 #1, also enforced by `multi-agent/tests/eval/golden/golden_schema_test.go:TestAcceptanceCasesAreValid`). |
+| `input` | object | ✅ | Passed to the MCP tool as `arguments` in `tools/call`. Each key MUST appear in the per-tool allowlist (§2.5 #3, §3 (f)). Path-typed values (§3 (b)) reject empty / whitespace-only strings. |
 | `expected` | any JSON value | ⛔ exclusive with `expected_error` | On a non-error MCP response, the runner does **deep-equal JSON comparison** against the tool's structured result (see §2.4). |
-| `expected_error` | string | ⛔ exclusive with `expected` | On an `isError: true` MCP response, the runner does **case-sensitive substring** matching against the joined MCP error message (§13 §2.5 #4). |
+| `expected_error` | non-empty string | ⛔ exclusive with `expected` | On an `isError: true` MCP response, the runner does **case-sensitive substring** matching against the joined MCP error message (§13 §2.5 #4). Whitespace-only is rejected (§3 (c) — `"\n" in any-multi-line-traceback == True`, `" " in any-multi-word-error == True`, etc.). |
 
-Any other top-level field is rejected (§3 (e)).
+Any other top-level field is rejected (§3 (e)). Non-empty and
+uniqueness rules on `name`/`tool` were added over PR #57's review
+rounds 2–3 to close silent-accept regressions that the initial
+"required/string" wording did not exclude.
 
 ### 2.2 File-level invariants checked at load time
 
@@ -137,22 +140,34 @@ Both roots are load-time constants; if either cannot be located on disk
 the runner aborts with exit 2 (`MODULE_ROOT could not be derived from
 runner path …`).
 
-For both `--cases <path>` and every path-typed in-case field:
+The two roots have different carve-out rules:
 
-- If the value starts with `/tmp/` *as a strict prefix* (`len(value) > 5
-  and value[:5] == "/tmp/"`), accept it verbatim and DO NOT resolve it
-  against either root. This is the §13 §2.3 carve-out for negative-case
-  fixtures that intentionally do not exist on disk; the MCP tool is
-  expected to surface `file not found`. The strictness is intentional:
-  `/tmp` alone, `/tmpfile`, `/tmp/../etc/passwd` (resolved form),
-  etc. are all rejected by the containment check. The carve-out
-  applies to **in-case** path fields only — `--cases` itself is not
-  allowed under `/tmp/` (operator must commit the cases file to the
-  repo).
-- Otherwise, resolve relative to the appropriate root if the value is
-  relative, or take the absolute path as-is. Then call
-  `Path(...).resolve()` and assert containment under the appropriate
-  root. On failure, exit 2.
+- **`--cases <path>`** — no `/tmp/` carve-out. The cases file MUST live
+  in the repo; `--cases /tmp/x.jsonl` is rejected. Resolve relative to
+  REPO_ROOT (or take absolute as-is), then assert containment under
+  REPO_ROOT. On failure, exit 2.
+
+- **Every path-typed in-case field** (`input.path`, `input.policy_path`):
+  - If the value starts with `/tmp/` *as a strict prefix*
+    (`len(value) > 5 and value[:5] == "/tmp/"`), accept it verbatim and
+    DO NOT resolve it against MODULE_ROOT. This is the §13 §2.3
+    carve-out for negative-case fixtures that intentionally do not
+    exist on disk; the MCP tool is expected to surface `file not
+    found`. The strictness is intentional: `/tmp` alone, `/tmpfile`,
+    and any other value that lacks the strict `/tmp/` prefix are
+    rejected by the containment check.
+  - Otherwise, resolve relative to MODULE_ROOT (or take absolute
+    as-is), then assert containment under MODULE_ROOT. On failure,
+    exit 2.
+  - **Note on `/tmp/../etc/passwd`** — this literal *string* passes
+    the strict-prefix test (accepted by the path layer per §3 (b)) but
+    its resolved form escapes MODULE_ROOT. See §3 (b) line-item
+    "Concrete reject examples" for the deliberate design: the runner
+    defends its own file access; whether the MCP tool downstream
+    performs a privileged op on the resolved form is the tool's
+    responsibility, not the runner's. Earlier versions of this spec
+    listed the string under "rejected by the containment check" —
+    that was inaccurate and has been reconciled with §3 (b).
 
 The runner does **not** stat the file — it is legitimate for a case to
 reference a path that the MCP tool itself will discover is missing

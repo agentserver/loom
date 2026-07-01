@@ -162,7 +162,7 @@ into the per-session `_pytest_tmp/` dir, flips the first `"rows": 5` to
 ```bash
 cd <repo-root>  # e.g. /root/multi-agent/.worktrees/p1-acceptance-golden
 
-# Python pytest suite — 42 tests (17 baseline + 25 added over 3 PR #57 review rounds)
+# Python pytest suite — 46 tests (17 baseline + 29 added over 4 PR #57 review rounds)
 pytest skills/mcp-acceptance/scripts/ -q
 
 # 5-family golden smoke (driven by pytest above, but also runnable

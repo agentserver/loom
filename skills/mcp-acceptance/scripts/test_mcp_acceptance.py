@@ -359,6 +359,45 @@ def test_missing_expected_produces_targeted_message(synth_cases) -> None:
     )
 
 
+@pytest.mark.parametrize("case,expected_msg", [
+    ({}, "missing required field 'name'"),
+    ({"name": "x"}, "missing required field 'tool'"),
+    ({"name": "x", "tool": "csv_profile"},
+     "missing required field 'input'"),
+])
+def test_empty_or_bare_case_produces_targeted_message(
+    synth_cases, case, expected_msg,
+) -> None:
+    """Round-4 PR #57 review: a truly empty case (or a case with only
+    name / name+tool) used to hit the classifier as "mixed" and
+    report "mixes golden and legacy shapes" — misdirects operators
+    away from the actual fix (add the missing field). Should now
+    surface the targeted 'missing required field ...' error."""
+    cases = synth_cases([case], suffix=f"-empty-{len(case)}")
+    r = _run_runner(cases, server_cmd="true")
+    assert r.returncode == 2, (r.returncode, r.stderr)
+    assert expected_msg in r.stderr, (
+        f"expected {expected_msg!r} in stderr for case {case!r}, got:\n{r.stderr}"
+    )
+    assert "mixes golden" not in r.stderr, (
+        f"regression: empty-shape case reported as 'mixes shapes':\n{r.stderr}"
+    )
+
+
+def test_true_mixed_still_reports_mixes_shapes(synth_cases) -> None:
+    """Sanity: a case that legitimately combines shapes (input + args)
+    still hits the 'mixes shapes' path — the round-4 targeting fix
+    only rerouted empty_shape and incomplete_golden, not real mixes."""
+    cases = synth_cases([
+        {"name": "x", "tool": "csv_profile",
+         "input": {"path": "/tmp/x"}, "args": {},
+         "expected_error": "y"},
+    ])
+    r = _run_runner(cases, server_cmd="true")
+    assert r.returncode == 2, (r.returncode, r.stderr)
+    assert "mixes golden" in r.stderr, r.stderr
+
+
 # ---- §3 (c) case-sensitive substring ---------------------------------
 
 

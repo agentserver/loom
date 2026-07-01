@@ -254,15 +254,22 @@ def _resolve_cases_path(path: str) -> Path:
 
 
 def _classify_line(obj: dict[str, Any]) -> str:
-    """Return 'golden' | 'legacy' | 'incomplete_golden' | 'mixed'.
+    """Return 'golden' | 'legacy' | 'incomplete_golden' | 'empty_shape' | 'mixed'.
 
-    'incomplete_golden' means the line uses the golden `input` field but
-    is missing both `expected` and `expected_error`. It is still routed
-    through the golden loader (which then raises the targeted
-    "missing one of {expected, expected_error}" error) — so downstream
-    error messages tell operators what to fix instead of the misleading
-    "mixes golden and legacy" wording. PR #57 round-3 review caught
-    the previous behaviour.
+    'incomplete_golden' — line uses the golden `input` field but is
+    missing both `expected` and `expected_error`. Routed through the
+    golden loader so the targeted "missing one of {expected,
+    expected_error}" error surfaces (PR #57 round-3 review).
+
+    'empty_shape' — line has NEITHER `input` nor `args` nor
+    `expected*`. Also routed through the golden loader so the
+    missing-required-field message (usually "missing required field
+    'input'") surfaces instead of the misleading "mixes shapes" (PR
+    #57 round-4 review).
+
+    'mixed' — line combines fields from both shapes (has `input` AND
+    `args`, or `args` AND `expected*`, etc.). Truly ambiguous;
+    reported as such.
     """
     has_input = "input" in obj
     has_args = "args" in obj
@@ -273,6 +280,8 @@ def _classify_line(obj: dict[str, Any]) -> str:
         return "incomplete_golden"
     if has_args and not has_input and not has_expected:
         return "legacy"
+    if not has_input and not has_args and not has_expected:
+        return "empty_shape"
     return "mixed"
 
 
@@ -322,12 +331,15 @@ def load_cases(path: str) -> tuple[list[dict[str, Any]], str, Path | None]:
         )
 
     shapes = {shape for _, _, shape in parsed}
-    # "incomplete_golden" lines share the golden mode's downstream
-    # validator (which raises a targeted "missing one of {expected,
-    # expected_error}" error). Merge them into "golden" for mode
+    # "incomplete_golden" and "empty_shape" lines share the golden
+    # mode's downstream validator (which raises a targeted
+    # "missing one of {expected, expected_error}" or "missing required
+    # field 'input'" error). Merge them into "golden" for mode
     # detection so we don't mis-report an incomplete file as
-    # "mixes shapes".
-    if shapes == {"golden", "incomplete_golden"} or shapes == {"incomplete_golden"}:
+    # "mixes shapes". Collapse ordering: any set that is a subset of
+    # {golden, incomplete_golden, empty_shape} becomes {golden}.
+    goldenish = {"golden", "incomplete_golden", "empty_shape"}
+    if shapes and shapes.issubset(goldenish):
         shapes = {"golden"}
     if "mixed" in shapes or len(shapes) > 1:
         # If any line is "mixed" (neither pure golden nor pure legacy),
