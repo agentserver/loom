@@ -245,6 +245,30 @@ jobs:
             exit 1
           fi
           echo "cluster smoke job completed"
+      - name: Diagnose smoke failure
+        if: failure()
+        run: |
+          set +e
+          echo "::group::pods"
+          kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" get pods -l app.kubernetes.io/instance="$SMOKE_RELEASE" -o wide
+          echo "::endgroup::"
+          echo "::group::describe pods"
+          kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" describe pods -l app.kubernetes.io/instance="$SMOKE_RELEASE"
+          echo "::endgroup::"
+          echo "::group::events (last 60)"
+          kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" get events --sort-by='.lastTimestamp' | tail -60
+          echo "::endgroup::"
+          for pod in $(kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" get pods -l app.kubernetes.io/instance="$SMOKE_RELEASE" -o name); do
+            echo "::group::logs $pod (all containers, including init)"
+            kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" logs "$pod" --all-containers=true --prefix=true --tail=200 --ignore-errors
+            echo "::endgroup::"
+            echo "::group::previous logs $pod (if crashed)"
+            kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" logs "$pod" --all-containers=true --prefix=true --tail=200 --previous --ignore-errors 2>&1 | head -200 || true
+            echo "::endgroup::"
+          done
+          echo "::group::helm status"
+          helm --kube-context "$KUBE_CONTEXT" status "$SMOKE_RELEASE" -n "$OBSERVER_NAMESPACE" || true
+          echo "::endgroup::"
       - name: Cleanup smoke stack
         if: always()
         run: |
