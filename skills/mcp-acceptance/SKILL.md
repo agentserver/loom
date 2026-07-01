@@ -1,6 +1,6 @@
 ---
 name: mcp-acceptance
-description: Use BEFORE calling register_slave_mcp or register_mcp to validate a stdio MCP server's tools/call semantics — drives initialize→tools/list→tools/call against a case file and exits non-zero on any failure, gating registration in a shell pipeline.
+description: Use BEFORE calling register_slave_mcp or register_mcp to validate a stdio MCP server's tools/call semantics — drives initialize→tools/list→tools/call against a case file and exits non-zero on any failure, gating registration in a shell pipeline. Also serves as the B3 acceptance gate for Phase-0 task-family golden cases (`--cases multi-agent/tests/eval/golden/<family>/acceptance/cases.jsonl`).
 ---
 
 # MCP Acceptance
@@ -59,6 +59,10 @@ Exit 1 vs 2 lets shell wrappers distinguish "server has bugs" from "server isn't
 
 ## Case Format (JSONL)
 
+Two shapes are accepted; the runner auto-detects per file.
+
+### Legacy shape (driver acceptance, ad-hoc cases)
+
 One case per non-empty, non-`#` line:
 
 ```jsonl
@@ -81,6 +85,42 @@ Optional fields (all AND-combined):
 - `timeout_sec` (number, per-call timeout, default 10)
 
 No expectations → only asserts `isError == expect_isError`.
+
+### Golden shape (Phase-0 task families, B3 acceptance gate)
+
+The `multi-agent/tests/eval/golden/<family>/acceptance/cases.jsonl` files
+ship a stricter contract that pairs each case with either a
+deep-equal `expected` value or a case-sensitive substring
+`expected_error`:
+
+```jsonl
+{"name": "happy_path_small_sales", "tool": "csv_profile", "input": {"path": "tests/eval/golden/csv-profiler/first-task/input/sales.csv"}, "expected": {"rows": 5, "cols": 3}}
+{"name": "error_missing_file", "tool": "csv_profile", "input": {"path": "/tmp/does-not-exist-fb73.csv"}, "expected_error": "file not found"}
+```
+
+Required fields per case:
+- `name` (string, snake_case slug)
+- `tool` (string — **all cases in the file MUST share one value**; per §13 §2.5 #1)
+- `input` (object — keys must appear in the per-tool allowlist mirrored
+  from `multi-agent/tests/eval/golden/golden_schema_test.go:toolAllowedFields`)
+- **exactly one** of `expected` (any JSON value, deep-equal) or
+  `expected_error` (string, case-sensitive substring matched against
+  the MCP error message)
+
+Any other top-level key → exit 2. See **Security** below.
+
+### Mode selection
+
+The runner auto-detects per file:
+
+- All lines have `input` and exactly one of `expected` / `expected_error`
+  → golden mode.
+- All lines have `args` → legacy mode.
+- Mixed → exit 2.
+
+There is **no `--cases-format` switch** — the auto-detect rule is
+exhaustive and a flag would only let the operator disagree with the
+file's actual contents.
 
 ## What the Runner Also Asserts (free)
 
@@ -169,8 +209,48 @@ Pick A for CI-like one-shot validation. Pick B when iterating on cases or expect
 | Treating exit 2 (handshake) as exit 1 (case failure) | Distinguish in wrappers — exit 2 means fix the server, not the cases. |
 | Forgetting `--cwd` for servers that load sibling files | Pass `--cwd` to the directory where the server expects relative paths. |
 
+## Security (golden mode only)
+
+Golden mode adds 6 mandatory checks. None are bypassable except item (d)
+below, and even (d) cannot bypass (a)–(c), (e), (f).
+
+| # | Check | What it prevents |
+|---|---|---|
+| (a) | `--cases <path>` must resolve inside the repo (worktree) root. | `--cases /etc/passwd` leaking file metadata via parse errors. |
+| (b) | Each case's `input.path` / `input.policy_path` must resolve inside `multi-agent/`. Strict `/tmp/` prefix is the negative-case carve-out (§13 §2.3). | A malicious cases file from making the MCP tool read `/etc/passwd`. |
+| (c) | `expected_error` matching is **case-sensitive substring**, hardcoded. No flag, no env var, no per-case override. | Genuine bugs surfacing `"File Not Found"` (vs the expected `"file not found"`) silently passing under a loosened matcher. |
+| (d) | When `LOOM_ABLATION_NOACCEPTANCEGATE=1` is set, the runner bypasses the MCP work AND emits exactly one stderr line: `[ablation] NoAcceptanceGate: bypassed cases=<path> count=<N>`. | Silent green on a zero-row cases file; auditable trail for ablation runs. The line is **mandatory**. |
+| (e) | Unknown top-level case fields → exit 2. The closed set is `{name, tool, input, expected, expected_error}`. | An attacker planting `__import__`, `pickle`, etc. that a future loose parser might honour. |
+| (f) | Each `input` key must appear in the per-tool allowlist mirrored from `multi-agent/tests/eval/golden/golden_schema_test.go:toolAllowedFields`. | The "negative_service_down case adds base_url but local_echo_call has no base_url parameter" drift class. |
+
+### Ablation bridge (Go ↔ Python)
+
+The `LOOM_ABLATION_NOACCEPTANCEGATE` env var is the only Python ↔ Go
+bridge. On the Go side, `multi-agent/internal/ablation/skill_flags.go`
+registers `NoAcceptanceGate` against a package-private `*bool` target
+so `ablation.Default.List()` is exhaustive. The Phase-2 CLI binder
+(WT-2-flag-integration) is expected to convert `--ablation
+NoAcceptanceGate` into both the Go target flip and the
+`LOOM_ABLATION_NOACCEPTANCEGATE=1` env export when it forks this
+Python runner.
+
+This skill does NOT implement the binder — only honours the env var.
+
+## Exit Codes (golden mode)
+
+| Code | Trigger |
+|---|---|
+| 0 | All cases passed AND no security/schema error occurred. Also: ablation bypass success. |
+| 1 | At least one case failed an assertion (deep-equal mismatch, `expected_error` substring miss, `isError` flag mismatch, tool not in `tools/list`, response not parseable as JSON, `tools/call` exception). |
+| 2 | Pre-flight error — `--cases` outside repo root, cases file empty/mixed/unparseable, unknown top-level field, unknown input field, multiple distinct tools, path-traversal in `input.path` / `input.policy_path`, server handshake / `initialize` / `tools/list` failure. |
+
+The legacy mode's `0 = pass / 1 = case failed / 2 = handshake failed`
+contract is preserved unchanged.
+
 ## Related
 
 - `scaffold-mcp-server` — Generates the protocol skeleton; pair these two skills end-to-end.
 - `multiagent` references `slave-skills.md` — `register_mcp` validation scope and what it does NOT check.
 - Memory `registermcp-reliability` — Background on why this skill exists.
+- `docs/specs/wt1-acceptance-golden.spec.md` — Golden mode design + security mitigations.
+- `multi-agent/internal/ablation/skill_flags.go` — Go side of the `NoAcceptanceGate` ablation flag.
