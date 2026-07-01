@@ -102,7 +102,13 @@ jobs:
           values = {
               "replicaCount": 2,
               "existingSecret": "",
-              "cluster": {"enabled": True},
+              # networkPolicy off for smoke: the ci ServiceAccount
+              # observer-github-actions lacks networkpolicies.networking.k8s.io
+              # RBAC in dev-yuzishu. NP is defense-in-depth; the smoke stack's
+              # multi-pod behaviour still validates without it. Real deployments
+              # (release job below + production charts) keep NP enabled by
+              # default. See PR #58 post-merge fix.
+              "cluster": {"enabled": True, "networkPolicy": {"enabled": False}},
               "secret": {
                   "create": True,
                   "databaseUrl": f"postgres://observer:{postgres_password}@{release}-observer-postgresql:5432/observer?sslmode=disable",
