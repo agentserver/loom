@@ -108,6 +108,10 @@ spec:
                 secretKeyRef:
                   name: {{ default (include "observer.configSecretName" .) .Values.existingSecret }}
                   key: {{ default "cluster-secret" .Values.cluster.secretKey }}
+          {{- with .Values.cluster.assertSecret.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
         {{- end }}
       {{- end }}
       containers:
