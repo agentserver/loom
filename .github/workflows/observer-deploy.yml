@@ -350,7 +350,15 @@ jobs:
 
           values = {
               "existingSecret": "",
-              "cluster": {"enabled": True},
+              # networkPolicy off for the release deploy: dev-yuzishu's
+              # observer-github-actions ServiceAccount lacks the
+              # networkpolicies.networking.k8s.io RBAC, so `helm upgrade`
+              # can't read/manage the NetworkPolicy resource. NP is
+              # defense-in-depth (spec §Internal NetworkPolicy); the HMAC+
+              # nonce auth on the internal port is the primary defence.
+              # Restore NP when the SA is granted RBAC (or the release
+              # moves to a namespace that already allows it).
+              "cluster": {"enabled": True, "networkPolicy": {"enabled": False}},
               "secret": {
                   "create": True,
                   "databaseUrl": os.environ["OBSERVER_DATABASE_URL"],
