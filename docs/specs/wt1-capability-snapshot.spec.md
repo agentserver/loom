@@ -415,22 +415,30 @@ form per numeric value:
 precision loss (`9007199254740993` stays distinct from
 `9007199254740992`; `1e-100` stays distinct from `0`).
 
-DoS defence (round-7 audit P2 + round-8 audit P1) — TWO caps, both
-required:
+DoS defence (rounds 7 + 8 + 9) — THREE caps in depth, each layered
+in front of a distinct cost boundary:
 
-- `maxNumberLiteralLen` (64) — first line of defence. Rejects literals
-  like `1e999999` whose byte length alone signals adversarial intent.
-- `maxNumberBitLen` (4096) — second line of defence, applied to the
-  parsed rational's numerator AND denominator BitLen. Rejects
-  `1e-100000` (9 bytes, but denominator = 10^100000 has ~332,000 bits)
-  and `1e100000` (numerator has ~332,000 bits). Without this second
-  cap, `exactDecimalPrec`'s trial-division loop runs O(log2(denom))
-  iterations, and `FloatString(prec)` allocates O(prec) bytes — a
-  9-byte literal could pin a CPU for 12 seconds.
+- `maxNumberLiteralLen` (64) — first line. Rejects literals whose
+  byte length alone signals adversarial intent (`1e999999...` with
+  padded digits).
+- `maxNumberAbsExponent` (1250) — pre-parse guard. Scans the literal
+  string for `e|E`, extracts the exponent digits (bounded by cap #1),
+  rejects if `|exp| > 1250`. Round-9 audit P2 caught that a 9-byte
+  literal like `1e-999999` passed cap #1 (small literal) but forced
+  `big.Rat.SetString` to allocate a ~3M-bit bignum during parsing,
+  burning ~28 ms per literal BEFORE cap #3 rejected it. This guard
+  fires at the parser boundary and closes the residual DoS.
+- `maxNumberBitLen` (4096) — post-parse cap, applied to the parsed
+  rational's numerator AND denominator BitLen. Rejects anything that
+  slipped past the pre-parse guard (e.g. a long-form `0.000…001`
+  literal within the byte cap but with a huge bit representation).
 
-The `maxNumberBitLen = 4096` bound covers magnitudes up to ~1e1233 —
-well beyond any legitimate JSON schema value — while capping the
-worst-case output at ~1.2KB and worst-case compute at sub-millisecond.
+`1250` is chosen to comfortably exceed `log10(2^4096) ≈ 1233` — any
+literal past that magnitude would be rejected by cap #3 anyway, so
+short-circuiting at cap #2 is safe and cheap. `4096` covers magnitudes
+up to ~1e1233, well beyond any legitimate JSON schema value, while
+capping the worst-case output at ~1.2KB and worst-case compute at
+sub-millisecond.
 
 Regression coverage:
 - `TestNewSnapshot_CanonicalisesInputSchemaNumberLiteralShapes` — 9
@@ -453,6 +461,12 @@ Regression coverage:
   symmetric on numerator BitLen (`1e100000`).
 - `TestNewSnapshot_AcceptsLegitimateLargeMagnitudes` — `1e1000` and
   `1e-1000` still accepted (bit-cap does not block legitimate use).
+- `TestNewSnapshot_RejectsHugeExponentBeforeSetString` — pre-parse
+  guard bounds SetString wall time to 5ms per literal for
+  `1e±999999`, `1e±1500`, and `1e00001500` (round-9 regression guard).
+- `TestNewSnapshot_BitLenCapBoundary` — `1e±1233` accepted, `1e±1234`
+  rejected; pins the accept/reject transition against a future
+  off-by-one.
 - `TestNewSnapshot_CanonicalJSONBytesIdempotent` — canonicalising
   canonicalised bytes yields byte-equal output for representative
   inputs.

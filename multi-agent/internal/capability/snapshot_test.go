@@ -968,6 +968,76 @@ func TestNewSnapshot_AcceptsLegitimateLargeMagnitudes(t *testing.T) {
 	}
 }
 
+// §4.0.1 — round-9 audit P2: pre-parse exponent guard bounds SetString
+// wall time. Round-8's BitLen cap ran AFTER SetString, so a short
+// literal with a huge exponent (`1e-999999`) still burned ~28ms
+// inside the parser before rejection. The round-9 guard rejects at
+// the parser boundary. Bounded to 5ms with plenty of headroom.
+func TestNewSnapshot_RejectsHugeExponentBeforeSetString(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		`{"a":1e-999999}`,
+		`{"a":1e999999}`,
+		`{"a":1e-1500}`,    // just past cap on the low side
+		`{"a":1e1500}`,     // just past cap on the high side
+		`{"a":1e00001500}`, // padded zeros must not fool the exponent scan
+	}
+	for _, sch := range cases {
+		start := time.Now()
+		_, err := NewSnapshot(Snapshot{
+			OS: "linux", Arch: "amd64",
+			Platform: commandiface.Platform{OS: "linux", Arch: "amd64"},
+			Network:  NetworkInternet,
+			MCPTools: []MCPToolDescriptor{{
+				Server: "srv", Name: "tool",
+				InputSchema: json.RawMessage(sch),
+			}},
+		})
+		elapsed := time.Since(start)
+		if !errors.Is(err, ErrSnapshotInvalid) {
+			t.Errorf("NewSnapshot(%s): want ErrSnapshotInvalid, got %v", sch, err)
+			continue
+		}
+		if elapsed > 5*time.Millisecond {
+			t.Errorf("NewSnapshot(%s): elapsed %v exceeds 5ms — SetString DoS not bounded", sch, elapsed)
+		}
+	}
+}
+
+// §4.0.1 — round-9 audit P2: boundary tests pin the accept/reject
+// transition around the BitLen cap. Prevents a future off-by-one that
+// flips `>` to `>=` or applies the cap to Num+Denom sum instead of
+// each independently.
+func TestNewSnapshot_BitLenCapBoundary(t *testing.T) {
+	t.Parallel()
+	mk := func(sch string) error {
+		_, err := NewSnapshot(Snapshot{
+			OS: "linux", Arch: "amd64",
+			Platform: commandiface.Platform{OS: "linux", Arch: "amd64"},
+			Network:  NetworkInternet,
+			MCPTools: []MCPToolDescriptor{{
+				Server: "srv", Name: "tool",
+				InputSchema: json.RawMessage(sch),
+			}},
+		})
+		return err
+	}
+	// log2(10) * 1233 ≈ 4096. 10^1233 has BitLen ~4094 (accept).
+	if err := mk(`{"a":1e1233}`); err != nil {
+		t.Errorf("1e1233 (BitLen ~4094, under cap): want accept, got %v", err)
+	}
+	if err := mk(`{"a":1e-1233}`); err != nil {
+		t.Errorf("1e-1233 (denom BitLen ~4094, under cap): want accept, got %v", err)
+	}
+	// 10^1234 has BitLen ~4098 (over cap → reject).
+	if err := mk(`{"a":1e1234}`); !errors.Is(err, ErrSnapshotInvalid) {
+		t.Errorf("1e1234 (BitLen ~4098, over cap): want ErrSnapshotInvalid, got %v", err)
+	}
+	if err := mk(`{"a":1e-1234}`); !errors.Is(err, ErrSnapshotInvalid) {
+		t.Errorf("1e-1234 (denom BitLen ~4098, over cap): want ErrSnapshotInvalid, got %v", err)
+	}
+}
+
 // §4.0.1 — belt-and-braces: NEGATIVE tiny fractions must not collide
 // with zero, and must not collide with their positive counterparts.
 func TestNewSnapshot_InputSchemaNegativeTinyFractionsDistinguished(t *testing.T) {

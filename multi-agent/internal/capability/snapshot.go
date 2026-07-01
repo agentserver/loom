@@ -299,6 +299,63 @@ const maxNumberLiteralLen = 64
 // at ~1.2KB and worst-case compute at sub-millisecond.
 const maxNumberBitLen = 4096
 
+// maxNumberAbsExponent bounds the absolute value of the exponent in a
+// json.Number literal we will hand to big.Rat.SetString. Motivation
+// (round-9 audit P2): the BitLen cap runs AFTER SetString, so a short
+// literal like `1e-999999` still burns ~28 ms of wall time inside the
+// parser BEFORE the cap rejects it (SetString allocates a ~3M-bit
+// bignum). A cheap pre-parse guard on the exponent digits — bounded to
+// ~62 characters by maxNumberLiteralLen — closes this residual DoS at
+// the parser boundary.
+//
+// 1250 comfortably exceeds the decimal magnitude the BitLen cap admits
+// (log10(2^4096) ≈ 1233); anything past this is guaranteed to be
+// rejected by the BitLen cap anyway, so we short-circuit before the
+// expensive parse.
+const maxNumberAbsExponent = 1250
+
+// exponentAbsExceedsCap returns true if the JSON number literal in s
+// carries an exponent whose absolute value exceeds maxNumberAbsExponent.
+// Non-scientific literals (no `e`/`E`) return false.
+//
+// The scan is intentionally tolerant of unusual-but-JSON-legal shapes
+// like `1E+42` / `1e-42` / `1.5e10`; it locates the exponent marker,
+// skips an optional sign, and parses the remaining digits. If the
+// digits overflow int (which requires >~19 characters, well past our
+// 64-byte input cap × common sense), it treats the literal as over
+// the cap.
+func exponentAbsExceedsCap(s string) bool {
+	i := strings.IndexAny(s, "eE")
+	if i < 0 {
+		return false
+	}
+	exp := s[i+1:]
+	if len(exp) > 0 && (exp[0] == '+' || exp[0] == '-') {
+		exp = exp[1:]
+	}
+	if exp == "" {
+		return false // malformed — leave the real reject to SetString
+	}
+	// Count leading zeros; if the remaining digit run is longer than
+	// what could possibly encode a value ≤ maxNumberAbsExponent (4
+	// digits for values up to 9999), we know it exceeds the cap
+	// without needing to parse. This avoids int-overflow concerns for
+	// arbitrarily long exponent digit strings.
+	trimmed := strings.TrimLeft(exp, "0")
+	if len(trimmed) > 4 {
+		return true
+	}
+	// trimmed fits in at most 4 digits → parse safely.
+	n := 0
+	for _, c := range trimmed {
+		if c < '0' || c > '9' {
+			return false // non-digit → leave rejection to SetString
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n > maxNumberAbsExponent
+}
+
 // canonicalNumber is a wrapper around big.Rat that marshals to a single
 // canonical decimal literal per rational value. Integer values emit as
 // `N`; non-integers emit the EXACT shortest decimal (all trailing zeros
@@ -398,6 +455,14 @@ func canonicaliseNumbers(v interface{}) (interface{}, error) {
 	case json.Number:
 		if len(string(t)) > maxNumberLiteralLen {
 			return nil, fmt.Errorf("canonical json: number literal %q exceeds %d-byte cap (adversarial-DoS defence)", string(t), maxNumberLiteralLen)
+		}
+		// Pre-parse exponent guard (round-9 audit P2): big.Rat.SetString
+		// on a short-literal huge-exponent input (`1e-999999`) still
+		// allocates a ~3M-bit bignum during parsing, ~28 ms wall time
+		// per literal. Reject overtly-oversized exponents at the
+		// parser boundary before SetString runs.
+		if exponentAbsExceedsCap(string(t)) {
+			return nil, fmt.Errorf("canonical json: number literal %q has an exponent whose absolute value exceeds %d (adversarial-DoS defence)", string(t), maxNumberAbsExponent)
 		}
 		// big.Rat.SetString accepts JSON number grammar (decimal +
 		// exponent). If it can't parse, that means json.Number handed
