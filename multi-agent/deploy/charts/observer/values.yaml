@@ -47,6 +47,18 @@ cluster:
   headlessServiceName: ""  # default "<release>-observer-headless" computed in _helpers.tpl
   networkPolicy:
     enabled: true
+  # Resources for the assert-cluster-secret init container. Namespaces
+  # with a ResourceQuota that requires per-container cpu/memory
+  # requests+limits (e.g. dev-yuzishu) will reject the Deployment
+  # otherwise. Match postgresql.wait.resources for consistency.
+  assertSecret:
+    resources:
+      requests:
+        cpu: 25m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
 
 secret:
   create: false
