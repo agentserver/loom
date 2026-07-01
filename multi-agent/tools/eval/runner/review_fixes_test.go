@@ -476,6 +476,49 @@ func TestReviewR3_P2_OnTempdirPanic_StillCleansTempdir(t *testing.T) {
 	})
 }
 
+// --- Round 4 review fixes ---
+
+// TestReviewR4_P2_DurationCoversFullRun — spec §5 pins started_at_unix
+// to "runner wall clock at step 1" and finished_at_unix to "step 17".
+// Pre-fix, `startedAt` was captured at step 10 (agent stage) and
+// `finishedAt` right after oracle stdout parse; commit_meta collection
+// was OUTSIDE the duration_ms window and downstream aggregators
+// systematically under-reported wall time.
+//
+// The test shims commit_meta with a 250ms sleep and asserts
+// duration_ms >= 200ms — proof that finishedAt is captured after
+// commit_meta rather than before it.
+func TestReviewR4_P2_DurationCoversFullRun(t *testing.T) {
+	root := findRepoModuleRoot(t)
+	// Shim commit_meta to sleep, then print a valid JSON blob.
+	shim := filepath.Join(t.TempDir(), "slow-shim.sh")
+	body := "#!/bin/sh\nsleep 0.25\ncat <<'EOF'\n" + commitMetaJSON() + "\nEOF\n"
+	if err := os.WriteFile(shim, []byte(body), 0o700); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+	t.Setenv("LOOM_EVAL_COMMIT_META_CMD", "/bin/sh "+shim)
+	t.Setenv("LOOM_EVAL_GIT_EMAIL_CMD", gitEmailShim(t, "a@b|c@d"))
+
+	outCSV := filepath.Join(t.TempDir(), "run.csv")
+	res := Run(context.Background(), Opts{
+		WorkloadID:  "cross-device-code-mod",
+		WorkloadDir: filepath.Join(root, "tests/eval/workloads"),
+		StubListen:  pickFreePort(t),
+		StubBin:     stubBinaryPath(t),
+		OutCSV:      outCSV,
+		Stderr:      discardStderr(t),
+	})
+	if res.ExitCode != 0 {
+		t.Fatalf("exit = %d", res.ExitCode)
+	}
+	if res.Row.DurationMs < 200 {
+		t.Errorf("DurationMs = %d, want >= 200 (spec §5: finished_at includes commit_meta)", res.Row.DurationMs)
+	}
+	if res.Row.FinishedAtUnix < res.Row.StartedAtUnix {
+		t.Fatalf("finished (%d) before started (%d)", res.Row.FinishedAtUnix, res.Row.StartedAtUnix)
+	}
+}
+
 // TestReviewR3_P2_LockedWriter_NoInterleave — concurrent Write calls from
 // two goroutines through the lockedWriter must produce well-formed
 // records, never byte-level torn output. Smoke at 1000 writes/goroutine

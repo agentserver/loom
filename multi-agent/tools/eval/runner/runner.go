@@ -74,6 +74,14 @@ type Result struct {
 // Run is the orchestrator. It executes the pipeline from spec §4 and
 // returns a Result; the CLI shim translates Result into os.Exit.
 func Run(ctx context.Context, opts Opts) Result {
+	// Spec §5 col 3 (`started_at_unix`) pins the runner wall clock to
+	// step 1 — i.e. before any validation or subprocess spawn — so
+	// downstream metric extractors get true end-to-end wall time,
+	// including stub build + startup and pre-flight validation
+	// (PR #53 round 4 P2). Pair with finishedAt captured after the
+	// CSV write below.
+	startedAt := time.Now()
+
 	if opts.Stderr == nil {
 		opts.Stderr = os.Stderr
 	}
@@ -155,7 +163,6 @@ func Run(ctx context.Context, opts Opts) Result {
 	// Agent stage — skeleton copies mock_workspace; real fanout is a
 	// future worktree's job. Errors here mark the run as fail, not a
 	// pre-flight error.
-	startedAt := time.Now()
 	if opts.AgentStage != nil {
 		if err := opts.AgentStage(ctx, ws, spec); err != nil {
 			fmt.Fprintf(opts.Stderr, "eval-runner: agent stage error: %v\n", err)
@@ -199,11 +206,15 @@ func Run(ctx context.Context, opts Opts) Result {
 		fmt.Fprintf(opts.Stderr, "eval-runner: oracle subprocess error: %v\n", oracleErr)
 	}
 
-	finishedAt := time.Now()
-
 	// commit_meta + git emails.
 	commit := collectCommitMeta(ctx, opts, env, opts.Stderr)
 	author, committer := collectGitEmails(ctx, opts, env, opts.Stderr)
+
+	// Spec §5 col 4 (`finished_at_unix`) is the wall clock at step 17
+	// (writeCSV). Capture right before Writer.Insert so
+	// commit_meta/redact/row assembly all count toward duration_ms;
+	// the CSV write itself is microseconds (PR #53 round 4 P2).
+	finishedAt := time.Now()
 
 	// Assemble row.
 	row := RunRow{
