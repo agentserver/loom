@@ -929,9 +929,12 @@ func fanoutContractPrompt(t *testing.T, tc contract.TaskContract, body string) s
 		SuccessCriteria: []string{"done"},
 	}
 	tc.DataContract = contract.DataContract{
-		WriteTargets: []contract.WriteTarget{{Type: contract.WriteTargetArtifact, Kind: "document", Name: "out.md"}},
+		ReadArtifacts: []contract.ArtifactRef{},
+		WriteTargets:  []contract.WriteTarget{{Type: contract.WriteTargetArtifact, Kind: "document", Name: "out.md"}},
 	}
 	tc.ExecutionPolicy.AllowedTargets = []string{"agent-a"}
+	tc.CapabilityRequirements = contract.CapabilityRequirements{Skills: []string{"chat"}}
+	tc.RecoveryHint = "test recovery hint"
 	tc.ApplyDefaults()
 	prompt, err := contract.EncodeEnvelope(tc, body)
 	require.NoError(t, err)

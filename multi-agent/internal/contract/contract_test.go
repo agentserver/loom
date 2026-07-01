@@ -19,8 +19,11 @@ func TestTaskContractApplyDefaults(t *testing.T) {
 			SuccessCriteria: []string{"helper is saved as an artifact"},
 		},
 		DataContract: DataContract{
-			WriteTargets: []WriteTarget{{Type: WriteTargetArtifact, Kind: "code", Name: "helper.go"}},
+			ReadArtifacts: []ArtifactRef{},
+			WriteTargets:  []WriteTarget{{Type: WriteTargetArtifact, Kind: "code", Name: "helper.go"}},
 		},
+		CapabilityRequirements: CapabilityRequirements{Skills: []string{"chat"}},
+		RecoveryHint:           "test recovery hint",
 	}
 
 	tc.ApplyDefaults()
@@ -81,11 +84,14 @@ func TestTaskContractValidateRejectsExplicitZeroDAGNodeLimit(t *testing.T) {
 			"success_criteria": ["helper is saved as an artifact"]
 		},
 		"data_contract": {
+			"read_artifacts": [],
 			"write_targets": [{"type":"artifact","kind":"code","name":"helper.go"}]
 		},
 		"execution_policy": {
 			"max_dag_nodes": 0
-		}
+		},
+		"capability_requirements": {"skills":["chat"]},
+		"recovery_hint": "test recovery hint"
 	}`)
 	var tc TaskContract
 	if err := json.Unmarshal(raw, &tc); err != nil {
@@ -108,8 +114,11 @@ func TestTaskContractValidateRejectsMissingIntent(t *testing.T) {
 		Version:        1,
 		ConversationID: "conv-1",
 		DataContract: DataContract{
-			WriteTargets: []WriteTarget{{Type: WriteTargetArtifact, Kind: "document", Name: "out.md"}},
+			ReadArtifacts: []ArtifactRef{},
+			WriteTargets:  []WriteTarget{{Type: WriteTargetArtifact, Kind: "document", Name: "out.md"}},
 		},
+		CapabilityRequirements: CapabilityRequirements{Skills: []string{"chat"}},
+		RecoveryHint:           "hint",
 	}
 	tc.ApplyDefaults()
 
@@ -130,8 +139,11 @@ func TestTaskContractValidateRejectsMissingConversationID(t *testing.T) {
 			SuccessCriteria: []string{"helper is saved as an artifact"},
 		},
 		DataContract: DataContract{
-			WriteTargets: []WriteTarget{{Type: WriteTargetArtifact, Kind: "code", Name: "helper.go"}},
+			ReadArtifacts: []ArtifactRef{},
+			WriteTargets:  []WriteTarget{{Type: WriteTargetArtifact, Kind: "code", Name: "helper.go"}},
 		},
+		CapabilityRequirements: CapabilityRequirements{Skills: []string{"chat"}},
+		RecoveryHint:           "hint",
 	}
 	tc.ApplyDefaults()
 
@@ -152,6 +164,11 @@ func TestTaskContractValidateRejectsMissingWriteTargets(t *testing.T) {
 			Goal:            "generate a helper",
 			SuccessCriteria: []string{"helper is saved as an artifact"},
 		},
+		DataContract: DataContract{
+			ReadArtifacts: []ArtifactRef{},
+		},
+		CapabilityRequirements: CapabilityRequirements{Skills: []string{"chat"}},
+		RecoveryHint:           "hint",
 	}
 	tc.ApplyDefaults()
 
@@ -173,8 +190,11 @@ func TestTaskContractValidateRejectsCodeWriteTargetWhenCodeArtifactsDisabled(t *
 			SuccessCriteria: []string{"helper is saved as an artifact"},
 		},
 		DataContract: DataContract{
-			WriteTargets: []WriteTarget{{Type: WriteTargetArtifact, Kind: "code", Name: "helper.go"}},
+			ReadArtifacts: []ArtifactRef{},
+			WriteTargets:  []WriteTarget{{Type: WriteTargetArtifact, Kind: "code", Name: "helper.go"}},
 		},
+		CapabilityRequirements: CapabilityRequirements{Skills: []string{"chat"}},
+		RecoveryHint:           "hint",
 	}
 	tc.ApplyDefaults()
 	tc.ExecutionPolicy.AllowCodeArtifacts = Bool(false)
@@ -197,8 +217,11 @@ func TestTaskContractValidateRejectsUnsupportedExposeCodePolicy(t *testing.T) {
 			SuccessCriteria: []string{"helper is saved as an artifact"},
 		},
 		DataContract: DataContract{
-			WriteTargets: []WriteTarget{{Type: WriteTargetArtifact, Kind: "code", Name: "helper.go"}},
+			ReadArtifacts: []ArtifactRef{},
+			WriteTargets:  []WriteTarget{{Type: WriteTargetArtifact, Kind: "code", Name: "helper.go"}},
 		},
+		CapabilityRequirements: CapabilityRequirements{Skills: []string{"chat"}},
+		RecoveryHint:           "hint",
 	}
 	tc.ApplyDefaults()
 	tc.ExecutionPolicy.ExposeCodeToUser = "always"
@@ -253,8 +276,11 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 			SuccessCriteria: []string{"summary references artifacts"},
 		},
 		DataContract: DataContract{
-			WriteTargets: []WriteTarget{{Type: WriteTargetArtifact, Kind: "document", Name: "summary.md"}},
+			ReadArtifacts: []ArtifactRef{},
+			WriteTargets:  []WriteTarget{{Type: WriteTargetArtifact, Kind: "document", Name: "summary.md"}},
 		},
+		CapabilityRequirements: CapabilityRequirements{Skills: []string{"chat"}},
+		RecoveryHint:           "hint",
 	}
 	tc.ApplyDefaults()
 

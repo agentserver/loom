@@ -176,9 +176,10 @@ func main() {
 			},
 		},
 		"capability_requirements": map[string]any{
-			"skills": []string{},
+			"skills": []string{"chat"},
 			"tools":  []string{},
 		},
+		"recovery_hint": "e2e smoke recovery hint: outputs land on the driver fanout summary; rerun is idempotent.",
 	}
 
 	dryRunRaw, err := rpc.callTool("dry_run_contract", map[string]any{"contract": contract})

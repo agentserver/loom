@@ -48,5 +48,6 @@
         "policy"
       ]
     }
-  }
+  },
+  "recovery_hint": "Re-run is idempotent; outputs land under refund-risk-report.md. Inspect that artifact before retry — it is the only authoritative output."
 }

@@ -17,8 +17,11 @@ func TestContractFromPromptRejectsAllowMasterFalse(t *testing.T) {
 			SuccessCriteria: []string{"done"},
 		},
 		DataContract: contract.DataContract{
-			WriteTargets: []contract.WriteTarget{{Type: contract.WriteTargetArtifact, Kind: "document", Name: "out.md"}},
+			ReadArtifacts: []contract.ArtifactRef{},
+			WriteTargets:  []contract.WriteTarget{{Type: contract.WriteTargetArtifact, Kind: "document", Name: "out.md"}},
 		},
+		CapabilityRequirements: contract.CapabilityRequirements{Skills: []string{"chat"}},
+		RecoveryHint:           "test recovery hint",
 	}
 	tc.ApplyDefaults()
 	tc.ExecutionPolicy.AllowMaster = contract.Bool(false)

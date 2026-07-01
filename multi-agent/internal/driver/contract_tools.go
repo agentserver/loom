@@ -3,6 +3,8 @@ package driver
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"log"
 	"strings"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
@@ -46,8 +48,23 @@ func (s *submitContractTaskTool) Call(ctx context.Context, raw json.RawMessage) 
 		return nil, &MCPToolError{Message: "invalid args: " + err.Error(), Category: observerstore.FailContractViolation}
 	}
 	tc := args.Contract
-	tc.ApplyDefaults()
-	if err := tc.Validate(); err != nil {
+	// §7 (a): EnforceContract MUST be the first call after the
+	// json.Unmarshal error branch closes. Nothing — no DiscoverAgents,
+	// no observer relay write, no log line, no thread bind — may run
+	// between here and the json.Unmarshal-error return above. The
+	// static AST test TestSubmitContractTaskHandler_FirstCallIsEnforce
+	// pins this lexically; the runtime test
+	// TestContractToolsEntry_SchemaEnforceBeforeDispatch pins it
+	// semantically by t.Fatal'ing any unexpected side effect.
+	if err := contract.EnforceContract(&tc); err != nil {
+		if errors.Is(err, contract.ErrContractFormalizationDisabled) {
+			return s.callNaturalLanguageFallback(ctx, tc, fallbackArgs{
+				Prompt:            args.Prompt,
+				TargetDisplayName: args.TargetDisplayName,
+				Skill:             args.Skill,
+				TimeoutSec:        args.TimeoutSec,
+			})
+		}
 		return nil, &MCPToolError{Message: "invalid contract: " + err.Error(), Category: observerstore.FailContractViolation}
 	}
 
@@ -288,4 +305,92 @@ func targetAllowed(agentID string, allowedTargets []string) bool {
 		}
 	}
 	return false
+}
+
+// fallbackArgs is the subset of submit_contract_task's argument struct
+// that the natural-language fallback needs. Unexported — used only by
+// callNaturalLanguageFallback below.
+type fallbackArgs struct {
+	Prompt            string
+	TargetDisplayName string
+	Skill             string
+	TimeoutSec        int
+}
+
+// callNaturalLanguageFallback implements the spec §3.2 / §4 fallback
+// path taken when DisableContractEntirely is true. Logs the drop line
+// exactly once, picks a non-empty body (Prompt → defaulted-from-Goal →
+// hard error), runs selectTarget, and DelegateTasks the bare body
+// (no envelope, no contract JSON).
+//
+// The route field in the response is the fixed literal
+// "natural_language_fallback" so the §D eval harness can distinguish
+// this path from a normal routed delegation. resource_snapshot is
+// omitted — by §3.2 design we are intentionally exercising the
+// no-contract code path, so persisting a snapshot would muddy the
+// experiment.
+//
+// SystemContext is intentionally NOT populated. The ablation point of
+// "no contract" is also "no parent-link metadata"; an operator who
+// wants parent-link tracing under this ablation should not be using
+// the ablation.
+func (s *submitContractTaskTool) callNaturalLanguageFallback(
+	ctx context.Context, tc contract.TaskContract, args fallbackArgs,
+) (json.RawMessage, error) {
+	// §3.2 + §7 (c): log line MUST contain the literal substring
+	// "dropped contract body" plus "conversation=". T26 greps for these.
+	//
+	// %q (Go-quoted, escapes \n / \r / control chars) defeats log
+	// injection via an attacker-controlled conversation_id containing
+	// newlines — a literal newline would otherwise let an operator
+	// forge a second "[ablation] ..." line in the audit trail. See
+	// PR #52 round-3 review P1-2.
+	log.Printf("[ablation] NoContractFormalization: dropped contract body on conversation=%q", tc.ConversationID)
+
+	body := strings.TrimSpace(args.Prompt)
+	if body == "" {
+		if strings.TrimSpace(tc.Intent.Goal) == "" {
+			// Neither caller-supplied prompt nor a salvageable intent.
+			// Fail loudly rather than silently delegate an empty
+			// string to a slave.
+			return nil, &MCPToolError{
+				Message:  "no prompt and no intent.goal to delegate",
+				Category: observerstore.FailContractViolation,
+			}
+		}
+		body = "(contract formalization disabled) " + tc.Intent.Goal
+	}
+
+	cards, err := s.t.sdk.DiscoverAgents(ctx)
+	if err != nil {
+		return nil, &MCPToolError{Message: "discover agents: " + err.Error(), Category: observerstore.FailUnknown}
+	}
+	targetID, targetName, _, skill, _, err := s.selectTarget(ctx, cards, tc, args.TargetDisplayName, args.Skill)
+	if err != nil {
+		return nil, err
+	}
+
+	timeout := args.TimeoutSec
+	if timeout == 0 {
+		timeout = s.t.cfg.DriverDefaults.TaskTimeoutSec
+	}
+
+	resp, err := s.t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
+		TargetID:       targetID,
+		Skill:          skill,
+		Prompt:         body,
+		TimeoutSeconds: timeout,
+	})
+	if err != nil {
+		return nil, &MCPToolError{Message: "delegate: " + err.Error(), Category: observerstore.FailUnknown}
+	}
+
+	return json.Marshal(map[string]interface{}{
+		"task_id":             resp.TaskID,
+		"target_id":           targetID,
+		"target_display_name": targetName,
+		"skill":               skill,
+		"route":               "natural_language_fallback",
+		"warnings":            []string{},
+	})
 }
