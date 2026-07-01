@@ -189,3 +189,13 @@ CREATE TABLE IF NOT EXISTS resource_snapshots (
   PRIMARY KEY (workspace_id, snapshot_id)
 );
 CREATE INDEX IF NOT EXISTS idx_resource_snapshots_latest ON resource_snapshots(workspace_id, created_at);
+
+-- WT-1-routing-trace note: the sqlite route_reasons DDL lives in
+-- ../schema.sql; the writer (observerstore.NewRouteWriter) is
+-- SQLite-only in this WT because it uses `?` placeholders and sends a
+-- string for candidates_json — neither works against pgx/v5/stdlib
+-- ($N placeholders + jsonb needs `::jsonb` cast). Adding pg support is
+-- a follow-up WT that must ship a pg-native writer alongside the DDL;
+-- landing the schema here without a working writer would silently drop
+-- traces via `[route-trace] write failed: syntax error at or near "?"`.
+-- See round-5 review on PR #55.

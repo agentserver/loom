@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/yourorg/multi-agent/internal/contract"
@@ -57,15 +58,41 @@ func observerPayload(v interface{}) json.RawMessage {
 }
 
 func (d *Dispatcher) Run(ctx context.Context, t executor.Task) (executor.Result, error) {
+	// WT-1-routing-trace: every Run produces exactly one RouteDecision. The
+	// defer guarantees the trace is written even on the many early-return
+	// paths (InsertIfAbsent error / duplicate, envelope-decode error,
+	// no-executor, executor error, timeout). Branches below populate
+	// SelectedAgentID / SelectedNone / ReasonCode / ReasonText / Candidates
+	// before returning.
+	conv := peekConversationID(t.Prompt)
+	if conv == "" {
+		conv = t.ID
+	}
+	dec := NewDecision(conv)
+	defer FinalizeAndEmit(ctx, dec)
+
+	// Snapshot route keys in sorted order for deterministic candidate listing.
+	skills := make([]string, 0, len(d.routes))
+	for k := range d.routes {
+		skills = append(skills, k)
+	}
+	sort.Strings(skills)
+
 	summary := observer.SummarizePrompt(t.Prompt, 80)
 	inserted, err := d.store.InsertIfAbsent(store.Task{ID: t.ID, Skill: t.Skill, Prompt: t.Prompt})
 	if err != nil {
+		dec.ReasonCode = ReasonUnknown
+		dec.ReasonText = "InsertIfAbsent failed"
 		return executor.Result{}, err
 	}
 	if !inserted {
+		dec.ReasonCode = ReasonUnknown
+		dec.ReasonText = "duplicate task; replaying existing row"
 		return d.replayExistingTask(t)
 	}
 	if err := d.store.MarkRunning(t.ID); err != nil {
+		dec.ReasonCode = ReasonUnknown
+		dec.ReasonText = "MarkRunning failed"
 		return executor.Result{}, err
 	}
 	d.emit(observer.Event{
@@ -87,14 +114,18 @@ func (d *Dispatcher) Run(ctx context.Context, t executor.Task) (executor.Result,
 			Status:  "failed",
 			Payload: observerPayload(map[string]string{"error": err.Error()}),
 		})
+		dec.ReasonCode = ReasonUnknown
+		dec.ReasonText = "malformed task contract envelope"
 		return executor.Result{}, err
 	} else if ok {
 		t.Prompt = body
 	}
 
 	exec, ok := d.routes[t.Skill]
+	matchedKey := t.Skill
 	if !ok {
 		exec = d.routes[""]
+		matchedKey = ""
 	}
 	if exec == nil {
 		err := fmt.Errorf("no executor for skill %q", t.Skill)
@@ -106,7 +137,32 @@ func (d *Dispatcher) Run(ctx context.Context, t executor.Task) (executor.Result,
 			Status:  "failed",
 			Payload: observerPayload(map[string]string{"error": err.Error()}),
 		})
+		dec.SelectedNone = true
+		dec.ReasonCode = ReasonNoCapabilityMatch
+		dec.ReasonText = "no executor registered for skill " + t.Skill
+		for _, s := range skills {
+			dec.Candidates = append(dec.Candidates, Candidate{
+				AgentID: s, Score: 0, Reason: ReasonNoCapabilityMatch,
+			})
+		}
 		return executor.Result{}, err
+	}
+
+	// Executor lookup succeeded — populate the winning candidate now.
+	dec.SelectedAgentID = matchedKey
+	dec.SelectedNone = false
+	dec.ReasonCode = ReasonCapabilityMatch
+	dec.ReasonText = "matched skill " + t.Skill
+	for _, s := range skills {
+		r := ReasonNoCapabilityMatch
+		score := 0.0
+		if s == matchedKey {
+			r = ReasonCapabilityMatch
+			score = 1.0
+		}
+		dec.Candidates = append(dec.Candidates, Candidate{
+			AgentID: s, Score: score, Reason: r,
+		})
 	}
 
 	runCtx := ctx
@@ -130,6 +186,10 @@ func (d *Dispatcher) Run(ctx context.Context, t executor.Task) (executor.Result,
 			Status:  "failed",
 			Payload: observerPayload(map[string]string{"error": err.Error()}),
 		})
+		// Keep the existing capability_match ReasonCode (the routing decision
+		// itself succeeded — the executor's runtime failure is a separate
+		// concern). Append a short, sanitize-friendly hint to ReasonText.
+		dec.ReasonText = "matched skill " + t.Skill + "; executor returned error"
 		return executor.Result{}, err
 	}
 	// For chat / chat_resume only, wrap the result in a structured marker so
@@ -166,6 +226,12 @@ func (d *Dispatcher) Run(ctx context.Context, t executor.Task) (executor.Result,
 		}
 	}
 	if err := d.store.Complete(t.ID, stored); err != nil {
+		// The routing decision itself succeeded — keep ReasonCode at
+		// capability_match — but the trace's reason text should record
+		// that persistence failed downstream, otherwise the audit row
+		// reads like a clean success. ReasonText is sanitized by
+		// FinalizeAndEmit, so a tainted err.Error() can't leak secrets.
+		dec.ReasonText = "matched skill " + t.Skill + "; store.Complete failed: " + err.Error()
 		return res, err
 	}
 	d.emit(observer.Event{
