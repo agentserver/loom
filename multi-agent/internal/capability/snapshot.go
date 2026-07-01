@@ -14,8 +14,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/big"
 	"regexp"
 	"sort"
+	"strings"
 	"sync/atomic"
 
 	"github.com/yourorg/multi-agent/internal/ablation"
@@ -228,26 +230,131 @@ func NewSnapshot(spec Snapshot) (Snapshot, error) {
 }
 
 // canonicalJSONBytes returns a deterministic byte encoding of the JSON
-// value in b: whitespace-free and with object keys sorted at every
-// nesting level. Used to normalise MCPTools.InputSchema so semantically-
+// value in b: whitespace-free, with object keys sorted at every nesting
+// level, AND with every JSON number normalised to a single canonical
+// literal form. Used to normalise MCPTools.InputSchema so semantically-
 // identical schemas hash identically.
 //
-// The algorithm: unmarshal into interface{}, then marshal with the
-// standard library. encoding/json is documented to sort map[string]…
-// keys lexicographically when marshalling, so a single round-trip
-// achieves canonicalisation for any JSON value tree.
+// The map-key sort comes for free from encoding/json (it marshals
+// map[string]… keys lexicographically). The number normalisation is
+// hand-rolled because Go's json.Number preserves the input literal
+// verbatim — so `1e10`, `1E10`, `1.0`, `1e+10`, `0e0` and `0` all
+// round-trip to distinct byte sequences, which would silently defeat
+// hash dedup (round-6 audit).
+//
+// Algorithm:
+//  1. Decode into interface{} with UseNumber to keep precision.
+//  2. Walk the tree; for every json.Number, replace with a
+//     canonicalNumber wrapper that emits a canonical form via
+//     big.Rat. Integer values remain integers (e.g. `1.0` → `1`);
+//     non-integer rationals emit the shortest decimal that
+//     round-trips through big.Rat.
+//  3. Re-marshal; encoding/json sorts map keys and calls
+//     canonicalNumber.MarshalJSON for numeric literals.
+//
+// big.Rat handles ANY JSON-representable number without float64 loss
+// because JSON numbers are always rational (the grammar has no
+// irrationals).
 func canonicalJSONBytes(b json.RawMessage) (json.RawMessage, error) {
 	var v interface{}
 	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.UseNumber() // keep number precision (avoid float64 lossy rounding)
+	dec.UseNumber()
 	if err := dec.Decode(&v); err != nil {
 		return nil, err
 	}
+	// Reject trailing tokens ({"a":1}{"b":2} shape — json.Valid also
+	// rejects this, so callers are already protected, but belt-and-braces).
+	if dec.More() {
+		return nil, fmt.Errorf("canonical json: trailing tokens after value")
+	}
+	v = canonicaliseNumbers(v)
 	out, err := json.Marshal(v)
 	if err != nil {
 		return nil, err
 	}
 	return json.RawMessage(out), nil
+}
+
+// canonicalNumber is a wrapper around big.Rat that marshals to one
+// canonical decimal form: integer values as `N`, non-integers as the
+// shortest decimal reached by trimming trailing zeros from
+// FloatString(prec). No leading `+`, no uppercase `E`, no exponent.
+type canonicalNumber struct{ r *big.Rat }
+
+// MarshalJSON emits the canonical form. Never fails.
+func (c canonicalNumber) MarshalJSON() ([]byte, error) {
+	// If the rational has denominator 1 it is an integer; emit as `N`.
+	if c.r.IsInt() {
+		return []byte(c.r.Num().String()), nil
+	}
+	// Non-integer: probe increasing precisions until FloatString round-
+	// trips back to the same rational. That gives the minimum-precision
+	// exact decimal form. Bound the loop at 64 fractional digits — the
+	// widest legitimate JSON schema value we expect (float64 max
+	// precision is ~17; 64 gives head-room for arbitrary-precision
+	// inputs like 1/3 that never terminate — we cap and accept a
+	// controlled loss for the pathological case).
+	const maxPrec = 64
+	for prec := 1; prec <= maxPrec; prec++ {
+		s := c.r.FloatString(prec)
+		s = trimTrailingZeros(s)
+		back, ok := new(big.Rat).SetString(s)
+		if ok && back.Cmp(c.r) == 0 {
+			return []byte(s), nil
+		}
+	}
+	// Fallback: emit the maxPrec form even though it lost precision.
+	// Rationals like 1/3 land here. Any 1/3-shaped schema value hashes
+	// consistently at 64-digit precision, which is deterministic across
+	// runs (that's what we care about for dedup).
+	return []byte(trimTrailingZeros(c.r.FloatString(maxPrec))), nil
+}
+
+// trimTrailingZeros strips redundant fractional trailing zeros from a
+// decimal produced by big.Rat.FloatString. "1.500" → "1.5"; "2.000"
+// → "2"; "0.0" → "0".
+func trimTrailingZeros(s string) string {
+	if !strings.Contains(s, ".") {
+		return s
+	}
+	s = strings.TrimRight(s, "0")
+	s = strings.TrimSuffix(s, ".")
+	if s == "" || s == "-" {
+		return "0"
+	}
+	return s
+}
+
+// canonicaliseNumbers walks a decoded JSON value tree, replacing every
+// json.Number with a canonicalNumber wrapper. Non-numeric nodes pass
+// through unchanged. Recurses into maps and slices.
+func canonicaliseNumbers(v interface{}) interface{} {
+	switch t := v.(type) {
+	case json.Number:
+		// big.Rat.SetString accepts JSON number grammar (decimal +
+		// exponent). If it can't parse, fall back to the raw string —
+		// json.Marshal will re-emit it and the hash will remain
+		// deterministic per that raw form (a UseNumber value that
+		// parses back as JSON is by definition parseable, so this
+		// fallback is a belt-and-braces path).
+		r, ok := new(big.Rat).SetString(string(t))
+		if !ok {
+			return t
+		}
+		return canonicalNumber{r: r}
+	case map[string]interface{}:
+		for k, child := range t {
+			t[k] = canonicaliseNumbers(child)
+		}
+		return t
+	case []interface{}:
+		for i, child := range t {
+			t[i] = canonicaliseNumbers(child)
+		}
+		return t
+	default:
+		return v
+	}
 }
 
 // ---------------------------------------------------------------------

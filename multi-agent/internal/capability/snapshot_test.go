@@ -710,6 +710,79 @@ func TestSyncDisableUpload_MirrorsRawBool(t *testing.T) {
 	}
 }
 
+// §4 — MCPTools.InputSchema numeric-literal variants must hash
+// IDENTICALLY when semantically equal, otherwise the same
+// dedup-defeat failure round-5 tried to fix reappears via number-shape
+// divergence (round-6 audit).
+func TestNewSnapshot_CanonicalisesInputSchemaNumberLiteralShapes(t *testing.T) {
+	t.Parallel()
+	mk := func(schema string) Snapshot {
+		s, err := NewSnapshot(Snapshot{
+			OS: "linux", Arch: "amd64",
+			Platform: commandiface.Platform{OS: "linux", Arch: "amd64"},
+			Network:  NetworkInternet,
+			MCPTools: []MCPToolDescriptor{{
+				Server: "srv", Name: "tool",
+				InputSchema: json.RawMessage(schema),
+			}},
+		})
+		if err != nil {
+			t.Fatalf("NewSnapshot(%s): %v", schema, err)
+		}
+		return s
+	}
+	pairs := [][2]string{
+		{`{"n":1e10}`, `{"n":1E10}`},          // exponent case
+		{`{"n":1.0}`, `{"n":1}`},              // trailing zero after point
+		{`{"n":1e+10}`, `{"n":1e10}`},         // explicit + in exponent
+		{`{"n":0e0}`, `{"n":0}`},              // zero-exponent zero
+		{`{"n":1.500}`, `{"n":1.5}`},          // fractional trailing zeros
+		{`{"n":100}`, `{"n":1e2}`},            // integer written as scientific
+		{`{"n":-0}`, `{"n":0}`},               // signed zero
+		{`{"a":[1.0,2.0]}`, `{"a":[1,2]}`},    // nested array numbers
+		{`{"x":{"y":1.00}}`, `{"x":{"y":1}}`}, // nested object numbers
+	}
+	for _, p := range pairs {
+		a, b := ComputeHash(mk(p[0])), ComputeHash(mk(p[1]))
+		if a != b {
+			t.Errorf("hash diverges for semantically-equal numbers %q vs %q:\n  a=%s\n  b=%s", p[0], p[1], a, b)
+		}
+	}
+}
+
+// §4 — the canonicaliser must also preserve DISTINCT numeric values
+// (a normalisation that collapses everything to the same string would
+// pass the equality test but destroy the hash's rollback-detection
+// guarantee). Test the negative side.
+func TestNewSnapshot_InputSchemaDistinctNumbersHashDistinctly(t *testing.T) {
+	t.Parallel()
+	mk := func(schema string) Snapshot {
+		s, err := NewSnapshot(Snapshot{
+			OS: "linux", Arch: "amd64",
+			Platform: commandiface.Platform{OS: "linux", Arch: "amd64"},
+			Network:  NetworkInternet,
+			MCPTools: []MCPToolDescriptor{{
+				Server: "srv", Name: "tool",
+				InputSchema: json.RawMessage(schema),
+			}},
+		})
+		if err != nil {
+			t.Fatalf("NewSnapshot: %v", err)
+		}
+		return s
+	}
+	if ComputeHash(mk(`{"n":1}`)) == ComputeHash(mk(`{"n":2}`)) {
+		t.Fatal("1 and 2 hashed identically — canonicaliser collapsed distinct values")
+	}
+	if ComputeHash(mk(`{"n":1.5}`)) == ComputeHash(mk(`{"n":1.6}`)) {
+		t.Fatal("1.5 and 1.6 hashed identically")
+	}
+	// Big integer past float64 precision still distinguished.
+	if ComputeHash(mk(`{"n":9007199254740993}`)) == ComputeHash(mk(`{"n":9007199254740992}`)) {
+		t.Fatal("2^53 and 2^53+1 hashed identically — big.Rat lost precision")
+	}
+}
+
 // §7(a) — eyJ regex must require a second base64 segment, otherwise it
 // false-positives on innocuous "identifier.name" phrasings in tool
 // descriptions.

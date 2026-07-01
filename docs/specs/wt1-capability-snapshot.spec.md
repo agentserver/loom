@@ -385,6 +385,33 @@ func ComputeHash(s Snapshot) string
 func (s Snapshot) Hash() string
 ```
 
+### 4.0.1 InputSchema number-literal canonicalisation (round-6)
+
+`MCPTools.InputSchema` is `json.RawMessage`, so an unmarshal+re-marshal
+round-trip normalises whitespace and object-key order but preserves
+`json.Number` literal shapes verbatim: `1e10` / `1E10` / `1.0` / `1` /
+`0e0` / `0` all survive as distinct bytes and hash differently. Round-6
+audit caught this as a P1 dedup defeat.
+
+`canonicalJSONBytes` walks the decoded tree and replaces every
+`json.Number` with a `canonicalNumber` wrapper that emits ONE literal
+form per numeric value:
+
+- integers (denominator = 1) emit as `N` (no `.0`, no exponent);
+- non-integers emit the shortest exact decimal reached by
+  `big.Rat.FloatString(prec)` (`prec` grows from 1 to 64 until the
+  string round-trips through `big.Rat` back to the same value; trailing
+  zeros are trimmed);
+- pathological rationals (e.g. `1/3`) cap at 64 fractional digits, which
+  is deterministic across runs.
+
+`big.Rat` handles every JSON-representable number without float64
+precision loss (`9007199254740993` stays distinct from
+`9007199254740992`). Distinct numeric values still hash distinctly —
+tests `TestNewSnapshot_CanonicalisesInputSchemaNumberLiteralShapes`
+(collapse-on-equal) and `TestNewSnapshot_InputSchemaDistinctNumbersHashDistinctly`
+(distinguish-on-unequal) cover both directions.
+
 ### 4.1 Canonical encoding mechanics
 
 We use a private helper `canonical(s Snapshot) Snapshot` that returns a
