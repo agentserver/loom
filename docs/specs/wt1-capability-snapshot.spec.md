@@ -419,32 +419,69 @@ omission of that update is the most common rollback-attack failure mode.
 
 ### 5.1 DDL (appended to `multi-agent/internal/observerstore/schema.sql`)
 
+Two tables, split so dedup by hash is independent from per-agent
+attribution (see §5.1.1 for the design rationale):
+
 ```sql
+-- Content-addressed capability snapshot dedup store. One row per
+-- unique canonical-JSON snapshot; multiple agents that observe the
+-- same host state share this row.
 CREATE TABLE IF NOT EXISTS capability_snapshots (
   hash          TEXT PRIMARY KEY,
-  agent_id      TEXT NOT NULL,
-  workspace_id  TEXT NOT NULL,
-  created_at    TEXT NOT NULL,
-  snapshot_json TEXT NOT NULL
+  snapshot_json TEXT NOT NULL,
+  first_seen_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_capability_snapshots_agent
-  ON capability_snapshots(workspace_id, agent_id, created_at);
+
+-- Insert-always attribution log: every observation of a snapshot by
+-- an (agent, workspace) pair lands here, so the eval runner can
+-- reconstruct "which agents saw which capability set at which time"
+-- even when 100 agents share the same hash.
+CREATE TABLE IF NOT EXISTS capability_snapshot_usages (
+  workspace_id TEXT NOT NULL,
+  agent_id     TEXT NOT NULL,
+  hash         TEXT NOT NULL,
+  used_at      TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, agent_id, hash, used_at)
+);
+CREATE INDEX IF NOT EXISTS idx_capability_snapshot_usages_agent
+  ON capability_snapshot_usages(workspace_id, agent_id, used_at);
+CREATE INDEX IF NOT EXISTS idx_capability_snapshot_usages_hash
+  ON capability_snapshot_usages(hash);
 ```
 
 - `hash` is the `Snapshot.Hash()` SHA-256 hex digest.
 - `snapshot_json` stores the **same canonical JSON** that was hashed —
   byte-equivalent under SHA-256 — so post-hoc auditors can recompute the
-  hash and so the §F4 `CapabilityRecall` evaluator can read the snapshot
-  fields directly without reaching the slave.
-- `created_at` is RFC3339 (UTC), matching every other observer table that
-  uses TEXT timestamps.
-- The PRIMARY KEY on `hash` plus `ON CONFLICT(hash) DO NOTHING` makes
-  inserts idempotent; the same snapshot reuploaded from multiple agents in
-  the same workspace deduplicates by hash and the index lets the runner
-  still find each (workspace, agent) usage of that hash by `created_at`.
-- DDL uses `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` so
-  every `OpenSQLite` call (the existing `db.Exec(schemaSQL)` path) is
+  hash and the §F4 `CapabilityRecall` evaluator reads snapshot fields
+  directly.
+- `first_seen_at` is set on the initial insert of a given hash; subsequent
+  `ON CONFLICT(hash) DO NOTHING` inserts leave it untouched (it is a
+  provenance timestamp of first observation, NOT of the latest use).
+- `capability_snapshot_usages.used_at` records when THIS agent observed
+  the snapshot; the PRIMARY KEY includes `used_at` so an agent
+  re-observing the same snapshot at a different instant is a new row.
+- All timestamps are RFC3339Nano (UTC).
+- DDL uses `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`
+  so every `OpenSQLite` call (the existing `db.Exec(schemaSQL)` path) is
   idempotent for existing installations.
+
+#### 5.1.1 Why two tables
+
+The Phase-1 fresh-reviewer audit (round 5) caught that a single
+`capability_snapshots(hash PK, agent_id, ...)` shape with
+`ON CONFLICT(hash) DO NOTHING` **silently drops every attribution row
+after the first**: agent-A observes hash H and lands a row; agent-B
+observes hash H seconds later and their INSERT no-ops; a query
+`WHERE agent_id='agent-B'` returns zero rows. That violates §F4
+evaluator contract (which needs per-agent capability usage).
+
+Splitting into dedup (`capability_snapshots`) + attribution
+(`capability_snapshot_usages`) fixes it without duplicating the JSON
+blob: the JSON is stored exactly once per unique host state; usages
+grow linearly with observations. The two-table shape also lets the
+evaluator do `SELECT snapshot_json FROM capability_snapshots s JOIN
+capability_snapshot_usages u ON s.hash = u.hash WHERE u.agent_id = ?`
+in one query.
 
 ### 5.2 Writer signature
 
@@ -460,38 +497,44 @@ func WriteSnapshot(
 ) error
 ```
 
-Behaviour:
+Behaviour (see §7.2 for the security-motivated ordering):
 
-1. If `capability.DisableUpload == true` (ablation
-   `NoCapabilityDiscovery`): log one line
-   `[ablation] NoCapabilityDiscovery: skipped snapshot hash=<hex>` to the
-   standard `log` package and return `nil`. Do **not** touch the DB.
-   See Security (d).
-2. Compute `hash := snap.Hash()`.
-3. Marshal `snap` to canonical JSON (same canonicalisation as
-   `ComputeHash`); reject if the canonical JSON contains an embedded
-   secret pattern (Security (e)) by returning `ErrSnapshotContainsSecret`.
-4. Execute, using a **parameterized** prepared statement with `?`
-   placeholders only — no `fmt.Sprintf` of any user-supplied field:
-
+1. Canonicalise `snap` (`capability.CanonicalJSON(snap)`); return the
+   wrapped error if it fails (only reachable for hand-built snapshots
+   that bypassed `NewSnapshot`).
+2. Compute `hash` = SHA-256 hex of the canonical bytes.
+3. Reject the canonical bytes if they contain an embedded raw-token
+   pattern (`ErrSnapshotContainsSecret`). Runs BEFORE the ablation
+   short-circuit so leaked descriptors surface regardless of upload
+   state.
+4. If `capability.IsUploadDisabled()` returns true: log
+   `[ablation] NoCapabilityDiscovery: skipped snapshot hash=<hex>` and
+   return `nil`. Do **not** touch the DB.
+5. Otherwise, open a `db.BeginTx(ctx, nil)` transaction and:
    ```sql
    INSERT INTO capability_snapshots
-     (hash, agent_id, workspace_id, created_at, snapshot_json)
-   VALUES (?, ?, ?, ?, ?)
-   ON CONFLICT(hash) DO NOTHING;
+     (hash, snapshot_json, first_seen_at)
+   VALUES (?, ?, ?) ON CONFLICT(hash) DO NOTHING;
+
+   INSERT INTO capability_snapshot_usages
+     (workspace_id, agent_id, hash, used_at)
+   VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING;
    ```
+   Both use `?` placeholders. Commit atomically. Return any error
+   verbatim (no wrapping) so callers can `errors.Is(err, sql.ErrConnDone)`.
 
-5. Use `db.ExecContext(ctx, ...)`. Return the database error verbatim if
-   any (no wrapping) so callers can `errors.Is(err, sql.ErrConnDone)` etc.
+The `first_seen_at` and `used_at` values are both `nowUTC().Format(time.RFC3339Nano)`
+captured once per call — a single snapshot upload thus has identical
+timestamps in the two tables when it is the first observation. Tests
+override `var nowUTC` for determinism; overrides MUST be serial (no
+`t.Parallel()`) and restore via `t.Cleanup`, since the global has no
+internal lock. `TestWriteSnapshot_PersistedCreatedAt` exercises the
+override path so the test contract is wired even if no other test
+currently needs it.
 
-`created_at` is set inside `WriteSnapshot` from a clock parameter exposed
-to tests via package-private `var nowUTC = func() time.Time { return time.Now().UTC() }`
-so a test can substitute a deterministic value when it needs to assert
-the persisted `created_at`. Tests that flip `nowUTC` MUST be serial (no
-`t.Parallel()`) and MUST restore via `t.Cleanup`, since the global has
-no internal lock and concurrent `WriteSnapshot` calls would race.
-`TestWriteSnapshot_PersistedCreatedAt` exercises the override path so
-the test contract is wired even if no other test currently needs it.
+Reading `IsUploadDisabled()` (not the `DisableUpload` package variable
+directly) is REQUIRED — the accessor's `atomic.Bool` load is what makes
+concurrent reads race-free (see §7(d)).
 
 ### 5.3 Sentinel errors
 
@@ -601,7 +644,7 @@ construct a `CredentialAlias`. The factory:
    | Pattern | Source |
    |---|---|
    | `(?i)sk-[A-Z0-9_-]{10,}` | OpenAI / Anthropic-shaped API keys (catches `sk-ant-api03-…` too) |
-   | `(?i)eyJ[A-Z0-9_-]{10,}\.` | JWT / OIDC tokens (header.) |
+   | `(?i)eyJ[A-Z0-9_-]{10,}\.[A-Z0-9_-]{10,}(\.[A-Z0-9_-]{10,})?` | JWT / OIDC tokens (2+ base64 segments; single-segment `eyJfoo.` would false-positive on innocuous `identifier.name` phrasings, so we require the payload segment too) |
    | `(?i)AKIA[0-9A-Z]{16,}` | AWS access key ID |
    | `(?i)ghp_[A-Z0-9]{20,}` | GitHub classic PAT |
    | `(?i)github_pat_[A-Z0-9_]{20,}` | GitHub fine-grained PAT |
@@ -683,10 +726,37 @@ writes exactly one log line through `log.Default()` of the form
 returns `nil`. The log line is required so post-hoc ablation auditors can
 distinguish "snapshot intentionally skipped" from "writer crashed silently".
 
-The default value of `DisableUpload` at process start is `false`.
+The default value at process start is `false`.
 Phase 2 `WT-2-flag-integration` will flip it via
 `ablation.Default.SetByName("NoCapabilityDiscovery", true)` from the CLI;
 no other call site flips it.
+
+**Concurrency**: `DisableUpload` is a `*bool` target seen by the ablation
+registry (the registry API is `Register(FlagName, *bool)` — a hard
+constraint), but the package exposes the *authoritative* value via
+`IsUploadDisabled()` which loads from a mirroring `atomic.Bool`. Three
+mutation paths:
+
+- `SetDisableUpload(v bool)` — writes both the atomic and the raw bool
+  atomically-in-observation-order (`atomic.Store` first, then the bool
+  assignment). Tests and direct consumers use this.
+- Ablation registry `SetByName(name, v)` — writes ONLY the raw
+  `DisableUpload` bool (this is the ablation package's fixed contract).
+  The CLI binder (Phase-2 WT-2-flag-integration) MUST call
+  `SyncDisableUpload()` immediately after any `SetByName` batch and
+  BEFORE starting any goroutine that will call `WriteSnapshot`.
+- `SyncDisableUpload()` — copies the current raw `DisableUpload` value
+  into the atomic mirror. Idempotent; safe to call multiple times as
+  long as no `WriteSnapshot` is in flight concurrently.
+
+`WriteSnapshot` MUST read via `IsUploadDisabled()`; the round-5
+fresh-reviewer audit confirmed `go test -race` fires under concurrent
+access when the accessor is skipped and a bare `bool` read is used.
+The `DisableUpload` variable is retained so the ablation registry
+contract still works; the atomic is the source-of-truth for readers.
+`TestRegisteredOnAblationDefault` guarantees the registry binding is
+still to `&DisableUpload`; a new test asserts a race-free
+read/write pattern via the accessor.
 
 #### §7.2 Ordering of secret-scan vs ablation skip
 

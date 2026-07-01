@@ -6,8 +6,10 @@
 package capability
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/yourorg/multi-agent/internal/ablation"
@@ -400,8 +402,8 @@ func TestCredentialAlias_RejectsRawTokensCaseInsensitively(t *testing.T) {
 		"SK-ABC123DEF4567XYZ",
 		"GHP_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
 		"XOXB-12345-67890-ABCDEFABCDEF",
-		"EyJabcDEFghiJKL.payload",
-		"akia0123456789ABCDEF", // mixed
+		"EyJabcDEFghiJKL.PAYLOAD0123.SIGXYZ7890", // 3-segment uppercase JWT
+		"akia0123456789ABCDEF",                   // mixed
 	}
 	for _, in := range cases {
 		_, err := NewCredentialAlias(in)
@@ -574,3 +576,163 @@ func TestNewSnapshot_RejectsZeroValue(t *testing.T) {
 
 // Strings helper to make negative-test messages readable.
 var _ = strings.HasPrefix
+
+// ---------------------------------------------------------------------
+// Round-5 fresh-reviewer audit fixes
+// ---------------------------------------------------------------------
+
+// §4 — MCPTools.InputSchema key-order permutations must hash IDENTICALLY,
+// otherwise dedup at the observer breaks silently: two semantically-
+// identical schemas would land as two distinct rows. NewSnapshot must
+// canonicalise the InputSchema at construction time.
+func TestNewSnapshot_CanonicalisesInputSchemaKeyOrder(t *testing.T) {
+	t.Parallel()
+	mk := func(schema string) Snapshot {
+		s, err := NewSnapshot(Snapshot{
+			OS: "linux", Arch: "amd64",
+			Platform: commandiface.Platform{OS: "linux", Arch: "amd64"},
+			Network:  NetworkInternet,
+			MCPTools: []MCPToolDescriptor{{
+				Server: "srv", Name: "tool",
+				InputSchema: json.RawMessage(schema),
+			}},
+		})
+		if err != nil {
+			t.Fatalf("NewSnapshot(%s): %v", schema, err)
+		}
+		return s
+	}
+	a := ComputeHash(mk(`{"a":1,"b":2}`))
+	b := ComputeHash(mk(`{"b":2,"a":1}`))
+	if a != b {
+		t.Fatalf("InputSchema key-order defeats hash dedup:\n  a=%s\n  b=%s", a, b)
+	}
+}
+
+// §4 — whitespace inside InputSchema must not change the hash either
+// (the canonicaliser strips it via unmarshal → remarshal round-trip).
+func TestNewSnapshot_CanonicalisesInputSchemaWhitespace(t *testing.T) {
+	t.Parallel()
+	mk := func(schema string) Snapshot {
+		s, err := NewSnapshot(Snapshot{
+			OS: "linux", Arch: "amd64",
+			Platform: commandiface.Platform{OS: "linux", Arch: "amd64"},
+			Network:  NetworkInternet,
+			MCPTools: []MCPToolDescriptor{{
+				Server: "srv", Name: "tool",
+				InputSchema: json.RawMessage(schema),
+			}},
+		})
+		if err != nil {
+			t.Fatalf("NewSnapshot: %v", err)
+		}
+		return s
+	}
+	tight := ComputeHash(mk(`{"a":1,"b":[2,3]}`))
+	loose := ComputeHash(mk("{\n  \"a\" : 1 ,\n  \"b\" : [ 2 , 3 ]\n}"))
+	if tight != loose {
+		t.Fatalf("InputSchema whitespace changes hash:\n  tight=%s\n  loose=%s", tight, loose)
+	}
+}
+
+// §4 — canonicaliser must preserve number precision (json.Number),
+// not silently float64-round large integers into imprecision.
+func TestNewSnapshot_CanonicalisesInputSchemaPreservesNumbers(t *testing.T) {
+	t.Parallel()
+	// 2^53+1 is the smallest integer that float64 cannot represent
+	// exactly. If the canonicaliser round-trips through float64 it will
+	// silently rewrite 9007199254740993 → 9007199254740992.
+	big := `{"n":9007199254740993}`
+	s, err := NewSnapshot(Snapshot{
+		OS: "linux", Arch: "amd64",
+		Platform: commandiface.Platform{OS: "linux", Arch: "amd64"},
+		Network:  NetworkInternet,
+		MCPTools: []MCPToolDescriptor{{
+			Server: "srv", Name: "tool",
+			InputSchema: json.RawMessage(big),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewSnapshot: %v", err)
+	}
+	if !strings.Contains(string(s.MCPTools[0].InputSchema), "9007199254740993") {
+		t.Fatalf("canonicalised InputSchema lost integer precision: %s", s.MCPTools[0].InputSchema)
+	}
+}
+
+// §7(d) — IsUploadDisabled must return the atomic value, not the raw
+// bool, so concurrent readers race-free. Direct test: two goroutines
+// hammer read + SetDisableUpload write; -race must not fire.
+func TestIsUploadDisabled_RaceFree(t *testing.T) {
+	// This test flips DisableUpload; serial to avoid stepping on other
+	// tests. Restore.
+	t.Cleanup(func() { SetDisableUpload(false) })
+
+	var reads atomic.Int64
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 10000; i++ {
+			_ = IsUploadDisabled()
+			reads.Add(1)
+		}
+		close(done)
+	}()
+	for i := 0; i < 10000; i++ {
+		SetDisableUpload(i%2 == 0)
+	}
+	<-done
+	if reads.Load() == 0 {
+		t.Fatal("no reads happened; test setup is broken")
+	}
+	// If -race fires, the test binary exits non-zero and this line
+	// never returns "pass". Explicit success sentinel:
+	t.Logf("completed %d atomic-read/write pairs with no race", reads.Load())
+}
+
+// §7(d) — SyncDisableUpload mirrors the raw bool (as the ablation
+// registry writes it) into the atomic. Simulates the Phase-2 CLI
+// binder flow.
+func TestSyncDisableUpload_MirrorsRawBool(t *testing.T) {
+	t.Cleanup(func() { SetDisableUpload(false) })
+
+	// Simulate ablation.Default.SetByName writing directly to
+	// &DisableUpload (bypassing SetDisableUpload).
+	DisableUpload = true
+	SyncDisableUpload()
+	if !IsUploadDisabled() {
+		t.Fatal("SyncDisableUpload did not mirror raw true into atomic")
+	}
+
+	DisableUpload = false
+	SyncDisableUpload()
+	if IsUploadDisabled() {
+		t.Fatal("SyncDisableUpload did not mirror raw false into atomic")
+	}
+}
+
+// §7(a) — eyJ regex must require a second base64 segment, otherwise it
+// false-positives on innocuous "identifier.name" phrasings in tool
+// descriptions.
+func TestJSONContainsRawToken_EyJRequiresPayloadSegment(t *testing.T) {
+	t.Parallel()
+	// A 3-segment JWT (real): must match.
+	realJWT := []byte(`{"description":"jwt eyJhbGciOiJIUzI1NiJ9.ZXlKMGVYQWlPaUpLVjFRaUxDSmhiR2NpT2lKSVV6STFOaUo5.sig"}`)
+	if !JSONContainsRawToken(realJWT) {
+		t.Errorf("real 3-segment JWT not caught: %s", realJWT)
+	}
+	// A 2-segment JWT stub (real, truncated): must match.
+	twoSeg := []byte(`{"description":"eyJhbGciOiJIUzI1NiJ9.ZXlKMGVYQWlPaUpLVjFRaUxDSmhiR2NpT2lKSVV6STFOaUo5"}`)
+	if !JSONContainsRawToken(twoSeg) {
+		t.Errorf("2-segment JWT not caught: %s", twoSeg)
+	}
+	// An innocuous identifier.name (single segment): must NOT match.
+	innocent := []byte(`{"description":"See eyJconfigDefaults. for defaults"}`)
+	if JSONContainsRawToken(innocent) {
+		t.Errorf("false positive on innocuous identifier.name: %s", innocent)
+	}
+	// A shorter phrase still starting with eyJ: must NOT match.
+	shorter := []byte(`{"description":"eyJabc"}`)
+	if JSONContainsRawToken(shorter) {
+		t.Errorf("false positive on short eyJ identifier: %s", shorter)
+	}
+}

@@ -7,6 +7,7 @@
 package capability
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 	"log"
 	"regexp"
 	"sort"
+	"sync/atomic"
 
 	"github.com/yourorg/multi-agent/internal/ablation"
 	"github.com/yourorg/multi-agent/internal/commandiface"
@@ -107,13 +109,13 @@ var (
 // must reject `SK-...` / `GHP_...` / `XOXB-...` just as firmly as their
 // canonical lowercase forms.
 var rawTokenPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)sk-[A-Z0-9_-]{10,}`),        // OpenAI / Anthropic-shaped API keys (incl. sk-ant-api03-…)
-	regexp.MustCompile(`(?i)eyJ[A-Z0-9_-]{10,}\.`),      // JWT / OIDC tokens — header + '.' delimiter
-	regexp.MustCompile(`(?i)AKIA[0-9A-Z]{16,}`),         // AWS access key ID
-	regexp.MustCompile(`(?i)ghp_[A-Z0-9]{20,}`),         // GitHub classic personal access token
-	regexp.MustCompile(`(?i)github_pat_[A-Z0-9_]{20,}`), // GitHub fine-grained personal access token
-	regexp.MustCompile(`(?i)AIza[A-Z0-9_-]{30,}`),       // Google API key
-	regexp.MustCompile(`(?i)xox[bapres]-[A-Z0-9-]+`),    // Slack bot/app/user/refresh/eshare/legacy tokens (incl. xoxe-)
+	regexp.MustCompile(`(?i)sk-[A-Z0-9_-]{10,}`),                                      // OpenAI / Anthropic-shaped API keys (incl. sk-ant-api03-…)
+	regexp.MustCompile(`(?i)eyJ[A-Z0-9_-]{10,}\.[A-Z0-9_-]{10,}(\.[A-Z0-9_-]{10,})?`), // JWT / OIDC tokens: 2+ base64 segments (round-5 audit: single-segment false-positives on identifier.name phrasings)
+	regexp.MustCompile(`(?i)AKIA[0-9A-Z]{16,}`),                                       // AWS access key ID
+	regexp.MustCompile(`(?i)ghp_[A-Z0-9]{20,}`),                                       // GitHub classic personal access token
+	regexp.MustCompile(`(?i)github_pat_[A-Z0-9_]{20,}`),                               // GitHub fine-grained personal access token
+	regexp.MustCompile(`(?i)AIza[A-Z0-9_-]{30,}`),                                     // Google API key
+	regexp.MustCompile(`(?i)xox[bapres]-[A-Z0-9-]+`),                                  // Slack bot/app/user/refresh/eshare/legacy tokens (incl. xoxe-)
 }
 
 // aliasShapeRe enforces the §3.4 alias regex on the CredentialAlias type.
@@ -192,18 +194,60 @@ func NewSnapshot(spec Snapshot) (Snapshot, error) {
 		}
 	}
 	// MCPTools.InputSchema is json.RawMessage; ComputeHash relies on
-	// json.Marshal being infallible. Validate it once at construction
-	// time so a malformed InputSchema can never produce two distinct
-	// snapshots that collide on ComputeHash's error-path constant.
-	for i, mt := range spec.MCPTools {
-		if len(mt.InputSchema) == 0 {
-			continue
+	// json.Marshal being infallible AND on byte-identical inputs
+	// producing identical hashes. Validate + CANONICALISE at
+	// construction time so that (a) a malformed InputSchema can never
+	// produce two distinct snapshots that collide on ComputeHash's
+	// error-path constant, and (b) two semantically-identical schemas
+	// with different byte layouts (`{"a":1,"b":2}` vs `{"b":2,"a":1}`
+	// or embedded whitespace) hash to the same value — otherwise dedup
+	// at the observer breaks silently (round-5 audit finding).
+	//
+	// canonicalJSONBytes unmarshals into interface{}, then re-marshals
+	// with sorted object keys via json.Marshal (which sorts map[string]…
+	// keys deterministically per Go 1.12+ spec).
+	if len(spec.MCPTools) > 0 {
+		normed := make([]MCPToolDescriptor, len(spec.MCPTools))
+		for i, mt := range spec.MCPTools {
+			normed[i] = mt
+			if len(mt.InputSchema) == 0 {
+				continue
+			}
+			if !json.Valid(mt.InputSchema) {
+				return Snapshot{}, fmt.Errorf("%w: MCPTools[%d].InputSchema is not valid JSON", ErrSnapshotInvalid, i)
+			}
+			canon, err := canonicalJSONBytes(mt.InputSchema)
+			if err != nil {
+				return Snapshot{}, fmt.Errorf("%w: MCPTools[%d].InputSchema: %v", ErrSnapshotInvalid, i, err)
+			}
+			normed[i].InputSchema = canon
 		}
-		if !json.Valid(mt.InputSchema) {
-			return Snapshot{}, fmt.Errorf("%w: MCPTools[%d].InputSchema is not valid JSON", ErrSnapshotInvalid, i)
-		}
+		spec.MCPTools = normed
 	}
 	return spec, nil
+}
+
+// canonicalJSONBytes returns a deterministic byte encoding of the JSON
+// value in b: whitespace-free and with object keys sorted at every
+// nesting level. Used to normalise MCPTools.InputSchema so semantically-
+// identical schemas hash identically.
+//
+// The algorithm: unmarshal into interface{}, then marshal with the
+// standard library. encoding/json is documented to sort map[string]…
+// keys lexicographically when marshalling, so a single round-trip
+// achieves canonicalisation for any JSON value tree.
+func canonicalJSONBytes(b json.RawMessage) (json.RawMessage, error) {
+	var v interface{}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber() // keep number precision (avoid float64 lossy rounding)
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	out, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(out), nil
 }
 
 // ---------------------------------------------------------------------
@@ -339,18 +383,48 @@ func (s Snapshot) Hash() string { return ComputeHash(s) }
 // Ablation flag + init() (spec §7(d))
 // ---------------------------------------------------------------------
 
-// DisableUpload is the ablation toggle for NoCapabilityDiscovery.
+// DisableUpload is the ablation toggle target seen by the ablation
+// registry. The registry contract requires a *bool, so this variable
+// stays. Readers MUST use IsUploadDisabled() instead — that accessor
+// loads from a mirroring atomic.Bool and is race-free.
 //
 // Spec §7(d): when true, observerstore.WriteSnapshot must short-circuit
 // (skip the DB write) while still allowing local snapshot collection to
 // proceed — the slave's self-defence logic ("do I have pytest?") depends
 // on local collection regardless of upload state.
-//
-// Default is false. Mutated only by the Phase 2 CLI binder via
-// ablation.Default.SetByName("NoCapabilityDiscovery", true) before run
-// start. The ablation registry's pre-run-only mutation pattern means no
-// concurrent reader has to take a lock.
 var DisableUpload bool
+
+// disableUploadAtomic mirrors DisableUpload for race-free reads. See
+// SetDisableUpload / SyncDisableUpload / IsUploadDisabled.
+var disableUploadAtomic atomic.Bool
+
+// IsUploadDisabled returns the ablation flag's value via an atomic load.
+// This is the ONLY correct way to read the flag from a concurrent
+// context. Reading the raw DisableUpload variable races with any
+// writer.
+func IsUploadDisabled() bool { return disableUploadAtomic.Load() }
+
+// SetDisableUpload sets both the atomic mirror and the raw bool.
+// Direct consumers (tests, production code that needs to flip the flag
+// without going through the ablation registry) MUST use this.
+func SetDisableUpload(v bool) {
+	disableUploadAtomic.Store(v)
+	DisableUpload = v
+}
+
+// SyncDisableUpload copies the current raw DisableUpload value into the
+// atomic mirror. The Phase-2 CLI binder MUST call this after any
+// ablation.Default.SetByName("NoCapabilityDiscovery", ...) batch and
+// BEFORE spawning any goroutine that calls WriteSnapshot — the ablation
+// registry writes only through the *bool, and readers see the atomic.
+//
+// Safe to call from a single goroutine at process start. NOT safe to
+// call concurrently with WriteSnapshot without external synchronisation
+// — but the ablation package's own "pre-run-only mutation" contract
+// covers that.
+func SyncDisableUpload() {
+	disableUploadAtomic.Store(DisableUpload)
+}
 
 func init() {
 	if err := ablation.Default.Register(ablation.NoCapabilityDiscovery, &DisableUpload); err != nil {

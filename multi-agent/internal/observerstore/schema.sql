@@ -237,16 +237,24 @@ CREATE INDEX IF NOT EXISTS idx_route_reasons_conv
     ON route_reasons(conversation_id, decision_started_at);
 
 -- WT-1-capability-snapshot: A1 capability snapshot persistence
--- (spec: docs/specs/wt1-capability-snapshot.spec.md §5.1). Rows are
--- deduplicated by `hash` (SHA-256 of canonical snapshot JSON); the
--- per-(workspace, agent) usage index lets the eval runner attribute
--- usages of a shared hash to specific agents.
+-- (spec: docs/specs/wt1-capability-snapshot.spec.md §5.1). Two tables:
+-- the content-addressed dedup store for the JSON blob, and an
+-- insert-always attribution log so the eval runner can trace which
+-- agents observed which capability set at which instant.
 CREATE TABLE IF NOT EXISTS capability_snapshots (
   hash          TEXT PRIMARY KEY,
-  agent_id      TEXT NOT NULL,
-  workspace_id  TEXT NOT NULL,
-  created_at    TEXT NOT NULL,
-  snapshot_json TEXT NOT NULL
+  snapshot_json TEXT NOT NULL,
+  first_seen_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_capability_snapshots_agent
-ON capability_snapshots(workspace_id, agent_id, created_at);
+
+CREATE TABLE IF NOT EXISTS capability_snapshot_usages (
+  workspace_id TEXT NOT NULL,
+  agent_id     TEXT NOT NULL,
+  hash         TEXT NOT NULL,
+  used_at      TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, agent_id, hash, used_at)
+);
+CREATE INDEX IF NOT EXISTS idx_capability_snapshot_usages_agent
+ON capability_snapshot_usages(workspace_id, agent_id, used_at);
+CREATE INDEX IF NOT EXISTS idx_capability_snapshot_usages_hash
+ON capability_snapshot_usages(hash);

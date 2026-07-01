@@ -4,6 +4,12 @@
 > `docs/specs/wt1-capability-snapshot.spec.md`.
 > Branch: `paper/v3/p1-capability-snapshot`.
 > Base: `origin/paper/v3-integration` after `17f2c3c`.
+>
+> Rounds 4–5 fresh-reviewer audits landed additional changes (spec §7.1
+> catalogue, §7.2 ordering, §5.1 two-table schema, atomic `IsUploadDisabled`
+> accessor, InputSchema canonicalisation). This plan reflects the
+> pre-audit design intent; the audit fix commits are self-explanatory
+> from their commit messages and the updated spec.
 
 This document is the file-by-file work breakdown and the test matrix
 Stage 3 will RED-GREEN-REFACTOR through. It does not introduce any new

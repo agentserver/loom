@@ -2,8 +2,9 @@
 // docs/specs/wt1-capability-snapshot.spec.md §5 + §7(c)/(d)/(e).
 //
 // NOTE: tests in this file that mutate the package global
-// capability.DisableUpload MUST NOT call t.Parallel(); they share package
-// state. Each such test uses t.Cleanup to restore DisableUpload = false.
+// capability.DisableUpload (via capability.SetDisableUpload) MUST NOT
+// call t.Parallel(); they share package state. Each such test uses
+// t.Cleanup to restore SetDisableUpload(false).
 package observerstore
 
 import (
@@ -67,66 +68,86 @@ func TestWriteSnapshot_HappyPath(t *testing.T) {
 		t.Fatalf("WriteSnapshot: %v", err)
 	}
 
-	var (
-		hash, agentID, wsID, createdAt, body string
-	)
+	// capability_snapshots: one row keyed by hash with the JSON blob.
+	var hash, body, firstSeenAt string
 	row := store.db.QueryRowContext(ctx,
-		`SELECT hash, agent_id, workspace_id, created_at, snapshot_json
+		`SELECT hash, snapshot_json, first_seen_at
 		   FROM capability_snapshots WHERE hash = ?`, snap.Hash())
-	if err := row.Scan(&hash, &agentID, &wsID, &createdAt, &body); err != nil {
-		t.Fatalf("scan: %v", err)
+	if err := row.Scan(&hash, &body, &firstSeenAt); err != nil {
+		t.Fatalf("capability_snapshots scan: %v", err)
 	}
 	if hash != snap.Hash() {
 		t.Errorf("hash = %s; want %s", hash, snap.Hash())
 	}
+	if body == "" {
+		t.Errorf("snapshot_json is empty")
+	}
+	if firstSeenAt == "" {
+		t.Errorf("first_seen_at is empty")
+	}
+
+	// capability_snapshot_usages: one row per observation.
+	var wsID, agentID, uHash, usedAt string
+	row = store.db.QueryRowContext(ctx,
+		`SELECT workspace_id, agent_id, hash, used_at
+		   FROM capability_snapshot_usages WHERE hash = ?`, snap.Hash())
+	if err := row.Scan(&wsID, &agentID, &uHash, &usedAt); err != nil {
+		t.Fatalf("capability_snapshot_usages scan: %v", err)
+	}
 	if agentID != "agent-1" || wsID != "ws-1" {
 		t.Errorf("(agent_id, workspace_id) = (%q, %q); want (agent-1, ws-1)", agentID, wsID)
 	}
-	if createdAt == "" {
-		t.Errorf("created_at is empty")
-	}
-	if body == "" {
-		t.Errorf("snapshot_json is empty")
+	if usedAt == "" {
+		t.Errorf("used_at is empty")
 	}
 }
 
 // §7(c) — parameterised SQL: an agent_id containing SQL meta-characters
-// MUST round-trip verbatim and not corrupt the table.
+// MUST round-trip verbatim and not corrupt any table. The injection
+// payload targets both possible tables now, since the writer touches
+// two of them per call.
 func TestWriteSnapshot_Parameterized_SQLMetaInAgentID(t *testing.T) {
 	t.Parallel()
 	store := openInMemoryStore(t)
 	snap := validSnap(t)
 	ctx := context.Background()
-	injection := `a'); DROP TABLE capability_snapshots; --`
+	injection := `a'); DROP TABLE capability_snapshots; DROP TABLE capability_snapshot_usages; --`
 
 	if err := WriteSnapshot(ctx, store.db, injection, "ws-1", snap); err != nil {
 		t.Fatalf("WriteSnapshot: %v", err)
 	}
 
-	// Table still exists.
+	// Both tables still exist.
 	var n int
 	if err := store.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='capability_snapshots'`,
+		`SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('capability_snapshots','capability_snapshot_usages')`,
 	).Scan(&n); err != nil {
 		t.Fatalf("table existence query: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("table count = %d; want 1 (table was dropped — SQL was concatenated, not parameterised)", n)
+	if n != 2 {
+		t.Fatalf("table count = %d; want 2 (a table was dropped — SQL was concatenated, not parameterised)", n)
 	}
 
-	// Row count == 1.
+	// Row count == 1 in each table.
 	if err := store.db.QueryRowContext(ctx,
 		`SELECT count(*) FROM capability_snapshots`).Scan(&n); err != nil {
-		t.Fatalf("row count: %v", err)
+		t.Fatalf("dedup count: %v", err)
 	}
 	if n != 1 {
-		t.Errorf("row count = %d; want 1", n)
+		t.Errorf("capability_snapshots row count = %d; want 1", n)
+	}
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM capability_snapshot_usages`).Scan(&n); err != nil {
+		t.Fatalf("usages count: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("capability_snapshot_usages row count = %d; want 1", n)
 	}
 
 	// Retrieved agent_id is the literal injection string.
 	var got string
 	if err := store.db.QueryRowContext(ctx,
-		`SELECT agent_id FROM capability_snapshots`).Scan(&got); err != nil {
+		`SELECT agent_id FROM capability_snapshot_usages`).Scan(&got); err != nil {
 		t.Fatalf("agent_id query: %v", err)
 	}
 	if got != injection {
@@ -134,8 +155,17 @@ func TestWriteSnapshot_Parameterized_SQLMetaInAgentID(t *testing.T) {
 	}
 }
 
+// Same snap re-inserted by the same agent at the same instant is a
+// no-op (dedup row unchanged; usage row deduplicated by composite PK).
 func TestWriteSnapshot_IdempotentOnDuplicateHash(t *testing.T) {
-	t.Parallel()
+	// Fix the clock so the two calls produce identical used_at values,
+	// exercising the usages-table PRIMARY KEY dedup path. Serial: mutates
+	// nowUTC package global.
+	prev := nowUTC
+	fixed := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
+	nowUTC = func() time.Time { return fixed }
+	t.Cleanup(func() { nowUTC = prev })
+
 	store := openInMemoryStore(t)
 	snap := validSnap(t)
 	ctx := context.Background()
@@ -150,15 +180,35 @@ func TestWriteSnapshot_IdempotentOnDuplicateHash(t *testing.T) {
 	var n int
 	if err := store.db.QueryRowContext(ctx,
 		`SELECT count(*) FROM capability_snapshots WHERE hash = ?`, snap.Hash()).Scan(&n); err != nil {
-		t.Fatalf("count: %v", err)
+		t.Fatalf("dedup count: %v", err)
 	}
 	if n != 1 {
-		t.Errorf("row count after duplicate insert = %d; want 1 (ON CONFLICT DO NOTHING failed)", n)
+		t.Errorf("capability_snapshots row count after duplicate insert = %d; want 1", n)
+	}
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM capability_snapshot_usages WHERE hash = ?`, snap.Hash()).Scan(&n); err != nil {
+		t.Fatalf("usages count: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("capability_snapshot_usages row count after same-instant duplicate = %d; want 1", n)
 	}
 }
 
-func TestWriteSnapshot_DifferentAgentsSameHashOneRow(t *testing.T) {
-	t.Parallel()
+// Two agents observing the same snapshot share ONE row in the dedup
+// table (that is the whole point of dedup) but must each land their OWN
+// row in the attribution table so a runner can retrieve per-agent
+// usage. Round-5 audit finding: the prior implementation silently
+// dropped agent-B's attribution.
+func TestWriteSnapshot_DifferentAgentsShareDedupButKeepUsages(t *testing.T) {
+	// Fix the clock so timestamps are deterministic per (agent_id) —
+	// but we advance between agents so used_at is distinct where the
+	// PRIMARY KEY would otherwise collide. Serial: mutates nowUTC.
+	prev := nowUTC
+	t0 := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
+	step := 0
+	nowUTC = func() time.Time { defer func() { step++ }(); return t0.Add(time.Duration(step) * time.Second) }
+	t.Cleanup(func() { nowUTC = prev })
+
 	store := openInMemoryStore(t)
 	snap := validSnap(t)
 	ctx := context.Background()
@@ -170,25 +220,43 @@ func TestWriteSnapshot_DifferentAgentsSameHashOneRow(t *testing.T) {
 		t.Fatalf("agent-B: %v", err)
 	}
 
-	var rows int
+	// Dedup: one row for the hash.
+	var n int
 	if err := store.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM capability_snapshots`).Scan(&rows); err != nil {
-		t.Fatalf("count: %v", err)
+		`SELECT count(*) FROM capability_snapshots`).Scan(&n); err != nil {
+		t.Fatalf("dedup count: %v", err)
 	}
-	if rows != 1 {
-		t.Errorf("row count = %d; want 1 (hash PRIMARY KEY + ON CONFLICT dedup)", rows)
+	if n != 1 {
+		t.Errorf("capability_snapshots row count = %d; want 1 (dedup by hash)", n)
 	}
 
-	// Confirm the (workspace_id, agent_id, created_at) index exists so a
-	// runner can still query both agents' usages by hash.
+	// Attribution: BOTH agents' usages recoverable via the index-backed
+	// query. Round-5 audit contract.
+	var aCount, bCount int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM capability_snapshot_usages WHERE workspace_id = ? AND agent_id = ?`,
+		"ws-1", "agent-A").Scan(&aCount); err != nil {
+		t.Fatalf("agent-A usage count: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM capability_snapshot_usages WHERE workspace_id = ? AND agent_id = ?`,
+		"ws-1", "agent-B").Scan(&bCount); err != nil {
+		t.Fatalf("agent-B usage count: %v", err)
+	}
+	if aCount != 1 || bCount != 1 {
+		t.Errorf("per-agent usage counts = (A=%d, B=%d); want (1, 1) — attribution lost", aCount, bCount)
+	}
+
+	// Confirm the (workspace_id, agent_id, used_at) index exists so a
+	// runner can efficiently query per-agent usages.
 	var idxName string
 	if err := store.db.QueryRowContext(ctx,
-		`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_capability_snapshots_agent'`,
+		`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_capability_snapshot_usages_agent'`,
 	).Scan(&idxName); err != nil {
 		t.Fatalf("index lookup: %v", err)
 	}
-	if idxName != "idx_capability_snapshots_agent" {
-		t.Errorf("index name = %q; want idx_capability_snapshots_agent", idxName)
+	if idxName != "idx_capability_snapshot_usages_agent" {
+		t.Errorf("index name = %q; want idx_capability_snapshot_usages_agent", idxName)
 	}
 }
 
@@ -219,10 +287,17 @@ func TestWriteSnapshot_RejectsEmbeddedSecretInMCPDescription(t *testing.T) {
 	var n int
 	if err := store.db.QueryRowContext(ctx,
 		`SELECT count(*) FROM capability_snapshots`).Scan(&n); err != nil {
-		t.Fatalf("count: %v", err)
+		t.Fatalf("dedup count: %v", err)
 	}
 	if n != 0 {
-		t.Errorf("row count = %d; want 0 (secret-strip should not have inserted)", n)
+		t.Errorf("capability_snapshots row count = %d; want 0 (secret-strip should not have inserted)", n)
+	}
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM capability_snapshot_usages`).Scan(&n); err != nil {
+		t.Fatalf("usages count: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("capability_snapshot_usages row count = %d; want 0 (transaction should have rolled back)", n)
 	}
 }
 
@@ -249,8 +324,8 @@ func TestWriteSnapshot_RejectsEmbeddedSecretInToolName(t *testing.T) {
 
 // A hand-built Snapshot with malformed MCPTools.InputSchema (bypassing
 // NewSnapshot) must surface as a returned error from WriteSnapshot, NOT
-// a panic from snap.Hash(). Verifies the canonical-first ordering inside
-// WriteSnapshot.
+// a panic from snap.Hash(). Verifies the canonical-first ordering
+// inside WriteSnapshot.
 func TestWriteSnapshot_ReturnsErrorOnMalformedSnapshot(t *testing.T) {
 	t.Parallel()
 	store := openInMemoryStore(t)
@@ -282,9 +357,8 @@ func TestWriteSnapshot_ReturnsErrorOnMalformedSnapshot(t *testing.T) {
 // leaky descriptor still surfaces as ErrSnapshotContainsSecret even
 // when uploads are ablated off. (Reviewer round 4 P2.)
 func TestNoCapabilityDiscovery_SecretScanRunsBeforeAblationSkip(t *testing.T) {
-	prev := capability.DisableUpload
-	capability.DisableUpload = true
-	t.Cleanup(func() { capability.DisableUpload = prev })
+	capability.SetDisableUpload(true)
+	t.Cleanup(func() { capability.SetDisableUpload(false) })
 
 	store := openInMemoryStore(t)
 	snap, err := capability.NewSnapshot(capability.Snapshot{
@@ -310,9 +384,8 @@ func TestNoCapabilityDiscovery_SecretScanRunsBeforeAblationSkip(t *testing.T) {
 }
 
 // Spec §5.2 contract: tests substitute a deterministic value through
-// nowUTC and assert it round-trips into the created_at column. This
-// test runs serially (no t.Parallel) because nowUTC is a package
-// global with no internal lock; t.Cleanup restores.
+// nowUTC and assert it round-trips into first_seen_at (dedup) and
+// used_at (usages) columns. Serial: mutates nowUTC.
 func TestWriteSnapshot_PersistedCreatedAt(t *testing.T) {
 	prev := nowUTC
 	fixed := time.Date(2025, 1, 2, 3, 4, 5, 678901234, time.UTC)
@@ -327,23 +400,32 @@ func TestWriteSnapshot_PersistedCreatedAt(t *testing.T) {
 		t.Fatalf("WriteSnapshot: %v", err)
 	}
 
-	var got string
-	if err := store.db.QueryRowContext(ctx,
-		`SELECT created_at FROM capability_snapshots WHERE hash = ?`, snap.Hash()).Scan(&got); err != nil {
-		t.Fatalf("query created_at: %v", err)
-	}
 	want := fixed.Format(time.RFC3339Nano)
-	if got != want {
-		t.Errorf("created_at = %q; want %q", got, want)
+
+	var firstSeen string
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT first_seen_at FROM capability_snapshots WHERE hash = ?`, snap.Hash()).Scan(&firstSeen); err != nil {
+		t.Fatalf("query first_seen_at: %v", err)
+	}
+	if firstSeen != want {
+		t.Errorf("first_seen_at = %q; want %q", firstSeen, want)
+	}
+
+	var usedAt string
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT used_at FROM capability_snapshot_usages WHERE hash = ?`, snap.Hash()).Scan(&usedAt); err != nil {
+		t.Fatalf("query used_at: %v", err)
+	}
+	if usedAt != want {
+		t.Errorf("used_at = %q; want %q", usedAt, want)
 	}
 }
 
-// §7(d) — DisableUpload=true short-circuits the DB write but returns nil.
+// §7(d) — IsUploadDisabled()==true short-circuits the DB write but
+// returns nil. Neither table is touched.
 func TestNoCapabilityDiscovery_SkipsUploadButReturnsNil(t *testing.T) {
-	// Serial: mutates capability.DisableUpload package global.
-	prev := capability.DisableUpload
-	capability.DisableUpload = true
-	t.Cleanup(func() { capability.DisableUpload = prev })
+	capability.SetDisableUpload(true)
+	t.Cleanup(func() { capability.SetDisableUpload(false) })
 
 	store := openInMemoryStore(t)
 	snap := validSnap(t)
@@ -356,10 +438,17 @@ func TestNoCapabilityDiscovery_SkipsUploadButReturnsNil(t *testing.T) {
 	var n int
 	if err := store.db.QueryRowContext(ctx,
 		`SELECT count(*) FROM capability_snapshots`).Scan(&n); err != nil {
-		t.Fatalf("count: %v", err)
+		t.Fatalf("dedup count: %v", err)
 	}
 	if n != 0 {
-		t.Errorf("row count = %d; want 0 (DisableUpload should have skipped insert)", n)
+		t.Errorf("capability_snapshots row count = %d; want 0", n)
+	}
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM capability_snapshot_usages`).Scan(&n); err != nil {
+		t.Fatalf("usages count: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("capability_snapshot_usages row count = %d; want 0", n)
 	}
 }
 
@@ -368,9 +457,8 @@ func TestNoCapabilityDiscovery_SkipsUploadButReturnsNil(t *testing.T) {
 // and the hash so ablation auditors can distinguish intentional skip
 // from silent crash.
 func TestNoCapabilityDiscovery_LogsSkipLine(t *testing.T) {
-	prev := capability.DisableUpload
-	capability.DisableUpload = true
-	t.Cleanup(func() { capability.DisableUpload = prev })
+	capability.SetDisableUpload(true)
+	t.Cleanup(func() { capability.SetDisableUpload(false) })
 
 	// Capture the standard logger.
 	var buf bytes.Buffer
