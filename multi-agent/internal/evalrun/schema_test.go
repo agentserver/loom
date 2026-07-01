@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"reflect"
 	"strings"
@@ -268,6 +269,27 @@ func TestInsert_RejectsBadFailureCategory(t *testing.T) {
 		s.FailureCategory = "unknown"
 		if err := w.Insert(context.Background(), s); err != nil {
 			t.Fatalf("fail+unknown must be accepted, got %v", err)
+		}
+	})
+	// Exhaustive taxonomy round-trip: every one of the 11 canonical
+	// observerstore.AllCategories() entries MUST be accepted, including
+	// the "reserved-for-future" tags (wrong_version, forbidden_cred,
+	// driver_restart). Without this loop a refactor of
+	// isAcceptedFailureCategory that replaced observerstore.IsKnown
+	// with a hand-written switch missing a case would silently reject
+	// those reserved values and only surface at first production use.
+	t.Run("all_11_canonical_categories_ok", func(t *testing.T) {
+		for i, cat := range observerstore.AllCategories() {
+			cat := cat
+			t.Run(string(cat), func(t *testing.T) {
+				s := sampleSchema()
+				s.RunID = fmt.Sprintf("run-fc-all11-%02d-taxon", i)
+				s.SuccessOracleResult = "fail"
+				s.FailureCategory = string(cat)
+				if err := w.Insert(context.Background(), s); err != nil {
+					t.Fatalf("canonical taxonomy value %q must be accepted, got %v", cat, err)
+				}
+			})
 		}
 	})
 }
