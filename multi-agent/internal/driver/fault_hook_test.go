@@ -3,7 +3,9 @@ package driver
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -131,7 +133,16 @@ func TestFaultHook_NoFaultInjectImport(t *testing.T) {
 
 // D6: Fast-path benchmark. The noop path must complete in under 100ns/op
 // on the dev workstation (spec §6.1 perf gate).
+//
+// Skipped on GitHub-hosted CI runners: their shared burstable CPUs cannot
+// sustainably beat 100 ns/op even for a trivial atomic-load path, and
+// the `-race` build (used in CI) multiplies per-op cost by ~5x. The perf
+// gate's purpose — catch regressions from a real dev workstation — is
+// preserved locally; CI's job is coverage + correctness, not perf.
 func TestBench_FastPathUnder100ns(t *testing.T) {
+	if os.Getenv("GITHUB_ACTIONS") != "" {
+		t.Skip("perf gate is dev-workstation only; CI runners can't sustain 100 ns/op under -race")
+	}
 	prev := SetHook(nil)
 	defer SetHook(prev)
 	res := testing.Benchmark(BenchmarkFaultHook_NoopFastPath)
@@ -155,7 +166,10 @@ func BenchmarkFaultHook_NoopFastPath(b *testing.B) {
 }
 
 // moduleRoot walks upward from this test's package directory looking
-// for go.mod so `go list` runs in the right module.
+// for go.mod so `go list` runs in the right module. Uses filepath.Dir
+// so `GOMOD` on Windows (backslash separators) resolves correctly —
+// `strings.TrimSuffix(mod, "/go.mod")` didn't match `\go.mod` and
+// yielded a malformed cwd that broke CI's windows job.
 func moduleRoot(t *testing.T) string {
 	t.Helper()
 	cmd := exec.Command("go", "env", "GOMOD")
@@ -164,9 +178,8 @@ func moduleRoot(t *testing.T) string {
 		t.Fatalf("go env GOMOD: %v", err)
 	}
 	mod := strings.TrimSpace(string(out))
-	if mod == "" || mod == "/dev/null" {
+	if mod == "" || mod == "/dev/null" || mod == "NUL" {
 		t.Fatalf("no go.mod found from test cwd")
 	}
-	// Strip /go.mod suffix.
-	return strings.TrimSuffix(mod, "/go.mod")
+	return filepath.Dir(mod)
 }
