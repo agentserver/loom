@@ -776,3 +776,182 @@ func TestHub_Close_DoesNotWaitForLiveWS_DrainsThemInstead(t *testing.T) {
 		t.Fatal("Close blocked for >2s with a live WS connection — counter leaks into read loop (D-fix6 regression)")
 	}
 }
+
+// TestHub_Admission_RaceBetweenPreCheckAndAdd_NoGhostRow is the regression test
+// for BLOCKER 1 (PR #58 fix-round-1): inFlightAdmissions.Add(1) happens AFTER
+// the fast draining pre-check, so Close can race between them and permit an
+// admission to proceed to connectUpsert AFTER the hub has already committed to
+// draining — creating a ghost row that races process exit.
+//
+// Race window (pre-fix code):
+//  1. ServeHTTP: h.draining.Load() returns false.
+//  2. [testHookAfterPreCheck fires — test blocks it]
+//     Test spawns Close: admitMu.Lock → draining=true → Unlock →
+//     inFlightAdmissions.Wait() sees counter=0 → Close returns immediately.
+//  3. Test releases hook. ServeHTTP: h.inFlightAdmissions.Add(1) — too late.
+//  4. ServeHTTP: connectUpsert INSERTs a row (GHOST ROW).
+//  5. ServeHTTP: admitMu.Lock → sees draining=true → draining-rejection → remove.
+//     In production, os.Exit from preStop may fire between 3-5, so remove never
+//     lands and sibling pods see the ghost for up to sweep TTL (5m).
+//
+// Post-fix code (Add(1) inside admitMu, with a serialised draining check):
+//   - If Close acquires admitMu first: draining=true is set. ServeHTTP then
+//     acquires admitMu, sees draining=true, returns 503 with NO connectUpsert.
+//   - If ServeHTTP acquires admitMu first: Add(1) fires (counter=1). Close then
+//     acquires admitMu, sets draining, releases. Close's Wait() blocks on
+//     counter=1 until ServeHTTP's draining-rejection cleanup completes Done().
+//
+// TEST ASSERTION strategy: mandatory sqlmock expectations for connectUpsert.
+//   - Pre-fix: connectUpsert IS called → mock.ExpectationsWereMet() returns nil.
+//     require.Error at the end FAILS → test fails, exposing the ghost-row race.
+//   - Post-fix: connectUpsert NOT called (503 path) → ExpectationsWereMet returns
+//     "expected ExpectedExec ... which was not matched" → require.Error PASSES.
+//
+// The test forces the "Close acquires admitMu first" branch by keeping ServeHTTP
+// stuck in the hook while Close runs to completion. This is deterministic: the
+// hook is invoked synchronously from ServeHTTP AFTER the pre-check but BEFORE
+// ServeHTTP touches admitMu, so admitMu is free for Close.
+//
+// Run as: go test -run TestHub_Admission_RaceBetweenPreCheckAndAdd_NoGhostRow -race -count=5
+func TestHub_Admission_RaceBetweenPreCheckAndAdd_NoGhostRow(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{
+		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
+	}}
+
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+
+	const advertiseURL = "http://pod-race:8091"
+
+	// Mandatory expectations. Post-fix these are UNMET (503 path), which is the
+	// success signal for the test. Pre-fix these will be MET (connectUpsert then
+	// remove fire), which triggers the test failure.
+	mock.ExpectExec(connectUpsertSQL).
+		WithArgs(
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), advertiseURL,
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec(removeSQL).
+		WithArgs(
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+			advertiseURL, sqlmock.AnyArg(),
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	hub := NewHub(resolver)
+	sr := newSharedRegistry(db, advertiseURL)
+	hub.attachSharedRegistry(ClusterRuntime{DB: db, AdvertiseURL: advertiseURL}, sr, nil, nil)
+
+	hookEntered := make(chan struct{}, 1)
+	hookRelease := make(chan struct{})
+
+	hub.testHookAfterPreCheck = func() {
+		select {
+		case hookEntered <- struct{}{}:
+		default:
+		}
+		<-hookRelease
+	}
+
+	srv := httptest.NewServer(hub)
+	t.Cleanup(srv.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/daemon-link"
+
+	// Dial in a goroutine; it will block in the hook.
+	dialDone := make(chan struct{})
+	go func() {
+		defer close(dialDone)
+		conn, _, dialErr := websocket.DefaultDialer.DialContext(context.Background(), wsURL, wsDialHeader("tok-alice"))
+		if dialErr != nil {
+			return // 503 draining — acceptable outcome (post-fix)
+		}
+		defer conn.Close()
+		regPayload, _ := json.Marshal(commander.RegisterPayload{
+			SchemaVersion: commander.SchemaVersion,
+			Kind:          "claude",
+			DisplayName:   "race-precheck-daemon",
+			ShortID:       "agent-precheck-race",
+		})
+		_ = conn.WriteJSON(commander.Envelope{Type: "register", Payload: regPayload})
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Wait until ServeHTTP has passed the fast pre-check (hook fired).
+	select {
+	case <-hookEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("testHookAfterPreCheck never fired — ServeHTTP did not reach the pre-check")
+	}
+
+	// Run Close while ServeHTTP is stuck in the hook. Close should finish quickly
+	// (admitMu is free, counter=0). This models the race in production where
+	// Close/preStop completes before the still-running admission goroutine.
+	var closeErr error
+	var closeReturned atomic.Bool
+	closeDone := make(chan struct{})
+	go func() {
+		defer close(closeDone)
+		closeCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		closeErr = hub.Close(closeCtx)
+		closeReturned.Store(true)
+	}()
+
+	// Wait for Close to actually return before releasing the hook. This ensures
+	// that when ServeHTTP resumes, draining=true is already set AND Close has
+	// already returned — exactly the "Close saw counter=0 and left" scenario.
+	// If Close is still running after 3s, the fix is in place AND ServeHTTP
+	// incremented the counter; release the hook so ServeHTTP finishes.
+	select {
+	case <-closeDone:
+		require.NoError(t, closeErr, "Close must not error")
+	case <-time.After(3 * time.Second):
+		t.Log("Close still running after 3s; releasing hook to let ServeHTTP finish")
+	}
+
+	// Release the hook. Post-fix: ServeHTTP acquires admitMu, sees draining=true,
+	// returns 503, no connectUpsert. Pre-fix: ServeHTTP calls Add(1), then
+	// connectUpsert (registering the ghost row that Close never waited for).
+	close(hookRelease)
+
+	// Ensure Close has returned (may have returned earlier).
+	select {
+	case <-closeDone:
+		require.NoError(t, closeErr, "Close must not error")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return within 5s after hook release")
+	}
+
+	// Wait for the dial goroutine to finish.
+	select {
+	case <-dialDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("dial goroutine did not finish within 5s after Close returned")
+	}
+
+	// Local registry must be empty (both pre- and post-fix should satisfy this).
+	o := owner{userID: "alice", workspaceID: "W1"}
+	require.Empty(t, hub.reg.daemons(o), "local registry must be empty after race + Close")
+
+	// PRIMARY ASSERTION: connectUpsert must NOT have been called.
+	//   - Post-fix: 503 path → connectUpsert unmet → ExpectationsWereMet returns
+	//     error → require.Error PASSES.
+	//   - Pre-fix: connectUpsert IS called → all expectations met →
+	//     ExpectationsWereMet returns nil → require.Error FAILS → test fails,
+	//     exposing the ghost-row window between the pre-check and Add(1).
+	err = mock.ExpectationsWereMet()
+	require.Error(t, err,
+		"connectUpsert was called AFTER Close set draining=true and returned — "+
+			"the pre-check-vs-Add race allowed a ghost row to be admitted. "+
+			"Expected the 503 path (no SQL calls) once Close returned.")
+	t.Logf("post-fix expected unmet expectations: %v", err)
+}

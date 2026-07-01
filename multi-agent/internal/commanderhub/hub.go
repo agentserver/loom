@@ -96,6 +96,15 @@ type Hub struct {
 	// in production (zero value). Not exported; set only from _test.go files in
 	// this package.
 	testHookPostUpsert func()
+
+	// testHookAfterPreCheck, if non-nil, is called immediately after the fast
+	// draining pre-check (h.draining.Load()) and BEFORE h.inFlightAdmissions.Add(1).
+	// Tests use this hook to inject a Close/drain call strictly between the
+	// pre-check and the Add, reproducing the BLOCKER 1 race: Close sets
+	// draining=true, Wait() returns immediately (counter still 0), then ServeHTTP
+	// continues with Add(1) too late. Must be nil in production (zero value). Not
+	// exported; set only from _test.go files in this package.
+	testHookAfterPreCheck func()
 }
 
 // NewHub builds a Hub backed by resolver for bearer-token → Identity resolution.
@@ -119,15 +128,40 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Count this goroutine as in-flight so Close/drainHandler can wait for any
-	// post-upsert cleanup (sharedReg.remove in the draining-rejection branch)
-	// to finish before the process continues with shutdown.
+	// Test hook: fired between the pre-check and the admitMu.Lock below to
+	// reproduce the race where Close runs in this gap. Always nil in production.
+	if h.testHookAfterPreCheck != nil {
+		h.testHookAfterPreCheck()
+	}
+
+	// BLOCKER 1 fix (PR #58 fix-round-1): perform the draining re-check AND
+	// inFlightAdmissions.Add(1) under admitMu, so the pre-check + Add is
+	// serialised against Close's (admitMu.Lock → draining.Store(true) → Unlock)
+	// critical section.
+	//
+	// Ordering guarantees:
+	//   - If ServeHTTP acquires admitMu first: counter++ before Close sees it.
+	//     Close's subsequent Wait() blocks on the non-zero counter until this
+	//     ServeHTTP goroutine finishes its admission cleanup.
+	//   - If Close acquires admitMu first: draining=true. ServeHTTP sees it
+	//     after acquiring admitMu, returns 503 without any Add or upsert.
+	//
+	// This closes the race window where Close could observe counter=0 while a
+	// ServeHTTP goroutine had already passed the fast pre-check but not yet
+	// called Add(1), letting a ghost row leak into the shared registry.
 	//
 	// SCOPE: the counter covers only the admission window — from here until
 	// the admission decision (reg.add succeeds or draining-rejection completes).
 	// It must NOT span the WS read loop (which can last hours), otherwise
 	// Close/drainHandler blocks in inFlightAdmissions.Wait() indefinitely.
+	h.admitMu.Lock()
+	if h.draining.Load() {
+		h.admitMu.Unlock()
+		http.Error(w, "observer draining", http.StatusServiceUnavailable)
+		return
+	}
 	h.inFlightAdmissions.Add(1)
+	h.admitMu.Unlock()
 	admissionDone := false
 	defer func() {
 		if !admissionDone {
