@@ -50,7 +50,12 @@ func (ch *commanderHandlers) daemons(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, map[string]any{"daemons": ch.hub.reg.daemons(o)})
+	infos, err := ch.hub.listDaemons(r.Context(), o)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, map[string]any{"daemons": infos})
 }
 
 func (ch *commanderHandlers) sessionsFanout(w http.ResponseWriter, r *http.Request) {
@@ -185,8 +190,9 @@ func (ch *commanderHandlers) readFile(w http.ResponseWriter, r *http.Request, da
 
 // writeSendCmdError maps a SendCommand error to an HTTP status for the
 // non-streaming handlers. Daemon-originated session_not_found or an absent
-// daemon → 404, invalid_request → 400, anything else → 502. The turn handler
-// streams and forwards error frames as SSE, so it does not use this.
+// daemon → 404, invalid_request → 400, daemon_upgrade_required → 426,
+// anything else → 502. The turn handler streams and forwards error frames
+// as SSE, so it does not use this.
 func writeSendCmdError(w http.ResponseWriter, r *http.Request, err error) {
 	var de *DaemonError
 	if errors.As(err, &de) {
@@ -196,6 +202,9 @@ func writeSendCmdError(w http.ResponseWriter, r *http.Request, err error) {
 			return
 		case commander.ErrCodeInvalidRequest:
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		case commander.ErrCodeDaemonUpgradeRequired:
+			http.Error(w, err.Error(), http.StatusUpgradeRequired)
 			return
 		}
 	}
@@ -223,12 +232,20 @@ func (ch *commanderHandlers) turn(w http.ResponseWriter, r *http.Request, daemon
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return
 	}
-	if _, ok := ch.hub.reg.lookup(o, daemonID); !ok {
+	if _, ok, err := ch.hub.lookupDaemon(r.Context(), o, daemonID); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	} else if !ok {
 		http.NotFound(w, r)
 		return
 	}
-	key := turnKey{owner: o, daemonID: daemonID, sessionID: sid}
-	if !ch.hub.turns.begin(key) {
+	key := turnKey{owner: o, shortID: daemonID, sessionID: sid}
+	began, err := ch.hub.turns.begin(r.Context(), key)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	if !began {
 		http.Error(w, "turn already in flight", http.StatusConflict)
 		return
 	}
@@ -238,20 +255,20 @@ func (ch *commanderHandlers) turn(w http.ResponseWriter, r *http.Request, daemon
 
 	chunkCh, err := ch.hub.SendCommandStream(turnCtx, o, daemonID, "session_turn", args)
 	if errors.Is(err, ErrDaemonNotFound) {
-		ch.hub.turns.finish(key, turnStateDisconnected)
-		ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
+		_ = ch.hub.turns.finish(r.Context(), key, turnStateDisconnected)
+		ch.hub.invalidateDaemonSessions(key.owner, key.shortID)
 		http.NotFound(w, r)
 		return
 	}
 	if errors.Is(err, ErrDaemonGone) {
-		ch.hub.turns.finish(key, turnStateDisconnected)
-		ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
+		_ = ch.hub.turns.finish(r.Context(), key, turnStateDisconnected)
+		ch.hub.invalidateDaemonSessions(key.owner, key.shortID)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	if err != nil {
-		ch.hub.turns.fail(key, err.Error())
-		ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
+		_ = ch.hub.turns.fail(r.Context(), key, err.Error())
+		ch.hub.invalidateDaemonSessions(key.owner, key.shortID)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -274,12 +291,12 @@ func (ch *commanderHandlers) turn(w http.ResponseWriter, r *http.Request, daemon
 			// then propagates the real session into the tree.
 			if env.Type == "command_result" {
 				if realID := payloadSessionID(env.Payload); realID != "" && realID != key.sessionID {
-					realKey := turnKey{owner: key.owner, daemonID: key.daemonID, sessionID: realID}
-					ch.hub.turns.rekey(key, realKey)
+					realKey := turnKey{owner: key.owner, shortID: key.shortID, sessionID: realID}
+					_ = ch.hub.turns.rekey(r.Context(), key, realKey)
 					key = realKey
 				}
 			}
-			ch.updateTurnStateFromEnvelope(key, env)
+			ch.updateTurnStateFromEnvelope(r.Context(), key, env)
 			if writeSSE {
 				sse.writeEnvelope(env)
 			}
@@ -293,34 +310,34 @@ func (ch *commanderHandlers) turn(w http.ResponseWriter, r *http.Request, daemon
 	}
 streamClosed:
 	if !terminal {
-		ch.finishTurnWithoutTerminal(key, turnCtx.Err(), sse, writeSSE)
+		ch.finishTurnWithoutTerminal(r.Context(), key, turnCtx.Err(), sse, writeSSE)
 	}
 }
 
-func (ch *commanderHandlers) finishTurnWithoutTerminal(key turnKey, ctxErr error, sse *sseWriter, writeSSE bool) {
+func (ch *commanderHandlers) finishTurnWithoutTerminal(ctx context.Context, key turnKey, ctxErr error, sse *sseWriter, writeSSE bool) {
 	switch {
 	case errors.Is(ctxErr, context.DeadlineExceeded):
 		msg := "no terminal frame within timeout"
-		ch.hub.turns.fail(key, msg)
+		_ = ch.hub.turns.fail(ctx, key, msg)
 		if writeSSE {
 			sse.emitError("timeout", msg)
 		}
 	case errors.Is(ctxErr, context.Canceled):
 		msg := context.Canceled.Error()
-		ch.hub.turns.fail(key, msg)
+		_ = ch.hub.turns.fail(ctx, key, msg)
 		if writeSSE {
 			sse.emitError("request_canceled", msg)
 		}
 	default:
-		ch.hub.turns.finish(key, turnStateDisconnected)
+		_ = ch.hub.turns.finish(ctx, key, turnStateDisconnected)
 		if writeSSE {
 			sse.emitError(commander.ErrCodeBackendUnavailable, "daemon disconnected")
 		}
 	}
-	ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
+	ch.hub.invalidateDaemonSessions(key.owner, key.shortID)
 }
 
-func (ch *commanderHandlers) updateTurnStateFromEnvelope(key turnKey, env commander.Envelope) {
+func (ch *commanderHandlers) updateTurnStateFromEnvelope(ctx context.Context, key turnKey, env commander.Envelope) {
 	switch env.Type {
 	case "event":
 		var ep commander.EventPayload
@@ -331,43 +348,43 @@ func (ch *commanderHandlers) updateTurnStateFromEnvelope(key turnKey, env comman
 		case "status":
 			switch ep.StatusCode {
 			case agentbackend.StatusQueued:
-				ch.hub.turns.set(key, turnStateQueued)
+				_ = ch.hub.turns.set(ctx, key, turnStateQueued)
 			case agentbackend.StatusStarting:
-				ch.hub.turns.set(key, turnStateQueued)
+				_ = ch.hub.turns.set(ctx, key, turnStateQueued)
 			case agentbackend.StatusAnswering:
-				ch.hub.turns.set(key, turnStateAnswering)
+				_ = ch.hub.turns.set(ctx, key, turnStateAnswering)
 			case agentbackend.StatusAwaitingApproval:
-				ch.hub.turns.finish(key, turnStateAwaitingApproval)
-				ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
+				_ = ch.hub.turns.finish(ctx, key, turnStateAwaitingApproval)
+				ch.hub.invalidateDaemonSessions(key.owner, key.shortID)
 			case agentbackend.StatusDone:
-				ch.hub.turns.finish(key, turnStateDone)
-				ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
+				_ = ch.hub.turns.finish(ctx, key, turnStateDone)
+				ch.hub.invalidateDaemonSessions(key.owner, key.shortID)
 			case agentbackend.StatusError:
-				ch.hub.turns.fail(key, ep.Text)
-				ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
+				_ = ch.hub.turns.fail(ctx, key, ep.Text)
+				ch.hub.invalidateDaemonSessions(key.owner, key.shortID)
 			default:
 				switch ep.Text {
 				case "queued on daemon", "queued-on-daemon", "accepted by daemon":
-					ch.hub.turns.set(key, turnStateQueued)
+					_ = ch.hub.turns.set(ctx, key, turnStateQueued)
 				case "starting codex":
-					ch.hub.turns.set(key, turnStateQueued)
+					_ = ch.hub.turns.set(ctx, key, turnStateQueued)
 				case "codex running":
-					ch.hub.turns.set(key, turnStateAnswering)
+					_ = ch.hub.turns.set(ctx, key, turnStateAnswering)
 				}
 			}
 		case "chunk":
-			ch.hub.turns.set(key, turnStateAnswering)
+			_ = ch.hub.turns.set(ctx, key, turnStateAnswering)
 		}
 	case "command_result":
 		if payloadAwaitingUser(env.Payload) {
-			ch.hub.turns.finish(key, turnStateAwaitingApproval)
+			_ = ch.hub.turns.finish(ctx, key, turnStateAwaitingApproval)
 		} else {
-			ch.hub.turns.finish(key, turnStateDone)
+			_ = ch.hub.turns.finish(ctx, key, turnStateDone)
 		}
-		ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
+		ch.hub.invalidateDaemonSessions(key.owner, key.shortID)
 	case "error":
-		ch.hub.turns.fail(key, errorMessage(env.Payload))
-		ch.hub.invalidateDaemonSessions(key.owner, key.daemonID)
+		_ = ch.hub.turns.fail(ctx, key, errorMessage(env.Payload))
+		ch.hub.invalidateDaemonSessions(key.owner, key.shortID)
 	}
 }
 

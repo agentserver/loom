@@ -15,6 +15,8 @@ require (
 	modernc.org/sqlite v1.50.0
 )
 
+require github.com/DATA-DOG/go-sqlmock v1.5.2
+
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect

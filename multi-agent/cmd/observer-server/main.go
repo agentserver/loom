@@ -3,19 +3,26 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/yourorg/multi-agent/internal/commanderhub"
 	"github.com/yourorg/multi-agent/internal/commanderhub/authstore"
 	"github.com/yourorg/multi-agent/internal/identity"
 	agentidentity "github.com/yourorg/multi-agent/internal/identity/agentserver"
@@ -35,7 +42,37 @@ type Config struct {
 	ObjectStore ObjectStoreConfig `yaml:"object_store"`
 	Telemetry   TelemetryConfig   `yaml:"telemetry"`
 	Identity    IdentityConfig    `yaml:"identity"`
+	Cluster     ClusterConfig     `yaml:"cluster"`
 	Production  bool              `yaml:"production"`
+}
+
+// ClusterConfig configures multi-pod cluster mode for the observer-server.
+// When Enabled is false all other fields are ignored. When Enabled is true
+// the server starts a second internal HTTP listener on InternalListenAddr and
+// registers itself in the shared Postgres registry via AdvertiseURL.
+//
+// Env-indirection fields (advertise_url_env, secret_env, prev_secret_env):
+// If the direct value field (e.g. AdvertiseURL) is empty but the corresponding
+// *Env field is non-empty, loadConfig resolves the value via os.Getenv after
+// YAML merge. This allows Kubernetes Deployments to inject per-pod values
+// (e.g. POD_IP-derived advertise URL) via environment variables while keeping
+// the config file in a ConfigMap rather than a Secret.
+type ClusterConfig struct {
+	Enabled             bool          `yaml:"enabled"`
+	AdvertiseURL        string        `yaml:"advertise_url"`
+	AdvertiseURLEnv     string        `yaml:"advertise_url_env,omitempty"`
+	InternalListenAddr  string        `yaml:"internal_listen_addr"`
+	Secret              string        `yaml:"secret"`
+	SecretEnv           string        `yaml:"secret_env,omitempty"`
+	PrevSecret          string        `yaml:"prev_secret,omitempty"`
+	PrevSecretEnv       string        `yaml:"prev_secret_env,omitempty"`
+	HeartbeatInterval   time.Duration `yaml:"heartbeat_interval"`
+	HeartbeatJitter     time.Duration `yaml:"heartbeat_jitter"`
+	SweepInterval       time.Duration `yaml:"sweep_interval"`
+	DaemonExpiryAfter   time.Duration `yaml:"daemon_expiry_after"`
+	ForwardTimeout      time.Duration `yaml:"forward_timeout"`
+	DrainTimeout        time.Duration `yaml:"drain_timeout"`
+	SessionListCacheTTL time.Duration `yaml:"session_list_cache_ttl"`
 }
 
 type APIKeyConfig struct {
@@ -109,13 +146,30 @@ type IdentityConfig struct {
 }
 
 type AgentserverIdentityConfig struct {
-	Enabled        bool           `yaml:"enabled"`
-	URL            string         `yaml:"url"`
-	FreshTTL       durationConfig `yaml:"fresh_ttl"`
-	StaleGrace     durationConfig `yaml:"stale_grace"`
-	RequestTimeout durationConfig `yaml:"request_timeout"`
-	CacheCapacity  int            `yaml:"cache_capacity"`
-	StartupProbe   bool           `yaml:"startup_probe"`
+	Enabled           bool           `yaml:"enabled"`
+	URL               string         `yaml:"url"`
+	FreshTTL          durationConfig `yaml:"fresh_ttl"`
+	StaleGrace        durationConfig `yaml:"stale_grace"`
+	RequestTimeout    durationConfig `yaml:"request_timeout"`
+	CacheCapacity     int            `yaml:"cache_capacity"`
+	StartupProbe      bool           `yaml:"startup_probe"`
+	// RevocationChannel controls which cross-pod revocation backend to use.
+	// The field is a pointer so that absent (nil) and explicit-empty ("") are
+	// semantically distinct:
+	//
+	//   nil        — "auto": attach PG revocation channel when store.driver=postgres
+	//                (same as the pre-v19 behaviour; safe for single-pod deployments)
+	//   ptr("")    — "disabled": never attach the PG revocation channel, even with a
+	//                Postgres store. The chart emits revocation_channel: "" when
+	//                revocationChannel=disabled so this is reliably distinguishable
+	//                from the absent/auto case.
+	//   ptr("postgres") — always attach the PG revocation channel (explicit opt-in;
+	//                required when running multi-pod without cluster.enabled but with
+	//                a shared Postgres store). The chart emits
+	//                revocation_channel: "postgres" when revocationChannel=enabled.
+	//
+	// Any other non-nil value is rejected as fatal at startup.
+	RevocationChannel *string `yaml:"revocation_channel"`
 }
 
 type LegacyAPIKeysConfig struct {
@@ -144,10 +198,16 @@ func main() {
 	cfgPath := flag.String("config", "observer.yaml", "path to observer config")
 	migrateOnly := flag.Bool("migrate-only", false, "run database migrations and exit")
 	retentionCleanup := flag.Bool("retention-cleanup", false, "delete expired telemetry events and exit")
+	drainLocal := flag.Bool("drain-local", false, "POST to the local internal drain endpoint and exit (used by preStop hook)")
+	internalPort := flag.Int("internal-port", 0, "internal listener port for --drain-local (overrides config cluster.internal_listen_addr port)")
 	flag.Parse()
 
-	cfg, err := loadConfig(*cfgPath)
+	cfg, err := loadConfig(*cfgPath, *migrateOnly || *retentionCleanup)
 	if err != nil {
+		if *drainLocal {
+			// On drain, config errors are fatal — the operator must fix them.
+			log.Fatalf("drain-local: failed to load config: %v", err)
+		}
 		log.Fatal(err)
 	}
 	if *migrateOnly {
@@ -163,6 +223,12 @@ func main() {
 			log.Fatal(err)
 		}
 		log.Printf("observer-server retention cleanup deleted %d events", deleted)
+		return
+	}
+	if *drainLocal {
+		if err := runDrainLocal(cfg, *internalPort); err != nil {
+			log.Fatalf("drain-local: %v", err)
+		}
 		return
 	}
 
@@ -182,6 +248,21 @@ func main() {
 		}
 	}
 	log.Printf("observer-server loaded %d api_keys", len(specs))
+
+	// Run authstore migration BEFORE building the identity resolver.
+	// The PG revocation channel (LISTEN/NOTIFY) requires the
+	// commander_identity_revocations table to exist at subscribe time. If we
+	// migrate after building the resolver, the subscribe call fails once (fresh
+	// DB) and is never retried — resulting in no cross-pod revocations.
+	//
+	// Also migrates when the cluster telemetry PG limiter is selected
+	// (telemetry + cluster + postgres) so commander_telemetry_buckets is
+	// present before the first telemetry request hits the table.
+	if cfg.Store.Driver == "postgres" && needsCommanderDDL(cfg) {
+		if err := authstore.MigratePostgres(st.DB()); err != nil {
+			log.Fatalf("commanderhub authstore migrate (pre-resolver): %v", err)
+		}
+	}
 
 	resolver, err := buildIdentityResolver(cfg, st)
 	if err != nil {
@@ -227,13 +308,27 @@ func main() {
 	}
 
 	// Only build the auth store + apply commander DDL when commander is
-	// actually being mounted. observerweb.NewWithResolverOptions guards the
+	// actually being mounted. observerweb.NewWithResolverOptionsHub guards the
 	// MountAll call by AgentserverURL != "" (see internal/observerweb/server.go),
 	// so a non-commander Postgres deployment has no use for commander_logins /
 	// commander_sessions and shouldn't pay the migration cost or be coupled to
 	// new DDL during rollouts.
 	opts := observerWebOptions(cfg, objects)
+	if cfg.Telemetry.Enabled && cfg.Cluster.Enabled && cfg.Store.Driver == "postgres" {
+		// Use the shared-Postgres token-bucket limiter only in cluster mode.
+		// The commander_telemetry_buckets table is only migrated behind the cluster
+		// gate; a single-pod Postgres deployment lacks the table and would get 503s.
+		// Single-pod deployments keep the in-memory limiter.
+		observerweb.SetPGTelemetryLimiter(
+			&opts,
+			st.DB(),
+			cfg.Telemetry.RateLimit.PerMinute,
+			cfg.Telemetry.RateLimit.Burst,
+		)
+	}
 	if opts.AgentserverURL != "" {
+		// buildCommanderAuthStore may migrate again (idempotent) but skips it
+		// if already done above (postgres: IF NOT EXISTS DDL is idempotent).
 		authStore, err := buildCommanderAuthStore(cfg, st.DB())
 		if err != nil {
 			log.Fatal(err)
@@ -241,12 +336,85 @@ func main() {
 		opts.AuthStore = authStore
 	}
 
+	// Wire cluster mode: when enabled, build the ClusterRuntime (with timing
+	// overrides) and provide an internalMux for the dual-listener setup.
+	if cfg.Cluster.Enabled {
+		secret, _ := hex.DecodeString(cfg.Cluster.Secret)
+		var prevSecret []byte
+		if cfg.Cluster.PrevSecret != "" {
+			prevSecret, _ = hex.DecodeString(cfg.Cluster.PrevSecret)
+		}
+		opts.Cluster = commanderhub.ClusterRuntime{
+			DB:                 st.DB(),
+			AdvertiseURL:       cfg.Cluster.AdvertiseURL,
+			Secret:             secret,
+			PrevSecret:         prevSecret,
+			InternalListenAddr: cfg.Cluster.InternalListenAddr,
+			// Propagate timing config values so they are used by sharedRegistry /
+			// forwardClient instead of their hardcoded defaults.
+			HeartbeatInterval: cfg.Cluster.HeartbeatInterval,
+			SweepInterval:     cfg.Cluster.SweepInterval,
+			DaemonExpiryAfter: cfg.Cluster.DaemonExpiryAfter,
+			ForwardTimeout:    cfg.Cluster.ForwardTimeout,
+		}
+		opts.InternalMux = http.NewServeMux()
+	}
+
 	log.Printf("observer-server listening on %s", cfg.ListenAddr)
-	app := observerweb.NewWithResolverOptions(st, usHandler, resolver, opts)
-	srv := newHTTPServer(cfg.ListenAddr, withHealth(app, func(ctx context.Context) error {
+	// Use NewWithResolverOptionsHub so we can call hub.Close during shutdown
+	// to drain daemon WebSocket connections before stopping the listeners.
+	app, hub := observerweb.NewWithResolverOptionsHub(st, usHandler, resolver, opts)
+	publicSrv := newPublicHTTPServer(cfg.ListenAddr, withHealth(app, func(ctx context.Context) error {
 		return st.DB().PingContext(ctx)
 	}))
-	log.Fatal(srv.ListenAndServe())
+
+	var internalSrv *http.Server
+	if cfg.Cluster.Enabled && opts.InternalMux != nil {
+		log.Printf("observer-server cluster mode enabled; internal listener on %s (advertise=%s)",
+			cfg.Cluster.InternalListenAddr, cfg.Cluster.AdvertiseURL)
+		internalSrv = newInternalHTTPServer(cfg.Cluster.InternalListenAddr, opts.InternalMux)
+		go func() {
+			if err := internalSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("observer-server internal listener error: %v", err)
+			}
+		}()
+	}
+
+	go func() {
+		if err := publicSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("observer-server public listener error: %v", err)
+		}
+	}()
+
+	// Wait for termination signal.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+	log.Printf("observer-server shutting down")
+
+	drainTimeout := cfg.Cluster.DrainTimeout
+	if drainTimeout <= 0 {
+		drainTimeout = 10 * time.Second
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), drainTimeout+5*time.Second)
+	defer cancel()
+
+	// Drain hub BEFORE stopping HTTP servers: closes daemon WebSocket connections
+	// and removes shared-registry rows so peer pods see them as gone immediately.
+	if hub != nil {
+		if err := hub.Close(shutdownCtx); err != nil {
+			log.Printf("observer-server hub close: %v", err)
+		}
+	}
+
+	if err := publicSrv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("observer-server public server shutdown: %v", err)
+	}
+	if internalSrv != nil {
+		if err := internalSrv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("observer-server internal server shutdown: %v", err)
+		}
+	}
 }
 
 func runMigrationsOnly(cfg *Config) error {
@@ -259,9 +427,11 @@ func runMigrationsOnly(cfg *Config) error {
 	if err := userspace.MigrateForDriver(st.DB(), cfg.Store.Driver); err != nil {
 		return fmt.Errorf("userspace migrate: %w", err)
 	}
-	// Mirror the runtime gate above: only apply commander DDL when this
-	// deployment will actually mount the commander surface.
-	if cfg.Store.Driver == "postgres" && strings.TrimSpace(cfg.Identity.Agentserver.URL) != "" {
+	// Apply commander DDL when the runtime would need it. Uses the same gate
+	// as the startup path: commander enabled OR telemetry+cluster+postgres
+	// (which selects the shared-PG telemetry limiter and requires the
+	// commander_telemetry_buckets table to exist).
+	if cfg.Store.Driver == "postgres" && needsCommanderDDL(cfg) {
 		if err := authstore.MigratePostgres(st.DB()); err != nil {
 			return fmt.Errorf("commanderhub authstore migrate: %w", err)
 		}
@@ -295,6 +465,92 @@ func buildCommanderAuthStore(cfg *Config, db *sql.DB) (authstore.Store, error) {
 
 func shouldMigrateUserspaceOnStartup(driver string) bool {
 	return driver != "postgres" && driver != "pgx"
+}
+
+// needsCommanderDDL returns true when the commander_* tables (including
+// commander_telemetry_buckets) must be present in the database. This is true
+// when:
+//   - Commander is enabled (AgentserverURL is set), OR
+//   - The cluster telemetry PG limiter is selected (telemetry enabled AND cluster
+//     enabled AND store driver is postgres). The SetPGTelemetryLimiter gate in
+//     main() selects the shared-PG limiter exactly when these three conditions
+//     are met; failing to migrate in that case leaves the table absent and
+//     produces 503s on the first telemetry call.
+func needsCommanderDDL(cfg *Config) bool {
+	if strings.TrimSpace(cfg.Identity.Agentserver.URL) != "" {
+		return true
+	}
+	if cfg.Telemetry.Enabled && cfg.Cluster.Enabled && cfg.Store.Driver == "postgres" {
+		return true
+	}
+	return false
+}
+
+// runDrainLocal is the implementation of the --drain-local subcommand used by
+// the Kubernetes preStop hook. It POSTs to the local internal drain endpoint
+// so that in-flight daemon WebSocket connections are gracefully closed before
+// the pod terminates. The loopback bypass on the internal listener (see C5)
+// means no auth header is required.
+//
+// Exit behaviour (called via log.Fatalf in main):
+//   - Returns non-nil on config-read errors (→ exit 1).
+//   - Returns nil (success) on HTTP 200 from the drain endpoint.
+//   - Returns nil on connection-refused — the server may already have stopped;
+//     this is not treated as an error so Kubernetes does not mark the preStop
+//     as failed (which would cause an immediate SIGKILL rather than the
+//     configured terminationGracePeriodSeconds).
+func runDrainLocal(cfg *Config, portOverride int) error {
+	// Determine the internal port to contact.
+	internalAddr := cfg.Cluster.InternalListenAddr
+	if portOverride > 0 {
+		internalAddr = fmt.Sprintf(":%d", portOverride)
+	}
+	if internalAddr == "" {
+		// Cluster mode is disabled or the config is incomplete; nothing to drain.
+		log.Printf("drain-local: cluster.internal_listen_addr not set; skipping drain")
+		return nil
+	}
+
+	// Extract port from the listen addr (e.g. ":8091" → "8091").
+	_, port, err := net.SplitHostPort(internalAddr)
+	if err != nil {
+		return fmt.Errorf("cannot parse cluster.internal_listen_addr %q: %w", internalAddr, err)
+	}
+	drainURL := fmt.Sprintf("http://127.0.0.1:%s/api/commander/_internal/drain", port)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, drainURL, nil)
+	if err != nil {
+		return fmt.Errorf("building drain request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		// connection-refused means the server already stopped — not an error.
+		if isConnectionRefused(err) {
+			log.Printf("drain-local: server already stopped (connection refused); exiting cleanly")
+			return nil
+		}
+		return fmt.Errorf("drain POST to %s: %w", drainURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("drain endpoint returned %d (expected 200)", resp.StatusCode)
+	}
+	log.Printf("drain-local: drain complete (HTTP 200 from %s)", drainURL)
+	return nil
+}
+
+// isConnectionRefused reports whether err (from http.Client.Do) is a
+// connection-refused error, which means the server has already exited.
+func isConnectionRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "connection refused")
 }
 
 func runRetentionCleanup(cfg *Config) (int64, error) {
@@ -443,7 +699,7 @@ func openObjectStore(cfg *Config) (objectstore.Store, error) {
 	}
 }
 
-func loadConfig(path string) (*Config, error) {
+func loadConfig(path string, jobMode bool) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -467,6 +723,32 @@ func loadConfig(path string) (*Config, error) {
 	if err := dec.Decode(&cfg); err != nil {
 		return nil, err
 	}
+	// v4: also merge a sibling nonsecret/observer.nonsecret.yaml when present.
+	// This allows the cluster: block and identity cache overrides to be
+	// delivered via ConfigMap rather than Secret, which is required for
+	// existingSecret deployments where secret.create=false.
+	nonsecretPath := filepath.Join(filepath.Dir(path), "nonsecret", "observer.nonsecret.yaml")
+	if nonsecretData, err := os.ReadFile(nonsecretPath); err == nil {
+		nsDec := yaml.NewDecoder(bytes.NewReader(nonsecretData))
+		nsDec.KnownFields(true)
+		if err := nsDec.Decode(&cfg); err != nil {
+			return nil, fmt.Errorf("observer.nonsecret.yaml: %w", err)
+		}
+	}
+	// Resolve env-indirection fields on ClusterConfig. Operators may set
+	// advertise_url_env / secret_env / prev_secret_env in the ConfigMap so
+	// that per-pod values (e.g. POD_IP-derived URL) are injected at runtime
+	// without storing them in a Secret. Direct fields take precedence.
+	if cfg.Cluster.AdvertiseURL == "" && cfg.Cluster.AdvertiseURLEnv != "" {
+		cfg.Cluster.AdvertiseURL = os.Getenv(cfg.Cluster.AdvertiseURLEnv)
+	}
+	if cfg.Cluster.Secret == "" && cfg.Cluster.SecretEnv != "" {
+		cfg.Cluster.Secret = os.Getenv(cfg.Cluster.SecretEnv)
+	}
+	if cfg.Cluster.PrevSecret == "" && cfg.Cluster.PrevSecretEnv != "" {
+		cfg.Cluster.PrevSecret = os.Getenv(cfg.Cluster.PrevSecretEnv)
+	}
+
 	if cfg.Production && !yamlPathExists(data, "identity", "legacy_api_keys", "enabled") {
 		cfg.Identity.LegacyAPIKeys.Enabled = false
 	}
@@ -509,7 +791,28 @@ func loadConfig(path string) (*Config, error) {
 	if cfg.Telemetry.RetentionDays == 0 {
 		cfg.Telemetry.RetentionDays = 30
 	}
-	if err := validateConfig(&cfg); err != nil {
+	// Cluster defaults — applied before validation so rules can use them.
+	if cfg.Cluster.Enabled {
+		if cfg.Cluster.HeartbeatInterval == 0 {
+			cfg.Cluster.HeartbeatInterval = 30 * time.Second
+		}
+		if cfg.Cluster.HeartbeatJitter == 0 {
+			cfg.Cluster.HeartbeatJitter = 5 * time.Second
+		}
+		if cfg.Cluster.SweepInterval == 0 {
+			cfg.Cluster.SweepInterval = 60 * time.Second
+		}
+		if cfg.Cluster.DaemonExpiryAfter == 0 {
+			cfg.Cluster.DaemonExpiryAfter = 90 * time.Second
+		}
+		if cfg.Cluster.ForwardTimeout == 0 {
+			cfg.Cluster.ForwardTimeout = 5 * time.Second
+		}
+		if cfg.Cluster.DrainTimeout == 0 {
+			cfg.Cluster.DrainTimeout = 10 * time.Second
+		}
+	}
+	if err := validateConfig(&cfg, jobMode); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
@@ -557,7 +860,7 @@ func userspaceBlobRoot(sqlitePath string) string {
 	return filepath.Join(filepath.Dir(sqlitePath), "userspace-blobs")
 }
 
-func validateConfig(cfg *Config) error {
+func validateConfig(cfg *Config, skipCluster bool) error {
 	if !cfg.Identity.LegacyAPIKeys.Enabled && !cfg.Identity.Agentserver.Enabled {
 		return fmt.Errorf("at least one identity source must be enabled")
 	}
@@ -616,7 +919,124 @@ func validateConfig(cfg *Config) error {
 		return fmt.Errorf("telemetry.max_body_bytes must be <= 1048576")
 	}
 
+	// Validate revocation_channel if set. nil = auto is always valid.
+	if rc := cfg.Identity.Agentserver.RevocationChannel; rc != nil {
+		if *rc != "" && *rc != "postgres" {
+			return fmt.Errorf("identity.agentserver.revocation_channel: unknown value %q (accepted: omitted/auto, empty-string/disabled, \"postgres\")", *rc)
+		}
+	}
+
+	// Job modes (--migrate-only, --retention-cleanup) don't run forwarding,
+	// drain, or heartbeat — they don't need the cluster runtime. Skip cluster
+	// validation so the mounted nonsecret ConfigMap (which sets cluster.enabled:
+	// true) doesn't cause a crashloop when the job container lacks the cluster
+	// env vars that the Deployment carries.
+	if !skipCluster {
+		if err := validateClusterConfig(&cfg.Cluster, cfg.Store.Driver); err != nil {
+			return err
+		}
+	}
+
 	return nil
+}
+
+// validateClusterConfig validates the cluster configuration block.
+// It is fail-closed: any inconsistency returns an error rather than silently
+// disabling cluster mode. Must be called after defaults are applied.
+func validateClusterConfig(c *ClusterConfig, storeDriver string) error {
+	if !c.Enabled {
+		// Reject partial cluster config when cluster is disabled to catch
+		// misconfigurations where the user set cluster fields but forgot
+		// to set cluster.enabled: true.
+		if c.AdvertiseURL != "" {
+			return fmt.Errorf("cluster.advertise_url is set but cluster.enabled is false")
+		}
+		if c.InternalListenAddr != "" {
+			return fmt.Errorf("cluster.internal_listen_addr is set but cluster.enabled is false")
+		}
+		if c.Secret != "" {
+			return fmt.Errorf("cluster.secret is set but cluster.enabled is false")
+		}
+		return nil
+	}
+	if c.AdvertiseURL == "" {
+		return fmt.Errorf("cluster.advertise_url is required when cluster.enabled is true")
+	}
+	if c.InternalListenAddr == "" {
+		return fmt.Errorf("cluster.internal_listen_addr is required when cluster.enabled is true")
+	}
+	if c.Secret == "" {
+		return fmt.Errorf("cluster.secret is required when cluster.enabled is true")
+	}
+
+	// Validate AdvertiseURL is a well-formed http/https URL and not localhost.
+	u, err := url.Parse(c.AdvertiseURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("cluster.advertise_url must be an http or https URL")
+	}
+	advertiseHost := u.Hostname()
+	if advertiseHost == "localhost" || strings.HasPrefix(advertiseHost, "127.") || advertiseHost == "::1" {
+		return fmt.Errorf("cluster.advertise_url must not use a loopback address (got %q)", advertiseHost)
+	}
+
+	// internal_listen_addr must bind to a wildcard or loopback-only interface.
+	// runDrainLocal always contacts 127.0.0.1:<port>; if the listener is bound
+	// to a specific non-loopback IP (e.g. 10.x.x.x) the preStop drain silently
+	// gets connection-refused and daemons are not drained.  Hostname binds like
+	// "localhost" are also disallowed — require literal IP for predictability.
+	//
+	// Allowed hosts: "" (wildcard ":port"), "0.0.0.0", "127.0.0.1", "::", "::1".
+	// Everything else, including symbolic hostnames and non-loopback IPs, is fatal.
+	internalHost, _, _ := net.SplitHostPort(c.InternalListenAddr)
+	switch internalHost {
+	case "", "0.0.0.0", "127.0.0.1", "::", "::1":
+		// accepted: wildcard or explicit loopback
+	default:
+		return fmt.Errorf(
+			"cluster.internal_listen_addr host %q is not a wildcard or loopback address "+
+				"(accepted: empty/:port, 0.0.0.0, 127.0.0.1, ::, ::1); "+
+				"runDrainLocal contacts 127.0.0.1 so non-wildcard non-loopback binds break preStop drain",
+			internalHost)
+	}
+	// Additionally reject loopback-only binds paired with a non-loopback advertise_url
+	// because peers would advertise an address they cannot reach internally.
+	if internalHost == "127.0.0.1" || internalHost == "::1" {
+		return fmt.Errorf("cluster.internal_listen_addr binds to loopback (%q) but cluster.advertise_url (%q) is non-loopback — peers cannot reach this pod", c.InternalListenAddr, c.AdvertiseURL)
+	}
+
+	// Validate secret: must be hex-decodable and at least 32 bytes (256-bit).
+	secretBytes, err := hex.DecodeString(c.Secret)
+	if err != nil || len(secretBytes) < 32 {
+		return fmt.Errorf("cluster.secret is empty or too short (must be at least 64 hex chars / 32 bytes)")
+	}
+
+	// Validate prev_secret if set.
+	if c.PrevSecret != "" {
+		prevBytes, err := hex.DecodeString(c.PrevSecret)
+		if err != nil || len(prevBytes) < 32 {
+			return fmt.Errorf("cluster.prev_secret is invalid (must be at least 64 hex chars / 32 bytes)")
+		}
+	}
+
+	// Heartbeat must beat expiry.
+	if c.HeartbeatInterval >= c.DaemonExpiryAfter {
+		return fmt.Errorf("cluster.heartbeat_interval (%s) must be less than cluster.daemon_expiry_after (%s)",
+			c.HeartbeatInterval, c.DaemonExpiryAfter)
+	}
+
+	// Cluster registry requires Postgres.
+	if storeDriver != "postgres" {
+		return fmt.Errorf("cluster.enabled requires store.driver=postgres (got %q)", storeDriver)
+	}
+
+	return nil
+}
+
+// advertiseHash returns a 4-hex-char prefix of the SHA-256 of the advertise
+// URL. Used by hub.go::nextCmdID to make command IDs unique across pods.
+func advertiseHash(rawURL string) string {
+	sum := sha256.Sum256([]byte(rawURL))
+	return hex.EncodeToString(sum[:])[:4]
 }
 
 func buildIdentityResolver(cfg *Config, st observerstore.ManagedStore) (identity.Resolver, error) {
@@ -629,11 +1049,47 @@ func buildIdentityResolver(cfg *Config, st observerstore.ManagedStore) (identity
 			BaseURL: strings.TrimSpace(cfg.Identity.Agentserver.URL),
 			Timeout: cfg.Identity.Agentserver.RequestTimeout.Duration(),
 		})
+		var cacheOpts []identity.Option
+		// Attach a cross-pod revocation channel so token invalidations propagate
+		// to all pods without waiting for TTL expiry.
+		// Pointer semantics (see AgentserverIdentityConfig.RevocationChannel):
+		//   nil          → auto: enable PG revocation when store.driver=postgres
+		//   ptr("")      → disabled: never enable, even with a Postgres store
+		//   ptr("postgres") → always enable
+		//   ptr(other)   → fatal (caught by validateConfig before reaching here)
+		rc := cfg.Identity.Agentserver.RevocationChannel
+		var usePGRevocation bool
+		switch {
+		case rc == nil:
+			// auto: fall back to store-driver heuristic.
+			usePGRevocation = cfg.Store.Driver == "postgres"
+		case *rc == "":
+			// explicit disabled: never use PG revocation.
+			usePGRevocation = false
+		case *rc == "postgres":
+			// explicit opt-in.
+			usePGRevocation = true
+		default:
+			// Should be caught by validateConfig; guard here defensively.
+			return nil, fmt.Errorf("identity.agentserver.revocation_channel: unknown value %q (must be empty or \"postgres\")", *rc)
+		}
+		if usePGRevocation {
+			cacheOpts = append(cacheOpts,
+				identity.WithRevocationChannel(identity.NewPGRevocationChannel(st.DB())),
+			)
+		}
+		freshTTL := cfg.Identity.Agentserver.FreshTTL.Duration()
+		// In cluster mode, use 30s FreshTTL (per v19 spec §identity cache TTLs)
+		// when the user has not set an explicit value. The default of 180s is
+		// too long for multi-pod revocation propagation scenarios.
+		if cfg.Cluster.Enabled && freshTTL == 180*time.Second {
+			freshTTL = 30 * time.Second
+		}
 		resolvers = append(resolvers, identity.NewCache(upstream, identity.CacheConfig{
-			FreshTTL:   cfg.Identity.Agentserver.FreshTTL.Duration(),
+			FreshTTL:   freshTTL,
 			StaleGrace: cfg.Identity.Agentserver.StaleGrace.Duration(),
 			Capacity:   cfg.Identity.Agentserver.CacheCapacity,
-		}))
+		}, cacheOpts...))
 	}
 	if len(resolvers) == 0 {
 		return nil, errors.New("at least one identity source must be enabled")
@@ -717,13 +1173,35 @@ func withHealth(app http.Handler, ready func(context.Context) error) http.Handle
 	return mux
 }
 
-func newHTTPServer(addr string, h http.Handler) *http.Server {
+// newPublicHTTPServer creates the public-facing HTTP server. WriteTimeout is 0
+// because SSE and streaming turns can run for 10+ minutes; rely on per-request
+// context deadlines and ReadHeaderTimeout to bound slow/stuck clients.
+func newPublicHTTPServer(addr string, h http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              addr,
 		Handler:           h,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      60 * time.Second,
+		WriteTimeout:      0, // streaming SSE / forwarded turns have no fixed bound
 		IdleTimeout:       120 * time.Second,
 	}
+}
+
+// newInternalHTTPServer creates the internal (cluster-only) HTTP server.
+// WriteTimeout is 0 because forwarded streaming turns have no fixed duration.
+func newInternalHTTPServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      0, // forwarded streaming turns have no fixed duration
+		IdleTimeout:       120 * time.Second,
+	}
+}
+
+// newHTTPServer is kept for compatibility with tests that use it directly.
+// New code should prefer newPublicHTTPServer or newInternalHTTPServer.
+func newHTTPServer(addr string, h http.Handler) *http.Server {
+	return newPublicHTTPServer(addr, h)
 }

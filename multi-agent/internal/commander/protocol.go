@@ -11,9 +11,10 @@ import "encoding/json"
 const SchemaVersion = 1
 
 const (
-	CapabilitySessions = "sessions"
-	CapabilityTurn     = "turn"
-	CapabilityFiles    = "files"
+	CapabilitySessions               = "sessions"
+	CapabilityTurn                   = "turn"
+	CapabilityFiles                  = "files"
+	CapabilityFilePreviewEncodedCap  = "file_preview_encoded_cap"
 )
 
 const MaxFilePreviewBytes int64 = 2 * 1024 * 1024
@@ -126,4 +127,5 @@ const (
 	ErrCodeSchemaVersionMismatch = "schema_version_mismatch"
 	ErrCodeInvalidRequest        = "invalid_request"
 	ErrCodeInternal              = "internal"
+	ErrCodeDaemonUpgradeRequired = "daemon_upgrade_required"
 )

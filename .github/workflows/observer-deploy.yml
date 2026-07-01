@@ -93,11 +93,16 @@ jobs:
           minio_user = "minio" + "".join(secrets.choice(alphabet) for _ in range(12))
           minio_password = "".join(secrets.choice(alphabet) for _ in range(32))
           telemetry_key = "".join(secrets.choice(alphabet) for _ in range(32))
+          cluster_secret = secrets.token_hex(32)
+          cluster_secret_prev = ""
           release = os.environ["SMOKE_RELEASE"]
 
+          print(f"::add-mask::{cluster_secret}")
+
           values = {
-              "replicaCount": 1,
+              "replicaCount": 2,
               "existingSecret": "",
+              "cluster": {"enabled": True},
               "secret": {
                   "create": True,
                   "databaseUrl": f"postgres://observer:{postgres_password}@{release}-observer-postgresql:5432/observer?sslmode=disable",
@@ -106,6 +111,7 @@ jobs:
                   "telemetryKeys": {
                       "telemetry-global-key": telemetry_key,
                   },
+                  "clusterSecret": cluster_secret,
               },
               "gateway": {"enabled": False},
               "config": {
@@ -170,9 +176,20 @@ jobs:
             --wait \
             --wait-for-jobs \
             --timeout 10m
+      - name: Resolve smoke pod IPs
+        run: |
+          kubectl --context "$KUBE_CONTEXT" -n "$OBSERVER_NAMESPACE" \
+            get pods -l "app.kubernetes.io/instance=$SMOKE_RELEASE,app.kubernetes.io/component=observer" \
+            -o jsonpath='{range .items[*]}{.status.podIP} {end}' > /tmp/observer-pod-ips
+          cat /tmp/observer-pod-ips
       - name: Smoke from cluster
         run: |
           set -euo pipefail
+          ips="$(cat /tmp/observer-pod-ips)"
+          cmds=""
+          for ip in $ips; do
+            cmds="${cmds}wget -qO- http://${ip}:8090/readyz; wget -qO- http://${ip}:8090/healthz; "
+          done
           cat >/tmp/observer-smoke-job.yaml <<EOF
           apiVersion: batch/v1
           kind: Job
@@ -206,8 +223,7 @@ jobs:
                       - -ec
                     args:
                       - |
-                        wget -qO- "http://${SMOKE_RELEASE}-observer:8090/readyz"
-                        wget -qO- "http://${SMOKE_RELEASE}-observer:8090/healthz"
+                        ${cmds}
                     resources:
                       requests:
                         cpu: 25m
@@ -277,6 +293,8 @@ jobs:
           MINIO_ROOT_USER: ${{ secrets.MINIO_ROOT_USER }}
           MINIO_ROOT_PASSWORD: ${{ secrets.MINIO_ROOT_PASSWORD }}
           OBSERVER_TELEMETRY_KEY: ${{ secrets.OBSERVER_TELEMETRY_KEY }}
+          OBSERVER_CLUSTER_SECRET: ${{ secrets.OBSERVER_CLUSTER_SECRET }}
+          OBSERVER_CLUSTER_SECRET_PREV: ${{ secrets.OBSERVER_CLUSTER_SECRET_PREV }}
         run: |
           python3 - <<'PY'
           import json
@@ -288,13 +306,21 @@ jobs:
               "MINIO_ROOT_USER",
               "MINIO_ROOT_PASSWORD",
               "OBSERVER_TELEMETRY_KEY",
+              "OBSERVER_CLUSTER_SECRET",
           ]
           missing = [name for name in required if not os.environ.get(name)]
           if missing:
               raise SystemExit("missing required secrets: " + ", ".join(missing))
 
+          cluster_secret = os.environ["OBSERVER_CLUSTER_SECRET"]
+          print(f"::add-mask::{cluster_secret}")
+          cluster_secret_prev = os.environ.get("OBSERVER_CLUSTER_SECRET_PREV", "")
+          if cluster_secret_prev:
+              print(f"::add-mask::{cluster_secret_prev}")
+
           values = {
               "existingSecret": "",
+              "cluster": {"enabled": True},
               "secret": {
                   "create": True,
                   "databaseUrl": os.environ["OBSERVER_DATABASE_URL"],
@@ -303,6 +329,7 @@ jobs:
                   "telemetryKeys": {
                       "telemetry-global-key": os.environ["OBSERVER_TELEMETRY_KEY"],
                   },
+                  "clusterSecret": cluster_secret,
               },
               "config": {
                   "identity": {
@@ -337,6 +364,8 @@ jobs:
               },
               "migration": {"useHelmHook": False},
           }
+          if cluster_secret_prev:
+              values["secret"]["clusterSecretPrev"] = cluster_secret_prev
           with open("/tmp/observer-release-secret-values.json", "w", encoding="utf-8") as f:
               json.dump(values, f)
           PY

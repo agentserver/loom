@@ -3,6 +3,7 @@ package commander
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
@@ -152,8 +153,12 @@ func TestHandlerReadFileCapsPreviewAtTwoMB(t *testing.T) {
 }
 
 func TestHandlerReadFileAllowsExactPreviewCap(t *testing.T) {
+	// Use a file small enough that the JSON-encoded FileReadResult stays
+	// under maxEncodedFileResponse (768 KiB). Pure ASCII expands 1:1 in JSON,
+	// so 400 KiB of 'a' bytes encodes well under the 768 KiB wire cap.
 	root := t.TempDir()
-	content := bytes.Repeat([]byte("a"), int(MaxFilePreviewBytes))
+	contentSize := 400 * 1024 // 400 KiB — fits within maxEncodedFileResponse
+	content := bytes.Repeat([]byte("a"), contentSize)
 	if err := os.WriteFile(filepath.Join(root, "exact.txt"), content, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +169,7 @@ func TestHandlerReadFileAllowsExactPreviewCap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got.TooLarge || got.Binary || got.Size != MaxFilePreviewBytes || len(got.Content) != int(MaxFilePreviewBytes) {
+	if got.TooLarge || got.Binary || got.Size != int64(contentSize) || len(got.Content) != contentSize {
 		t.Fatalf("too_large=%v binary=%v size=%d content_len=%d", got.TooLarge, got.Binary, got.Size, len(got.Content))
 	}
 }
@@ -298,5 +303,34 @@ func TestHandlerListFilesSortsDirsBeforeFilesCaseInsensitive(t *testing.T) {
 	want := []string{"Alpha", "beta", "apple.txt", "Zoo.txt"}
 	if strings.Join(names, ",") != strings.Join(want, ",") {
 		t.Fatalf("names=%v want %v", names, want)
+	}
+}
+
+func TestReadFile_EncodedSizeCapPreventsControlByteBlowup(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "tricky.txt")
+	tricky := bytes.Repeat([]byte{0x01}, 1024*1024)
+	if err := os.WriteFile(path, tricky, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h := handlerForFileRoot(root)
+	res, err := h.ReadFile(context.Background(), "s1", "tricky.txt")
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !res.TooLarge {
+		t.Fatalf("expected TooLarge=true; got Content len=%d, Binary=%v", len(res.Content), res.Binary)
+	}
+	if res.Content != "" {
+		t.Fatalf("expected Content empty when TooLarge; got len=%d", len(res.Content))
+	}
+
+	out, err := json.Marshal(res)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if int64(len(out)) > 1<<20 {
+		t.Fatalf("encoded FileReadResult = %d bytes exceeds 1 MiB cap", len(out))
 	}
 }

@@ -35,12 +35,16 @@ const (
 	defaultTurnTimeout = 10 * time.Minute // safety max after browser/SSE disconnect
 )
 
-// SendCommand runs a non-streaming command (list_sessions / get_session) on one
-// daemon and returns the command_result payload. ErrDaemonNotFound → caller 404.
-func (h *Hub) SendCommand(ctx context.Context, o owner, daemonID, command string, args json.RawMessage) (json.RawMessage, error) {
-	dc, ok := h.reg.lookup(o, daemonID)
-	if !ok {
-		return nil, ErrDaemonNotFound
+// sendCommandToLocal sends a non-streaming command on a pre-resolved *daemonConn.
+// It first checks ownership (confirmOwnership), then registers a pending entry,
+// writes the command envelope, and drains the reply channel.
+//
+// The caller is responsible for the initial registry lookup; this helper is used
+// both by SendCommand (local path) and by forwardHandler (receiver path, D1 remote
+// lookup bypassed intentionally — loop prevention).
+func (h *Hub) sendCommandToLocal(ctx context.Context, dc *daemonConn, command string, args json.RawMessage) (json.RawMessage, error) {
+	if !dc.confirmOwnership(ctx) {
+		return nil, ErrDaemonGone
 	}
 	select {
 	case <-dc.done:
@@ -78,13 +82,17 @@ func (h *Hub) SendCommand(ctx context.Context, o owner, daemonID, command string
 	}
 }
 
-// SendCommandStream runs a streaming command (session_turn). Events and the
-// terminal command_result/error or terminal status event are forwarded on the
-// returned channel, which is closed when the turn ends or the daemon/ctx is done.
-func (h *Hub) SendCommandStream(ctx context.Context, o owner, daemonID, command string, args json.RawMessage) (<-chan commander.Envelope, error) {
-	dc, ok := h.reg.lookup(o, daemonID)
-	if !ok {
-		return nil, ErrDaemonNotFound
+// sendCommandStreamToLocal sends a streaming command on a pre-resolved *daemonConn.
+// outBuffer controls the output channel buffer size (16 for browser SSE; 256 for
+// the forwarding receiver path, which must not block the draining goroutine).
+//
+// shortID and sessionID are the turn-key components used by routeFrame to call
+// turns.updateFromEnvelope. Pass empty strings for non-turn commands.
+//
+// See sendCommandToLocal for caller responsibilities.
+func (h *Hub) sendCommandStreamToLocal(ctx context.Context, dc *daemonConn, command string, args json.RawMessage, outBuffer int, shortID, sessionID string) (<-chan commander.Envelope, error) {
+	if !dc.confirmOwnership(ctx) {
+		return nil, ErrDaemonGone
 	}
 	select {
 	case <-dc.done:
@@ -92,13 +100,13 @@ func (h *Hub) SendCommandStream(ctx context.Context, o owner, daemonID, command 
 	default:
 	}
 	cmdID := h.nextCmdID()
-	pe := dc.registerPending(cmdID, true)
+	pe := dc.registerPending(cmdID, true, shortID, sessionID, command)
 	ch := pe.ch
 	if err := dc.writeEnvelope(commandEnvelope(cmdID, command, args)); err != nil {
 		dc.removePending(cmdID)
 		return nil, ErrDaemonGone
 	}
-	out := make(chan commander.Envelope, 16)
+	out := make(chan commander.Envelope, outBuffer)
 	go func() {
 		defer close(out)
 		defer dc.removePending(cmdID)
@@ -130,14 +138,99 @@ func (h *Hub) SendCommandStream(ctx context.Context, o owner, daemonID, command 
 	return out, nil
 }
 
+// SendCommand runs a non-streaming command (list_sessions / get_session) on one
+// daemon and returns the command_result payload. ErrDaemonNotFound → caller 404.
+//
+// Local path: daemonID found in localReg → sendCommandToLocal.
+// Remote path (shared mode only): lookupRemote hit → forwardCli.send.
+func (h *Hub) SendCommand(ctx context.Context, o owner, daemonID, command string, args json.RawMessage) (json.RawMessage, error) {
+	// Fast path: locally connected daemon.
+	if dc, ok := h.reg.lookup(o, daemonID); ok {
+		return h.sendCommandToLocal(ctx, dc, command, args)
+	}
+	// Shared-mode remote path.
+	if h.sharedReg != nil && h.forwardCli != nil {
+		peerURL, _, found, err := h.sharedReg.lookupRemote(ctx, o, daemonID)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			return h.forwardCli.send(ctx, peerURL, forwardRequest{
+				UserID:      o.userID,
+				WorkspaceID: o.workspaceID,
+				DaemonID:    daemonID,
+				Command:     command,
+				Args:        args,
+			})
+		}
+	}
+	return nil, ErrDaemonNotFound
+}
+
+// SendCommandStream runs a streaming command (session_turn). Events and the
+// terminal command_result/error or terminal status event are forwarded on the
+// returned channel, which is closed when the turn ends or the daemon/ctx is done.
+//
+// Local path: daemonID found in localReg → sendCommandStreamToLocal.
+// Remote path (shared mode only): lookupRemote hit → forwardCli.stream.
+func (h *Hub) SendCommandStream(ctx context.Context, o owner, daemonID, command string, args json.RawMessage) (<-chan commander.Envelope, error) {
+	// Extract sessionID from args for session_turn commands so routeFrame can
+	// call turns.updateFromEnvelope with the correct turn key.
+	sessionID := ""
+	if command == "session_turn" {
+		var ta commander.SessionTurnArgs
+		if err := json.Unmarshal(args, &ta); err == nil {
+			sessionID = ta.ID
+		}
+	}
+	// Fast path: locally connected daemon.
+	if dc, ok := h.reg.lookup(o, daemonID); ok {
+		return h.sendCommandStreamToLocal(ctx, dc, command, args, 16, daemonID, sessionID)
+	}
+	// Shared-mode remote path.
+	if h.sharedReg != nil && h.forwardCli != nil {
+		peerURL, _, found, err := h.sharedReg.lookupRemote(ctx, o, daemonID)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			return h.forwardCli.stream(ctx, peerURL, forwardRequest{
+				UserID:      o.userID,
+				WorkspaceID: o.workspaceID,
+				DaemonID:    daemonID,
+				Command:     command,
+				Args:        args,
+			})
+		}
+	}
+	return nil, ErrDaemonNotFound
+}
+
 func (h *Hub) ListFiles(ctx context.Context, o owner, daemonID, sessionID, path string) (json.RawMessage, error) {
 	args, _ := json.Marshal(commander.FileListArgs{ID: sessionID, Path: path})
 	return h.SendCommand(ctx, o, daemonID, "list_files", args)
 }
 
-func (h *Hub) ReadFile(ctx context.Context, o owner, daemonID, sessionID, path string) (json.RawMessage, error) {
+func (h *Hub) ReadFile(ctx context.Context, o owner, shortID, sessionID, path string) (json.RawMessage, error) {
+	// In shared mode, gate locally-owned daemons on file_preview_encoded_cap
+	// before forwarding. Peer-owned daemons are not in the local registry;
+	// forwardHandler on the owning pod runs the same check.
+	if h.sharedReg != nil {
+		if dc, ok := h.reg.lookup(o, shortID); ok {
+			dc.metaMu.Lock()
+			has := dc.capabilities[commander.CapabilityFilePreviewEncodedCap]
+			dc.metaMu.Unlock()
+			if !has {
+				return nil, &DaemonError{
+					Code:    commander.ErrCodeDaemonUpgradeRequired,
+					Message: "daemon binary too old; upgrade required for file preview in cluster mode",
+				}
+			}
+		}
+		// Peer-owned: forwardHandler on owning pod runs same check.
+	}
 	args, _ := json.Marshal(commander.FileReadArgs{ID: sessionID, Path: path})
-	return h.SendCommand(ctx, o, daemonID, "read_file", args)
+	return h.SendCommand(ctx, o, shortID, "read_file", args)
 }
 
 // DaemonSessions is one row of the fan-out GET /sessions result.
@@ -153,8 +246,15 @@ type DaemonSessions struct {
 // FanOutSessions concurrently asks every online daemon of this owner for its
 // sessions, each under defaultCmdTimeout. Slow/dead daemons surface a per-row
 // status and do not block the rest (fail-open).
+// In shared mode, the daemon list comes from listDaemons (Postgres), so
+// peer-pod daemons appear in the fan-out.
 func (h *Hub) FanOutSessions(ctx context.Context, o owner) []DaemonSessions {
-	snapshot := h.reg.daemons(o)
+	snapshot, err := h.listDaemons(ctx, o)
+	if err != nil {
+		// Registry error: return empty rather than panic; the caller surfaces it
+		// as an empty daemons array.
+		return nil
+	}
 	results := make([]DaemonSessions, len(snapshot))
 	var wg sync.WaitGroup
 	for i := range snapshot {

@@ -9,6 +9,13 @@ spec:
   selector:
     matchLabels:
       {{- include "observer.selectorLabels" . | nindent 6 }}
+  {{- if .Values.cluster.enabled }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 100%
+  {{- end }}
   template:
     metadata:
       labels:
@@ -27,8 +34,10 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if and (eq .Values.config.store.driver "postgres") .Values.postgresql.wait.enabled }}
+      {{- $needPostgresWait := and (eq .Values.config.store.driver "postgres") .Values.postgresql.wait.enabled }}
+      {{- if or $needPostgresWait .Values.cluster.enabled }}
       initContainers:
+        {{- if $needPostgresWait }}
         - name: wait-for-postgresql
           image: "{{ .Values.postgresql.image.repository }}:{{ .Values.postgresql.image.tag }}"
           imagePullPolicy: {{ .Values.postgresql.image.pullPolicy }}
@@ -71,6 +80,35 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+        {{- end }}
+        {{- if .Values.cluster.enabled }}
+        - name: assert-cluster-secret
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              LEN=$(printf '%s' "$CHECK_VAL" | wc -c)
+              if [ -z "$CHECK_VAL" ]; then
+                  echo "{{ .Values.cluster.secretEnv }}: empty" >&2
+                  echo "check that the Secret has key {{ default "cluster-secret" .Values.cluster.secretKey }}" >&2
+                  exit 1
+              fi
+              if [ "$LEN" -lt 64 ]; then
+                  echo "{{ .Values.cluster.secretEnv }}: length $LEN < 64 (must be >=64 hex chars / 32 bytes; generate with: openssl rand -hex 32)" >&2
+                  exit 1
+              fi
+              if ! printf '%s' "$CHECK_VAL" | grep -Eq '^[0-9a-fA-F]+$'; then
+                  echo "{{ .Values.cluster.secretEnv }}: not a hex string (must contain only 0-9 a-f A-F; generate with: openssl rand -hex 32)" >&2
+                  exit 1
+              fi
+          env:
+            - name: CHECK_VAL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (include "observer.configSecretName" .) .Values.existingSecret }}
+                  key: {{ default "cluster-secret" .Values.cluster.secretKey }}
+        {{- end }}
       {{- end }}
       containers:
         - name: observer
@@ -83,6 +121,11 @@ spec:
             - name: http
               containerPort: {{ .Values.service.port }}
               protocol: TCP
+            {{- if .Values.cluster.enabled }}
+            - name: internal
+              containerPort: {{ .Values.cluster.internalServicePort }}
+              protocol: TCP
+            {{- end }}
           env:
             {{- if eq .Values.config.store.driver "postgres" }}
             - name: {{ .Values.config.store.postgres.dsnEnv }}
@@ -112,6 +155,38 @@ spec:
                   key: {{ default "telemetry-global-key" .secretKey }}
             {{- end }}
             {{- end }}
+            {{- if .Values.cluster.enabled }}
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: {{ .Values.cluster.advertiseUrlEnv }}
+              value: "http://$(POD_IP):{{ .Values.cluster.internalServicePort }}"
+            - name: {{ .Values.cluster.secretEnv }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (include "observer.configSecretName" .) .Values.existingSecret }}
+                  key: {{ default "cluster-secret" .Values.cluster.secretKey }}
+            {{- if .Values.cluster.prevSecretEnv }}
+            - name: {{ .Values.cluster.prevSecretEnv }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (include "observer.configSecretName" .) .Values.existingSecret }}
+                  key: {{ default "cluster-secret-prev" .Values.cluster.prevSecretKey }}
+                  optional: true
+            {{- end }}
+            {{- end }}
+          {{- if .Values.cluster.enabled }}
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /usr/local/bin/observer-server
+                  - --config
+                  - /etc/observer/observer.yaml
+                  - --drain-local
+                  - --internal-port={{ .Values.cluster.internalServicePort }}
+          {{- end }}
           readinessProbe:
             httpGet:
               path: /readyz

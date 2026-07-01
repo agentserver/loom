@@ -57,6 +57,23 @@ type Options struct {
 	// AgentserverURL is set and AuthStore is nil — silent in-memory fallback
 	// would re-introduce the multi-pod login bug this package was built to fix.
 	AuthStore authstore.Store
+
+	// TelemetryLimiter overrides the default in-memory token-bucket limiter.
+	// When non-nil (e.g. *pgTelemetryLimiter in cluster+postgres mode),
+	// TelemetryRateLimit is ignored. When nil, NewWithResolverOptions builds
+	// the in-memory limiter from TelemetryRateLimit as before.
+	TelemetryLimiter telemetryAllower
+
+	// Cluster enables multi-pod cluster mode. When Cluster.AdvertiseURL != "",
+	// NewWithResolverOptions passes it to commanderhub.MountAll which wires the
+	// shared registry and forward client and populates InternalMux with the
+	// internal forwarding/drain endpoints.
+	Cluster commanderhub.ClusterRuntime
+
+	// InternalMux, when non-nil, receives the /api/commander/_internal/*
+	// endpoints in cluster mode. The caller is responsible for starting a
+	// separate HTTP listener on it (e.g. on cfg.Cluster.InternalListenAddr).
+	InternalMux *http.ServeMux
 }
 
 // New constructs the observerweb HTTP handler. If usHandler is non-nil,
@@ -77,6 +94,18 @@ func NewWithResolver(s Store, usHandler *userspace.Handler, resolver identity.Re
 }
 
 func NewWithResolverOptions(s Store, usHandler *userspace.Handler, resolver identity.Resolver, opts Options) http.Handler {
+	app, _ := newWithResolverOptionsInternal(s, usHandler, resolver, opts)
+	return app
+}
+
+// NewWithResolverOptionsHub is like NewWithResolverOptions but also returns the
+// *commanderhub.Hub so the caller can call hub.Close(ctx) during graceful shutdown.
+// Returns nil if commander is not mounted (AgentserverURL == "").
+func NewWithResolverOptionsHub(s Store, usHandler *userspace.Handler, resolver identity.Resolver, opts Options) (http.Handler, *commanderhub.Hub) {
+	return newWithResolverOptionsInternal(s, usHandler, resolver, opts)
+}
+
+func newWithResolverOptionsInternal(s Store, usHandler *userspace.Handler, resolver identity.Resolver, opts Options) (http.Handler, *commanderhub.Hub) {
 	if resolver == nil {
 		resolver = static.New(s)
 	}
@@ -92,25 +121,30 @@ func NewWithResolverOptions(s Store, usHandler *userspace.Handler, resolver iden
 	if opts.MaxObjectProxyBytes <= 0 {
 		opts.MaxObjectProxyBytes = defaultMaxObjectProxyBytes
 	}
+	limiter := opts.TelemetryLimiter
+	if limiter == nil {
+		limiter = newTelemetryLimiter(opts.TelemetryRateLimit.PerMinute, opts.TelemetryRateLimit.Burst)
+	}
 	h := &handler{
 		s:                   s,
 		resolver:            resolver,
 		registerEnabled:     !opts.RegisterDisabled,
 		objects:             opts.Objects,
 		objectProxyEnabled:  !opts.DisableObjectProxy,
-		telemetryLimiter:    newTelemetryLimiter(opts.TelemetryRateLimit.PerMinute, opts.TelemetryRateLimit.Burst),
+		telemetryLimiter:    limiter,
 		maxEventBodyBytes:   opts.MaxEventBodyBytes,
 		maxObjectProxyBytes: opts.MaxObjectProxyBytes,
 	}
 	mux := http.NewServeMux()
 	mountRoutes(mux, h, usHandler)
+	var hub *commanderhub.Hub
 	if opts.AgentserverURL != "" {
 		if opts.AuthStore == nil {
 			panic("observerweb: AuthStore is required when AgentserverURL is set (see internal/commanderhub/authstore)")
 		}
-		commanderhub.MountAll(mux, resolver, opts.AgentserverURL, opts.AuthStore)
+		hub = commanderhub.MountAll(mux, opts.InternalMux, resolver, opts.AgentserverURL, opts.AuthStore, opts.Cluster)
 	}
-	return mux
+	return mux, hub
 }
 
 func mountRoutes(mux *http.ServeMux, h *handler, usHandler *userspace.Handler) {
@@ -142,7 +176,7 @@ type handler struct {
 	registerEnabled     bool
 	objects             objectstore.Store
 	objectProxyEnabled  bool
-	telemetryLimiter    *telemetryLimiter
+	telemetryLimiter    telemetryAllower
 	maxEventBodyBytes   int64
 	maxObjectProxyBytes int64
 }
@@ -159,12 +193,12 @@ func (h *handler) postEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	agent := agentFromIdentity(ident)
 
-	telemetryKey := strings.TrimSpace(r.Header.Get("X-Loom-Telemetry-Key"))
-	if telemetryKey == "" {
+	telemetryHeader := strings.TrimSpace(r.Header.Get("X-Loom-Telemetry-Key"))
+	if telemetryHeader == "" {
 		http.Error(w, "missing telemetry api key", http.StatusForbidden)
 		return
 	}
-	telemetryKeyID, ok, err := h.s.LookupTelemetryAPIKey(telemetryKey, agent.WorkspaceID)
+	telemetryKeyID, ok, err := h.s.LookupTelemetryAPIKey(telemetryHeader, agent.WorkspaceID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -200,10 +234,22 @@ func (h *handler) postEvent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "workspace or agent mismatch", http.StatusForbidden)
 		return
 	}
-	rateKey := agent.WorkspaceID + "\x00" + agent.ID + "\x00" + telemetryKeyID
-	if h.telemetryLimiter != nil && !h.telemetryLimiter.allow(rateKey, time.Now()) {
-		http.Error(w, "telemetry rate limit exceeded", http.StatusTooManyRequests)
-		return
+	if h.telemetryLimiter != nil {
+		key := telemetryKey{
+			WorkspaceID:    agent.WorkspaceID,
+			AgentID:        agent.ID,
+			TelemetryKeyID: telemetryKeyID,
+		}
+		allowed, err := h.telemetryLimiter.allow(r.Context(), key, time.Now())
+		if err != nil {
+			http.Error(w, "telemetry rate limit unavailable", http.StatusServiceUnavailable)
+			log.Printf("observerweb: telemetry rate limit error: %v", err)
+			return
+		}
+		if !allowed {
+			http.Error(w, "telemetry rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
 	}
 	if err := h.recordExternalIdentity(ident); err != nil {
 		log.Printf("observer: RecordExternalIdentity error ws=%s id=%s: %v", ident.WorkspaceID, ident.AgentID, err)

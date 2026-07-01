@@ -142,6 +142,7 @@ production_stack="$(helm template observer-prod "$CHART_DIR" \
   -f "$CHART_DIR/values-production.example.yaml" \
   --set existingSecret= \
   --set secret.create=true \
+  --set "secret.clusterSecret=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" \
   --set secret.databaseUrl='postgres://observer:observer@observer-prod-observer-postgresql:5432/observer?sslmode=disable' \
   --set secret.s3AccessKey=minioadmin \
   --set secret.s3SecretKey=minioadmin \
@@ -210,3 +211,208 @@ grep -q 'cpu: 500m' <<<"$production_minio"
 grep -q 'memory: 1Gi' <<<"$production_minio"
 grep -q 'cpu: "2"' <<<"$production_minio"
 grep -q 'memory: 8Gi' <<<"$production_minio"
+
+# --- E2 validation guard tests ---
+
+# Test E2.1: replicaCount > 1 with sqlite fails
+echo "[test] E2.1 replicaCount > 1 + sqlite must fail"
+out=$(helm template observer-test "$CHART_DIR" --set replicaCount=2 --set config.store.driver=sqlite 2>&1) && { echo "FAIL: expected fail; got success"; exit 1; }
+echo "$out" | grep -q "replicaCount > 1 requires store.driver=postgres" || { echo "FAIL: error msg not found; got: $out"; exit 1; }
+
+# Test E2.2: replicaCount > 1 without cluster.enabled fails
+echo "[test] E2.2 replicaCount > 1 + cluster.enabled=false must fail"
+out=$(helm template observer-test "$CHART_DIR" --set replicaCount=2 --set config.store.driver=postgres --set cluster.enabled=false 2>&1) && { echo "FAIL"; exit 1; }
+echo "$out" | grep -q "replicaCount > 1 requires cluster.enabled=true" || { echo "FAIL: $out"; exit 1; }
+
+# Test E2.3: cluster.enabled + secret.create without secret.clusterSecret fails
+echo "[test] E2.3 cluster enabled + secret.create without clusterSecret must fail"
+out=$(helm template observer-test "$CHART_DIR" --set replicaCount=2 --set config.store.driver=postgres --set cluster.enabled=true --set secret.create=true 2>&1) && { echo "FAIL"; exit 1; }
+echo "$out" | grep -q "requires secret.clusterSecret" || { echo "FAIL: $out"; exit 1; }
+
+# Test E2.4: clusterSecret too short fails (< 64 hex chars)
+echo "[test] E2.4 clusterSecret < 64 hex chars must fail"
+out=$(helm template observer-test "$CHART_DIR" --set replicaCount=2 --set config.store.driver=postgres --set cluster.enabled=true --set secret.create=true --set secret.clusterSecret=deadbeef 2>&1) && { echo "FAIL"; exit 1; }
+echo "$out" | grep -q "must be >=64 hex chars" || { echo "FAIL: $out"; exit 1; }
+
+# Test E2.5: non-hex clusterSecret (sufficient length but not hex) fails
+echo "[test] E2.5 non-hex clusterSecret of sufficient length must fail"
+out=$(helm template observer-test "$CHART_DIR" --set replicaCount=2 --set config.store.driver=postgres --set cluster.enabled=true --set secret.create=true \
+  --set "secret.clusterSecret=GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG" 2>&1) && { echo "FAIL: expected fail for non-hex secret; got success"; exit 1; }
+echo "$out" | grep -q "not a hex string\|must be a hex\|hex string" || { echo "FAIL: expected hex error; got: $out"; exit 1; }
+echo "E2.5 passed"
+
+echo "E2 validation tests passed"
+
+# --- E5 cluster-mode rendering tests ---
+
+# Block 1: Default (replicaCount=1) renders no cluster env or internal Service.
+echo "[test] E5.1 default: no cluster env, no headless service, no internal port"
+default="$(helm template observer-test "$CHART_DIR")"
+! grep -q 'OBSERVER_CLUSTER_SECRET' <<<"$default" || { echo "FAIL: OBSERVER_CLUSTER_SECRET should not render in default"; exit 1; }
+! grep -q 'observer-test-observer-headless' <<<"$default" || { echo "FAIL: headless service should not render in default"; exit 1; }
+! grep -q 'containerPort: 8091' <<<"$default" || { echo "FAIL: containerPort 8091 should not render in default"; exit 1; }
+echo "E5.1 passed"
+
+# Block 2: Multi-pod with cluster.enabled renders envs + internal Service + strategy.
+echo "[test] E5.2 multi-pod cluster: cluster env + headless service + strategy"
+multi="$(helm template observer-test "$CHART_DIR" \
+  --set replicaCount=2 \
+  --set cluster.enabled=true \
+  --set secret.create=true \
+  --set "secret.clusterSecret=$(openssl rand -hex 32)" \
+  --set secret.databaseUrl='postgres://x' \
+  --set secret.s3AccessKey=x --set secret.s3SecretKey=x \
+  --set "secret.telemetryKeys.telemetry-global-key=x" \
+  --set config.identity.legacyAPIKeys.enabled=true \
+  --set "config.apiKeys[0].id=test" --set "config.apiKeys[0].key=test" \
+  --set postgresql.enabled=false \
+  --set minio.enabled=false)"
+grep -q 'OBSERVER_CLUSTER_SECRET' <<<"$multi" || { echo "FAIL: OBSERVER_CLUSTER_SECRET missing"; exit 1; }
+grep -q 'POD_IP' <<<"$multi" || { echo "FAIL: POD_IP env missing"; exit 1; }
+grep -q 'observer-test-observer-headless' <<<"$multi" || { echo "FAIL: headless service name missing"; exit 1; }
+grep -q 'clusterIP: None' <<<"$multi" || { echo "FAIL: clusterIP: None missing"; exit 1; }
+grep -q 'containerPort: 8091' <<<"$multi" || { echo "FAIL: containerPort 8091 missing"; exit 1; }
+grep -q 'name: assert-cluster-secret' <<<"$multi" || { echo "FAIL: assert-cluster-secret init container missing"; exit 1; }
+grep -q 'maxUnavailable: 0' <<<"$multi" || { echo "FAIL: maxUnavailable: 0 missing in rolling strategy"; exit 1; }
+echo "E5.2 passed"
+
+# Block 3: Multi-pod without cluster.enabled fails fast (already covered by E2.2 but kept separate per spec).
+echo "[test] E5.3 multi-pod without cluster.enabled fails fast"
+out=$(helm template observer-test "$CHART_DIR" --set replicaCount=2 \
+    --set config.store.driver=postgres 2>&1) && { echo "FAIL: expected fail-fast; got success"; exit 1; }
+echo "$out" | grep -q 'cluster.enabled=true' || { echo "FAIL: cluster.enabled=true not in error: $out"; exit 1; }
+echo "fail-fast detected as expected"
+echo "E5.3 passed"
+
+# Block 4: existingSecret + production values render fresh_ttl + revocation_channel
+# into ConfigMap, and Secret is NOT rendered (existingSecret is set).
+echo "[test] E5.4 existingSecret: production config renders into ConfigMap; no Secret"
+prod="$(helm template observer-test "$CHART_DIR" \
+  --set existingSecret=observer-prod-secret \
+  -f "$CHART_DIR/values-production.example.yaml")"
+configmap="$(awk '/^---$/{p=0} /kind: ConfigMap/{p=1} p' <<<"$prod")"
+grep -q 'fresh_ttl: "30s"' <<<"$configmap" || { echo "FAIL: fresh_ttl missing from ConfigMap"; exit 1; }
+grep -q 'revocation_channel: "postgres"' <<<"$configmap" || { echo "FAIL: revocation_channel missing from ConfigMap"; exit 1; }
+# Secret was NOT rendered (existingSecret in use):
+if grep -q 'kind: Secret' <<<"$prod"; then
+  echo "FAIL: Secret should not render when existingSecret is set" >&2; exit 1
+fi
+echo "E5.4 passed"
+
+# Block 5: secret.create=true + cluster.enabled + agentserver.enabled renders
+# fresh_ttl + revocation_channel into chart-managed Secret.
+echo "[test] E5.5 secret.create + cluster: fresh_ttl + revocation_channel in Secret"
+secret_out="$(helm template observer-test "$CHART_DIR" \
+  --set replicaCount=2 --set cluster.enabled=true --set secret.create=true \
+  --set secret.clusterSecret=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef \
+  --set secret.databaseUrl='postgres://x' \
+  --set secret.s3AccessKey=x --set secret.s3SecretKey=x \
+  --set "secret.telemetryKeys.telemetry-global-key=x" \
+  --set config.identity.agentserver.enabled=true \
+  --set config.identity.agentserver.url=https://agentserver.example.com \
+  --set config.identity.agentserver.freshTTL='30s' \
+  --set config.identity.agentserver.revocationChannel='enabled' \
+  --set postgresql.enabled=false \
+  --set minio.enabled=false)"
+secret_yaml="$(awk '/^---$/{p=0} /kind: Secret/{p=1} p' <<<"$secret_out")"
+grep -q 'fresh_ttl: "30s"' <<<"$secret_yaml" || { echo "FAIL: fresh_ttl missing from Secret"; exit 1; }
+grep -q 'revocation_channel: "postgres"' <<<"$secret_yaml" || { echo "FAIL: revocation_channel missing from Secret"; exit 1; }
+echo "E5.5 passed"
+
+# Block 6: revocationChannel=disabled emits explicit revocation_channel: ""
+echo "[test] E5.6 revocationChannel=disabled emits empty string"
+disabled="$(helm template observer-test "$CHART_DIR" \
+  --set replicaCount=2 --set cluster.enabled=true \
+  --set secret.create=true \
+  --set "secret.clusterSecret=$(openssl rand -hex 32)" \
+  --set secret.databaseUrl='postgres://x' \
+  --set secret.s3AccessKey=x --set secret.s3SecretKey=x \
+  --set "secret.telemetryKeys.telemetry-global-key=x" \
+  --set config.identity.legacyAPIKeys.enabled=true \
+  --set "config.apiKeys[0].id=test" --set "config.apiKeys[0].key=test" \
+  --set config.identity.agentserver.revocationChannel='disabled' \
+  --set postgresql.enabled=false \
+  --set minio.enabled=false)"
+grep -q 'revocation_channel: ""' <<<"$disabled" || { echo "FAIL: revocation_channel empty string missing for disabled"; exit 1; }
+echo "E5.6 passed"
+
+# Block 7: invalid revocationChannel value fails fast
+echo "[test] E5.7 invalid revocationChannel fails fast"
+out=$(helm template observer-test "$CHART_DIR" --set replicaCount=2 \
+    --set cluster.enabled=true \
+    --set config.identity.agentserver.revocationChannel='bogus' 2>&1) && { echo "FAIL: expected fail; got success"; exit 1; }
+echo "$out" | grep -q 'must be auto' || { echo "FAIL: expected enum error; got: $out"; exit 1; }
+echo "revocationChannel enum fail-fast OK"
+echo "E5.7 passed"
+
+echo "E5 cluster-mode tests passed"
+
+# --- Finding 1: cluster.enabled in ConfigMap + env-field names in ConfigMap ---
+echo "[test] F1.1 cluster.enabled: true appears in ConfigMap when cluster.enabled=true"
+f1_multi="$(helm template observer-test "$CHART_DIR" \
+  --set replicaCount=2 \
+  --set cluster.enabled=true \
+  --set secret.create=true \
+  --set "secret.clusterSecret=$(openssl rand -hex 32)" \
+  --set secret.databaseUrl='postgres://x' \
+  --set secret.s3AccessKey=x --set secret.s3SecretKey=x \
+  --set "secret.telemetryKeys.telemetry-global-key=x" \
+  --set config.identity.legacyAPIKeys.enabled=true \
+  --set "config.apiKeys[0].id=test" --set "config.apiKeys[0].key=test" \
+  --set postgresql.enabled=false \
+  --set minio.enabled=false)"
+f1_configmap="$(awk '/^---$/{p=0} /kind: ConfigMap/{p=1} p' <<<"$f1_multi")"
+grep -q 'cluster:' <<<"$f1_configmap" || { echo "FAIL: cluster: block missing from ConfigMap"; exit 1; }
+grep -q 'enabled: true' <<<"$f1_configmap" || { echo "FAIL: cluster.enabled: true missing from ConfigMap"; exit 1; }
+grep -q 'advertise_url_env:' <<<"$f1_configmap" || { echo "FAIL: advertise_url_env missing from ConfigMap"; exit 1; }
+grep -q 'secret_env:' <<<"$f1_configmap" || { echo "FAIL: secret_env missing from ConfigMap"; exit 1; }
+grep -q 'internal_listen_addr:' <<<"$f1_configmap" || { echo "FAIL: internal_listen_addr missing from ConfigMap"; exit 1; }
+echo "F1.1 passed"
+
+echo "Finding 1 chart tests passed"
+
+# --- E-fix4.1: migration job and retention cronjob mount nonsecret ConfigMap ---
+echo "[test] E-fix4.1 migration job mounts nonsecret config"
+efix_out="$(helm template observer-test "$CHART_DIR" \
+  --set replicaCount=2 \
+  --set cluster.enabled=true \
+  --set migration.enabled=true \
+  --set retention.enabled=true \
+  --set secret.create=true \
+  --set "secret.clusterSecret=$(openssl rand -hex 32)" \
+  --set secret.databaseUrl='postgres://x' \
+  --set secret.s3AccessKey=x --set secret.s3SecretKey=x \
+  --set "secret.telemetryKeys.telemetry-global-key=x" \
+  --set config.identity.legacyAPIKeys.enabled=true \
+  --set "config.apiKeys[0].id=test" --set "config.apiKeys[0].key=test" \
+  --set postgresql.enabled=false \
+  --set minio.enabled=false)"
+
+# Extract just the Job manifest.
+job_yaml="$(awk '/^---$/{p=0} /kind: Job/{p=1} p' <<<"$efix_out")"
+grep -q 'observer-nonsecret-config' <<<"$job_yaml" || { echo "FAIL: observer-nonsecret-config volume missing from migration Job"; exit 1; }
+grep -q '/etc/observer/nonsecret' <<<"$job_yaml" || { echo "FAIL: /etc/observer/nonsecret mountPath missing from migration Job"; exit 1; }
+echo "E-fix4.1a migration job nonsecret mount: passed"
+
+# Extract just the CronJob manifest.
+cronjob_yaml="$(awk '/^---$/{p=0} /kind: CronJob/{p=1} p' <<<"$efix_out")"
+grep -q 'observer-nonsecret-config' <<<"$cronjob_yaml" || { echo "FAIL: observer-nonsecret-config volume missing from retention CronJob"; exit 1; }
+grep -q '/etc/observer/nonsecret' <<<"$cronjob_yaml" || { echo "FAIL: /etc/observer/nonsecret mountPath missing from retention CronJob"; exit 1; }
+echo "E-fix4.1b retention cronjob nonsecret mount: passed"
+
+echo "E-fix4.1 passed"
+
+# --- E-fix4.2: migration job and retention cronjob must NOT carry cluster env vars ---
+# Jobs run in --migrate-only / --retention-cleanup mode which skips cluster
+# validation.  Having OBSERVER_ADVERTISE_URL or OBSERVER_CLUSTER_SECRET in the
+# job would be confusing and unnecessary; assert they are absent.
+echo "[test] E-fix4.2 migration job and retention cronjob must not expose cluster env vars"
+! grep -q 'OBSERVER_ADVERTISE_URL' <<<"$job_yaml" || { echo "FAIL: OBSERVER_ADVERTISE_URL must not appear in migration Job env"; exit 1; }
+! grep -q 'OBSERVER_CLUSTER_SECRET' <<<"$job_yaml" || { echo "FAIL: OBSERVER_CLUSTER_SECRET must not appear in migration Job env"; exit 1; }
+echo "E-fix4.2a migration job has no cluster env vars: passed"
+
+! grep -q 'OBSERVER_ADVERTISE_URL' <<<"$cronjob_yaml" || { echo "FAIL: OBSERVER_ADVERTISE_URL must not appear in retention CronJob env"; exit 1; }
+! grep -q 'OBSERVER_CLUSTER_SECRET' <<<"$cronjob_yaml" || { echo "FAIL: OBSERVER_CLUSTER_SECRET must not appear in retention CronJob env"; exit 1; }
+echo "E-fix4.2b retention cronjob has no cluster env vars: passed"
+
+echo "E-fix4.2 passed"

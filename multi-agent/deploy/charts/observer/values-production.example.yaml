@@ -7,6 +7,12 @@ image:
 
 existingSecret: observer-production-secret
 
+cluster:
+  enabled: true
+  # Ops MUST add `cluster-secret` (and optionally `cluster-secret-prev` during
+  # rotation) to existingSecret. The init container at pod startup asserts
+  # OBSERVER_CLUSTER_SECRET is non-empty so misconfig is loud, not silent.
+
 gateway:
   # The public HTTPRoute for https://loom.nj.cs.ac.cn:10062/ is
   # platform-managed. CI/CD updates the Service behind it but does not manage
@@ -25,6 +31,8 @@ config:
     agentserver:
       enabled: true
       url: https://agent.cs.ac.cn
+      freshTTL: "30s"
+      revocationChannel: "enabled"
   store:
     driver: postgres
     postgres:

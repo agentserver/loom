@@ -51,7 +51,7 @@ api_keys:
 }
 
 func TestLoadDistributedObserverExampleConfig(t *testing.T) {
-	cfg, err := loadConfig("../../dev/configs/observer.example.yaml")
+	cfg, err := loadConfig("../../dev/configs/observer.example.yaml", false)
 	require.NoError(t, err)
 
 	require.Equal(t, ":8080", cfg.ListenAddr)
@@ -248,7 +248,7 @@ identity:
   legacy_api_keys:
     enabled: true
 `)
-	_, err := loadConfig(path)
+	_, err := loadConfig(path, false)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "sqlite store is not allowed in production")
 }
@@ -380,6 +380,39 @@ func TestRunMigrationsOnlyCreatesUserspaceTables(t *testing.T) {
 	require.Equal(t, "userspace_packages", table)
 }
 
+// TestRunMigrationsOnly_SkipsClusterValidation verifies that loading config in
+// job mode (migrateOnly=true) succeeds even when cluster.enabled is true but
+// the cluster env vars (advertise_url, secret) are unresolved — as happens in
+// the migration Job container which doesn't carry the Deployment's env vars.
+func TestRunMigrationsOnly_SkipsClusterValidation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "observer.db")
+	cfgFile := writeConfig(t, `
+store:
+  driver: sqlite
+  sqlite:
+    path: `+path+`
+object_store:
+  driver: filesystem
+identity:
+  legacy_api_keys:
+    enabled: true
+api_keys:
+  - id: ak-default
+    key: ak_secret
+cluster:
+  enabled: true
+  # advertise_url and secret are intentionally omitted — they would be resolved
+  # from env vars in a Deployment but the migration Job has no such vars.
+`)
+
+	// jobMode=true must bypass cluster validation and allow config to load.
+	cfg, err := loadConfig(cfgFile, true)
+	require.NoError(t, err, "loadConfig with jobMode=true must not fail on missing cluster env vars")
+
+	// The migration must complete successfully against the SQLite database.
+	require.NoError(t, runMigrationsOnly(cfg))
+}
+
 func TestPostgresStoreConfigSkipsMigrationsForServerStartupOnly(t *testing.T) {
 	t.Setenv("OBSERVER_DATABASE_URL", "postgres://observer:test@example.com/observer")
 	cfg := &Config{
@@ -468,7 +501,7 @@ workspaces:
   - id: ws1
     name: Workspace
 `)
-	_, err := loadConfig(path)
+	_, err := loadConfig(path, false)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "workspaces", "yaml strict mode should reject the obsolete field")
 }
@@ -618,7 +651,7 @@ telemetry:
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			path := writeConfig(t, tt.yaml)
-			_, err := loadConfig(path)
+			_, err := loadConfig(path, false)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), tt.wantErr)
 		})
@@ -656,7 +689,7 @@ api_keys: []
 func loadConfigFromString(t *testing.T, yaml string) *Config {
 	t.Helper()
 
-	cfg, err := loadConfig(writeConfig(t, yaml))
+	cfg, err := loadConfig(writeConfig(t, yaml), false)
 	require.NoError(t, err)
 	return cfg
 }

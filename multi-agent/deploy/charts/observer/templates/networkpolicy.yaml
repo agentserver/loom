@@ -1,0 +1,30 @@
+{{- if and .Values.cluster.enabled .Values.cluster.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "observer.fullname" . }}-internal
+  labels:
+    {{- include "observer.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "observer.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: observer
+  policyTypes: [Ingress]
+  ingress:
+    # Rule 1: public observer port — allow from ANYWHERE (Ingress, Gateway,
+    # daemon clients, in-cluster probes). NetworkPolicy without this rule
+    # would deny public traffic to selected pods.
+    - ports:
+        - port: {{ .Values.service.port }}
+          protocol: TCP
+    # Rule 2: internal port — restrict to observer pods only (peers).
+    - ports:
+        - port: {{ .Values.cluster.internalServicePort }}
+          protocol: TCP
+      from:
+        - podSelector:
+            matchLabels:
+              {{- include "observer.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: observer
+{{- end }}

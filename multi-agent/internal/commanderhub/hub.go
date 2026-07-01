@@ -1,12 +1,17 @@
 package commanderhub
 
 import (
+	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -22,21 +27,84 @@ const (
 	wsReadTimeout = 90 * time.Second // 3x default heartbeat (30s) → dead peer after 3 missed pongs
 )
 
+// ClusterRuntime holds the configuration needed for multi-pod cluster mode.
+// Populated by the wiring layer (Phase D D1) after NewHub. All fields are
+// read-only after the Hub is started.
+type ClusterRuntime struct {
+	DB                 *sql.DB
+	AdvertiseURL       string
+	Secret             []byte
+	PrevSecret         []byte
+	InternalListenAddr string
+	// Timing overrides — zero values use package defaults in the registry/client.
+	HeartbeatInterval time.Duration
+	SweepInterval     time.Duration
+	DaemonExpiryAfter time.Duration
+	ForwardTimeout    time.Duration
+}
+
 // Hub owns the /daemon-link WebSocket endpoint and the owner-keyed registry of
 // live daemon connections.
 type Hub struct {
 	resolver     identity.Resolver
 	upgrader     websocket.Upgrader
-	reg          *registry
-	turns        *turnStateStore
+	reg          *localRegistry
+	sharedReg    *sharedRegistry // B1: nil in single-pod; populated by attachSharedRegistry (Phase B B4)
+	forwardCli   *forwardClient  // C3: nil in single-pod; populated by attachForwardClient
+	cluster      ClusterRuntime  // C4: populated by wiring layer (Phase D D1) for cluster mode
+	turns        turnStateBackend
 	sessionCache *sessionListCache
 	cmdSeq       atomic.Int64 // generates per-command IDs (see proxy.go)
+
+	// draining is set to true when Close (or drainHandler) is called. ServeHTTP
+	// checks this flag and returns 503 for any new daemon WebSocket upgrade
+	// attempts during shutdown.
+	draining atomic.Bool
+
+	// admitMu serialises the draining-flag check + h.reg.add(dc) admission
+	// window in ServeHTTP against the draining-flag set + registry snapshot in
+	// Close/drainHandler. Holding admitMu for the entire WS read loop would
+	// deadlock; it is held only for the narrow critical section:
+	//   ServeHTTP:  Lock → re-check draining → reg.add → Unlock
+	//   Close:      Lock → draining.Store(true) → snapshot → Unlock → drain
+	// Any concurrent upgrade either finishes add before Close snapshots (and
+	// gets included in the drain snapshot), or sees draining=true after Close
+	// sets it (and returns 503 without adding to the registry). The read path
+	// (readLoop, routeFrame) never touches admitMu.
+	admitMu sync.Mutex
+
+	// inFlightAdmissions tracks ServeHTTP goroutines that have passed the fast
+	// draining pre-check and are somewhere between token resolution and the end
+	// of the WS handler. Close and drainHandler wait on this WaitGroup (after
+	// setting draining=true and releasing admitMu) to ensure that any goroutine
+	// in the post-upsert / draining-rejection cleanup window has finished its
+	// sharedReg.remove call before the process proceeds with shutdown. Without
+	// this wait there is a race: Close returns before the 5s remove-timeout
+	// goroutine finishes, so the process may exit leaving a ghost shared row.
+	inFlightAdmissions sync.WaitGroup
 
 	// TurnTimeout is the observer-side safety max applied to a session_turn
 	// command. Turns continue draining after the browser/SSE client disconnects;
 	// this bounds daemon work that never sends a terminal frame. Defaults to
 	// defaultTurnTimeout (10 min); a caller may override it after NewHub.
 	TurnTimeout time.Duration
+
+	// testHookPostUpsert, if non-nil, is called immediately after a successful
+	// connectUpsert and before the admitMu critical section. Tests use this hook
+	// to inject a draining=true transition inside the race window, verifying that
+	// the draining-rejection branch correctly removes the shared row. Must be nil
+	// in production (zero value). Not exported; set only from _test.go files in
+	// this package.
+	testHookPostUpsert func()
+
+	// testHookAfterPreCheck, if non-nil, is called immediately after the fast
+	// draining pre-check (h.draining.Load()) and BEFORE h.inFlightAdmissions.Add(1).
+	// Tests use this hook to inject a Close/drain call strictly between the
+	// pre-check and the Add, reproducing the BLOCKER 1 race: Close sets
+	// draining=true, Wait() returns immediately (counter still 0), then ServeHTTP
+	// continues with Add(1) too late. Must be nil in production (zero value). Not
+	// exported; set only from _test.go files in this package.
+	testHookAfterPreCheck func()
 }
 
 // NewHub builds a Hub backed by resolver for bearer-token → Identity resolution.
@@ -44,8 +112,8 @@ func NewHub(resolver identity.Resolver) *Hub {
 	return &Hub{
 		resolver:     resolver,
 		upgrader:     websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }},
-		reg:          newRegistry(),
-		turns:        newTurnStateStore(),
+		reg:          newLocalRegistry(),
+		turns:        newMemTurnStore(),
 		sessionCache: newSessionListCache(10 * time.Second),
 		TurnTimeout:  defaultTurnTimeout,
 	}
@@ -53,6 +121,54 @@ func NewHub(resolver identity.Resolver) *Hub {
 
 // ServeHTTP implements GET /api/daemon-link.
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Fast pre-check (no lock). If we are already draining we can bail out
+	// before doing any token resolution or WS upgrade — cheap path.
+	if h.draining.Load() {
+		http.Error(w, "observer draining", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Test hook: fired between the pre-check and the admitMu.Lock below to
+	// reproduce the race where Close runs in this gap. Always nil in production.
+	if h.testHookAfterPreCheck != nil {
+		h.testHookAfterPreCheck()
+	}
+
+	// BLOCKER 1 fix (PR #58 fix-round-1): perform the draining re-check AND
+	// inFlightAdmissions.Add(1) under admitMu, so the pre-check + Add is
+	// serialised against Close's (admitMu.Lock → draining.Store(true) → Unlock)
+	// critical section.
+	//
+	// Ordering guarantees:
+	//   - If ServeHTTP acquires admitMu first: counter++ before Close sees it.
+	//     Close's subsequent Wait() blocks on the non-zero counter until this
+	//     ServeHTTP goroutine finishes its admission cleanup.
+	//   - If Close acquires admitMu first: draining=true. ServeHTTP sees it
+	//     after acquiring admitMu, returns 503 without any Add or upsert.
+	//
+	// This closes the race window where Close could observe counter=0 while a
+	// ServeHTTP goroutine had already passed the fast pre-check but not yet
+	// called Add(1), letting a ghost row leak into the shared registry.
+	//
+	// SCOPE: the counter covers only the admission window — from here until
+	// the admission decision (reg.add succeeds or draining-rejection completes).
+	// It must NOT span the WS read loop (which can last hours), otherwise
+	// Close/drainHandler blocks in inFlightAdmissions.Wait() indefinitely.
+	h.admitMu.Lock()
+	if h.draining.Load() {
+		h.admitMu.Unlock()
+		http.Error(w, "observer draining", http.StatusServiceUnavailable)
+		return
+	}
+	h.inFlightAdmissions.Add(1)
+	h.admitMu.Unlock()
+	admissionDone := false
+	defer func() {
+		if !admissionDone {
+			h.inFlightAdmissions.Done()
+		}
+	}()
+
 	tok, ok := bearerToken(r.Header.Get("Authorization"))
 	if !ok {
 		http.Error(w, "missing bearer token", http.StatusUnauthorized)
@@ -64,6 +180,14 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	o := owner{userID: ident.UserID, workspaceID: ident.WorkspaceID}
+
+	// Generate 128-bit (16-byte) random connection ID; refuse upgrade on
+	// crypto/rand failure rather than silently using weak entropy.
+	connID, err := newDaemonID()
+	if err != nil {
+		http.Error(w, "server error", http.StatusServiceUnavailable)
+		return
+	}
 
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -77,7 +201,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(wsReadTimeout)) })
 
 	dc := &daemonConn{
-		id:      newDaemonID(),
+		id:      connID,
 		owner:   o,
 		conn:    conn,
 		pending: make(map[string]*pendingEntry),
@@ -108,6 +232,18 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		conn.Close()
 		return
 	}
+
+	// Cluster-mode: require non-empty (and non-whitespace) ShortID so peer pods
+	// can resolve the daemon by a stable name (not an ephemeral connection ID).
+	if h.sharedReg != nil && strings.TrimSpace(rp.ShortID) == "" {
+		_ = dc.writeEnvelope(errorEnvelope("", commander.ErrCodeInvalidRequest, "short_id is required when observer is in cluster mode"))
+		dc.writeMu.Lock()
+		_ = conn.WriteControl(websocket.CloseMessage, nil, time.Now().Add(wsWriteWait))
+		dc.writeMu.Unlock()
+		conn.Close()
+		return
+	}
+
 	dc.shortID = rp.ShortID
 	dc.displayName = rp.DisplayName
 	dc.kind = rp.Kind
@@ -127,11 +263,111 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	dc.lastSeenAt = time.Now().UTC()
 	dc.metaMu.Unlock()
 
+	// Cluster-mode admission: upsert into shared Postgres registry BEFORE
+	// adding to local registry, under a 3s timeout. On failure, refuse WS.
+	if h.sharedReg != nil {
+		upsertCtx, upsertCancel := context.WithTimeout(r.Context(), 3*time.Second)
+		upsertErr := h.sharedReg.connectUpsert(upsertCtx, dc)
+		upsertCancel()
+		if upsertErr != nil {
+			_ = dc.writeEnvelope(errorEnvelope("", commander.ErrCodeBackendUnavailable, "registry unavailable"))
+			dc.writeMu.Lock()
+			_ = conn.WriteControl(websocket.CloseMessage, nil, time.Now().Add(wsWriteWait))
+			dc.writeMu.Unlock()
+			conn.Close()
+			return
+		}
+		// Test hook: injected in _test.go to open the race window between
+		// connectUpsert and the admitMu critical section. Always nil in production.
+		if h.testHookPostUpsert != nil {
+			h.testHookPostUpsert()
+		}
+	}
+
+	routingID := dc.routingID()
+
+	// Admission critical section: re-check draining and add to local registry
+	// atomically under admitMu so that Close cannot snapshot the registry between
+	// the check and the add, leaving a live connection un-drained.
+	h.admitMu.Lock()
+	if h.draining.Load() {
+		h.admitMu.Unlock()
+		// We passed the fast pre-check but Close raced us here. Reject the
+		// upgrade: send a close frame and close the connection.
+		//
+		// If connectUpsert already wrote a shared row for this daemon, remove it
+		// now — before closing the WS — so sibling pods don't see a ghost daemon
+		// that was never admitted to the local registry. The sweep TTL is the
+		// fallback if remove fails; log the error but don't block shutdown.
+		if h.sharedReg != nil {
+			rmCtx, rmCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := h.sharedReg.remove(rmCtx, dc.owner, dc.shortID, dc.id); err != nil {
+				log.Printf("commanderhub: draining-reject remove short_id=%s conn_id=%s err=%v (sweep is fallback)",
+					dc.shortID, dc.id, err)
+			}
+			rmCancel()
+		}
+		// Admission window ends here: the draining-rejection cleanup (including any
+		// sharedReg.remove) is complete. Release the counter so Close/drainHandler
+		// can proceed; the WS close below is not part of the critical window.
+		h.inFlightAdmissions.Done()
+		admissionDone = true
+		dc.writeMu.Lock()
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseServiceRestart, "observer draining"),
+			time.Now().Add(wsWriteWait))
+		dc.writeMu.Unlock()
+		conn.Close()
+		return
+	}
 	h.reg.add(dc)
-	defer h.reg.remove(o, dc.id)
-	defer h.invalidateDaemonSessions(o, dc.id)
+	h.admitMu.Unlock()
+
+	// Admission window ends here: the daemon is now in the local registry and will
+	// be included in any subsequent drainAllLocalDaemons snapshot. Release the
+	// counter so Close/drainHandler can proceed to drain admitted connections.
+	h.inFlightAdmissions.Done()
+	admissionDone = true
+
+	// Teardown (reverse order of setup):
+	// 1. Stop heartbeat first so it cannot touch conn after we start removing.
+	// 2. Remove from shared registry (connection-id-guarded; safe if ownership lost).
+	// 3. Remove from local registry (predicate-guarded; safe on reconnect race).
+	// 4. Invalidate session cache.
+	// 5. Signal waiters and fail pending commands.
+	hbCtx, hbCancel := context.WithCancel(context.Background())
+	hbDone := make(chan struct{})
+
+	if h.sharedReg != nil {
+		go func() {
+			defer close(hbDone)
+			h.sharedReg.runHeartbeat(hbCtx, dc)
+		}()
+	} else {
+		close(hbDone)
+	}
+
+	// Teardown defers run in LIFO order:
+	// 1st registered = last to run: remove from local registry (predicate-guarded).
+	// 2nd registered: invalidate session cache.
+	// 3rd registered: signal waiters (close dc.done).
+	// 4th registered: fail all pending commands.
+	// 5th registered = first to run: stop heartbeat, then remove from shared registry.
+	// This ordering ensures the shared row is cleaned up before the local entry is
+	// removed, and that waiters/pending are only unblocked after teardown is complete.
+	defer h.reg.removeIf(o, routingID, func(existing *daemonConn) bool { return existing.id == dc.id })
+	defer h.invalidateDaemonSessions(o, routingID)
 	defer close(dc.done)
 	defer dc.failAllPending()
+	defer func() {
+		hbCancel()
+		<-hbDone
+		if h.sharedReg != nil {
+			rmCtx, rmCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = h.sharedReg.remove(rmCtx, o, dc.shortID, dc.id)
+			rmCancel()
+		}
+	}()
 
 	// Ack: PR-2 WSClient only flips linked=true on receipt.
 	if err := dc.writeEnvelope(commander.Envelope{Type: "ack"}); err != nil {
@@ -139,6 +375,147 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dc.readLoop()
+}
+
+// attachSharedRegistry wires cluster-mode components onto this Hub.
+// Called during wiring (Phase D D1). Must be called before ServeHTTP receives
+// any requests (not goroutine-safe against concurrent reads).
+//
+//   - cluster is stored for forwardHandler / drainHandler HMAC key access.
+//   - sr is the shared Postgres daemon registry.
+//   - fc is the HTTP forward client used for peer-pod command forwarding.
+//   - turns, when non-nil, replaces the Hub's in-memory turn store (e.g.
+//     pgTurnStore from Phase D D2). When nil the existing memTurnStore is kept.
+//   - h.sessionCache is set to nil so tree.go skips the in-process session
+//     cache in shared mode (all pods must go to the source of truth).
+func (h *Hub) attachSharedRegistry(cluster ClusterRuntime, sr *sharedRegistry, fc *forwardClient, turns turnStateBackend) {
+	h.cluster = cluster
+	h.sharedReg = sr
+	h.forwardCli = fc
+	if turns != nil {
+		h.turns = turns
+	}
+	h.sessionCache = nil
+}
+
+// Close drains the Hub and releases all resources.
+//
+// Shutdown sequence:
+//  1. Mark hub as draining — new daemon WS upgrades return 503 immediately.
+//  2. Snapshot the current local daemon set (under registry lock; copy to avoid holding lock).
+//  3. For each local daemon: call drainAllLocalDaemons to send observer_draining
+//     event and close the WS connection, which causes the per-WS read loop to
+//     return and its defers to clean up the shared-registry row.
+//  4. Wait on each dc.done channel up to the ctx deadline (WaitGroup + ctx select).
+//  5. Close idle HTTP connections held by the forwardClient (if any).
+func (h *Hub) Close(ctx context.Context) error {
+	// Step 1+2 (atomic): Under admitMu, set draining=true and snapshot the
+	// local registry. Any concurrent ServeHTTP that is between the pre-check
+	// and its admitMu.Lock will either:
+	//   (a) see draining=true after acquiring admitMu and bail out, OR
+	//   (b) have already called h.reg.add(dc) before we acquired admitMu and
+	//       its dc is therefore already in the snapshot below.
+	// Either way, no live WS connection escapes the drain.
+	h.admitMu.Lock()
+	h.draining.Store(true)
+	var daemons []*daemonConn
+	h.reg.mu.Lock()
+	for _, m := range h.reg.conns {
+		for _, dc := range m {
+			daemons = append(daemons, dc)
+		}
+	}
+	h.reg.mu.Unlock()
+	h.admitMu.Unlock()
+
+	// Wait for any ServeHTTP goroutine that passed the pre-check before we set
+	// draining=true to finish its post-upsert cleanup (sharedReg.remove in the
+	// draining-rejection branch). Without this wait, Close can return while a
+	// 5s remove call is still in progress, leaving a ghost shared row if the
+	// process exits. We release admitMu first so those goroutines can acquire
+	// it, see draining=true, and proceed to their remove+WS-close path.
+	inFlightDone := make(chan struct{})
+	go func() { h.inFlightAdmissions.Wait(); close(inFlightDone) }()
+	select {
+	case <-inFlightDone:
+	case <-ctx.Done():
+		log.Printf("commanderhub: Close ctx deadline reached waiting for in-flight admissions; proceeding with drain")
+	}
+
+	// Step 3: Send observer_draining event and close WS for every local daemon.
+	// This mirrors drainAllLocalDaemons but we also need the dc.done channel
+	// handles that drainAllLocalDaemons doesn't expose, so we inline the logic.
+	h.drainAllLocalDaemons("hub-close")
+
+	// Step 4: Wait for each daemon's read loop to finish (dc.done closes when
+	// ServeHTTP's defers complete). Use a WaitGroup fed by per-daemon goroutines
+	// so we can select on the ctx deadline collectively.
+	var wg sync.WaitGroup
+	for _, dc := range daemons {
+		wg.Add(1)
+		go func(dc *daemonConn) {
+			defer wg.Done()
+			select {
+			case <-dc.done:
+			case <-ctx.Done():
+			}
+		}(dc)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+
+	// Step 5: Release idle HTTP connections.
+	if h.forwardCli != nil {
+		h.forwardCli.httpClient.CloseIdleConnections()
+	}
+	return nil
+}
+
+// listDaemons returns the set of online daemons visible to owner o.
+// In shared mode (sharedReg != nil) it queries the Postgres registry so
+// peer-pod daemons appear in the list. In single-pod mode it falls back to
+// the local registry snapshot.
+func (h *Hub) listDaemons(ctx context.Context, o owner) ([]DaemonInfo, error) {
+	if h.sharedReg != nil {
+		return h.sharedReg.listAll(ctx, o)
+	}
+	return h.reg.daemons(o), nil
+}
+
+// lookupResult is returned by lookupDaemon.
+type lookupResult struct {
+	dc      *daemonConn // non-nil when local
+	peerURL string      // non-empty when remote
+	info    DaemonInfo  // populated for remote
+}
+
+// lookupDaemon checks whether shortID is owned locally or remotely.
+// Returns (result, true, nil) when found; (zero, false, nil) when not found;
+// (zero, false, err) on registry error.
+func (h *Hub) lookupDaemon(ctx context.Context, o owner, shortID string) (lookupResult, bool, error) {
+	// Check local registry first.
+	if dc, ok := h.reg.lookup(o, shortID); ok {
+		return lookupResult{dc: dc}, true, nil
+	}
+	// In shared mode, ask the Postgres registry for a remote owner.
+	if h.sharedReg != nil {
+		peerURL, info, found, err := h.sharedReg.lookupRemote(ctx, o, shortID)
+		if err != nil {
+			return lookupResult{}, false, err
+		}
+		if found {
+			return lookupResult{peerURL: peerURL, info: info}, true, nil
+		}
+	}
+	return lookupResult{}, false, nil
 }
 
 // --- daemonConn WS mechanics ---
@@ -162,10 +539,17 @@ func (dc *daemonConn) writeEnvelope(env commander.Envelope) error {
 // cancels while the buffer is full, the blocking terminal send must have an
 // escape hatch other than dc.done (which is closed only AFTER the read loop
 // returns — and the read loop is exactly the stuck goroutine).
+//
+// shortID, sessionID, command are populated at send time so that routeFrame
+// can synthesize the turnKey needed to call turns.updateFromEnvelope without
+// an extra round-trip through the daemon.  They are empty for non-turn commands.
 type pendingEntry struct {
 	ch        chan commander.Envelope // data channel; NEVER closed (GC reclaims it)
 	cancel    chan struct{}           // closed by removePending to unblock a stuck terminal send
-	streaming bool                    // streaming commands may terminate on status_code terminal events
+	streaming bool                   // streaming commands may terminate on status_code terminal events
+	shortID   string                 // populated for session_turn commands
+	sessionID string                 // populated for session_turn commands
+	command   string                 // populated for session_turn commands
 }
 
 // registerPending reserves a reply entry for cmdID and returns it. The data
@@ -174,11 +558,21 @@ type pendingEntry struct {
 // without a ch-close: terminal command_result/error frames for all commands,
 // terminal status events for streaming commands, disconnect via <-dc.done, and
 // cancel via <-ctx.Done().
-func (dc *daemonConn) registerPending(cmdID string, streaming bool) *pendingEntry {
+//
+// shortID, sessionID, command are optional: populate them when registering a
+// streaming turn command so routeFrame can call turns.updateFromEnvelope. Pass
+// empty strings for non-turn commands (list_sessions, get_session, etc.).
+func (dc *daemonConn) registerPending(cmdID string, streaming bool, turnMeta ...string) *pendingEntry {
 	pe := &pendingEntry{
 		ch:        make(chan commander.Envelope, 16),
 		cancel:    make(chan struct{}),
 		streaming: streaming,
+	}
+	// turnMeta is optional: [shortID, sessionID, command]
+	if len(turnMeta) == 3 {
+		pe.shortID = turnMeta[0]
+		pe.sessionID = turnMeta[1]
+		pe.command = turnMeta[2]
 	}
 	dc.pendingMu.Lock()
 	dc.pending[cmdID] = pe
@@ -250,6 +644,19 @@ func (dc *daemonConn) routeFrame(env commander.Envelope) {
 	if pe == nil {
 		return // unknown id (stale/late, or removed by a cancelling consumer): drop
 	}
+	// If this pending entry carries turn metadata (session_turn path), update the
+	// persistent turn store so state is visible cross-pod. This is a fire-and-
+	// forget best-effort call: an error here must not block the read loop.
+	if pe.command != "" && dc.hub != nil {
+		key := turnKey{
+			owner:     dc.owner,
+			shortID:   pe.shortID,
+			sessionID: pe.sessionID,
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = dc.hub.turns.updateFromEnvelope(ctx, key, pe.command, env)
+		cancel()
+	}
 	terminal := isTerminalEnvelope(env) || (pe.streaming && isTerminalStatusEnvelope(env))
 	if !sendOrDrop(pe.ch, env, terminal, pe.cancel, dc.done) {
 		return
@@ -287,8 +694,17 @@ func sendOrDrop(ch chan commander.Envelope, env commander.Envelope, terminal boo
 }
 
 // nextCmdID returns a hub-unique command id (used by proxy.go).
+// SINGLE-POD path (h.sharedReg == nil) emits base36 sequence only (bit-exact v0.0.9 behavior).
+// SHARED MODE (h.sharedReg != nil) emits <podHash>-<base36> where podHash is the
+// first 4 hex chars of SHA256(advertiseURL).
 func (h *Hub) nextCmdID() string {
-	return strconv.FormatInt(h.cmdSeq.Add(1), 36)
+	seq := strconv.FormatInt(h.cmdSeq.Add(1), 36)
+	if h.sharedReg == nil {
+		return seq // bit-exact preservation of v0.0.9 behavior
+	}
+	sum := sha256.Sum256([]byte(h.sharedReg.advertiseURL))
+	podHash := hex.EncodeToString(sum[:])[:4]
+	return podHash + "-" + seq
 }
 
 // --- shared utils (bearerToken also used by auth.go) ---
@@ -302,10 +718,12 @@ func bearerToken(auth string) (string, bool) {
 	return tok, tok != ""
 }
 
-func newDaemonID() string {
-	var b [8]byte
-	_, _ = rand.Read(b[:])
-	return hex.EncodeToString(b[:])
+func newDaemonID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
 }
 
 func errorEnvelope(id, code, message string) commander.Envelope {

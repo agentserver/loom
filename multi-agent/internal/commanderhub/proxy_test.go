@@ -3,6 +3,7 @@ package commanderhub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -215,7 +216,7 @@ func TestProxy_FanOutSessionsFailOpen(t *testing.T) {
 	// register a second "daemon" entry under same owner that will never answer
 	// (no real conn) → SendCommand hits ErrDaemonGone quickly via the pre-check
 	// on the already-closed done chan.
-	hub.reg.add(&daemonConn{id: "ghost", owner: o, done: closedDone(), pending: map[string]*pendingEntry{}})
+	hub.reg.add(&daemonConn{id: "ghost", shortID: "ghost", owner: o, done: closedDone(), pending: map[string]*pendingEntry{}})
 
 	res := hub.FanOutSessions(context.Background(), o)
 	byID := map[string]DaemonSessions{}
@@ -232,6 +233,162 @@ func TestProxy_FanOutSessionsFailOpen(t *testing.T) {
 	}
 	require.True(t, realFound, "real daemon should report ok")
 	require.Contains(t, []string{"error", "disconnected", "timeout"}, byID["ghost"].Status)
+}
+
+// TestSendCommand_OwnershipLost_ReturnsErrDaemonGone: when dc.ownershipLost is
+// already set (simulating a prior sibling-pod takeover), SendCommand must return
+// ErrDaemonGone immediately — before registering a pending entry or writing.
+func TestSendCommand_OwnershipLost_ReturnsErrDaemonGone(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{
+		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
+	}}
+	hub := NewHub(resolver)
+	// Attach a sharedRegistry so confirmOwnership enters cluster-mode path.
+	// db=nil is safe because ownershipLost.Load() short-circuits before any DB call.
+	hub.attachSharedRegistry(ClusterRuntime{AdvertiseURL: "http://pod-a:8091"}, &sharedRegistry{advertiseURL: "http://pod-a:8091"}, nil, nil)
+
+	o := owner{userID: "alice", workspaceID: "W1"}
+	dc := &daemonConn{
+		id:      "conn-1",
+		shortID: "agent-A",
+		owner:   o,
+		done:    make(chan struct{}),
+		pending: make(map[string]*pendingEntry),
+		hub:     hub,
+	}
+	dc.ownershipLost.Store(true)
+	hub.reg.add(dc)
+
+	_, err := hub.SendCommand(context.Background(), o, "agent-A", "list_sessions", nil)
+	require.ErrorIs(t, err, ErrDaemonGone)
+}
+
+// TestSendCommandStream_OwnershipLost_ReturnsErrDaemonGone: analogous test for
+// the streaming path — ownership lost before registerPending must return ErrDaemonGone.
+func TestSendCommandStream_OwnershipLost_ReturnsErrDaemonGone(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{
+		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
+	}}
+	hub := NewHub(resolver)
+	hub.attachSharedRegistry(ClusterRuntime{AdvertiseURL: "http://pod-a:8091"}, &sharedRegistry{advertiseURL: "http://pod-a:8091"}, nil, nil)
+
+	o := owner{userID: "alice", workspaceID: "W1"}
+	dc := &daemonConn{
+		id:      "conn-2",
+		shortID: "agent-B",
+		owner:   o,
+		done:    make(chan struct{}),
+		pending: make(map[string]*pendingEntry),
+		hub:     hub,
+	}
+	dc.ownershipLost.Store(true)
+	hub.reg.add(dc)
+
+	_, err := hub.SendCommandStream(context.Background(), o, "agent-B", "session_turn", nil)
+	require.ErrorIs(t, err, ErrDaemonGone)
+}
+
+// ---------------------------------------------------------------------------
+// Fix #4: Hub.ReadFile gates on file_preview_encoded_cap in shared mode
+// ---------------------------------------------------------------------------
+
+// TestReadFile_LocalSharedMode_RejectsOldDaemon verifies that ReadFile returns
+// DaemonError(daemon_upgrade_required) for a locally-owned daemon that lacks
+// CapabilityFilePreviewEncodedCap when the hub is in shared (cluster) mode.
+func TestReadFile_LocalSharedMode_RejectsOldDaemon(t *testing.T) {
+	hub := NewHub(&fakeResolver{mu: map[string]identity.Identity{}})
+	hub.attachSharedRegistry(ClusterRuntime{AdvertiseURL: "http://pod-a:8091"}, &sharedRegistry{advertiseURL: "http://pod-a:8091"}, nil, nil)
+
+	o := owner{userID: "alice", workspaceID: "W1"}
+	dc := &daemonConn{
+		id:      "conn-old",
+		shortID: "agent-old",
+		owner:   o,
+		done:    make(chan struct{}),
+		pending: make(map[string]*pendingEntry),
+		hub:     hub,
+	}
+	dc.metaMu.Lock()
+	// Old daemon: sessions + turn but NOT file_preview_encoded_cap.
+	dc.capabilities = map[string]bool{
+		commander.CapabilitySessions: true,
+		commander.CapabilityTurn:     true,
+	}
+	dc.metaMu.Unlock()
+	hub.reg.add(dc)
+
+	_, err := hub.ReadFile(context.Background(), o, "agent-old", "session-1", "/tmp/file")
+	require.Error(t, err)
+	var de *DaemonError
+	require.ErrorAs(t, err, &de, "ReadFile on old daemon in shared mode must return DaemonError")
+	require.Equal(t, commander.ErrCodeDaemonUpgradeRequired, de.Code)
+}
+
+// TestReadFile_SinglePod_AllowsOldDaemon verifies that ReadFile proceeds
+// normally (no capability gate) when the hub is NOT in shared mode (sharedReg nil).
+// This preserves backward compatibility with single-pod deployments.
+func TestReadFile_SinglePod_AllowsOldDaemon(t *testing.T) {
+	resolver := &fakeResolver{mu: map[string]identity.Identity{
+		"tok-alice": {UserID: "alice", WorkspaceID: "W1"},
+	}}
+	// dialFakeDaemon gives a hub WITHOUT sharedReg (single-pod mode).
+	hub, _, o, cleanup := dialFakeDaemon(t, resolver, "tok-alice", &tbBackend{})
+	defer cleanup()
+
+	// ReadFile on a daemon without the capability should reach SendCommand
+	// (not be gated), fail with ErrDaemonGone (no read_file handler), never
+	// with ErrCodeDaemonUpgradeRequired.
+	di := hub.reg.daemons(o)
+	require.Len(t, di, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := hub.ReadFile(ctx, o, di[0].DaemonID, "session-1", "/tmp/file")
+	// Any error is acceptable; what's NOT acceptable is DaemonError with upgrade code.
+	if err != nil {
+		var de *DaemonError
+		if errors.As(err, &de) {
+			require.NotEqual(t, commander.ErrCodeDaemonUpgradeRequired, de.Code,
+				"single-pod ReadFile must not gate on capability")
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Fix #4: Hub.ReadFile in shared mode — daemon WITH capability proceeds
+// ---------------------------------------------------------------------------
+
+// TestReadFile_LocalSharedMode_AllowsNewDaemon verifies that ReadFile proceeds
+// to SendCommand for a locally-owned daemon that HAS CapabilityFilePreviewEncodedCap
+// in shared (cluster) mode.
+func TestReadFile_LocalSharedMode_AllowsNewDaemon(t *testing.T) {
+	hub := NewHub(&fakeResolver{mu: map[string]identity.Identity{}})
+	hub.attachSharedRegistry(ClusterRuntime{AdvertiseURL: "http://pod-a:8091"}, &sharedRegistry{advertiseURL: "http://pod-a:8091"}, nil, nil)
+
+	o := owner{userID: "alice", workspaceID: "W1"}
+	dc := &daemonConn{
+		id:      "conn-new",
+		shortID: "agent-new",
+		owner:   o,
+		done:    closedDone(), // pre-closed so sendCommandToLocal returns ErrDaemonGone quickly
+		pending: make(map[string]*pendingEntry),
+		hub:     nil, // nil hub → confirmOwnership returns true (single-pod path)
+	}
+	dc.metaMu.Lock()
+	// New daemon: has file_preview_encoded_cap.
+	dc.capabilities = map[string]bool{
+		commander.CapabilitySessions:              true,
+		commander.CapabilityTurn:                  true,
+		commander.CapabilityFilePreviewEncodedCap: true,
+	}
+	dc.metaMu.Unlock()
+	hub.reg.add(dc)
+
+	// The capability gate passes; SendCommand then sees a closed `done` chan → ErrDaemonGone.
+	// We verify the error is ErrDaemonGone (not DaemonError upgrade required).
+	_, err := hub.ReadFile(context.Background(), o, "agent-new", "session-1", "/tmp/file")
+	require.ErrorIs(t, err, ErrDaemonGone,
+		"ReadFile with capability must pass gate and reach SendCommand (→ ErrDaemonGone on closed conn)")
 }
 
 // --- helpers ---

@@ -366,6 +366,9 @@ func runServeDaemon(args []string) {
 				DisplayName:   cfg.Discovery.DisplayName,
 				DriverVersion: driverVersion,
 				ShortID:       cfg.Credentials.ShortID,
+				Capabilities: []string{
+					commander.CapabilityFilePreviewEncodedCap,
+				},
 			},
 			HeartbeatInt:   time.Duration(cfg.Daemon.HeartbeatIntervalSec) * time.Second,
 			InitialBackoff: time.Duration(cfg.Daemon.InitialBackoffMs) * time.Millisecond,

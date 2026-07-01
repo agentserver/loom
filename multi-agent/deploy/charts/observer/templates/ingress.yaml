@@ -25,6 +25,14 @@ spec:
     - host: {{ .Values.ingress.host | quote }}
       http:
         paths:
+          - path: /api/commander/_internal/
+            pathType: Prefix
+            backend:
+              service:
+                # Point at a non-existent in-cluster Service to get 503 at the edge.
+                name: {{ include "observer.fullname" . }}-deny
+                port:
+                  number: 1
           - path: /
             pathType: Prefix
             backend:

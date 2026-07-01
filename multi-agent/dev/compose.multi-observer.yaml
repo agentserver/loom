@@ -1,0 +1,138 @@
+# Multi-observer local development stack
+#
+# Boots 1 Postgres + a migration job + 2 observer-server instances + 1 nginx
+# load balancer. Observers share the same Postgres DB and cluster secret; nginx
+# round-robins requests across both on port 8090.
+#
+# Usage: see dev/README.md → "make multi-observer-up"
+#
+# Required env (set in a .env file next to this file, or export before running):
+#   OBSERVER_CLUSTER_SECRET   — 64 hex chars (32 bytes); generate with:
+#                               openssl rand -hex 32
+#   OBSERVER_IMAGE            — (optional) image ref; defaults to observer-server:dev
+#
+# The Postgres DSN is hardcoded below (observer/observer@postgres/observer) so
+# you do not need to set OBSERVER_DSN unless you want a different DB.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: observer
+      POSTGRES_USER: observer
+      POSTGRES_PASSWORD: observer
+    volumes:
+      - observer-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U observer -d observer"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+    networks:
+      - observer-net
+
+  # One-shot migration job — runs before the observer instances start.
+  # Both observers depend on this service completing successfully.
+  observer-migrate:
+    image: ${OBSERVER_IMAGE:-observer-server:dev}
+    command:
+      - --config
+      - /etc/observer/observer.yaml
+      - --migrate-only
+    environment:
+      OBSERVER_DSN: "postgres://observer:observer@postgres:5432/observer?sslmode=disable"
+      OBSERVER_CLUSTER_SECRET: "${OBSERVER_CLUSTER_SECRET}"
+      OBSERVER_ADVERTISE_URL: "http://observer-1:8091"
+    volumes:
+      - ./configs/observer.multi-pod.yaml:/etc/observer/observer.yaml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - observer-net
+
+  observer-1:
+    image: ${OBSERVER_IMAGE:-observer-server:dev}
+    command:
+      - --config
+      - /etc/observer/observer.yaml
+    environment:
+      OBSERVER_DSN: "postgres://observer:observer@postgres:5432/observer?sslmode=disable"
+      OBSERVER_ADVERTISE_URL: "http://observer-1:8091"
+      OBSERVER_CLUSTER_SECRET: "${OBSERVER_CLUSTER_SECRET}"
+    volumes:
+      - ./configs/observer.multi-pod.yaml:/etc/observer/observer.yaml:ro
+    depends_on:
+      observer-migrate:
+        condition: service_completed_successfully
+    ports:
+      - "18091:8090"
+    restart: unless-stopped
+    networks:
+      - observer-net
+
+  observer-2:
+    image: ${OBSERVER_IMAGE:-observer-server:dev}
+    command:
+      - --config
+      - /etc/observer/observer.yaml
+    environment:
+      OBSERVER_DSN: "postgres://observer:observer@postgres:5432/observer?sslmode=disable"
+      OBSERVER_ADVERTISE_URL: "http://observer-2:8091"
+      OBSERVER_CLUSTER_SECRET: "${OBSERVER_CLUSTER_SECRET}"
+    volumes:
+      - ./configs/observer.multi-pod.yaml:/etc/observer/observer.yaml:ro
+    depends_on:
+      observer-migrate:
+        condition: service_completed_successfully
+    ports:
+      - "18092:8090"
+    restart: unless-stopped
+    networks:
+      - observer-net
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "8090:8090"
+    configs:
+      - source: nginx_conf
+        target: /etc/nginx/conf.d/observer.conf
+    depends_on:
+      - observer-1
+      - observer-2
+    restart: unless-stopped
+    networks:
+      - observer-net
+
+configs:
+  nginx_conf:
+    content: |
+      upstream observer_backends {
+          server observer-1:8090;
+          server observer-2:8090;
+      }
+      server {
+          listen 8090;
+          location / {
+              proxy_pass http://observer_backends;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              # Preserve WebSocket / long-poll connections
+              proxy_http_version 1.1;
+              proxy_set_header Upgrade $http_upgrade;
+              proxy_set_header Connection "upgrade";
+              proxy_read_timeout 300s;
+              proxy_send_timeout 300s;
+          }
+      }
+
+volumes:
+  observer-postgres:
+
+networks:
+  observer-net:
+    driver: bridge

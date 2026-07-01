@@ -121,7 +121,12 @@ func sortSessionRows(rows []SessionRow) {
 }
 
 func (h *Hub) CommanderTree(ctx context.Context, o owner) CommanderTree {
-	return h.commanderTreeForInfos(ctx, o, h.reg.daemons(o))
+	infos, err := h.listDaemons(ctx, o)
+	if err != nil {
+		// Registry error: return an empty tree; the caller sees an empty daemons list.
+		return CommanderTree{Daemons: []DaemonTree{}}
+	}
+	return h.commanderTreeForInfos(ctx, o, infos)
 }
 
 func (h *Hub) commanderTreeForInfos(ctx context.Context, o owner, infos []DaemonInfo) CommanderTree {
@@ -166,6 +171,12 @@ func (h *Hub) daemonTree(ctx context.Context, o owner, info DaemonInfo) DaemonTr
 }
 
 func (h *Hub) cachedSessionRows(ctx context.Context, o owner, info DaemonInfo) ([]SessionRow, error) {
+	// In shared mode sessionCache is nil — always go to the source of truth so
+	// cross-pod sessions are visible and stale cache doesn't hide pod B's data.
+	if h.sessionCache == nil {
+		return h.refreshSessionRows(ctx, o, info)
+	}
+
 	key := cacheKey{owner: o, daemonID: info.DaemonID}
 	now := time.Now()
 	h.sessionCache.mu.Lock()
@@ -173,7 +184,7 @@ func (h *Hub) cachedSessionRows(ctx context.Context, o owner, info DaemonInfo) (
 	if ent, ok := h.sessionCache.entries[key]; ok && now.Before(ent.expires) {
 		rows := append([]SessionRow(nil), ent.rows...)
 		h.sessionCache.mu.Unlock()
-		h.mergeCurrentTurnState(o, info.DaemonID, rows)
+		h.mergeCurrentTurnState(ctx, o, info.DaemonID, rows)
 		return rows, nil
 	}
 	h.sessionCache.mu.Unlock()
@@ -194,6 +205,10 @@ func (h *Hub) cachedSessionRows(ctx context.Context, o owner, info DaemonInfo) (
 }
 
 func (h *Hub) invalidateDaemonSessions(o owner, daemonID string) {
+	// No-op in shared mode (sessionCache is nil).
+	if h.sessionCache == nil {
+		return
+	}
 	h.sessionCache.mu.Lock()
 	key := cacheKey{owner: o, daemonID: daemonID}
 	h.sessionCache.gens[key]++
@@ -214,16 +229,16 @@ func (h *Hub) refreshSessionRows(ctx context.Context, o owner, info DaemonInfo) 
 	}
 	rows := make([]SessionRow, 0, len(body.Sessions))
 	for _, sess := range body.Sessions {
-		snap := h.turns.get(turnKey{owner: o, daemonID: info.DaemonID, sessionID: sess.ID})
+		snap, _ := h.turns.get(ctx, turnKey{owner: o, shortID: info.DaemonID, sessionID: sess.ID})
 		rows = append(rows, sessionRowFromBackend(info.DaemonID, info.ShortID, sess, snap))
 	}
 	sortSessionRows(rows)
 	return rows, nil
 }
 
-func (h *Hub) mergeCurrentTurnState(o owner, daemonID string, rows []SessionRow) {
+func (h *Hub) mergeCurrentTurnState(ctx context.Context, o owner, daemonID string, rows []SessionRow) {
 	for i := range rows {
-		snap := h.turns.get(turnKey{owner: o, daemonID: daemonID, sessionID: rows[i].SessionID})
+		snap, _ := h.turns.get(ctx, turnKey{owner: o, shortID: daemonID, sessionID: rows[i].SessionID})
 		state := string(snap.State)
 		if state == "" {
 			state = string(turnStateIdle)

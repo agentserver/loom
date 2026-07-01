@@ -52,6 +52,7 @@ func TestEnvelope_RegisterCarriesCapabilities(t *testing.T) {
 		{name: "CapabilitySessions", got: CapabilitySessions, want: "sessions"},
 		{name: "CapabilityTurn", got: CapabilityTurn, want: "turn"},
 		{name: "CapabilityFiles", got: CapabilityFiles, want: "files"},
+		{name: "CapabilityFilePreviewEncodedCap", got: CapabilityFilePreviewEncodedCap, want: "file_preview_encoded_cap"},
 	} {
 		if tc.got != tc.want {
 			t.Fatalf("%s=%q want %q", tc.name, tc.got, tc.want)
@@ -267,6 +268,7 @@ func TestEnvelope_ErrorCodesEnumerated(t *testing.T) {
 		"schema_version_mismatch": ErrCodeSchemaVersionMismatch,
 		"invalid_request":         ErrCodeInvalidRequest,
 		"internal":                ErrCodeInternal,
+		"daemon_upgrade_required": ErrCodeDaemonUpgradeRequired,
 	}
 	for want, got := range codes {
 		if got != want {
