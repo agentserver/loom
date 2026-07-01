@@ -774,18 +774,40 @@ func TestMultiPod_NonceReplay_FailsClosed(t *testing.T) {
 		return req
 	}
 
-	// First request — will go through (daemon goroutine not needed since we only
-	// care about nonce insertion, not command execution; daemon might return 404
-	// if the local lookup fails after nonce insertion, but the nonce IS inserted).
-	resp1, err := podB.fc.httpClient.Do(buildReq())
-	require.NoError(t, err)
-	_, _ = io.Copy(io.Discard, resp1.Body)
-	resp1.Body.Close()
-	// The first request may succeed or fail for the command itself, but the
-	// nonce must have been inserted.
+	// First request — pod-A's forwardHandler will insert the nonce into Postgres
+	// BEFORE dispatching the command to the local daemon. The addLocalDaemon
+	// helper only spawns a close-detector goroutine (not a full command
+	// responder), so `list_sessions` blocks until the caller cancels. That's
+	// fine for this test: the caller cancels with a short ctx (nonce is inserted
+	// well before the timeout) and the second request's replay assertion is the
+	// real verification.
+	//
+	// We use a per-request ctx (not fc.httpClient.Timeout) so the nonce race
+	// window is deterministic: nonce insertion happens synchronously in
+	// verifyForwardAuth before command dispatch.
+	req1Ctx, req1Cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	req1 := buildReq().WithContext(req1Ctx)
+	resp1, err := podB.fc.httpClient.Do(req1)
+	req1Cancel()
+	// The response may be a context-canceled error (daemon never replied); the
+	// nonce is inserted regardless because verifyForwardAuth runs before dispatch.
+	if err == nil {
+		_, _ = io.Copy(io.Discard, resp1.Body)
+		resp1.Body.Close()
+	}
 
-	// Second request with the same nonce must be rejected (replay).
-	resp2, err := podB.fc.httpClient.Do(buildReq())
+	// Give a moment for nonce insertion to commit (verifyForwardAuth runs
+	// insertNonce synchronously, but the server-side handler may still be draining
+	// the request body when our client returns).
+	time.Sleep(50 * time.Millisecond)
+
+	// Second request with the same nonce must be rejected (replay). This request
+	// is rejected at verifyForwardAuth's insertNonce step (returns false) BEFORE
+	// any daemon dispatch, so no timeout wrapper is needed.
+	req2Ctx, req2Cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer req2Cancel()
+	req2 := buildReq().WithContext(req2Ctx)
+	resp2, err := podB.fc.httpClient.Do(req2)
 	require.NoError(t, err)
 	_, _ = io.Copy(io.Discard, resp2.Body)
 	resp2.Body.Close()
