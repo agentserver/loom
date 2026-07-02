@@ -163,19 +163,26 @@ def validate_observer_db(user_path: str) -> tuple[Path, int]:
     return resolved, fd
 
 
-def validate_out_path(user_path: str) -> tuple[Path, Path]:
-    """Validate --out and return (resolved_parent, target_basename).
+def validate_out_path(user_path: str) -> "OutTarget":
+    """Validate --out and return an OutTarget pinning the resolved parent.
 
     Steps:
       1. Resolve the PARENT with strict=True (parent must exist; do
          NOT mkdir -p). Reject if resolved parent is in a forbidden
          subtree.
-      2. If the target exists as a symlink → ErrOutIsSymlink.
-      3. If the target exists as a regular file / dir → ErrOutFileExists.
+      2. **Open the parent immediately** with
+         `O_RDONLY | O_DIRECTORY | O_NOFOLLOW` on Linux so subsequent
+         open_out_file() calls use the pre-verified inode via
+         dir_fd; a parent-directory swap between validate and open
+         cannot re-target because the fd holds the inode identity.
+         Codex round-6 code-review P0. Non-Linux fallback: return
+         no fd (`dir_fd = -1`) and rely on plain-path open with the
+         documented residual risk per spec §7 (b).
+      3. If the target exists as a symlink → ErrOutIsSymlink.
+      4. If the target exists as a regular file / dir → ErrOutFileExists.
 
-    The atomic `O_CREAT | O_EXCL | O_NOFOLLOW` open happens in
-    `open_out_file` below (spec §7 (d) step 4), which pins the open on
-    a dir_fd of `resolved_parent` to close the parent-side TOCTOU.
+    Caller is responsible for closing `OutTarget.dir_fd` (or handing
+    it to `open_out_file`, which closes it after the atomic open).
     """
     p = Path(user_path).expanduser()
     parent = p.parent if str(p.parent) else Path(".")
@@ -191,54 +198,99 @@ def validate_out_path(user_path: str) -> tuple[Path, Path]:
             f"--out parent resolves under a forbidden subtree: {resolved_parent}"
         )
 
+    # Pin the resolved parent to a dir_fd immediately, before we lstat
+    # the target — otherwise an attacker could swap the parent inode
+    # between our resolve and open_out_file's re-open. Non-Linux
+    # platforms skip this and accept the residual TOCTOU risk.
+    if hasattr(os, "O_DIRECTORY") and sys.platform != "win32":
+        try:
+            dir_fd = os.open(
+                str(resolved_parent),
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            )
+        except OSError as e:
+            raise PathValidationError(
+                f"--out parent could not be pinned: {resolved_parent}: {e}"
+            ) from e
+    else:  # pragma: no cover — non-Linux fallback
+        dir_fd = -1
+
     # The target basename may or may not exist yet. If it exists,
     # decide which rejection applies. lstat, NOT stat: we want to see
-    # a symlink as-is, not follow it.
-    target = resolved_parent / p.name
+    # a symlink as-is, not follow it. Use dir_fd-relative fstatat via
+    # os.stat when we have a pinned dir_fd so this check binds to the
+    # pinned inode too.
     try:
-        st = os.lstat(target)
+        if dir_fd >= 0:
+            st = os.stat(p.name, dir_fd=dir_fd, follow_symlinks=False)
+        else:  # pragma: no cover — non-Linux fallback
+            st = os.lstat(resolved_parent / p.name)
     except FileNotFoundError:
         # Ideal case: target does not exist, open_out_file's O_EXCL
-        # will atomically create it.
-        return resolved_parent, Path(p.name)
+        # will atomically create it under the pinned dir_fd.
+        return OutTarget(resolved_parent=resolved_parent, basename=Path(p.name), dir_fd=dir_fd)
 
     if stat.S_ISLNK(st.st_mode):
-        raise ErrOutIsSymlink(f"--out is a symlink; refusing to write: {target}")
+        if dir_fd >= 0:
+            os.close(dir_fd)
+        raise ErrOutIsSymlink(f"--out is a symlink; refusing to write: {resolved_parent / p.name}")
     # Any other kind of existing entry (regular file, dir, socket, …)
     # is refused so we do not clobber data.
-    raise ErrOutFileExists(f"--out already exists (no --force): {target}")
+    if dir_fd >= 0:
+        os.close(dir_fd)
+    raise ErrOutFileExists(f"--out already exists (no --force): {resolved_parent / p.name}")
 
 
-def open_out_file(resolved_parent: Path, basename: Path) -> int:
-    """Atomically create the --out target under a dir_fd-anchored open.
+class OutTarget:
+    """Result of `validate_out_path`. Carries the pinned dir_fd.
 
-    See spec §7 (d) step 4: opening the target relative to a dir_fd
-    that already points at the resolved parent's inode closes the
-    parent-side TOCTOU that a plain path-based `open()` leaves gaping.
+    Kept as a plain class (rather than a NamedTuple / dataclass) so
+    tests can construct one in-line for fallback scenarios, and the
+    `close()` method can guard the fd against double-close.
+    """
+
+    def __init__(self, resolved_parent: Path, basename: Path, dir_fd: int) -> None:
+        self.resolved_parent = resolved_parent
+        self.basename = basename
+        self.dir_fd = dir_fd
+
+    def close(self) -> None:
+        """Close the pinned dir_fd. Idempotent. Safe if fd < 0."""
+        if self.dir_fd >= 0:
+            os.close(self.dir_fd)
+            self.dir_fd = -1
+
+
+def open_out_file(target: "OutTarget") -> int:
+    """Atomically create the --out target under the pinned dir_fd.
+
+    See spec §7 (d) step 4: opening the target relative to the dir_fd
+    that `validate_out_path` pinned closes the parent-side TOCTOU
+    that a plain path-based re-open would leave gaping (round-6
+    Codex code-review P0).
 
     Returns an fd opened O_WRONLY; caller is responsible for
     fdopen'ing to a text stream if writing CSV/JSON, and for closing.
+    Consumes `target.dir_fd` — closes it on success or failure.
 
     On non-Linux platforms without `O_DIRECTORY`/dir_fd semantics
-    (mostly Windows) we fall back to a plain path-based
-    O_CREAT|O_EXCL|O_NOFOLLOW open. The eval pipeline runs on Linux so
-    the fallback is documented, not tested, per spec §7 (d).
+    the fallback opens by resolved-parent-relative pathname; residual
+    TOCTOU risk documented in spec §7 (d).
     """
-    if not hasattr(os, "O_DIRECTORY") or sys.platform == "win32":  # pragma: no cover — non-Linux fallback
-        target_str = str(resolved_parent / basename)
+    if target.dir_fd < 0:  # pragma: no cover — non-Linux fallback
+        target_str = str(target.resolved_parent / target.basename)
         return os.open(
             target_str,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
             0o600,
         )
 
-    dir_fd = os.open(str(resolved_parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         return os.open(
-            str(basename),
+            str(target.basename),
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
             0o600,
-            dir_fd=dir_fd,
+            dir_fd=target.dir_fd,
         )
     finally:
-        os.close(dir_fd)
+        target.close()

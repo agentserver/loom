@@ -169,30 +169,35 @@ def test_out_parent_forbidden_reject() -> None:
         validate_out_path("/etc/eval-metrics.csv")
 
 
-def test_out_atomic_create_o_excl(tmp_path: Path) -> None:
-    """A file appearing between symlink-check and open is caught by O_EXCL."""
-    target = tmp_path / "created-then-created-again.csv"
-    resolved_parent, basename = validate_out_path(str(target))
-    fd1 = open_out_file(resolved_parent, basename)
-    os.close(fd1)
-    # Second open at the same path must fail with FileExistsError
-    # (O_EXCL semantics).
+def test_out_atomic_create_race(tmp_path: Path) -> None:
+    """Race: file appears between validate and open — O_EXCL catches it.
+
+    Ordering: (1) validate returns OutTarget with pinned dir_fd; (2)
+    attacker drops a file at the resolved path; (3) open_out_file's
+    O_CREAT|O_EXCL under dir_fd MUST fail with FileExistsError,
+    proving the atomic-open closes the between-check-and-open TOCTOU
+    for the file itself (the dir_fd closes the parent-side TOCTOU
+    covered by the swap tests below).
+    """
+    target = tmp_path / "racer.csv"
+    out_target = validate_out_path(str(target))
+    # Attacker drops the file after validate.
+    target.write_text("attacker got here first\n")
     with pytest.raises(FileExistsError):
-        open_out_file(resolved_parent, basename)
+        open_out_file(out_target)
 
 
 @pytest.mark.linux_only
-def test_out_dir_fd_bind_rejects_parent_swap(tmp_path: Path) -> None:
-    """Parent-swap between validate_out_path and open_out_file is caught.
+def test_out_dir_fd_bind_rejects_symlink_parent_swap(tmp_path: Path) -> None:
+    """Parent-swap to a symlink between validate and open is caught.
 
-    Between `validate_out_path` (which resolves the parent) and
-    `open_out_file` (which opens the parent via O_DIRECTORY|O_NOFOLLOW
-    and then dir_fd-anchors the file open), we simulate the attacker:
-    rename the resolved parent to somewhere else and drop a symlink at
-    the original pathname pointing to an attacker dir. The
-    O_NOFOLLOW-on-parent step MUST reject with an OSError — otherwise
-    the file would land in the attacker dir and the attacker controls
-    the CSV output path.
+    Between `validate_out_path` (which pins the parent inode via
+    dir_fd) and `open_out_file` (which opens the target relative to
+    that dir_fd), we simulate a symlink swap: rename the pinned
+    parent to somewhere else and drop a symlink at the original
+    pathname pointing to an attacker dir. The dir_fd still points at
+    the ORIGINAL inode — so the file lands in the renamed parent,
+    NOT the attacker dir. Verifies dir_fd-binds-to-inode invariant.
     """
     if not sys.platform.startswith("linux"):
         pytest.skip("Linux-only dir_fd semantics")
@@ -201,35 +206,63 @@ def test_out_dir_fd_bind_rejects_parent_swap(tmp_path: Path) -> None:
     attacker = tmp_path / "attacker"
     attacker.mkdir()
     target = parent / "out.csv"
-    resolved_parent, basename = validate_out_path(str(target))
+    out_target = validate_out_path(str(target))
 
-    # Race the parent path: original dir moved aside, symlink installed
-    # at the original name pointing at the attacker dir.
+    # Race: rename pinned parent aside, install symlink at original path.
     renamed_parent = tmp_path / "outdir-moved"
     os.rename(str(parent), str(renamed_parent))
     os.symlink(str(attacker), str(parent))
 
-    # open_out_file re-opens `resolved_parent` by pathname to grab a
-    # dir_fd; the pathname is now a symlink, so O_NOFOLLOW rejects
-    # with ELOOP (mapped to NotADirectoryError / OSError by CPython).
-    with pytest.raises(OSError):
-        open_out_file(resolved_parent, basename)
-
-    # Neither the renamed parent nor the attacker got a file — the
-    # racing open failed before either could be written.
-    assert not (renamed_parent / "out.csv").exists()
+    # dir_fd holds the ORIGINAL parent inode (now at renamed_parent).
+    # open_out_file opens the target relative to that fd; the file
+    # lands in renamed_parent, NOT attacker.
+    fd = open_out_file(out_target)
+    os.close(fd)
+    assert (renamed_parent / "out.csv").exists()
     assert not (attacker / "out.csv").exists()
 
 
 @pytest.mark.linux_only
-def test_out_dir_fd_bind_happy_path(tmp_path: Path) -> None:
-    """No race: validate_out_path + open_out_file writes the file."""
+def test_out_dir_fd_bind_rejects_regular_dir_parent_swap(tmp_path: Path) -> None:
+    """Parent-swap to a REAL DIRECTORY between validate and open is caught.
+
+    This is the class Codex round-6 code-review P0 flagged: the
+    round-5 code did a path-based re-open, which would follow into a
+    replacement regular directory. With dir_fd binding, the pinned
+    inode wins — the file lands in the RENAMED original parent, not
+    the replacement directory.
+    """
     if not sys.platform.startswith("linux"):
         pytest.skip("Linux-only dir_fd semantics")
     parent = tmp_path / "outdir"
     parent.mkdir()
     target = parent / "out.csv"
-    resolved_parent, basename = validate_out_path(str(target))
-    fd = open_out_file(resolved_parent, basename)
+    out_target = validate_out_path(str(target))
+
+    # Rename the pinned parent to renamed_parent; create a fresh
+    # regular directory at the original pathname.
+    renamed_parent = tmp_path / "outdir-moved"
+    os.rename(str(parent), str(renamed_parent))
+    replacement = tmp_path / "outdir"
+    replacement.mkdir()
+
+    # dir_fd holds the ORIGINAL parent's inode (now at renamed_parent).
+    # The file MUST land in renamed_parent, NOT in the replacement dir.
+    fd = open_out_file(out_target)
+    os.close(fd)
+    assert (renamed_parent / "out.csv").exists()
+    assert not (replacement / "out.csv").exists()
+
+
+@pytest.mark.linux_only
+def test_out_dir_fd_bind_happy_path(tmp_path: Path) -> None:
+    """No race: validate + open writes the file to the resolved parent."""
+    if not sys.platform.startswith("linux"):
+        pytest.skip("Linux-only dir_fd semantics")
+    parent = tmp_path / "outdir"
+    parent.mkdir()
+    target = parent / "out.csv"
+    out_target = validate_out_path(str(target))
+    fd = open_out_file(out_target)
     os.close(fd)
     assert (parent / "out.csv").exists()

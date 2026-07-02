@@ -97,3 +97,30 @@ def test_present_companion_table(fixture_3_db: Path) -> None:
     conn = _open(fixture_3_db)
     assert companion_table_status(conn, "route_reasons") is TableStatus.PRESENT
     conn.close()
+
+
+def test_pragma_query_only_verified_after_connect(tmp_path):
+    """Codex round-6 P0: PRAGMA query_only must be READ BACK after set.
+
+    A silent failure (e.g. a future SQLite build that renames the
+    PRAGMA) would leave the connection writable. open_observer_db
+    now reads PRAGMA query_only and refuses to return a connection
+    where the setting did not take.
+    """
+    from eval_metrics.paths import validate_observer_db
+    from eval_metrics.db import open_observer_db
+    # Build a minimal SQLite file — need to run at least one DDL for
+    # the magic bytes to land on disk.
+    import sqlite3
+    db = tmp_path / "smoke.db"
+    c = sqlite3.connect(str(db))
+    c.execute("CREATE TABLE t (x INTEGER)")
+    c.commit()
+    c.close()
+    resolved, fd = validate_observer_db(str(db))
+    conn = open_observer_db(resolved, fd)
+    try:
+        (v,) = conn.execute("PRAGMA query_only").fetchone()
+        assert int(v) == 1, "PRAGMA query_only should be 1 after open_observer_db"
+    finally:
+        conn.close()

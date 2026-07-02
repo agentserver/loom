@@ -182,14 +182,13 @@ def _run_extract(args: argparse.Namespace) -> int:
         return 2
 
     # --- Output-path validation done BEFORE any computation to fail fast ---
-    out_dir_target: tuple = ()
+    out_target = None  # type: ignore[assignment]
     if args.out is not None:
         try:
-            resolved_parent, basename = validate_out_path(args.out)
+            out_target = validate_out_path(args.out)
         except PathValidationError as e:
             sys.stderr.write(f"{e}\n")
             return 2
-        out_dir_target = (resolved_parent, basename)
 
     # --- Cohort selection (spec §3.1 --runs-filter) ---
     try:
@@ -238,14 +237,16 @@ def _run_extract(args: argparse.Namespace) -> int:
             return 3
         return 0
 
-    resolved_parent, basename = out_dir_target
+    assert out_target is not None  # unreachable — args.out was set
     try:
-        out_fd = open_out_file(resolved_parent, basename)
+        out_fd = open_out_file(out_target)
     except OSError as e:
         # Spec §3 exit codes: 2 = input validation (including
         # --out atomic-open failure at spec §7 (d) step 4, since that
         # is a TOCTOU-detection reject, not an I/O failure); 3 is
         # reserved for **write-time** I/O failures below.
+        # open_out_file already closed the pinned dir_fd via
+        # target.close() in its `finally` before raising, so no leak.
         sys.stderr.write(f"[eval-metrics] --out open failed: {e}\n")
         return 2
 

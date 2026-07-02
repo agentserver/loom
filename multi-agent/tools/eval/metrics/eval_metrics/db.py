@@ -60,6 +60,15 @@ def open_observer_db(resolved_path: Path, fd: int) -> sqlite3.Connection:
     # accident. UPDATE / INSERT / DELETE from now on raise
     # OperationalError with "attempt to write a readonly database".
     conn.execute("PRAGMA query_only = ON")
+    # Verify the PRAGMA took — a compile-time typo or a future SQLite
+    # build that renamed the PRAGMA would silently leave the DB
+    # writable. Codex round-6 code-review P0 tripwire.
+    (v,) = conn.execute("PRAGMA query_only").fetchone()
+    if int(v) != 1:
+        conn.close()
+        raise RuntimeError(
+            f"PRAGMA query_only did not take (got {v!r}); refusing to return a writable connection"
+        )
 
     # Return dictionary-like rows so downstream metric code can look
     # up columns by name (schema-drift resilience).
