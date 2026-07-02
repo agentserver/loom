@@ -199,3 +199,33 @@ CREATE INDEX IF NOT EXISTS idx_resource_snapshots_latest ON resource_snapshots(w
 -- landing the schema here without a working writer would silently drop
 -- traces via `[route-trace] write failed: syntax error at or near "?"`.
 -- See round-5 review on PR #55.
+
+-- WT-2-dry-run-validator: §A3 four-class pre-execution block audit.
+-- Postgres-native DDL — column types differ from the SQLite version:
+-- timestamptz for blocked_at (vs TEXT), text CHECK for block_kind
+-- (identical to SQLite). Companion writer lives in postgres/store.go
+-- (WriteDryRunBlock) with $N placeholders and ON CONFLICT DO NOTHING
+-- so pg deployments (default in Helm; see deploy/charts/observer)
+-- persist dry_run_blocks identically to SQLite dev.
+CREATE TABLE IF NOT EXISTS dry_run_blocks (
+    block_id                 text PRIMARY KEY,
+    attempt_id               text NOT NULL,
+    conversation_id          text NOT NULL,
+    experiment_id            text NOT NULL DEFAULT '',
+    contract_hash            text NOT NULL,
+    capability_snapshot_hash text NOT NULL,
+    block_kind               text NOT NULL
+        CHECK (block_kind IN ('missing_file','wrong_version','forbidden_cred','policy_violation')),
+    field                    text NOT NULL DEFAULT '',
+    expected                 text NOT NULL DEFAULT '',
+    actual                   text NOT NULL DEFAULT '',
+    detail                   text NOT NULL DEFAULT '',
+    blocked_at               timestamptz NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_dry_run_blocks_conv
+    ON dry_run_blocks(conversation_id, blocked_at);
+CREATE INDEX IF NOT EXISTS idx_dry_run_blocks_contract_hash
+    ON dry_run_blocks(contract_hash);
+CREATE INDEX IF NOT EXISTS idx_dry_run_blocks_attempt
+    ON dry_run_blocks(attempt_id);

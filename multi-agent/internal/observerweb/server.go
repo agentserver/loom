@@ -1025,14 +1025,20 @@ func (h *handler) dryRunBlocks(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	// The endpoint needs the underlying *sql.DB to construct the
-	// per-request writer. Type-assert against ManagedStore so we don't
-	// pollute the ingest-only Store interface with a new method that
-	// every postgres/sqlite/test double must implement. If the runtime
-	// store isn't managed (unlikely in production), fail closed.
-	managed, ok := h.s.(observerstore.ManagedStore)
-	if !ok {
-		http.Error(w, "dry_run_blocks endpoint requires ManagedStore backend", http.StatusServiceUnavailable)
+	// Two acceptable backends: a Postgres store that natively
+	// implements DryRunBlockWriter, or a SQLite ManagedStore we wrap
+	// with observerstore.NewDryRunBlockWriter around ManagedStore.DB().
+	// The Store interface intentionally stays ingest-only — this
+	// endpoint discriminates via runtime type assertion instead of
+	// adding another method every mock/postgres/sqlite backend has to
+	// implement. See wt2-dry-run-validator.spec.md §6.
+	var writer observerstore.DryRunBlockWriter
+	if pgw, ok := h.s.(observerstore.DryRunBlockWriter); ok {
+		writer = pgw
+	} else if managed, ok := h.s.(observerstore.ManagedStore); ok {
+		writer = observerstore.NewDryRunBlockWriter(managed.DB())
+	} else {
+		http.Error(w, "dry_run_blocks endpoint requires ManagedStore or DryRunBlockWriter-backed store", http.StatusServiceUnavailable)
 		return
 	}
 	var req struct {
@@ -1062,7 +1068,6 @@ func (h *handler) dryRunBlocks(w http.ResponseWriter, r *http.Request) {
 	if blockedAt.IsZero() {
 		blockedAt = time.Now().UTC()
 	}
-	writer := observerstore.NewDryRunBlockWriter(managed.DB())
 	row := observerstore.DryRunBlockRow{
 		BlockID:                req.BlockID,
 		AttemptID:              req.AttemptID,

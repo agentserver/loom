@@ -8,13 +8,23 @@ import (
 	"github.com/yourorg/multi-agent/internal/secretscrub"
 )
 
-// dryRunBlockMaxDetailBytes bounds the detail column at the writer
+// DryRunBlockMaxDetailBytes bounds the detail column at the writer
 // boundary — defense-in-depth against a caller that skipped the
 // validator's maxDetailBytes cap. See wt2-dry-run-validator.spec.md §7(c).
-const dryRunBlockMaxDetailBytes = 8192
+// Exported so alternate backends (see postgres/store.go
+// WriteDryRunBlock) share one truncation cap and can't drift.
+const DryRunBlockMaxDetailBytes = 8192
 
-// dryRunBlockDetailTruncSentinel appended when detail exceeds the cap.
-const dryRunBlockDetailTruncSentinel = "<...truncated>"
+// DryRunBlockDetailTruncSentinel is the marker appended when detail
+// exceeds the cap. Exported alongside DryRunBlockMaxDetailBytes.
+const DryRunBlockDetailTruncSentinel = "<...truncated>"
+
+// Package-local aliases preserve the pre-round-4 identifier names for
+// the SQLite writer body below.
+const (
+	dryRunBlockMaxDetailBytes      = DryRunBlockMaxDetailBytes
+	dryRunBlockDetailTruncSentinel = DryRunBlockDetailTruncSentinel
+)
 
 // DryRunBlockRow is the data shape persisted by NewDryRunBlockWriter.
 // Mirrors validator.Block plus the identity + hash columns the
