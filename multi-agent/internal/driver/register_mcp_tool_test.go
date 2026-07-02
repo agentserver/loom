@@ -8,6 +8,7 @@ import (
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/stretchr/testify/require"
+	"github.com/yourorg/multi-agent/internal/buildspec"
 )
 
 // validTestSpec returns a minimal buildspec.Spec JSON payload that passes Validate.
@@ -301,6 +302,85 @@ func TestRegisterSlaveMCP_HappyPath_PublishesRegistryHash(t *testing.T) {
 	require.NoError(t, err)
 	if LastRegistryHash() == emptyBytesSHA256Hex {
 		t.Fatal("LastRegistryHash should have advanced past empty-bytes after register")
+	}
+}
+
+// TestRegisterCore_DoesNotWriteAudit — registerCore is the
+// stage-3 entry point for the B2 pipeline; it MUST NOT write an
+// audit row itself.
+func TestRegisterCore_DoesNotWriteAudit(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "slave-b", DisplayName: "slave-b", Status: "available", Card: json.RawMessage(`{"skills":["chat","register_mcp"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-core"}, nil
+		},
+		getTaskFunc: func(id string, includeOutput bool) (*agentsdk.TaskInfo, error) {
+			return &agentsdk.TaskInfo{TaskID: id, Status: "completed", Result: json.RawMessage(`"ok"`)}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	rec := &recordingWriter{}
+	tools.SetPromotionAuditWriter(rec)
+	resetRegistryForTest()
+
+	spec := buildspec.Normalize(buildspec.Spec{
+		Name:        "mytool",
+		Description: "d",
+		Tools: []buildspec.ToolSpec{
+			{Name: "do_thing", Description: "d", ArgsSchema: json.RawMessage(`{"type":"object"}`), ResultDescription: "r"},
+		},
+	})
+	result, err := tools.registerCore(context.Background(), registerCoreArgs{
+		TargetDisplayName: "slave-b",
+		Spec:              spec,
+		SourcePath:        "dist/mytool.js",
+	}, "test_caller")
+	require.NoError(t, err)
+	require.Len(t, rec.rows, 0, "registerCore MUST NOT write an audit row")
+	require.NotEmpty(t, result.RegistryHash)
+}
+
+// TestRegisterCore_ReturnsRegistryHash — happy path returns
+// non-empty 64-hex.
+func TestRegisterCore_ReturnsRegistryHash(t *testing.T) {
+	sdk := &fakeSDK{
+		discoverFunc: func() ([]agentsdk.AgentCard, error) {
+			return []agentsdk.AgentCard{
+				{AgentID: "slave-b", DisplayName: "slave-b", Status: "available", Card: json.RawMessage(`{"skills":["register_mcp"]}`)},
+			}, nil
+		},
+		delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+			return &agentsdk.DelegateTaskResponse{TaskID: "task-core-2"}, nil
+		},
+		getTaskFunc: func(id string, includeOutput bool) (*agentsdk.TaskInfo, error) {
+			return &agentsdk.TaskInfo{TaskID: id, Status: "completed", Result: json.RawMessage(`"ok"`)}, nil
+		},
+	}
+	tools := newTestTools(t, sdk)
+	resetRegistryForTest()
+
+	spec := buildspec.Normalize(buildspec.Spec{
+		Name:        "othertool",
+		Description: "d",
+		Tools: []buildspec.ToolSpec{
+			{Name: "op", Description: "d", ArgsSchema: json.RawMessage(`{"type":"object"}`), ResultDescription: "r"},
+		},
+	})
+	result, err := tools.registerCore(context.Background(), registerCoreArgs{
+		TargetDisplayName: "slave-b",
+		Spec:              spec,
+		SourcePath:        "dist/other.js",
+	}, "test_caller")
+	require.NoError(t, err)
+	require.Len(t, result.RegistryHash, 64)
+	for _, c := range result.RegistryHash {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Fatalf("hash must be lowercase hex: %q", result.RegistryHash)
+		}
 	}
 }
 

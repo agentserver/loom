@@ -281,7 +281,8 @@ CREATE TABLE IF NOT EXISTS promotion_audit (
     candidate_source_task_id  TEXT NOT NULL,
     registry_hash_after       TEXT NOT NULL DEFAULT '',
     stage                     TEXT NOT NULL DEFAULT '',
-    stage_result              TEXT NOT NULL DEFAULT ''
+    stage_result              TEXT NOT NULL DEFAULT '',
+    stage_note                TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_promotion_audit_mcp
     ON promotion_audit(mcp_name, ts);

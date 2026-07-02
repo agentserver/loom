@@ -230,6 +230,41 @@ func TestAuditFields_ConsumerViewJoinKeyPresent(t *testing.T) {
 	}
 }
 
+func TestAuditFields_StageNoteRegex(t *testing.T) {
+	cases := []struct {
+		name    string
+		val     string
+		wantErr bool
+	}{
+		{"empty", "", false},
+		{"dry_run", "dry_run", false},
+		{"fail_scaffold", "fail_scaffold", false},
+		{"digits", "err_42", false},
+		{"max_128", strings.Repeat("a", 128), false},
+		{"has_space", "a b", true},
+		{"has_hyphen", "a-b", true},
+		{"upper", "UPPER", true},
+		{"newline", "a\nb", true},
+		{"overlong", strings.Repeat("a", 129), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := validRow()
+			r.StageNote = tc.val
+			err := Validate(r)
+			if tc.wantErr {
+				if !errors.Is(err, ErrInvalidStageNote) {
+					t.Fatalf("want ErrInvalidStageNote, got %v", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("want nil, got %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestSentinelCandidateTaskID_MatchesRegex(t *testing.T) {
 	for _, tc := range []struct {
 		reason      Reason

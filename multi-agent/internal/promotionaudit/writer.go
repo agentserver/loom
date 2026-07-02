@@ -45,8 +45,9 @@ func NewSQLiteWriter(db *sql.DB) *SQLiteWriter {
 const insertSQL = `INSERT INTO promotion_audit (
     row_id, ts, workspace_id, mcp_name, action,
     promoted_by_user_id, driver_thread_id, promotion_reason,
-    candidate_source_task_id, registry_hash_after, stage, stage_result
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    candidate_source_task_id, registry_hash_after, stage, stage_result,
+    stage_note
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 // nowUTC is overridable in tests for deterministic timestamps. Tests
 // that swap this MUST be serial (no t.Parallel) and restore via
@@ -117,6 +118,7 @@ func (w *SQLiteWriter) Write(ctx context.Context, f AuditFields) error {
 		f.RegistryHashAfter,
 		f.Stage,
 		string(f.StageResult),
+		f.StageNote,
 	); err != nil {
 		return fmt.Errorf("promotionaudit: insert row_id=%s: %w", rowID, err)
 	}

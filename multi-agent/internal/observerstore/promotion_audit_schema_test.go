@@ -21,6 +21,7 @@ func TestSchema_PromotionAuditTableExists(t *testing.T) {
 		"row_id", "ts", "workspace_id", "mcp_name", "action",
 		"promoted_by_user_id", "driver_thread_id", "promotion_reason",
 		"candidate_source_task_id", "registry_hash_after", "stage", "stage_result",
+		"stage_note",
 	} {
 		if !cols[want] {
 			t.Errorf("promotion_audit missing column %q; got %v", want, cols)

@@ -220,6 +220,43 @@ func TestSQLiteWriter_TSSerialisedUTC(t *testing.T) {
 	}
 }
 
+func TestSQLiteWriter_StageNoteRoundTrip(t *testing.T) {
+	db := newTestStore(t)
+	w := NewSQLiteWriter(db)
+	ctx := context.Background()
+
+	f := validRow()
+	f.StageNote = "dry_run"
+	if err := w.Write(ctx, f); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	var got string
+	if err := db.QueryRow(`SELECT stage_note FROM promotion_audit`).Scan(&got); err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if got != "dry_run" {
+		t.Fatalf("stage_note = %q, want %q", got, "dry_run")
+	}
+}
+
+func TestSQLiteWriter_EmptyStageNoteDefaults(t *testing.T) {
+	db := newTestStore(t)
+	w := NewSQLiteWriter(db)
+	ctx := context.Background()
+
+	f := validRow() // StageNote is "" by default
+	if err := w.Write(ctx, f); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	var got string
+	if err := db.QueryRow(`SELECT stage_note FROM promotion_audit`).Scan(&got); err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("stage_note = %q, want empty", got)
+	}
+}
+
 func TestSQLiteWriter_ConcurrentSafeSameStore(t *testing.T) {
 	db := newTestStore(t)
 	w := NewSQLiteWriter(db)

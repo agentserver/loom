@@ -45,6 +45,26 @@ type registerMCPArgs struct {
 	CandidateSourceTaskID string         `json:"candidate_source_task_id"`
 }
 
+// registerCoreArgs is the input to registerCore, the shared logic
+// invoked by both the tool-boundary (registerSlaveMCPTool.Call) and
+// the B2 pipeline (Stage 3). It carries a pre-normalised, pre-validated
+// spec + audit fields — the caller has already run promotionaudit.Validate.
+type registerCoreArgs struct {
+	TargetAgentID     string
+	TargetDisplayName string
+	Spec              buildspec.Spec // MUST be already-normalised
+	SourcePath        string
+	TimeoutSec        int
+}
+
+// registerCoreResult carries what the caller needs to write an audit
+// row and construct the tool response. `RegistryHash` is the post-
+// register value published to `driver.LastRegistryHash()`.
+type registerCoreResult struct {
+	WaitResult   json.RawMessage
+	RegistryHash string
+}
+
 func (r *registerSlaveMCPTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
 	var args registerMCPArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
@@ -59,8 +79,6 @@ func (r *registerSlaveMCPTool) Call(ctx context.Context, raw json.RawMessage) (j
 	}
 	// Build the audit fields BEFORE the delegate task so a malformed
 	// audit input aborts without any slave-side side-effects (§7 (a)).
-	// We don't have WorkspaceID / RegistryHashAfter yet — we set the
-	// hash after the slave completes and workspace is filled from cfg.
 	reason, err := promotionaudit.Parse(args.PromotionReason)
 	if err != nil {
 		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailContractViolation}
@@ -73,45 +91,73 @@ func (r *registerSlaveMCPTool) Call(ctx context.Context, raw json.RawMessage) (j
 		DriverThreadID:        args.DriverThreadID,
 		PromotionReason:       reason,
 		CandidateSourceTaskID: args.CandidateSourceTaskID,
-		// RegistryHashAfter is set post-delegate; use the empty-bytes
-		// sha256 hex placeholder so the precheck Validate passes (any
-		// 64-hex is accepted).
-		RegistryHashAfter: emptyBytesSHA256Hex,
+		RegistryHashAfter:     emptyBytesSHA256Hex,
 	}
 	if err := promotionaudit.Validate(auditPrecheck); err != nil {
 		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailContractViolation}
 	}
-	card, err := r.t.resolveAvailableAgent(ctx, args.TargetAgentID, args.TargetDisplayName)
+	// Invoke the shared core; it does NOT write an audit row.
+	coreArgs := registerCoreArgs{
+		TargetAgentID:     args.TargetAgentID,
+		TargetDisplayName: args.TargetDisplayName,
+		Spec:              spec,
+		SourcePath:        args.SourcePath,
+		TimeoutSec:        args.TimeoutSec,
+	}
+	result, waitErr := r.t.registerCore(ctx, coreArgs, r.Name())
+	if waitErr != nil {
+		return result.WaitResult, waitErr
+	}
+	// Slave task succeeded → write the tool-boundary audit row.
+	auditFinal := auditPrecheck
+	auditFinal.RegistryHashAfter = result.RegistryHash
+	if r.t.promoAudit != nil {
+		if werr := r.t.promoAudit.Write(ctx, auditFinal); werr != nil {
+			r.t.logHelperErr("promotion_audit", "write", werr)
+		}
+	} else {
+		r.t.logHelperErr("promotion_audit", "write", errNoPromoAuditSink)
+	}
+	return result.WaitResult, nil
+}
+
+// registerCore is the shared register logic invoked by BOTH the
+// tool-boundary Call above AND the B2 promotion pipeline (stage 3).
+// It does NOT write an audit row — that is the caller's job so B2 can
+// wrap it in the per-stage audit row shape without double-audit.
+//
+// callerToolName is used ONLY for the task-journal entry and for
+// helper-error logs.
+func (t *Tools) registerCore(ctx context.Context, args registerCoreArgs, callerToolName string) (registerCoreResult, error) {
+	card, err := t.resolveAvailableAgent(ctx, args.TargetAgentID, args.TargetDisplayName)
 	if err != nil {
-		return nil, err
+		return registerCoreResult{}, err
 	}
 	if !hasSkill(card, "register_mcp") {
-		return nil, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise register_mcp", Category: observerstore.FailStaleCapability}
+		return registerCoreResult{}, &MCPToolError{Message: "target " + card.DisplayName + " does not advertise register_mcp", Category: observerstore.FailStaleCapability}
 	}
 	prompt, err := json.Marshal(struct {
 		Spec       buildspec.Spec `json:"spec"`
 		SourcePath string         `json:"source_path"`
-	}{Spec: spec, SourcePath: args.SourcePath})
+	}{Spec: args.Spec, SourcePath: args.SourcePath})
 	if err != nil {
-		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailUnknown}
+		return registerCoreResult{}, &MCPToolError{Message: err.Error(), Category: observerstore.FailUnknown}
 	}
-	resp, err := r.t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
+	resp, err := t.sdk.DelegateTask(ctx, agentsdk.DelegateTaskRequest{
 		TargetID:       card.AgentID,
 		Skill:          "register_mcp",
 		Prompt:         string(prompt),
 		TimeoutSeconds: args.TimeoutSec,
 	})
 	if err != nil {
-		return nil, &MCPToolError{Message: "delegate register_mcp task: " + err.Error(), Category: observerstore.FailUnknown}
+		return registerCoreResult{}, &MCPToolError{Message: "delegate register_mcp task: " + err.Error(), Category: observerstore.FailUnknown}
 	}
-	// DelegateTask succeeded — degrade journal append failure to a log entry
-	// so we still wait on the slave task. See §1.1 #1 of the 2026-06-13 review.
 	var sessRef agentbackend.SessionRef
 	if resp.SessionID != "" {
 		sessRef = agentbackend.NewBridgeOnly("", cardShortID(card), resp.SessionID)
 	}
-	if err := r.t.recordDelegatedTask(delegatedTaskRecord{
-		Tool:              r.Name(),
+	if err := t.recordDelegatedTask(delegatedTaskRecord{
+		Tool:              callerToolName,
 		Response:          resp,
 		TargetID:          card.AgentID,
 		TargetDisplayName: card.DisplayName,
@@ -120,27 +166,15 @@ func (r *registerSlaveMCPTool) Call(ctx context.Context, raw json.RawMessage) (j
 		TimeoutSec:        args.TimeoutSec,
 		SessionRef:        sessRef,
 	}); err != nil {
-		r.t.logHelperErr("driver_journal", "record_delegated_task", err)
+		t.logHelperErr("driver_journal", "record_delegated_task", err)
 	}
-	waitResult, waitErr := r.t.waitDelegatedTask(ctx, resp.TaskID, args.TimeoutSec)
+	waitResult, waitErr := t.waitDelegatedTask(ctx, resp.TaskID, args.TimeoutSec)
 	if waitErr != nil {
-		return waitResult, waitErr
+		return registerCoreResult{WaitResult: waitResult}, waitErr
 	}
-	// Slave task succeeded → update per-slave view + compute new hash
-	// + write audit row (spec §3.4). Failure to write audit degrades
-	// to a helper-error log; the register itself is still successful.
-	specHash := computeSpecHash(spec)
-	hash := PublishRegisterAndCompute(card.AgentID, spec.Name, specHash)
-	auditFinal := auditPrecheck
-	auditFinal.RegistryHashAfter = hash
-	if r.t.promoAudit != nil {
-		if werr := r.t.promoAudit.Write(ctx, auditFinal); werr != nil {
-			r.t.logHelperErr("promotion_audit", "write", werr)
-		}
-	} else {
-		r.t.logHelperErr("promotion_audit", "write", errNoPromoAuditSink)
-	}
-	return waitResult, nil
+	specHash := computeSpecHash(args.Spec)
+	hash := PublishRegisterAndCompute(card.AgentID, args.Spec.Name, specHash)
+	return registerCoreResult{WaitResult: waitResult, RegistryHash: hash}, nil
 }
 
 // computeSpecHash returns the sha256 hex of the canonical JSON of spec.

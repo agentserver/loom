@@ -42,6 +42,11 @@ var (
 	stageRE    = regexp.MustCompile(`^[a-z_]{1,64}$`)
 	// registryHashRE — exactly 64 lowercase hex chars (sha256 hex).
 	registryHashRE = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	// stageNoteRE — lowercase letters, digits, underscore only. B2
+	// §2.4.1: reserved for short structured notes on stage rows
+	// (`dry_run`, `fail_scaffold`, ...). Tight regex prevents the
+	// column from becoming a free-string injection surface.
+	stageNoteRE = regexp.MustCompile(`^[a-z0-9_]{0,128}$`)
 )
 
 // Sentinel error values. Callers should test with errors.Is; the
@@ -57,6 +62,7 @@ var (
 	ErrInvalidStage           = errors.New("promotionaudit: stage must match ^[a-z_]{1,64}$ or be empty")
 	ErrInvalidStageResult     = errors.New("promotionaudit: stage_result must be '', 'ok', or 'fail'")
 	ErrInvalidWorkspaceID     = errors.New("promotionaudit: register/unregister actions require a non-empty workspace_id")
+	ErrInvalidStageNote       = errors.New("promotionaudit: stage_note must match ^[a-z0-9_]{0,128}$")
 )
 
 // AuditFields is the row shape written to the promotion_audit table.
@@ -94,6 +100,13 @@ type AuditFields struct {
 	// so B2 gets a clean surface.
 	Stage       string
 	StageResult StageResult
+
+	// StageNote is a short structured note attached to a stage row —
+	// used by B2 to mark dry-run rows (`dry_run`) so downstream
+	// metric filters can drop them from both numerator and
+	// denominator symmetrically. Tighter regex than Stage;
+	// see stageNoteRE.
+	StageNote string
 
 	// TS is caller-supplied. The writer serialises via
 	// t.UTC().Format(time.RFC3339Nano); a zero TS is not accepted (the
@@ -206,6 +219,9 @@ func Validate(f AuditFields) error {
 	case StageResultEmpty, StageResultOK, StageResultFail:
 	default:
 		return wrap(fmt.Sprintf("stage_result=%q", f.StageResult), ErrInvalidStageResult)
+	}
+	if f.StageNote != "" && !stageNoteRE.MatchString(f.StageNote) {
+		return wrap("stage_note", ErrInvalidStageNote)
 	}
 	return nil
 }

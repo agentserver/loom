@@ -277,6 +277,7 @@ func (t *Tools) All() []Tool {
 		&runSlaveShellTool{t},
 		&registerSlaveMCPTool{t},
 		&unregisterSlaveMCPTool{t},
+		&promotionPipelineTool{t: t}, // WT-2 B2 §2.1
 		// Permission tools use task delegation until agentserver exposes a dedicated control channel.
 		&getSlaveClaudePermissionsTool{t},
 		&updateSlaveClaudePermissionsTool{t},

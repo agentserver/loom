@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,6 +13,38 @@ import (
 	"github.com/yourorg/multi-agent/internal/observerstore"
 	"github.com/yourorg/multi-agent/internal/promotionaudit"
 )
+
+// TestInstall_PathBypassesUserPromotionPathAblation — spec B2 §7 (k).
+// The mcp-userspace install CLI represents USER intent, not
+// driver-initiated promotion; therefore NoUserPromotionPath MUST NOT
+// touch it. Enforced by a static AST scan: any identifier
+// `NoUserPromotionPath` in cmd_install.go is a violation of the
+// invariant, regardless of ablation flag state at runtime.
+func TestInstall_PathBypassesUserPromotionPathAblation(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "cmd_install.go", nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse cmd_install.go: %v", err)
+	}
+	var violations []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		if ident, ok := n.(*ast.Ident); ok {
+			if strings.Contains(ident.Name, "NoUserPromotionPath") {
+				violations = append(violations, ident.Name)
+			}
+		}
+		if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+			// String literal reference (e.g. ablation flag name) also counts.
+			if strings.Contains(lit.Value, "NoUserPromotionPath") {
+				violations = append(violations, "string:"+lit.Value)
+			}
+		}
+		return true
+	})
+	if len(violations) > 0 {
+		t.Fatalf("cmd_install.go MUST NOT reference NoUserPromotionPath (spec B2 §7 (k)); found: %v", violations)
+	}
+}
 
 func TestInstall_RequiresAllFourAuditFlags(t *testing.T) {
 	cases := []struct {
