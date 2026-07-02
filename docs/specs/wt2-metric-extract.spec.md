@@ -389,7 +389,7 @@ DDL constraint is just `TEXT` (see `runs` DDL at
 `internal/observerstore/schema.sql:194-220`). The fixture-builder
 therefore expands each short logical ID below to the 64-hex sha256
 of `hashlib.sha256(short_id.encode()).hexdigest()` before insertion
-— e.g. `a1` becomes `f2ca1bb6c7e907d06dafe4687e579fce76b37e4e93b7605022da52e6ccc26fd2`.
+— e.g. `a1` becomes `f55ff16f66f43360266b95db6f8fec01d76031054306ae4a4b380598f6cfd114`.
 The tables use the short IDs for readability; the on-disk fixture
 DB contains the expanded values.
 
