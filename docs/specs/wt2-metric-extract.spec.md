@@ -77,17 +77,22 @@ in 08号 §Overhead (08:87 heading, 08:91 rows) AND cited by 12号
 |---|---|
 | 7 | `lifecycle`, `overhead` |
 | 8 | `lifecycle`, `overhead` |
+| 22 (`CapabilityReuseRate`) | `lifecycle`, `user-promoted` |
+| 23 (`RepeatedGenerationRate`) | `lifecycle`, `user-promoted` |
 
-`--metric-set overhead` therefore emits #7 and #8 (in addition to the
-§2.5 rows). All other metrics remain in exactly one metric-set.
+`--metric-set overhead` therefore emits #7 and #8 in addition to the
+§2.5 rows; `--metric-set lifecycle` emits #22 and #23 in addition to
+the §2.1 rows (because 08:37-38 files those two metrics under both
+§Lifecycle and §User-promoted). All other metrics remain in exactly
+one metric-set.
 
 | # | Metric | Numerator | Denominator | Provenance |
 |---|---|---|---|---|
 | 1 | `TaskSuccessRate` | `count(runs where success_oracle_result = 'pass')` | `count(runs in selection)` | `runs.success_oracle_result` |
-| 2 | `LifecycleClosureRate` | `count(runs where success_oracle_result = 'pass' AND task_contract_hash != '' AND artifact_hashes != '[]' AND observer_trace_path != '')` | `count(runs in selection)` | `runs.{success_oracle_result, task_contract_hash, artifact_hashes, observer_trace_path}` |
+| 2 | `LifecycleClosureRate` | `count(runs where success_oracle_result = 'pass' AND capability_snapshot_hash != '' AND task_contract_hash != '' AND artifact_hashes != '[]' AND observer_trace_path != '')` — the five columns map to 08:36's chain "raw-context (`capability_snapshot_hash`) → capability (same) → contract (`task_contract_hash`) → artifact/telemetry (`artifact_hashes` + `observer_trace_path`) → reusable-capability WHEN NEEDED". The reusable-capability leg is 08:36's "when needed" branch — a task that never touches a reusable capability still closes the lifecycle; the extractor does not require `dynamic_mcp_registry_hash != ''` here because that would over-restrict tasks that never engaged the promotion path. See 12号 §B `CapabilityReuseRate` (§2.3 row 22) for the reuse-side metric. | `count(runs in selection)` | `runs.{success_oracle_result, capability_snapshot_hash, task_contract_hash, artifact_hashes, observer_trace_path}` |
 | 3 | `TimeToCompletion` | reported as a **structured object** with keys `p50_seconds`, `p95_seconds`, `mean_seconds`, `count` — computed from `(end_time − start_time)` across the selection; excludes rows where either timestamp is empty. | — | `runs.{start_time, end_time}` |
 | 4 | `HumanContextSelectionCount` | `sum(runs.human_intervention_count)` | — | `runs.human_intervention_count` (WT-1-run-schema §D1) |
-| 5 | `WrongContextFailureRate` | `count(runs where failure_category IN ('wrong-context','missing-file','wrong-version'))` | `count(runs in selection)` | `runs.failure_category` (11-value taxonomy per PR #61 / D4) |
+| 5 | `WrongContextFailureRate` | `count(runs where failure_category IN ('wrong-context','missing-file','wrong-version','forbidden-cred','stale-capability'))` — the five D4 taxonomy tags that map to 08:48's "missing file/tool/OS/credential/network in chosen context" (`forbidden-cred` covers credential; `stale-capability` covers network / OS reachability drift; the three tool/file/version tags are direct) | `count(runs in selection)` | `runs.failure_category` (11-value taxonomy per PR #61 / D4) |
 | 6 | `ArtifactCorrectnessRate` | `count(runs where success_oracle_result = 'pass' AND artifact_hashes != '[]')` | `count(runs where artifact_hashes != '[]')` | `runs.{success_oracle_result, artifact_hashes}` (oracle-side truth deferred to 12号 §D8; see §7 (g)) |
 | 7 | `ManualSetupStepCount` | `sum(runs.manual_setup_step_count)` if column present, else `null` + `"upstream data missing"` | — | 12号 §D8 owns the writer; not yet landed → emit `null` per §7 (g) |
 | 8 | `ConfigTouchCount` | `sum(runs.config_touch_count)` if column present, else `null` + `"upstream data missing"` | — | same as above |
@@ -229,11 +234,12 @@ semantic, overhead)` (§7 (e)).
 invocation** (not per `runs` row), because the paper metrics are
 cohort-level ratios / percentiles. `--runs-filter` narrows the cohort;
 a single invocation always produces exactly one record — including
-when the cohort is empty (in which case count-metrics are 0 and
-ratio-metrics are `null` per §7 (f)). To produce Table 2's per-baseline
-breakdown, the caller invokes the extractor once per
-`baseline_or_ablation` value and concatenates the resulting single-row
-CSVs.
+when the cohort is empty (in which case count-metrics with landed
+upstream data sources emit `0`, count-metrics with unlanded upstream
+emit `null`, and ratio-metrics emit `null` per §7 (f)). To produce
+Table 2's per-baseline breakdown, the caller invokes the extractor
+once per `baseline_or_ablation` value and concatenates the resulting
+single-row CSVs.
 
 **CSV.** Row 1 is the header: column 1 = `metric_set`, column 2 =
 `row_count` (the number of `runs` rows that matched the selection),
@@ -292,6 +298,9 @@ by pytest.
 ### 4.1 Fixture 1 — Lifecycle (§2.1)
 
 10 runs, all `experiment_id='E1'`, `baseline_or_ablation='FullLoom'`.
+Every row has `capability_snapshot_hash = 'cs-<run#>'` (non-empty on
+all 10) — this is stated once here so the fixture table below does
+not need to carry the column.
 
 | run # | success | end−start (s) | human_intervention_count | failure_category | artifact_hashes | task_contract_hash | observer_trace_path |
 |---|---|---|---|---|---|---|---|
@@ -309,7 +318,10 @@ by pytest.
 Hand-computed values:
 
 - `TaskSuccessRate = 6/10 = 0.6`
-- `LifecycleClosureRate = 6/10 = 0.6` (same 6 rows: pass AND contract_hash non-empty AND artifacts non-empty AND trace non-empty)
+- `LifecycleClosureRate = 6/10 = 0.6` (same 6 rows: pass AND
+  capability_snapshot_hash non-empty (universally true in fixture 1)
+  AND contract_hash non-empty AND artifacts non-empty AND trace
+  non-empty)
 - `TimeToCompletion.mean_seconds = (12+18+30+10+60+20+90+14+22+16)/10 = 29.2`
 - `TimeToCompletion.count = 10`
 - `TimeToCompletion.p50_seconds = 19.0` (linear-interp median of the sorted list [10,12,14,16,18,20,22,30,60,90]; per numpy convention, midpoint of the two middle values 18 and 20)
@@ -389,8 +401,11 @@ Each of the 5 runs has fully populated lifecycle columns
 `observer_trace_path`) so §2.1 metrics compute deterministically —
 those hand-computed values appear alongside the routing values in
 the "Hand-computed values" block below. The `task_contract_hash`
-column is empty on every row so §2.2 #10 `ContractCompleteness`
-nulls via denominator=0.
+column is empty on every row, and there are no `task_contracts` rows;
+`ContractCompleteness` (§2.2 #10) nulls for the same
+cohort-attribution-missing reason spelled out in §2.2 row 10 (the
+per-run→contract join key is absent regardless of whether
+`task_contracts` is populated).
 
 | run # | selected_context | ground_truth_context |
 |---|---|---|
@@ -400,7 +415,10 @@ nulls via denominator=0.
 | 4 | slave-A | slave-A |
 | 5 | slave-C | ''        |
 
-The full per-run lifecycle-column matrix is:
+The full per-run lifecycle-column matrix is (every row has
+`capability_snapshot_hash = ''` — no capability snapshot recorded —
+so `LifecycleClosureRate` correctly evaluates to 0/5 under the
+5-column predicate in §2.1 row 2):
 
 | run # | success | end−start (s) | human | failure_category | artifact_hashes | task_contract_hash | observer_trace_path |
 |---|---|---|---|---|---|---|---|
@@ -434,7 +452,9 @@ Populated metrics:
 
 - `TaskSuccessRate = 3/5 = 0.6` (§2.1 #1)
 - `LifecycleClosureRate = 0/5 = 0.0` (§2.1 #2; no rows have
-  task_contract_hash non-empty → the AND fails on every row)
+  task_contract_hash non-empty AND no rows have
+  capability_snapshot_hash non-empty either — the 5-column AND fails
+  on every row)
 - `TimeToCompletion = {mean_seconds: 22.0, p50_seconds: 20.0,
   p95_seconds: 37.0, count: 5}` (§2.1 #3; sorted [10, 15, 20, 25,
   40]; median = 20 (middle element); p95 at fractional index 3.8 →
@@ -472,11 +492,13 @@ An in-memory DB with the WT-1-run-schema DDL applied but zero rows.
 Expected output per §3.3 empty-DB contract:
 
 - CSV: header row + **exactly one data row** with `metric_set=full`,
-  `row_count=0`, all count metrics = `0`, all ratio and structured
-  metrics = empty cells, `_notes` populated for every metric whose
-  upstream is missing.
-- JSON: `{"metric_set":"full","row_count":0,"metrics":{...all count
-  metrics: 0, all ratio metrics: null...},"notes":{...upstream-missing
+  `row_count=0`; count-metrics with landed upstream emit `0`,
+  count-metrics with unlanded upstream emit empty cell (JSON
+  `null`), all ratio and structured metrics = empty cells,
+  `_notes` populated for every metric whose upstream is missing.
+- JSON: `{"metric_set":"full","row_count":0,"metrics":{count-metric
+  with landed upstream: 0, count-metric with unlanded upstream: null,
+  ratio-metric: null, ...},"notes":{...upstream-missing
   entries...}}`.
 
 Confirms §5 acceptance criterion 1.
@@ -797,7 +819,7 @@ Modified: none. This worktree adds files only. If any file outside
     null = 39.
   - §7 (d) closing paragraph corrected: "36-column" → "39-metric".
   - Remaining stray "36" references either removed or corrected.
-- 2026-07-02 (round 5, Codex P1 fixes):
+- 2026-07-02 (round 5, Codex P1 fixes — first batch):
   - §2.1 header adds "Metric-set membership" table making #7
     `ManualSetupStepCount` / #8 `ConfigTouchCount` members of BOTH
     `lifecycle` AND `overhead` metric-sets (they're §Overhead in 08
@@ -822,3 +844,18 @@ Modified: none. This worktree adds files only. If any file outside
   - Fixture 1 `StateContinuityRate = null`; fixture 2 all §2.2
     metrics = null (including #10 `ContractCompleteness`); fixture
     3 arithmetic: 8 populated + 31 null = 39.
+- 2026-07-02 (round 6, Codex P1 fixes):
+  - §2.1 #5 `WrongContextFailureRate` numerator widened to include
+    `forbidden-cred` (credential) and `stale-capability` (network/OS
+    drift) per 08:48.
+  - §2.1 #2 `LifecycleClosureRate` numerator adds
+    `capability_snapshot_hash != ''` per 08:36 lifecycle chain.
+  - §2.1 Metric-set membership table: `CapabilityReuseRate` (#22)
+    and `RepeatedGenerationRate` (#23) added — 08:37-38 files them
+    under both §Lifecycle and §User-promoted.
+  - §3.3 aggregation and empty-DB paragraphs harmonized on the same
+    contract: count with landed upstream = 0; count with unlanded
+    upstream = null; ratio always null when denominator=0 or
+    upstream missing.
+  - Fixture 3 `ContractCompleteness` null-reason wording aligned
+    with §2.2 row 10 (cohort-attribution missing).
