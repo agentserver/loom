@@ -22,8 +22,10 @@ import (
 	"github.com/yourorg/multi-agent/internal/driver"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/observerclient"
+	"github.com/yourorg/multi-agent/internal/observerstore"
 	"github.com/yourorg/multi-agent/internal/orchestration"
 	"github.com/yourorg/multi-agent/internal/planner"
+	"github.com/yourorg/multi-agent/internal/promotionaudit"
 	"github.com/yourorg/multi-agent/internal/webui"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 	_ "github.com/yourorg/multi-agent/pkg/agentbackend/claude"
@@ -190,6 +192,20 @@ func runServe(args []string) {
 	sdkClient := driver.NewAgentSDKClient(cli, cfg.Server.URL, cfg.Credentials.ProxyToken)
 	tools := driver.NewTools(reg, audit, sdkClient, cfg, obs)
 	tools.SetTaskJournal(taskJournal)
+	// WT-2 B6: wire the promotion-audit writer if a local observer.db
+	// path is configured. Empty path leaves the writer nil — the
+	// register / unregister tools then degrade to a helper-error log
+	// per §3.4 step 6 while the slave register itself still succeeds.
+	if cfg.Observer.PromotionAuditDBPath != "" {
+		promoStore, err := observerstore.OpenSQLite(cfg.Observer.PromotionAuditDBPath)
+		if err != nil {
+			log.Printf("promotion_audit: OpenSQLite(%q): %v — audit writer disabled",
+				cfg.Observer.PromotionAuditDBPath, err)
+		} else {
+			tools.SetPromotionAuditWriter(promotionaudit.NewSQLiteWriter(promoStore.DB()))
+			defer promoStore.Close()
+		}
+	}
 	backend, err := newAgentBackend(cfg)
 	if err != nil {
 		log.Fatalf("agentbackend: %v", err)
