@@ -93,9 +93,19 @@ func resetLookupDepsForTest() {
 	userspaceStoreWarnOnce = sync.Once{}
 }
 
-// sanitizerRE — spec §3. Strip chars outside `[A-Za-z0-9_ .-]`.
-var sanitizerRE = regexp.MustCompile(`[^A-Za-z0-9_ .-]+`)
+// sanitizerRE — spec §3. Strip chars outside `[A-Za-z0-9_ .]`.
+// The `-` character is NOT accepted because FTS5 treats it as a NOT
+// operator prefix on tokens; a bare `-foo bar` would exclude foo
+// from the results. Keeping the class tight closes that surface.
+var sanitizerRE = regexp.MustCompile(`[^A-Za-z0-9_ .]+`)
 var whitespaceCollapseRE = regexp.MustCompile(`\s+`)
+
+// fts5OperatorWords are the tokens FTS5 treats as boolean operators
+// when uppercase. Lowercasing them (as we do here) demotes them to
+// plain search terms.
+var fts5OperatorWords = map[string]struct{}{
+	"AND": {}, "OR": {}, "NOT": {}, "NEAR": {},
+}
 
 const lookupQueryMaxLen = 256
 const lookupResultCap = 20
@@ -109,7 +119,18 @@ func sanitizeLookupQuery(raw string) string {
 	q = sanitizerRE.ReplaceAllString(q, "")
 	q = whitespaceCollapseRE.ReplaceAllString(q, " ")
 	q = strings.TrimSpace(q)
-	return q
+	// Lowercase any FTS5 operator words so they don't parse as
+	// operators. Split on whitespace, filter, rejoin.
+	if q == "" {
+		return q
+	}
+	tokens := strings.Fields(q)
+	for i, tok := range tokens {
+		if _, isOp := fts5OperatorWords[strings.ToUpper(tok)]; isOp {
+			tokens[i] = strings.ToLower(tok)
+		}
+	}
+	return strings.Join(tokens, " ")
 }
 
 // hashPrefix returns the first 8 hex chars of sha256(raw). Empty raw
@@ -125,16 +146,34 @@ func hashPrefix(raw string) string {
 // Lookup — see spec §2. Never returns an error; degrades on each
 // source's failure with a log line.
 func Lookup(ctx context.Context, query string) []Hit {
-	surfaceInitErrorOnce()
-
-	sanitized := sanitizeLookupQuery(query)
-	hp := hashPrefix(query)
-
+	// Ablation short-circuit BEFORE any other side effect (log,
+	// sanitizer, sample write, counter bump). Doing this first
+	// upholds §7 (c) "silent skip would break the paper's ablation
+	// audit story" — the only observable side-effect is the single
+	// [ablation] log line. Even the truncation log is deferred so
+	// an ablated call is one log line and nothing else.
 	if IsNoRegistryLookup() {
-		log.Printf("[ablation] NoRegistryLookup: skipped query_sanitized=%q query_hash=%s", sanitized, hp)
+		hp := hashPrefix(query)
+		// Sanitize INLINE (without emitting the truncation log)
+		// purely so the ablation log line carries a stable, safe
+		// query rendering. Explicit inline avoids calling
+		// sanitizeLookupQuery which log-warns on truncation.
+		q := query
+		if len(q) > lookupQueryMaxLen {
+			q = q[:lookupQueryMaxLen]
+		}
+		q = sanitizerRE.ReplaceAllString(q, "")
+		q = whitespaceCollapseRE.ReplaceAllString(q, " ")
+		q = strings.TrimSpace(q)
+		log.Printf("[ablation] NoRegistryLookup: skipped query_sanitized=%q query_hash=%s", q, hp)
 		return nil
 	}
-	// Only bump aggregate query counter for non-ablated calls (spec §5).
+
+	// Non-ablated path: surface init errors, sanitize with logging,
+	// bump counters, run searches.
+	surfaceInitErrorOnce()
+	sanitized := sanitizeLookupQuery(query)
+	hp := hashPrefix(query)
 	bumpLookupQuery()
 
 	// Registry side — read the per-slave in-process view.

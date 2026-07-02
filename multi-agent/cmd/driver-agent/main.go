@@ -1,5 +1,10 @@
 package main
 
+// WT-2 B4: driverUserspaceAdapter bridges *userspace.Store to the
+// narrow driver.UserspaceSearcher interface Lookup depends on. The
+// two types are structurally different because internal/driver stays
+// free of the internal/userspace import.
+
 import (
 	"bytes"
 	"context"
@@ -26,6 +31,7 @@ import (
 	"github.com/yourorg/multi-agent/internal/orchestration"
 	"github.com/yourorg/multi-agent/internal/planner"
 	"github.com/yourorg/multi-agent/internal/promotionaudit"
+	"github.com/yourorg/multi-agent/internal/userspace"
 	"github.com/yourorg/multi-agent/internal/webui"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 	_ "github.com/yourorg/multi-agent/pkg/agentbackend/claude"
@@ -203,6 +209,33 @@ func runServe(args []string) {
 				cfg.Observer.PromotionAuditDBPath, err)
 		} else {
 			tools.SetPromotionAuditWriter(promotionaudit.NewSQLiteWriter(promoStore.DB()))
+			// WT-2 B4: same local observer store handle powers the
+			// registry_lookup_samples writer AND the userspace search
+			// backing driver.Lookup. Remote-observer prod deployments
+			// (which leave PromotionAuditDBPath empty) don't get
+			// Lookup samples yet — future HTTP-piped variant handles
+			// that; for now Lookup runs registry-only with a WARN
+			// per §7 (d).
+			lookupSampleWriter := observerstore.NewRegistryLookupSamplesWriter(promoStore.DB())
+			usStore := userspace.NewStore(promoStore.DB())
+			driver.SetLookupDeps(driver.LookupDeps{
+				UserspaceStore: &driverUserspaceAdapter{store: usStore},
+				WorkspaceID:    cfg.Observer.WorkspaceID,
+				UserID:         "", // driver-agent does not carry a user identity
+				CurrentRunID:   driver.CurrentRunID,
+				SampleWrite: func(ctx context.Context, s driver.RegistryLookupSample) error {
+					return lookupSampleWriter.WriteRegistryLookupSample(ctx, observerstore.RegistryLookupSampleRow{
+						TS:              s.Queried,
+						RunID:           s.RunID,
+						WorkspaceID:     s.WorkspaceID,
+						QueryHashPrefix: s.QueryHashPrefix,
+						HitCount:        s.HitCount,
+						RegistryHits:    s.RegistryHits,
+						UserspaceHits:   s.UserspaceHits,
+						TopScore:        s.TopScore,
+					})
+				},
+			})
 			defer promoStore.Close()
 		}
 	}
@@ -431,4 +464,25 @@ func daemonWSURL(observerURL, wsPath string) (string, bool) {
 func die(msg string) {
 	fmt.Fprintln(os.Stderr, "driver-agent:", msg)
 	os.Exit(1)
+}
+
+// driverUserspaceAdapter bridges *userspace.Store to
+// driver.UserspaceSearcher. Kept in the driver-agent binary so the
+// internal/driver package stays free of the internal/userspace import.
+type driverUserspaceAdapter struct{ store *userspace.Store }
+
+func (a *driverUserspaceAdapter) SearchPackagesForIdentity(q, workspaceID, userID, kindFilter string, limit int) ([]driver.PackageHit, error) {
+	rows, err := a.store.SearchPackagesForIdentity(q, workspaceID, userID, kindFilter, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]driver.PackageHit, len(rows))
+	for i, r := range rows {
+		out[i] = driver.PackageHit{
+			Slug:        r.Slug,
+			Description: r.Description,
+			// Rank derived by position in the driver layer.
+		}
+	}
+	return out, nil
 }

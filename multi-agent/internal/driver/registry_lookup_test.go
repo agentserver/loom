@@ -101,6 +101,51 @@ func TestLookup_QueryTruncatedAtCap(t *testing.T) {
 	}
 }
 
+// TestLookup_AblationFirst_NoTruncationLogUnderAblation — §7 (c)
+// invariant: an ablated Lookup emits ONE line total (the [ablation]
+// line), and never the truncation log even when the query is long
+// enough to trigger it.
+func TestLookup_AblationFirst_NoTruncationLogUnderAblation(t *testing.T) {
+	buf := captureLogs(t)
+	setupLookup(t, &mockUserspace{}, &sampleCapture{})
+	noRegistryLookup = true
+	defer resetNoRegistryLookupForTest()
+
+	Lookup(context.Background(), strings.Repeat("a", 300))
+	if strings.Contains(buf.String(), "query truncated") {
+		t.Fatalf("truncation log leaked past ablation short-circuit: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "[ablation] NoRegistryLookup: skipped") {
+		t.Fatalf("expected [ablation] line: %s", buf.String())
+	}
+}
+
+// TestLookup_SanitizerStripsHyphen — FTS5 treats `-foo` as a NOT
+// operator prefix; the sanitizer must strip `-`.
+func TestLookup_SanitizerStripsHyphen(t *testing.T) {
+	us := &mockUserspace{}
+	setupLookup(t, us, &sampleCapture{})
+	Lookup(context.Background(), "foo-bar")
+	if strings.Contains(us.callArgs[0], "-") {
+		t.Fatalf("sanitizer should strip -: %q", us.callArgs[0])
+	}
+}
+
+// TestLookup_SanitizerLowercasesFTS5Operators — the sanitizer
+// lowercases AND/OR/NOT/NEAR so they parse as plain search terms.
+func TestLookup_SanitizerLowercasesFTS5Operators(t *testing.T) {
+	us := &mockUserspace{}
+	setupLookup(t, us, &sampleCapture{})
+	Lookup(context.Background(), "foo AND bar OR baz NEAR zap NOT quux")
+	got := us.callArgs[0]
+	for _, upper := range []string{"AND", "OR", "NEAR", "NOT"} {
+		// The upper form should not appear as a whole word.
+		if strings.Contains(" "+got+" ", " "+upper+" ") {
+			t.Fatalf("sanitizer left %q as a bare uppercase operator: %q", upper, got)
+		}
+	}
+}
+
 func TestLookup_SanitizerStripsReservedChars(t *testing.T) {
 	us := &mockUserspace{}
 	setupLookup(t, us, &sampleCapture{})
