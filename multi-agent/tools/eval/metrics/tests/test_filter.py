@@ -160,3 +160,24 @@ def test_accept_not_wraps_predicate() -> None:
     where, params = compile_runs_filter("NOT run_id = 'x'")
     assert "run_id" in where
     assert params == ("x",)
+
+
+def test_is_null_predicate_reject() -> None:
+    """`col IS NULL` — the IS predicate is entirely disallowed by grammar."""
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterTautology
+    with pytest.raises(ErrRunsFilterTautology):
+        compile_runs_filter("run_id IS NULL")
+
+
+def test_is_not_null_predicate_reject() -> None:
+    """`col IS NOT NULL` — schema-tautology on NOT NULL columns.
+
+    Codex round-2 code-review P0: `workload_id IS NOT NULL` would
+    silently select the full cohort because the schema declares that
+    column NOT NULL. We reject the IS predicate wholesale.
+    """
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterTautology
+    with pytest.raises(ErrRunsFilterTautology):
+        compile_runs_filter("workload_id IS NOT NULL")

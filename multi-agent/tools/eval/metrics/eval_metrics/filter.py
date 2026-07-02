@@ -144,9 +144,20 @@ def _extract_string_literals(fragment: str) -> tuple[str, list[str]]:
 # subclass under sqlglot.expressions). If a future major bump renames
 # them, tests/test_filter.py catches it — the pyproject cap `<27`
 # documents the boundary.
+#
+# Note: exp.Is (SQL `col IS NULL` / `col IS NOT NULL`) is intentionally
+# absent. On the observer `runs` schema most whitelisted columns
+# (`run_id`, `workload_id`, `claim_id`, `experiment_id`,
+# `baseline_or_ablation`) are declared `NOT NULL`, which makes
+# `<col> IS NOT NULL` a schema-level tautology that would select the
+# full cohort while looking like a legitimate narrowing filter. Rather
+# than teach the AST walker about per-column NULL-ability, we simply
+# refuse the entire IS predicate — the spec §3.1 grammar only names
+# `col = 'lit'`, `IN (...)`, `LIKE 'pat'`, and their AND/OR
+# combinations. Codex round-2 code-review P0.
 _PREDICATE_TYPES: tuple[type, ...] = (
     exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE,
-    exp.In, exp.Like, exp.ILike, exp.Between, exp.Is,
+    exp.In, exp.Like, exp.ILike, exp.Between,
 )
 
 
