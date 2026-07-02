@@ -12,7 +12,17 @@
 >
 > Out of scope: no Go code changes (**this worktree touches only
 > `multi-agent/tools/eval/metrics/`**); no new observer tables; no
-> upstream data source implementation. Metrics whose data source
+> upstream data source implementation. **Handoff-item scope carve-out**:
+> 14号 §5 handoff item 1 says "WT-2-metric-extract 接
+> `internal/evalrun.NewSQLWriter`" — that Go-side wiring
+> (`tools/eval/runner/` importing `internal/evalrun.NewSQLWriter` in
+> place of the stub `RunWriter`) is **explicitly re-assigned to a
+> follow-up Go-only worktree** and NOT part of this Python-only
+> worktree. The Python extractor consumes whatever the SQLWriter
+> writes to the `runs` table today, whether via the stub CSV
+> fallback (currently) or the real SQL writer (after the follow-up).
+> The re-assignment is recorded in this spec §6 (Non-goals) and in
+> §5 handoff item 1 of the follow-up close-out memo. Metrics whose data source
 > **has** landed AND whose cohort-projection join keys exist in
 > today's schema are populated with real values; metrics whose data
 > source has **not** yet landed (12 号 §A3 / §A6 / §B / §C4 / §D6c /
@@ -83,6 +93,8 @@ in 08号 §Overhead (08:87 heading, `ManualSetupStepCount` at 08:91;
 
 | # | Metric-set membership |
 |---|---|
+| 1 (`TaskSuccessRate`) | `lifecycle`, `user-promoted` (08:185-186 E4 Stage-A/B collection line) |
+| 3 (`TimeToCompletion`) | `lifecycle`, `user-promoted` (same) |
 | 4 (`HumanContextSelectionCount`) | `lifecycle`, `semantic` |
 | 5 (`WrongContextFailureRate`) | `lifecycle`, `semantic` |
 | 7 | `lifecycle`, `overhead` |
@@ -191,8 +203,8 @@ sub-cells so the header count stays stable).
 | 32 | `TaskDispatchLatency` | structured `{p50_ns, p95_ns, count}` — data source not landed → `null` | — | §7 (g) |
 | 33 | `TunnelOverhead` | structured `{p50_ns, p95_ns, count}` — data source not landed → `null` | — | §7 (g) |
 | 34 | `ArtifactTransferThroughput` | structured `{p50_bytes_per_sec, p95_bytes_per_sec, count}` — data source not landed → `null` | — | §7 (g) |
-| 35 | `ObserverOverhead` | structured `{p50_ns, p95_ns, count}` — data source not landed → `null` | — | §7 (g) |
-| 36 | `ModelProxyOverhead` | structured `{p50_ns, p95_ns, count}` — data source not landed → `null` | — | §7 (g) |
+| 35 | `ObserverOverhead` | structured `{latency_p50_ns, latency_p95_ns, cpu_delta_pct, mem_delta_bytes, count}` — 08:88 defines this as observer-enabled vs -disabled deltas across latency AND CPU/memory. Data source not landed (12号 §D7 microbench script #2 owns the on/off pairing) → all five sub-cells `null` | — | §7 (g) |
+| 36 | `ModelProxyOverhead` | structured `{first_token_latency_p50_ns, first_token_latency_p95_ns, tokens_per_sec_p50, tokens_per_sec_p95, e2e_latency_p95_ns, count}` — 08:89 defines this as first-token latency + tokens/sec + p95 latency comparison across proxy vs direct. Data source not landed (12号 §D7 microbench script #3) → all six sub-cells `null` | — | §7 (g) |
 | 37 | `RoutingLatencyP50P95` | structured `{p50_ns, p95_ns, count}` over `route_reasons.decision_duration_ns` where the row's `decision_started_at` falls within `[runs.start_time, runs.end_time]` for at least one run in the selection (there is NO direct FK between `runs` and `route_reasons` — the join is on the time window, since `runs` has no `conversation_id` column per the 24-column DDL) | — | `route_reasons.decision_duration_ns` + `route_reasons.decision_started_at` (PR #55); `runs.{start_time, end_time}` |
 | 38 | `TimeToFirstTask` | data source not landed (12号 §C4 / §D6c) → `null` | — | Named in 08:90 + 08:237 + 12:89 + 12:105; requires deploy-time timestamp not currently in schema. §7 (g). |
 | 39 | `SetupFailureRate` | data source not landed (12号 §C4 / §D6c) → `null` | — | Named in 08:237 + 12:89 + 12:105; requires deploy harness event stream not currently in schema. §7 (g). |
@@ -257,7 +269,7 @@ note in §2.2..§2.5) explicitly names the subset:
 |---|---|
 | `lifecycle` | §2.1 rows #1..#9 + #22 `CapabilityReuseRate` + #23 `RepeatedGenerationRate` (cross-listed per §2.1 membership table) |
 | `contracted` | §2.2 rows #10..#16 |
-| `user-promoted` | §2.3 rows #17..#27 + #40 `HumanEditCount` + #41 `TokenUsage` (both §2.3 members) |
+| `user-promoted` | §2.3 rows #17..#27 + #40 `HumanEditCount` + #41 `TokenUsage` (both §2.3 members) + #1 `TaskSuccessRate` + #3 `TimeToCompletion` (E4 Stage-A/B collection line 08:185-186 includes them alongside `HumanEditCount`/`token`; they populate from `runs` fields already used by §2.1) |
 | `semantic` | §2.4 rows #28..#30 + #4 `HumanContextSelectionCount` + #5 `WrongContextFailureRate` (cross-listed per §2.1 membership table; 08:140) |
 | `overhead` | §2.5 rows #31..#39 + #7 `ManualSetupStepCount` + #8 `ConfigTouchCount` (cross-listed per §2.1 membership table) |
 
@@ -291,8 +303,8 @@ into sub-columns using `<metric>.<key>` naming (e.g.
 - `TaskDispatchLatency` (§2.5 #32) → `{p50_ns, p95_ns, count}`
 - `TunnelOverhead` (§2.5 #33) → `{p50_ns, p95_ns, count}`
 - `ArtifactTransferThroughput` (§2.5 #34) → `{p50_bytes_per_sec, p95_bytes_per_sec, count}`
-- `ObserverOverhead` (§2.5 #35) → `{p50_ns, p95_ns, count}`
-- `ModelProxyOverhead` (§2.5 #36) → `{p50_ns, p95_ns, count}`
+- `ObserverOverhead` (§2.5 #35) → `{latency_p50_ns, latency_p95_ns, cpu_delta_pct, mem_delta_bytes, count}` (5-key per 08:88)
+- `ModelProxyOverhead` (§2.5 #36) → `{first_token_latency_p50_ns, first_token_latency_p95_ns, tokens_per_sec_p50, tokens_per_sec_p95, e2e_latency_p95_ns, count}` (6-key per 08:89)
 - `RoutingLatencyP50P95` (§2.5 #37) → `{p50_ns, p95_ns, count}`
 
 Row 2 is the single data row for this invocation. There is NO third
@@ -1096,7 +1108,7 @@ Modified: none. This worktree adds files only. If any file outside
     are canonicalized to sha256 by the fixture-builder before
     insertion (per `evalrun/schema.go:42` `^[a-f0-9]{64}$`
     validator).
-- 2026-07-03 (round 12, Codex P1 fixes):
+- 2026-07-03 (round 12, Codex P1 fixes — first batch):
   - Remaining stale 40 references corrected to 41 (§3.2, §5.1, §8
     manifest, fixture 3 header).
   - §3.3 empty-DB JSON example now cites BOTH `"upstream data
@@ -1108,3 +1120,16 @@ Modified: none. This worktree adds files only. If any file outside
     `sqlite3.connect` on Linux (the eval harness's only real
     target). Non-Linux falls back to the plain-path form with a
     documented residual TOCTOU risk.
+- 2026-07-03 (round 13, Codex P1 fixes):
+  - Scope: added a handoff carve-out — the `internal/evalrun.NewSQLWriter`
+    Go-side wiring (14号 §5 item 1) is reassigned to a follow-up
+    Go-only worktree, not this Python-only extractor.
+  - Metric-set membership: #1 `TaskSuccessRate` and #3
+    `TimeToCompletion` cross-listed into `user-promoted` (08:185-186
+    E4 Stage collection line names them alongside `HumanEditCount` /
+    `token`); §3.2 subset table updated.
+  - §2.5 structured shapes for #35 `ObserverOverhead` (5-key: latency
+    p50/p95 + CPU delta + mem delta + count per 08:88) and #36
+    `ModelProxyOverhead` (6-key: first-token latency p50/p95 +
+    tokens/sec p50/p95 + e2e p95 + count per 08:89); §3.3 flatten
+    list updated.
