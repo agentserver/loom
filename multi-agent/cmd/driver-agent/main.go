@@ -198,6 +198,13 @@ func runServe(args []string) {
 	sdkClient := driver.NewAgentSDKClient(cli, cfg.Server.URL, cfg.Credentials.ProxyToken)
 	tools := driver.NewTools(reg, audit, sdkClient, cfg, obs)
 	tools.SetTaskJournal(taskJournal)
+	// WT-2 B4: propagate the eval-runner's run_id (spawner sets
+	// LOOM_EVAL_RUN_ID before exec'ing driver-agent). Empty is fine
+	// for interactive/ad-hoc driver sessions; registry_lookup_samples
+	// rows land with run_id='' in that case.
+	if runID := os.Getenv("LOOM_EVAL_RUN_ID"); runID != "" {
+		driver.SetCurrentRunID(runID)
+	}
 	// WT-2 B6: wire the promotion-audit writer if a local observer.db
 	// path is configured. Empty path leaves the writer nil — the
 	// register / unregister tools then degrade to a helper-error log

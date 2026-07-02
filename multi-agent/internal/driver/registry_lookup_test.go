@@ -101,6 +101,35 @@ func TestLookup_QueryTruncatedAtCap(t *testing.T) {
 	}
 }
 
+// TestLookup_AblationLogCappedAt64Chars — §7 (h) bound. Ablation
+// log's query_sanitized rendering must be capped at 64 chars so an
+// alphanumeric secret-shaped input is bounded.
+func TestLookup_AblationLogCappedAt64Chars(t *testing.T) {
+	buf := captureLogs(t)
+	setupLookup(t, &mockUserspace{}, &sampleCapture{})
+	noRegistryLookup = true
+	defer resetNoRegistryLookupForTest()
+
+	// 100 alphanumeric chars — all pass the sanitizer character class.
+	raw := strings.Repeat("Ab1", 40) // 120 chars total
+	Lookup(context.Background(), raw)
+	logStr := buf.String()
+	// Extract the query_sanitized=%q value.
+	i := strings.Index(logStr, `query_sanitized="`)
+	if i < 0 {
+		t.Fatalf("expected query_sanitized=... in log: %s", logStr)
+	}
+	rest := logStr[i+len(`query_sanitized="`):]
+	end := strings.IndexByte(rest, '"')
+	if end < 0 {
+		t.Fatalf("unterminated query_sanitized: %s", logStr)
+	}
+	rendered := rest[:end]
+	if len(rendered) > 64 {
+		t.Fatalf("query_sanitized len %d > 64 — §7 (h) bound violated: %q", len(rendered), rendered)
+	}
+}
+
 // TestLookup_AblationFirst_NoTruncationLogUnderAblation — §7 (c)
 // invariant: an ablated Lookup emits ONE line total (the [ablation]
 // line), and never the truncation log even when the query is long

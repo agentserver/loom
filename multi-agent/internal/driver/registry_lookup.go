@@ -165,6 +165,14 @@ func Lookup(ctx context.Context, query string) []Hit {
 		q = sanitizerRE.ReplaceAllString(q, "")
 		q = whitespaceCollapseRE.ReplaceAllString(q, " ")
 		q = strings.TrimSpace(q)
+		// §7 (h): cap the log-side render at 64 chars so an
+		// alphanumeric secret-shaped input (which the sanitizer
+		// cannot strip because letters/digits are legitimate query
+		// tokens) is bounded in the log. The 8-hex query_hash gives
+		// operators a way to correlate across log entries.
+		if len(q) > 64 {
+			q = q[:64]
+		}
 		log.Printf("[ablation] NoRegistryLookup: skipped query_sanitized=%q query_hash=%s", q, hp)
 		return nil
 	}
