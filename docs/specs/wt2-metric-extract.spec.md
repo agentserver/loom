@@ -13,13 +13,17 @@
 > Out of scope: no Go code changes (**this worktree touches only
 > `multi-agent/tools/eval/metrics/`**); no new observer tables; no
 > upstream data source implementation. Metrics whose data source
-> **has** landed (12 号 §D1 + §A2 + §C2, Phase 1 close-out memo §4) are
-> populated with real values; metrics whose data source has **not** yet
-> landed (12 号 §A3 / §A6 / §B / §C4 / §D6c / §D7 / §D8, Phase 1
-> close-out memo §5) are still emitted as columns but populated with
-> `null` and a `"upstream data missing"` note (see §7 (g)). The
-> per-metric provenance table in §2 marks which category each metric
-> falls in today.
+> **has** landed AND whose cohort-projection join keys exist in
+> today's schema are populated with real values; metrics whose data
+> source has **not** yet landed (12 号 §A3 / §A6 / §B / §C4 / §D6c /
+> §D7 / §D8, Phase 1 close-out memo §5), **or** whose upstream is
+> landed but whose per-run join key is missing (§A2 landed the
+> `task_contracts` writer + 7-field bitmap logic, but the per-run→
+> contract join key is not in today's schema — see §2.2 row 10), are
+> still emitted as columns but populated with `null` and a
+> `"upstream data missing"` note (see §7 (g)). The per-metric
+> provenance table in §2 marks which category each metric falls in
+> today.
 
 ## 1. Background
 
@@ -75,16 +79,18 @@ in 08号 §Overhead (08:87 heading, 08:91 rows) AND cited by 12号
 
 | # | Metric-set membership |
 |---|---|
+| 4 (`HumanContextSelectionCount`) | `lifecycle`, `semantic` |
+| 5 (`WrongContextFailureRate`) | `lifecycle`, `semantic` |
 | 7 | `lifecycle`, `overhead` |
 | 8 | `lifecycle`, `overhead` |
 | 22 (`CapabilityReuseRate`) | `lifecycle`, `user-promoted` |
 | 23 (`RepeatedGenerationRate`) | `lifecycle`, `user-promoted` |
 
-`--metric-set overhead` therefore emits #7 and #8 in addition to the
-§2.5 rows; `--metric-set lifecycle` emits #22 and #23 in addition to
-the §2.1 rows (because 08:37-38 files those two metrics under both
-§Lifecycle and §User-promoted). All other metrics remain in exactly
-one metric-set.
+- `--metric-set overhead` emits #7 and #8 in addition to the §2.5 rows.
+- `--metric-set lifecycle` emits #22 and #23 in addition to the §2.1 rows (08:37-38 files them under both §Lifecycle and §User-promoted).
+- `--metric-set semantic` emits #4 and #5 in addition to the §2.4 rows (08:140 E2 metrics list `HumanContextSelectionCount` and `WrongContextFailureRate` as Semantic-routing metrics too).
+
+All other metrics remain in exactly one metric-set.
 
 | # | Metric | Numerator | Denominator | Provenance |
 |---|---|---|---|---|
@@ -232,7 +238,7 @@ note in §2.2..§2.5) explicitly names the subset:
 | `lifecycle` | §2.1 rows #1..#9 + #22 `CapabilityReuseRate` + #23 `RepeatedGenerationRate` (cross-listed per §2.1 membership table) |
 | `contracted` | §2.2 rows #10..#16 |
 | `user-promoted` | §2.3 rows #17..#27 |
-| `semantic` | §2.4 rows #28..#30 |
+| `semantic` | §2.4 rows #28..#30 + #4 `HumanContextSelectionCount` + #5 `WrongContextFailureRate` (cross-listed per §2.1 membership table; 08:140) |
 | `overhead` | §2.5 rows #31..#39 + #7 `ManualSetupStepCount` + #8 `ConfigTouchCount` (cross-listed per §2.1 membership table) |
 
 Any value not in the six-value enum above → exit 2 with the message
@@ -677,8 +683,17 @@ from §(b)'s read-target policy. Rules, in order:
    auditable act).
 3. **Symlink refusal on the target itself**: if the target exists as a
    dangling symlink or a symlink pointing anywhere, exit 2 with
-   `ErrOutIsSymlink` — this closes the TOCTOU window between
-   parent-directory realpath and file open.
+   `ErrOutIsSymlink`. This is checked AFTER (1) and BEFORE (4).
+4. **Atomic exclusive-nofollow create**: open the target via
+   `os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)`.
+   `O_EXCL` refuses to open if the target exists (redundant with (2),
+   but survives a race between (2) and (4)); `O_NOFOLLOW` refuses to
+   follow a symlink at the last path component (redundant with (3),
+   but again survives the intervening race); mode `0o600` prevents
+   world-readable output. If the open fails, exit 2 with the errno
+   name and no path bytes beyond what the operator supplied. This
+   `O_CREAT|O_EXCL|O_NOFOLLOW` atom is what actually closes the
+   TOCTOU window; (2) and (3) are the belt to its suspenders.
 
 **`/dev/stdout` / `/dev/null` are NOT supported** as `--out` values
 (they would trip the `/dev/` reject in step 1). The `stdout` sink is
@@ -889,7 +904,7 @@ Modified: none. This worktree adds files only. If any file outside
     upstream missing.
   - Fixture 3 `ContractCompleteness` null-reason wording aligned
     with §2.2 row 10 (cohort-attribution missing).
-- 2026-07-02 (round 7, Codex P1 fixes):
+- 2026-07-02 (round 7, Codex P1 fixes — first batch):
   - §3.2 `--metric-set` subset table added; §5.1 acceptance criterion
     #3 updated to reference the subset table so the two sections no
     longer disagree about cross-listed metrics.
@@ -897,3 +912,14 @@ Modified: none. This worktree adds files only. If any file outside
     Between / Is node MUST reference at least one whitelisted column,
     closing the `run_id = 'x' OR 1 = 1` OR-broadening attack that
     would otherwise pass Column-only whitelisting.
+- 2026-07-03 (round 8, Codex P1 fixes):
+  - §2.1 metric-set membership table cross-lists #4 `HumanContextSelectionCount`
+    and #5 `WrongContextFailureRate` into `semantic` (08:140 E2 metrics list).
+    §3.2 subset table + §5.1 acceptance criterion updated to match.
+  - Scope §1 out-of-scope paragraph carves out the
+    `ContractCompleteness` case (upstream landed, cohort join key
+    missing → null), so lines 16-17 no longer conflict with §2.2 row 10.
+  - §7 (d) `--out` step 4 added: atomic
+    `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW` open (mode `0o600`) is what
+    actually closes the TOCTOU window; the parent-realpath / overwrite-
+    refusal / symlink-refusal checks are the belt to its suspenders.
