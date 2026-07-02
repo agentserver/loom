@@ -225,6 +225,30 @@ func runServe(args []string) {
 			// per §7 (d).
 			lookupSampleWriter := observerstore.NewRegistryLookupSamplesWriter(promoStore.DB())
 			usStore := userspace.NewStore(promoStore.DB())
+			// WT-2 B1: promote-candidate deps + expiry goroutine.
+			promoWriter := observerstore.NewPromoteCandidatesWriter(promoStore.DB())
+			driver.SetPromoteCandidateDeps(driver.PromoteCandidateDeps{
+				Writer: &driverPromoWriterAdapter{w: promoWriter},
+				Events: obs,
+				Now:    time.Now,
+			})
+			// 5-minute sweep; 24h cutoff. The goroutine uses
+			// context.Background() because it starts before the
+			// signal-cancellable ctx is declared below; on process
+			// exit the goroutine dies with the process. A future
+			// refactor can hoist ctx creation earlier.
+			go func() {
+				sweepCtx := context.Background()
+				tick := time.NewTicker(5 * time.Minute)
+				defer tick.Stop()
+				for range tick.C {
+					cutoff := time.Now().Add(-24 * time.Hour)
+					if _, err := driver.ExpireCandidatesOlderThan(sweepCtx, cutoff); err != nil {
+						log.Printf("promote_candidate: expiry sweep: %v", err)
+					}
+				}
+			}()
+
 			driver.SetLookupDeps(driver.LookupDeps{
 				UserspaceStore: &driverUserspaceAdapter{store: usStore},
 				WorkspaceID:    cfg.Observer.WorkspaceID,
@@ -492,4 +516,28 @@ func (a *driverUserspaceAdapter) SearchPackagesForIdentity(q, workspaceID, userI
 		}
 	}
 	return out, nil
+}
+
+// driverPromoWriterAdapter bridges observerstore.PromoteCandidatesWriter
+// to driver.PromoteCandidatesWriter. The two types are structurally
+// identical but live in different packages so internal/driver stays
+// free of the internal/observerstore import.
+type driverPromoWriterAdapter struct{ w observerstore.PromoteCandidatesWriter }
+
+func (a *driverPromoWriterAdapter) InsertPromoteCandidate(ctx context.Context, row driver.PromoteCandidateRow) error {
+	return a.w.InsertPromoteCandidate(ctx, observerstore.PromoteCandidateRow{
+		CandidateID:   row.CandidateID,
+		Family:        row.Family,
+		SourceTaskIDs: row.SourceTaskIDs,
+		SurfacedAt:    row.SurfacedAt,
+		SurfacedBy:    row.SurfacedBy,
+		WorkspaceID:   row.WorkspaceID,
+		RunID:         row.RunID,
+	})
+}
+func (a *driverPromoWriterAdapter) UpdatePromoteCandidateDecision(ctx context.Context, cid, dec, at string) error {
+	return a.w.UpdatePromoteCandidateDecision(ctx, cid, dec, at)
+}
+func (a *driverPromoWriterAdapter) ExpirePromoteCandidates(ctx context.Context, cutoff string) (int, error) {
+	return a.w.ExpirePromoteCandidates(ctx, cutoff)
 }

@@ -311,3 +311,31 @@ CREATE TABLE IF NOT EXISTS registry_lookup_samples (
 );
 CREATE INDEX IF NOT EXISTS idx_registry_lookup_samples_run
     ON registry_lookup_samples(run_id, ts);
+
+-- WT-2-driver-promotion-chain B1: promote-candidate surfacing rows.
+-- Populated by driver.SurfacePromoteCandidate; consumed by
+-- PromotionCandidateSurfacingRate / PromotionAdoptionRate /
+-- TimeFromUserDecisionToRegisteredMCP metrics. Keyed by
+-- UNIQUE(run_id, candidate_id) so parallel Phase 3 runs stay
+-- unambiguous; the JOIN to promotion_audit uses candidate_id (which
+-- itself embeds run_id — see spec §4.1). See spec
+-- docs/specs/wt2-driver-promotion-chain-B1.spec.md §2.
+CREATE TABLE IF NOT EXISTS promote_candidates (
+    row_id            TEXT PRIMARY KEY,
+    candidate_id      TEXT NOT NULL,
+    family            TEXT NOT NULL,
+    source_task_ids   TEXT NOT NULL DEFAULT '[]',
+    surfaced_at       TEXT NOT NULL,
+    decision          TEXT NOT NULL DEFAULT '' CHECK(decision IN ('','promoted','declined','expired')),
+    decision_at       TEXT NOT NULL DEFAULT '',
+    surfaced_by       TEXT NOT NULL DEFAULT '' CHECK(surfaced_by IN ('','user_hint','driver_inferred','similarity_signal')),
+    workspace_id      TEXT NOT NULL DEFAULT '',
+    run_id            TEXT NOT NULL DEFAULT '',
+    UNIQUE(run_id, candidate_id)
+);
+CREATE INDEX IF NOT EXISTS idx_promote_candidates_family
+    ON promote_candidates(family, surfaced_at);
+CREATE INDEX IF NOT EXISTS idx_promote_candidates_candidate
+    ON promote_candidates(candidate_id);
+CREATE INDEX IF NOT EXISTS idx_promote_candidates_run
+    ON promote_candidates(run_id, surfaced_at);

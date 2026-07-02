@@ -151,7 +151,9 @@ func (pt *promotionPipelineTool) buildProdPipeline() (*promotionpipeline.Pipelin
 		},
 		AuditWrite:               pt.auditWriteAdapter,
 		EventEmit:                pt.eventEmitAdapter,
-		IsPromotionPathDisabled:  nil,
+		// WT-2 B1: NoUserPromotionPath predicate is now wired
+		// (was nil at B2's commit boundary).
+		IsPromotionPathDisabled:  IsNoUserPromotionPath,
 		IsAcceptanceGateDisabled: ablation.IsNoAcceptanceGate,
 	}
 	return promotionpipeline.New(deps)

@@ -96,6 +96,17 @@ func (r *registerSlaveMCPTool) Call(ctx context.Context, raw json.RawMessage) (j
 	if err := promotionaudit.Validate(auditPrecheck); err != nil {
 		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailContractViolation}
 	}
+	// WT-2 B1: NoUserPromotionPath gates driver-initiated reasons but
+	// leaves explicit_user_request alone (user-initiated intent is
+	// what the ablation preserves; driver inference / batch / ci is
+	// what it removes). Matches B6 §5 truth table + B1 §1 third gate.
+	surfacePromotionInitErrorOnce()
+	if IsNoUserPromotionPath() && reason != promotionaudit.ReasonExplicitUserRequest {
+		return nil, &MCPToolError{
+			Message:  "driver-initiated register_slave_mcp disabled by NoUserPromotionPath (reason=" + string(reason) + "); explicit_user_request still permitted",
+			Category: observerstore.FailPolicyViolation,
+		}
+	}
 	// Invoke the shared core; it does NOT write an audit row.
 	coreArgs := registerCoreArgs{
 		TargetAgentID:     args.TargetAgentID,
