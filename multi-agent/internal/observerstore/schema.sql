@@ -287,3 +287,21 @@ CREATE INDEX IF NOT EXISTS idx_dry_run_blocks_contract_hash
     ON dry_run_blocks(contract_hash);
 CREATE INDEX IF NOT EXISTS idx_dry_run_blocks_attempt
     ON dry_run_blocks(attempt_id);
+
+-- WT-2-overhead-probes: in-process latency spans (driver planning,
+-- agentserver task dispatch, observer write). Consumed by
+-- DriverPlanningOverhead / TaskDispatchLatency / ObserverOverhead p50/p95
+-- via the WT-2-metric-extract SELECT in §4.5 of wt2-overhead-probes.spec.
+-- event_id is derived server-side (sha256 of convID|kind|start|nonce);
+-- callers never supply it.
+CREATE TABLE IF NOT EXISTS probe_events (
+    event_id            TEXT PRIMARY KEY,
+    probe_kind          TEXT NOT NULL,     -- 'driver_planning' | 'task_dispatch' | 'observer_write'
+    conversation_id     TEXT NOT NULL,     -- validated ^[A-Za-z0-9_-]{8,128}$ before insert
+    span_start_at       TEXT NOT NULL,     -- RFC3339Nano, audit only
+    span_end_at         TEXT NOT NULL,     -- RFC3339Nano, audit only
+    duration_ns         INTEGER NOT NULL,  -- AUTHORITATIVE latency; end.Sub(start) w/ monotonic
+    wallclock_delta_ms  INTEGER NOT NULL DEFAULT 0  -- cross-machine skew; 0 for same-process spans
+);
+CREATE INDEX IF NOT EXISTS idx_probe_events_kind_conv
+    ON probe_events(probe_kind, conversation_id, span_start_at);
