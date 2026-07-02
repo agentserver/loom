@@ -113,3 +113,50 @@ def test_accept_and_or_combination() -> None:
     assert "baseline_or_ablation" in where
     assert "workload_id" in where
     assert set(params) == {"FullLoom", "code-mod-%"}
+
+
+def test_tautology_bare_true_reject() -> None:
+    """Bypass class: TRUE alone (round-1 codex code-review P0)."""
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterTautology
+    with pytest.raises(ErrRunsFilterTautology):
+        compile_runs_filter("TRUE")
+
+
+def test_tautology_bare_false_reject() -> None:
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterTautology
+    with pytest.raises(ErrRunsFilterTautology):
+        compile_runs_filter("FALSE")
+
+
+def test_tautology_or_true_bypass_reject() -> None:
+    """`run_id = 'x' OR TRUE` broadens to every row — must reject."""
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterTautology
+    with pytest.raises(ErrRunsFilterTautology):
+        compile_runs_filter("run_id = 'x' OR TRUE")
+
+
+def test_tautology_or_false_reject() -> None:
+    """`run_id = 'x' OR FALSE` is not a broadener but still a bypass shape;
+    the tree-shape rule rejects any non-predicate leaf uniformly."""
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterTautology
+    with pytest.raises(ErrRunsFilterTautology):
+        compile_runs_filter("run_id = 'x' OR FALSE")
+
+
+def test_tautology_not_true_reject() -> None:
+    """`NOT TRUE` — same class."""
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterTautology
+    with pytest.raises(ErrRunsFilterTautology):
+        compile_runs_filter("NOT TRUE")
+
+
+def test_accept_not_wraps_predicate() -> None:
+    """`NOT <predicate>` should still work; the fix must not over-restrict."""
+    where, params = compile_runs_filter("NOT run_id = 'x'")
+    assert "run_id" in where
+    assert params == ("x",)

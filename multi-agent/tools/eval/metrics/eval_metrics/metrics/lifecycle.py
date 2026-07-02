@@ -52,13 +52,27 @@ def linear_percentile(sorted_data: list[float], q: float) -> float:
     n = len(sorted_data)
     if n == 1:
         return float(sorted_data[0])
-    idx = (n - 1) * q
+    # Do the linear-interp math in Fraction-space to eliminate binary-float
+    # dust — e.g. plain `2M + 0.85 * (4M-2M)` on IEEE-754 gives
+    # `3699999.999999999...` because `0.95 * 3 = 2.849999...` (0.95 has no
+    # exact binary representation). Fraction gives 3700000 exactly. The
+    # emitted JSON/CSV values then equal the spec §4 hand-computed decimals
+    # exactly (`76.5` not `76.49999999999997`). Codex round-1 code review
+    # P1 tripwire.
+    from fractions import Fraction
+    q_frac = Fraction(q).limit_denominator(10 ** 6)  # 0.95 -> 19/20 exactly
+    idx = (n - 1) * q_frac
     lo = int(idx)
     hi = min(lo + 1, n - 1)
     frac = idx - lo
-    a = float(sorted_data[lo])
-    b = float(sorted_data[hi])
-    return a + frac * (b - a)
+    # sorted_data may be ints or floats; go through Fraction for both.
+    a = Fraction(sorted_data[lo])
+    b = Fraction(sorted_data[hi])
+    result = a + frac * (b - a)
+    # Round to 9 decimals as a defensive belt for the float() cast — the
+    # Fraction is exact but IEEE-754 may still need a shortest-repr nudge
+    # for large integers (e.g. ns values with 9+ significant digits).
+    return round(float(result), 9)
 
 
 def _parse_ts(ts: str) -> float:

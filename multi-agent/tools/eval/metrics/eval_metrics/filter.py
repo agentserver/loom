@@ -150,10 +150,57 @@ _PREDICATE_TYPES: tuple[type, ...] = (
 )
 
 
+def _reject_non_predicate_leaves(node: exp.Expression) -> None:
+    """Walk the boolean tree; every leaf must be a predicate.
+
+    Recurses through the AND/OR/NOT/Paren combinators; when it reaches
+    a non-combinator node, that node MUST be a member of
+    `_PREDICATE_TYPES`. A `Boolean` literal (`TRUE`/`FALSE`), a bare
+    `Literal` (a numeric or string truthy), or any other expression
+    triggers `ErrRunsFilterTautology`.
+
+    This closes the `TRUE` / `run_id = 'x' OR TRUE` / `run_id = 'x'
+    OR (SELECT ...)` (parser would already reject the latter via the
+    denylist, but the check is defence-in-depth) bypass that a
+    predicate-only walk misses. Any future combinator sqlglot adds
+    at the AST level (unlikely — AND/OR/NOT/Paren are stable) must be
+    added here explicitly, so a silent broadening cannot happen.
+    """
+    # Peel a Paren wrapper — `(...)` is a no-op grouping.
+    if isinstance(node, exp.Paren):
+        _reject_non_predicate_leaves(node.this)
+        return
+    # NOT wraps a single sub-expression; recurse into it.
+    if isinstance(node, exp.Not):
+        _reject_non_predicate_leaves(node.this)
+        return
+    # AND / OR wrap two sub-expressions (`this` + `expression`).
+    if isinstance(node, (exp.And, exp.Or)):
+        _reject_non_predicate_leaves(node.this)
+        _reject_non_predicate_leaves(node.expression)
+        return
+    # Predicate leaf — OK.
+    if isinstance(node, _PREDICATE_TYPES):
+        return
+    # Anything else at a boolean-tree position is a bypass. The most
+    # common offender is `exp.Boolean` (TRUE/FALSE literal); we also
+    # catch bare `exp.Literal` (numeric truthy) and any exotic
+    # expression sqlglot parsed for us.
+    raise ErrRunsFilterTautology(
+        f"--runs-filter contains non-predicate expression at boolean position: {node.sql()} "
+        f"(type={type(node).__name__}); every leaf must be a comparison, IN, LIKE, BETWEEN, or IS"
+    )
+
+
 def _ast_walk(tree: exp.Expression) -> None:
     """Enforce column-whitelist, tautology, and column-compare rules.
 
     - Every Column node must reference a name in ALLOWED_COLUMNS.
+    - Every leaf of the AND/OR/NOT/Paren tree must be a predicate node
+      (a member of `_PREDICATE_TYPES`); bare Boolean literals (`TRUE`,
+      `FALSE`) or bare numeric-literal-truthiness expressions are
+      rejected as tautologies. Without this, `TRUE` or `run_id = 'x'
+      OR TRUE` would bypass the predicate-level checks below.
     - Every predicate node must reference AT LEAST one Column
       (rejects `1 = 1`).
     - Every predicate's non-Column side must be a Literal /
@@ -170,6 +217,17 @@ def _ast_walk(tree: exp.Expression) -> None:
             raise ErrRunsFilterFieldNotAllowed(
                 f"--runs-filter references field {name!r} not in whitelist {sorted(ALLOWED_COLUMNS)}"
             )
+
+    # Tree-shape rule: the top-level tree must be a boolean tree whose
+    # leaves are all predicates. Walk every node; the only permitted
+    # non-predicate node types are AND / OR / NOT / Paren (logical
+    # combinators) plus the predicates themselves and their internal
+    # constituents (Column, Literal, Placeholder, Null, and the list
+    # container used by IN). Anything else at a position where the
+    # boolean tree expects a predicate — most importantly `exp.Boolean`
+    # (the `TRUE` / `FALSE` literal) — is a tautology bypass and is
+    # rejected. This closes the `TRUE` / `run_id = 'x' OR TRUE` bypass.
+    _reject_non_predicate_leaves(tree)
 
     # Predicate-level rules.
     for pred in tree.find_all(*_PREDICATE_TYPES):
