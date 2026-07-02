@@ -17,23 +17,24 @@ const humanCountMaxBytes = 4 * 1024
 // and emits MetricHumanContextSelectionCount. NEVER reads any other
 // file in .probes/ — §7(d) discipline. Absent file is legitimate
 // ("no humanloop instrumentation landed yet"), value=0, source=absent.
-func EmitHumanCount(ctx context.Context, e *Emitter, wsRoot string, stderr io.Writer) {
+//
+// The trailing `_ io.Writer` parameter is retained for call-site
+// symmetry (matches EmitSetupMetrics). Diagnostics go through
+// emitter.Warn (off-path).
+func EmitHumanCount(ctx context.Context, e *Emitter, wsRoot string, _ io.Writer) {
 	path := filepath.Join(wsRoot, humanCountFile)
-	n, src := countFile(path, stderr)
+	n, src := countFile(e, path)
 	_ = e.Emit(ctx, MetricHumanContextSelectionCount, n, map[string]string{"source": src})
 }
 
 // countFile parses the file at path. Contract per spec §3.4.
-func countFile(path string, stderr io.Writer) (int, string) {
-	if stderr == nil {
-		stderr = io.Discard
-	}
+func countFile(e *Emitter, path string) (int, string) {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, "absent"
 		}
-		fmt.Fprintf(stderr, "probes: humanloop count file open: %v\n", err)
+		e.Warn(fmt.Sprintf("probes: humanloop count file open: %v", err))
 		return 0, "malformed"
 	}
 	defer f.Close()
@@ -45,12 +46,12 @@ func countFile(path string, stderr io.Writer) (int, string) {
 	switch err {
 	case nil:
 		// File is at least humanCountMaxBytes+1 → over the cap.
-		fmt.Fprintf(stderr, "probes: humanloop count file exceeds %d bytes\n", humanCountMaxBytes)
+		e.Warn(fmt.Sprintf("probes: humanloop count file exceeds %d bytes", humanCountMaxBytes))
 		return 0, "malformed"
 	case io.ErrUnexpectedEOF, io.EOF:
 		buf = buf[:read]
 	default:
-		fmt.Fprintf(stderr, "probes: humanloop count file read: %v\n", err)
+		e.Warn(fmt.Sprintf("probes: humanloop count file read: %v", err))
 		return 0, "malformed"
 	}
 	// First line only; trim trailing whitespace.
@@ -61,7 +62,7 @@ func countFile(path string, stderr io.Writer) (int, string) {
 	line = strings.TrimSpace(line)
 	n, perr := strconv.Atoi(line)
 	if perr != nil || n < 0 {
-		fmt.Fprintf(stderr, "probes: humanloop count file malformed (%q)\n", line)
+		e.Warn(fmt.Sprintf("probes: humanloop count file malformed (%q)", line))
 		return 0, "malformed"
 	}
 	return n, "humanloop_counter_file"

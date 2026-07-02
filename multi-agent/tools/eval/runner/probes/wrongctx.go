@@ -25,19 +25,24 @@ var wrongClasses = map[string]bool{
 // EmitWrongContext emits MetricWrongContextFailureRate per spec §3.6.
 // Never blocks; returns nil-value with an unavailable_reason label when
 // either the selected-context file or the ground-truth labels file is
-// absent.
-func EmitWrongContext(ctx context.Context, e *Emitter, wsRoot, workloadRoot, workloadID string, out OracleOutput, stderr io.Writer) {
-	if stderr == nil {
-		stderr = io.Discard
-	}
-	selected, selOK := readSmallFile(filepath.Join(wsRoot, selectedCtxFile), selectedCtxMaxBytes, stderr)
+// absent. Diagnostics go through emitter.Warn (§7(a)).
+//
+// labelsDir is the parent directory of `workloads/<id>.labels.json`
+// (§F4 label tree). The runner constructs it from the workload dir's
+// sibling `labels/` — kept as a separate parameter so this helper
+// stays testable in isolation without assuming a filesystem layout.
+//
+// The trailing `_ io.Writer` parameter is retained for call-site
+// symmetry with EmitSetupMetrics / EmitHumanCount.
+func EmitWrongContext(ctx context.Context, e *Emitter, wsRoot, labelsDir, workloadID string, out OracleOutput, _ io.Writer) {
+	selected, selOK := readSmallFile(e, filepath.Join(wsRoot, selectedCtxFile), selectedCtxMaxBytes)
 	if !selOK {
 		_ = e.Emit(ctx, MetricWrongContextFailureRate, nil, map[string]string{
 			"unavailable_reason": "no_selected_context_file",
 		})
 		return
 	}
-	gt, gtOK := readGroundTruth(workloadRoot, workloadID, stderr)
+	gt, gtOK := readGroundTruth(e, labelsDir, workloadID)
 	if !gtOK {
 		_ = e.Emit(ctx, MetricWrongContextFailureRate, nil, map[string]string{
 			"unavailable_reason": "no_ground_truth_labels",
@@ -77,7 +82,7 @@ func EmitWrongContext(ctx context.Context, e *Emitter, wsRoot, workloadRoot, wor
 	_ = e.Emit(ctx, MetricWrongContextFailureRate, true, labels)
 }
 
-func readSmallFile(path string, cap int, stderr io.Writer) (string, bool) {
+func readSmallFile(e *Emitter, path string, cap int) (string, bool) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", false
@@ -87,12 +92,12 @@ func readSmallFile(path string, cap int, stderr io.Writer) (string, bool) {
 	read, err := io.ReadFull(f, buf)
 	switch err {
 	case nil:
-		fmt.Fprintf(stderr, "probes: %s exceeds %d bytes\n", path, cap)
+		e.Warn(fmt.Sprintf("probes: %s exceeds %d bytes", path, cap))
 		return "", false
 	case io.ErrUnexpectedEOF, io.EOF:
 		buf = buf[:read]
 	default:
-		fmt.Fprintf(stderr, "probes: %s read: %v\n", path, err)
+		e.Warn(fmt.Sprintf("probes: %s read: %v", path, err))
 		return "", false
 	}
 	line := string(buf)
@@ -102,8 +107,14 @@ func readSmallFile(path string, cap int, stderr io.Writer) (string, bool) {
 	return strings.TrimSpace(line), true
 }
 
-func readGroundTruth(workloadRoot, workloadID string, stderr io.Writer) (string, bool) {
-	path := filepath.Join(workloadRoot, "labels", "workloads", workloadID+".labels.json")
+// readGroundTruth reads `<labelsDir>/workloads/<workloadID>.labels.json`
+// and returns the `ground_truth_context.context_id` string (matches
+// the §F4 schema in `tests/eval/labels/workloads/*.labels.json`, e.g.
+// `{"ground_truth_context": {"agent_role": "...", "context_id": "..."}}`).
+// Backward-compat: if the top-level `ground_truth_context` is a bare
+// string (older draft), that is accepted verbatim.
+func readGroundTruth(e *Emitter, labelsDir, workloadID string) (string, bool) {
+	path := filepath.Join(labelsDir, "workloads", workloadID+".labels.json")
 	f, err := os.Open(path)
 	if err != nil {
 		return "", false
@@ -113,21 +124,33 @@ func readGroundTruth(workloadRoot, workloadID string, stderr io.Writer) (string,
 	read, err := io.ReadFull(f, buf)
 	switch err {
 	case nil:
-		fmt.Fprintf(stderr, "probes: labels %s exceeds %d bytes\n", path, labelsMaxBytes)
+		e.Warn(fmt.Sprintf("probes: labels %s exceeds %d bytes", path, labelsMaxBytes))
 		return "", false
 	case io.ErrUnexpectedEOF, io.EOF:
 		buf = buf[:read]
 	default:
-		fmt.Fprintf(stderr, "probes: labels %s read: %v\n", path, err)
+		e.Warn(fmt.Sprintf("probes: labels %s read: %v", path, err))
 		return "", false
 	}
 	var m map[string]any
 	if err := json.Unmarshal(buf, &m); err != nil {
-		fmt.Fprintf(stderr, "probes: labels %s unmarshal: %v\n", path, err)
+		e.Warn(fmt.Sprintf("probes: labels %s unmarshal: %v", path, err))
 		return "", false
 	}
-	if gt, ok := m["ground_truth_context"].(string); ok {
-		return gt, true
+	raw, ok := m["ground_truth_context"]
+	if !ok {
+		return "", false
+	}
+	// Preferred shape: object with .context_id string (F4 schema).
+	if obj, ok := raw.(map[string]any); ok {
+		if cid, ok := obj["context_id"].(string); ok && cid != "" {
+			return cid, true
+		}
+		return "", false
+	}
+	// Back-compat: bare string.
+	if s, ok := raw.(string); ok && s != "" {
+		return s, true
 	}
 	return "", false
 }

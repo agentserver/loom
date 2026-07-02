@@ -9,14 +9,19 @@ import (
 	"testing"
 )
 
-func writeLabels(t *testing.T, workloadRoot, id, gt string) {
+// writeLabels writes an §F4-shaped labels file
+// ({"ground_truth_context":{"context_id":<gt>,...}}) into a
+// `<labelsDir>/workloads/<id>.labels.json` path. `labelsDir` is the
+// value the runner passes into EmitWrongContext — this test uses the
+// same layout so the probe path is exercised end-to-end.
+func writeLabels(t *testing.T, labelsDir, id, gt string) {
 	t.Helper()
-	dir := filepath.Join(workloadRoot, "labels", "workloads")
+	dir := filepath.Join(labelsDir, "workloads")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, id+".labels.json"),
-		[]byte(`{"ground_truth_context":"`+gt+`"}`), 0o644); err != nil {
+	body := `{"ground_truth_context":{"agent_role":"slave","context_id":"` + gt + `"}}`
+	if err := os.WriteFile(filepath.Join(dir, id+".labels.json"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -111,5 +116,32 @@ func TestEmitWrongContext_SanitizesContextStrings(t *testing.T) {
 	recs, _ := e.Close()
 	if !strings.Contains(recs[0].Labels["selected"], "[REDACTED]") {
 		t.Fatalf("selected label not sanitized: %q", recs[0].Labels["selected"])
+	}
+}
+
+// TestEmitWrongContext_BareStringGroundTruth exercises the back-compat
+// path where an older label file stores ground_truth_context as a bare
+// string instead of an object with .context_id.
+func TestEmitWrongContext_BareStringGroundTruth(t *testing.T) {
+	ws, ldir := t.TempDir(), t.TempDir()
+	writeSelected(t, ws, "ctxA")
+	// Bare string variant (pre-F4 schema).
+	dir := filepath.Join(ldir, "workloads")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "wl-1.labels.json"),
+		[]byte(`{"ground_truth_context":"ctxB"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEmitter(0, io.Discard)
+	EmitWrongContext(context.Background(), e, ws, ldir, "wl-1",
+		OracleOutput{Passed: false, MetricsJSON: `{}`}, io.Discard)
+	recs, _ := e.Close()
+	if len(recs) != 1 || recs[0].Value != true {
+		t.Fatalf("bare-string back-compat broken: %#v", recs)
+	}
+	if recs[0].Labels["ground_truth"] != "ctxB" {
+		t.Fatalf("gt label: %q", recs[0].Labels["ground_truth"])
 	}
 }

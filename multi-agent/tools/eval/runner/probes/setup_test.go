@@ -37,8 +37,10 @@ func TestEmitSetupMetrics_MalformedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf synchronizedBuf
-	e := NewEmitter(0, io.Discard)
-	EmitSetupMetrics(context.Background(), e, ws, &buf)
+	// Warns flow through the emitter's stderr (§7(a)); the trailing
+	// io.Writer arg is a deprecated pass-through.
+	e := NewEmitter(0, &buf)
+	EmitSetupMetrics(context.Background(), e, ws, io.Discard)
 	recs, _ := e.Close()
 	for _, r := range recs {
 		if r.Value != nil || r.Labels["unavailable_reason"] != "malformed_setup_file" {

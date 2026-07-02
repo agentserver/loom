@@ -219,8 +219,12 @@ func Run(ctx context.Context, opts Opts) Result {
 	// WT-2-e1e6-probes Edit 3: emit oracle-derived metrics +
 	// humanloop counter (spec §5.1 Edit 3). oracleOutput is unexported
 	// to package main, so lift its fields into probes.OracleOutput.
+	// `Passed` uses the runner's canonical value (oracle-json passed
+	// AND no subprocess error AND exit-code 0) — a JSON `passed:true`
+	// with a non-zero exit code is a runner-level failure, so
+	// TaskSuccessRate must reflect that, not the raw JSON field.
 	oracleOutForProbes := probes.OracleOutput{
-		Passed:      oracleOut.Passed,
+		Passed:      passed,
 		MetricsJSON: oracleOut.MetricsRaw,
 		ExitCode:    res.ExitCode,
 		StdoutBytes: len(res.Stdout),
@@ -237,7 +241,11 @@ func Run(ctx context.Context, opts Opts) Result {
 
 	// WT-2-e1e6-probes Edit 4: emit WrongContextFailureRate after
 	// commit_meta + git emails. Reuses oracleOutForProbes from Edit 3.
-	probes.EmitWrongContext(ctx, emitter, ws.Root, workloadRoot, spec.ID,
+	// Labels live under `<workloadDir>/../labels/` (§F4 layout in
+	// tests/eval/labels/workloads/*.labels.json); derive that from the
+	// runner's --workload-dir flag rather than hard-coding.
+	labelsDir := filepath.Join(filepath.Dir(opts.WorkloadDir), "labels")
+	probes.EmitWrongContext(ctx, emitter, ws.Root, labelsDir, spec.ID,
 		oracleOutForProbes, opts.Stderr)
 
 	// WT-2-e1e6-probes Edit 5: emit TimeToCompletion right before

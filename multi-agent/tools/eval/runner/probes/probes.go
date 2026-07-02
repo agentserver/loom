@@ -142,17 +142,27 @@ func (e *Emitter) Emit(_ context.Context, metric MetricKey, value any, labels ma
 	return nil
 }
 
-// warn queues a warning line for the flusher to write. If the warn
+// Warn queues a warning line for the flusher to write. If the warn
 // channel is itself full, the warn is dropped and warnDropped
 // increments — a summary line at Close reports the count. NEVER
 // blocks the caller (spec §7(a)).
-func (e *Emitter) warn(msg string) {
+//
+// Exported so probe helpers (setup.go, humanloop.go, wrongctx.go) can
+// route their diagnostics off the runner's hot path. nil-Emitter
+// receiver is a no-op.
+func (e *Emitter) Warn(msg string) {
+	if e == nil {
+		return
+	}
 	select {
 	case e.warnCh <- msg:
 	default:
 		atomic.AddInt64(&e.warnDropped, 1)
 	}
 }
+
+// warn is the unexported alias kept for existing internal call sites.
+func (e *Emitter) warn(msg string) { e.Warn(msg) }
 
 // Close stops the flusher and returns accumulated records in emission
 // order. Idempotent.

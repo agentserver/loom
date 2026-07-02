@@ -41,8 +41,10 @@ func TestHumanCount_IgnoresSiblingLogFile(t *testing.T) {
 func TestHumanCount_AbsentFile(t *testing.T) {
 	ws := t.TempDir()
 	var buf synchronizedBuf
-	e := NewEmitter(0, io.Discard)
-	EmitHumanCount(context.Background(), e, ws, &buf)
+	// Warns now flow through the emitter's stderr (§7(a) — off the
+	// hot path). Pass io.Discard as the deprecated stderr param.
+	e := NewEmitter(0, &buf)
+	EmitHumanCount(context.Background(), e, ws, io.Discard)
 	recs, _ := e.Close()
 	if len(recs) != 1 || recs[0].Value != 0 || recs[0].Labels["source"] != "absent" {
 		t.Fatalf("record: %#v", recs)
@@ -61,8 +63,10 @@ func TestHumanCount_MalformedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf synchronizedBuf
-	e := NewEmitter(0, io.Discard)
-	EmitHumanCount(context.Background(), e, ws, &buf)
+	// Warns now flow through the emitter's stderr (§7(a) — off the
+	// hot path). Pass io.Discard as the deprecated stderr param.
+	e := NewEmitter(0, &buf)
+	EmitHumanCount(context.Background(), e, ws, io.Discard)
 	recs, _ := e.Close()
 	if len(recs) != 1 || recs[0].Value != 0 || recs[0].Labels["source"] != "malformed" {
 		t.Fatalf("record: %#v", recs)
@@ -82,8 +86,10 @@ func TestHumanCount_SizeCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf synchronizedBuf
-	e := NewEmitter(0, io.Discard)
-	EmitHumanCount(context.Background(), e, ws, &buf)
+	// Warns now flow through the emitter's stderr (§7(a) — off the
+	// hot path). Pass io.Discard as the deprecated stderr param.
+	e := NewEmitter(0, &buf)
+	EmitHumanCount(context.Background(), e, ws, io.Discard)
 	recs, _ := e.Close()
 	if len(recs) != 1 || recs[0].Value != 0 || recs[0].Labels["source"] != "malformed" {
 		t.Fatalf("record: %#v", recs)
