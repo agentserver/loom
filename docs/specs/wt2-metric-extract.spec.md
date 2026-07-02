@@ -48,11 +48,11 @@ extraction work to WT-2-metric-extract.
 
 The word "全部 metric" is load-bearing. §2 below enumerates every named
 metric across 12 号 §A/§B/§C/§D and 08 号 §Lifecycle / §Semantic /
-§Contracted / §User-promoted / §Overhead — 39 metrics in total — and
+§Contracted / §User-promoted / §Overhead — 40 metrics in total — and
 the extractor MUST emit a header column for each, even when the
 underlying data source has not yet been instrumented.
 
-## 2. Metric catalog (authoritative — 39 metrics)
+## 2. Metric catalog (authoritative — 40 metrics)
 
 Order is preserved in CSV headers and JSON `metrics`-object keys;
 renaming or reordering this list is a spec change, not an implementation
@@ -61,10 +61,13 @@ table/column or fixture-event type the extractor reads.
 
 Cross-check anchor: this catalog is the union of every metric name
 appearing in 08 号 §Metrics tables (08:32–92), 08 号 §Experiments
-metrics-lines (E1: 08:116, E2: 08:141, E3: 08:163, E4: 08:198, E5:
-08:219, E6: 08:237), and 12 号 §A/§B/§C/§D metric one-liners (12:41,
-12:44, 12:74, 12:87, 12:89, 12:105, 12:106, 12:107). If a future
-audit finds a named metric not in this catalog, that is a P0 spec bug.
+metrics-lines (E1: 08:116, E2: 08:141, E3: 08:163, E4: 08:198 + Stage
+A/B/C metrics at 08:184-186, E5: 08:219, E6: 08:237), and 12 号
+§A/§B/§C/§D metric one-liners (12:41, 12:44, 12:74, 12:87, 12:89,
+12:105, 12:106, 12:107), plus `HumanEditCount` from 08:185 (E4 Stage
+A metric — the 08 §User-promoted table at 08:65-78 does not list it
+as a named row, but the E4 experiment body does). If a future audit
+finds a named metric not in this catalog, that is a P0 spec bug.
 
 ### 2.1 Lifecycle (9 — from 12 号 §D8 / §A5 + 08 号 §Lifecycle / E1 / E3)
 
@@ -129,9 +132,9 @@ not — the metric emits `null` today.
 | 15 | `RecoverySuccessRate` | data source not landed: 08:60 defines the numerator as "# interrupted tasks that resume or fail safely / # injected failures". A run's `failure_category` reflects its **terminal** state — a recovered run's `failure_category` is `''` (it passed) and its `success_oracle_result` is `'pass'`, so `runs` alone cannot distinguish "recovered from an interruption" from "never interrupted". This attribution requires 12号 §A6 write_id dedup + resume-event stream. → `null` + `"upstream data missing"` | — | Requires 12号 §A6. §7 (g). |
 | 16 | `DuplicateSideEffectRate` | data source not landed (12号 §A6 P1, write_id dedup table missing) → `null` + `"upstream data missing"` | — | Requires observer `write_id` dedup table (12号 §A6). §7 (g). |
 
-### 2.3 User-promoted (11 — from 12 号 §B + 08 号 §User-promoted / E4) — metrics #17..#27
+### 2.3 User-promoted (12 — from 12 号 §B + 08 号 §User-promoted / E4) — metrics #17..#27, #40
 
-All 11 emit `null` + `"upstream data missing"` at spec time — the
+All 12 emit `null` + `"upstream data missing"` at spec time — the
 promotion-chain writers (12号 §B1/B2/B4/B6, WT-2-driver-promotion-chain
 worktree) have not landed. The columns are still emitted so downstream
 pandas readers do not silently drop schema when B chain merges. Numerator
@@ -143,13 +146,14 @@ pandas readers do not silently drop schema when B chain merges. Numerator
 | 18 | `UserInitiatedSynthesisSuccessRate` | `count(events where type='register_slave_mcp' AND acceptance='pass') / count(events where type='user_scaffold_start')` | 12号 §B2 |
 | 19 | `ValidationFalseAcceptRate` | `count(runs where acceptance_result='pass' AND oracle_result='fail') / count(runs where acceptance_result='pass')` | 12号 §B3 (`mcp-acceptance --cases`; PR #57 landed the golden, not the observer event) |
 | 20 | `TimeFromUserDecisionToRegisteredMCP` | structured `{p50_seconds,p95_seconds,mean_seconds,count}` over `(register_ts − user_decision_ts)` per B6 audit row | 12号 §B6 |
-| 21 | `RegistryLookupHitRate` | `count(events where type='registry_lookup' AND result='hit') / count(events where type='registry_lookup')` | 12号 §B4 |
+| 21 | `RegistryLookupHitRate` | 08:70 defines this as "# new tasks for which driver's pre-prompt lookup found an applicable registered MCP / # new tasks" — the denominator is `count(new tasks)`, NOT `count(lookup events)`, so a missing lookup instrumentation manifests as a low ratio (many task rows, few hit events), not a denominator-zero. Extractor: `count(events where type='registry_lookup' AND result='hit') / count(runs in selection)` — the denominator uses `runs` (per 08:70's "new tasks") rather than the events table, avoiding the "denominator=0 hides missing instrumentation" trap. | 12号 §B4 + `runs` (denominator) |
 | 22 | `CapabilityReuseRate` | `count(runs where reused_mcp_hash != '') / count(runs in same capability family)` | 12号 §B4 + `runs.dynamic_mcp_registry_hash` |
 | 23 | `RepeatedGenerationRate` | `count(events where type='user_scaffold_start' with existing valid MCP in registry) / count(repeated capability-family tasks)` | 12号 §B4 |
 | 24 | `PromotionAdoptionRate` | `count(events where type='register_slave_mcp') / count(events where type='promote_candidate')` | 12号 §B1+§B2 |
 | 25 | `AdHocScriptTaskShare` | `count(runs where no promotion event fired) / count(runs)` | 12号 §B1 (absence signal) |
-| 26 | `GeneratedCapabilityDefectRate` | `count(runs where success_oracle_result='fail' AND selected_capability_source='user-promoted') / count(runs where selected_capability_source='user-promoted')` | 12号 §B4 + oracle |
+| 26 | `GeneratedCapabilityDefectRate` | 08:76 defines this as "# reuse attempts failing due to a registered tool bug / # reuse attempts" — the numerator is scoped to `failure_category='registered-tool-defect'` (a not-yet-landed D4 taxonomy tag; today's 11-value taxonomy has no equivalent), NOT "any failed run using a user-promoted capability" (that would conflate workload-side failures with tool bugs). Extractor: `count(runs where selected_capability_source='user-promoted' AND failure_category='registered-tool-defect') / count(runs where selected_capability_source='user-promoted' AND was_reuse_attempt=true)`. | 12号 §B4 + oracle + a future §D4 tag |
 | 27 | `ReuseSpeedup` | `avg(TimeToCompletion for stage='A') / avg(TimeToCompletion for stage='C')` over same capability family | 12号 §B (family + stage columns not yet in `runs`) |
+| 40 | `HumanEditCount` | 08:185 (E4 Stage A baseline metric) — number of manual edits the operator makes to a Stage-A ad-hoc script before it works. **Not** the same as `HumanContextSelectionCount` (#4), which counts context-selection interventions. Extractor: `sum(runs.human_edit_count)` if the column is present in `PRAGMA table_info(runs)`, else `null` + `"upstream data missing"`. | Requires a new `runs.human_edit_count` column; owner: 12号 §D8 follow-up (currently focused on §D8's named metrics only). §7 (g). |
 
 ### 2.4 Semantic (3 — from 12 号 §C2 + 08 号 §Semantic / E2) — metrics #28..#30
 
@@ -228,7 +232,7 @@ belt-and-suspenders against sqlparse edge cases.
 
 ### 3.2 `--metric-set` selection
 
-`full` emits all 39 metrics from §2 (with structured metrics flattened
+`full` emits all 40 metrics from §2 (with structured metrics flattened
 into sub-columns, so the on-wire column count is larger — see §3.3).
 The five subset values each emit the section's rows PLUS any metric
 whose §2.1 Metric-set membership table (or an equivalent cross-list
@@ -496,7 +500,7 @@ Populated metrics:
   [500k, 1M, 2M, 4M]; median = midpoint = 1.5M; p95 at fractional
   index 2.85 → 2M + 0.85·(4M−2M) = 3.7M)
 
-Null metrics (31 total = 39 catalog − 8 populated above):
+Null metrics (32 total = 40 catalog − 8 populated above):
 
 - §2.1: `ManualSetupStepCount` (#7), `ConfigTouchCount` (#8),
   `StateContinuityRate` (#9) — 3 nulls
@@ -510,7 +514,7 @@ Null metrics (31 total = 39 catalog − 8 populated above):
   onboarding metrics (#38, #39) — 8 nulls
 
 Total: 3 + 7 + 11 + 2 + 8 = **31 null cells**. Populated 8 + null
-31 = 39 metrics.
+32 = 40 metrics.
 
 ### 4.4 Empty-DB fixture (implicit)
 
@@ -520,11 +524,19 @@ in any table. Applying only the WT-1-run-schema DDL would leave
 `route_reasons`, `task_contracts`, `capability_snapshots`, and other
 tables absent, and §2.5 #37 `RoutingLatencyP50P95`'s query to
 `route_reasons` would fail with `no such table`. The extractor's
-`db.py` helper therefore treats a missing companion table the same as
-an empty companion table (both yield `null` + `"upstream data missing"`
-for the affected metric); the empty-DB fixture applies the whole
-schema so this branch is not exercised — an integration test for the
-missing-table branch lives separately in the plan.
+`db.py` helper therefore treats a **missing companion table** as
+`null` + `"upstream data missing"` (schema not applied — an
+operational error), and an **empty companion table** (schema
+applied but zero rows) as `null` + `"denominator zero"` (data
+source landed, cohort just has no rows). This asymmetry matters
+for `RoutingLatencyP50P95` in particular: its upstream is landed
+today (PR #55), so an empty `route_reasons` in a real observer DB
+means "no dispatch decisions occurred", which is denominator-zero
+semantics — different from "schema was never applied", which is a
+setup bug. The empty-DB fixture applies the whole schema so this
+branch is exercised as denominator-zero for #37; a separate
+missing-table integration test in the plan exercises the
+upstream-missing branch.
 Expected output per §3.3 empty-DB contract:
 
 - CSV: header row + **exactly one data row** with `metric_set=full`,
@@ -542,7 +554,7 @@ Confirms §5 acceptance criterion 1.
 ## 5. Acceptance criteria
 
 1. `eval-metrics extract --observer-db <empty.db> --format csv` prints
-   a header line whose column set is `metric_set, row_count, <the 39
+   a header line whose column set is `metric_set, row_count, <the 40
    metric names in §2 order, with structured metrics flattened to
    <metric>.<subkey> sub-columns>, _notes`, followed by exactly one
    data row where `row_count=0`; count-metrics with landed upstream
@@ -761,7 +773,7 @@ Value MUST be one of `{full, lifecycle, contracted, user-promoted,
 semantic, overhead}`. Any other value → exit 2 immediately with the
 allowed-list printed. **Do NOT default to `full` on unrecognized
 input** — that would let a typo (`--metric-set liflecycle`) silently
-emit the full 39-metric set while the operator thinks they got a
+emit the full 40-metric set while the operator thinks they got a
 subset, corrupting the paper's cohort attribution.
 
 ### (f) Denominator = 0 → `null` (never NaN / inf / 0)
@@ -794,17 +806,20 @@ Every metric in §2 MUST have a fixture in §4 that either (a) computes a
 non-null value the pytest matrix asserts on, or (b) is explicitly
 recorded in the fixture-4 all-null contract. There is NO third category
 "no fixture" — every metric name is exercised. When a metric returns
-`null` because the underlying observer table/column has not been
-populated yet, the extractor emits its column with `null` value AND
-writes a one-line stderr warning of the form:
+`null`, the extractor emits its column with `null` value AND writes a
+one-line stderr warning + a `_notes` / `notes` entry using one of the
+two closed-set reasons from §3.3:
 
 ```
 [eval-metrics] warn: metric <name> returned null: upstream data missing (owner: 12号 §<section>)
+[eval-metrics] warn: metric <name> returned null: denominator zero
 ```
 
-The `--out` file's companion `notes` map (JSON) or `_notes` companion
-column (CSV) records the same. Reviewers of the CSV can eyeball the
-`_notes` column; automated pipelines can parse the JSON `notes` map.
+Note-emission is unconditional: EVERY `null` metric — whether from
+upstream-missing OR denominator-zero — gets a `_notes` / `notes`
+entry and a stderr warning. Missing a note for a `null` cell is a
+spec violation. Reviewers of the CSV can eyeball the `_notes`
+column; automated pipelines can parse the JSON `notes` map.
 
 ### (h) CI-conditional perf assertions
 
@@ -829,10 +844,10 @@ Created (all under `multi-agent/tools/eval/metrics/`):
 - `eval_metrics/paths.py` — `--observer-db` / `--out` path validators (§7 (b), (d))
 - `eval_metrics/csv_out.py` — CSV serializer + formula-injection escape (§7 (d))
 - `eval_metrics/json_out.py` — JSON serializer
-- `eval_metrics/metrics/__init__.py` — registry of the 39 metrics
+- `eval_metrics/metrics/__init__.py` — registry of the 40 metrics
 - `eval_metrics/metrics/lifecycle.py` — §2.1 (9 metrics)
 - `eval_metrics/metrics/contracted.py` — §2.2 (7 metrics)
-- `eval_metrics/metrics/user_promoted.py` — §2.3 (11 metrics, all null today)
+- `eval_metrics/metrics/user_promoted.py` — §2.3 (12 metrics, all null today)
 - `eval_metrics/metrics/semantic.py` — §2.4 (3 metrics)
 - `eval_metrics/metrics/overhead.py` — §2.5 (9 metrics)
 - `tests/conftest.py`
@@ -970,7 +985,7 @@ Modified: none. This worktree adds files only. If any file outside
     `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW` open (mode `0o600`) is what
     actually closes the TOCTOU window; the parent-realpath / overwrite-
     refusal / symlink-refusal checks are the belt to its suspenders.
-- 2026-07-03 (round 9, Codex P1 fixes):
+- 2026-07-03 (round 9, Codex P1 fixes — first batch):
   - §3.3 `_notes` reason set expanded to two-value closed set
     (`"upstream data missing"` OR `"denominator zero"`) so every
     `null` gets exactly one categorized reason; §5.1 acceptance
@@ -988,3 +1003,21 @@ Modified: none. This worktree adds files only. If any file outside
   - §2.1 note: `ManualSetupStepCount` cite is 08:91,
     `ConfigTouchCount` cite is 08:237 (E6 metrics list) — the
     round-8 change collapsed both into 08:91 by mistake.
+- 2026-07-03 (round 10, Codex P0 + P1 fixes):
+  - P0: `HumanEditCount` added as metric #40 (08:185 / 11号 §6);
+    catalog count 39 → 40. §2.3 header updated to 12 metrics.
+  - P1: §7 (g) reverse audit paragraph emits stderr warnings and
+    `_notes` entries for BOTH `"upstream data missing"` AND
+    `"denominator zero"` — every null gets a note regardless of
+    reason.
+  - P1: §4.4 empty-DB fixture clarifies missing-table (upstream
+    missing, setup bug) vs empty-table (denominator zero, real
+    empty cohort) semantics; `RoutingLatencyP50P95` on the
+    fixture asserts `denominator zero`, not upstream missing.
+  - P1: `RegistryLookupHitRate` denominator changed to
+    `count(runs in selection)` per 08:70 (was
+    `count(events where type='registry_lookup')`, which would
+    hide missing lookup instrumentation as denominator-zero).
+  - P1: `GeneratedCapabilityDefectRate` numerator narrowed to
+    `failure_category='registered-tool-defect' AND was_reuse_attempt=true`
+    per 08:76 (was any-failed-run-using-user-promoted-capability).
