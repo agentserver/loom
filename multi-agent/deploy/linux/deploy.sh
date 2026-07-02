@@ -454,7 +454,7 @@ prod_preflight() {
     # would let observer-server pick a random port — the readiness gate
     # would time out at exit 4, hiding an actionable misconfiguration.
     local obs_listen obs_port
-    obs_listen=$(yq eval '.listen_addr // ""' "$f")
+    obs_listen=$(run_whitelisted yq eval '.listen_addr // ""' "$f")
     [[ -n "$obs_listen" ]] || die "prod preflight failed: $f listen_addr is empty; see tests/prod_test/E2E_RUNBOOK.md:83-108"
     obs_port="${obs_listen##*:}"
     if [[ "$obs_port" =~ ^[0-9]+$ ]]; then
@@ -473,13 +473,13 @@ prod_preflight() {
     f="$LOOM_HOME/slave/config.yaml"
     [[ -r "$f" ]] || die "prod preflight failed: $f missing or unreadable; see tests/prod_test/E2E_RUNBOOK.md:83-108"
     local slave_token slave_short_id slave_ws slave_listen slave_port
-    slave_token=$(yq eval '.credentials.proxy_token // ""' "$f")
+    slave_token=$(run_whitelisted yq eval '.credentials.proxy_token // ""' "$f")
     [[ -n "$slave_token" ]] || die "prod preflight failed: $f credentials.proxy_token is empty; see tests/prod_test/E2E_RUNBOOK.md:83-108"
-    slave_short_id=$(yq eval '.credentials.short_id // ""' "$f")
+    slave_short_id=$(run_whitelisted yq eval '.credentials.short_id // ""' "$f")
     [[ -n "$slave_short_id" ]] || die "prod preflight failed: $f credentials.short_id is empty; see tests/prod_test/E2E_RUNBOOK.md:83-108"
-    slave_ws=$(yq eval '.credentials.workspace_id // ""' "$f")
+    slave_ws=$(run_whitelisted yq eval '.credentials.workspace_id // ""' "$f")
     [[ -n "$slave_ws" ]] || die "prod preflight failed: $f credentials.workspace_id is empty; see tests/prod_test/E2E_RUNBOOK.md:83-108"
-    slave_listen=$(yq eval '.daemon.listen // ""' "$f")
+    slave_listen=$(run_whitelisted yq eval '.daemon.listen // ""' "$f")
     # daemon.listen is required in prod mode — an empty value would let
     # slave-agent pick 127.0.0.1:0 (see internal/config/config.go:213),
     # and our TCP LISTEN readiness gate would then wait on the wrong
@@ -501,9 +501,9 @@ prod_preflight() {
     f="$LOOM_HOME/driver/config.yaml"
     [[ -r "$f" ]] || die "prod preflight failed: $f missing or unreadable; see tests/prod_test/E2E_RUNBOOK.md:83-108"
     local drv_token drv_short_id
-    drv_token=$(yq eval '.credentials.proxy_token // ""' "$f")
+    drv_token=$(run_whitelisted yq eval '.credentials.proxy_token // ""' "$f")
     [[ -n "$drv_token" ]] || die "prod preflight failed: $f credentials.proxy_token is empty; see tests/prod_test/E2E_RUNBOOK.md:83-108"
-    drv_short_id=$(yq eval '.credentials.short_id // ""' "$f")
+    drv_short_id=$(run_whitelisted yq eval '.credentials.short_id // ""' "$f")
     [[ -n "$drv_short_id" ]] || die "prod preflight failed: $f credentials.short_id is empty; see tests/prod_test/E2E_RUNBOOK.md:83-108"
     [[ -x "$LOOM_HOME/driver/driver-agent" ]] || die "prod preflight failed: $LOOM_HOME/driver/driver-agent not executable"
 }

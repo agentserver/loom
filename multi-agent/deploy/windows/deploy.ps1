@@ -59,19 +59,21 @@ param(
     [switch]$Prod,
 
     [Parameter(ParameterSetName = 'ModeString', Mandatory = $true)]
-    [ValidateSet('stub', 'prod')]
+    # Validation moved to Resolve-Mode below (same rationale as the
+    # port range comment: [ValidateSet] fires during parameter binding
+    # before our top-level trap can classify as exit 2).
     [string]$Mode,
 
     [Parameter(ParameterSetName = 'ShutdownSet', Mandatory = $true)]
     [switch]$Shutdown,
 
-    [ValidateRange(1024, 65535)]
+    # Ports use body-level validation (Assert-Port) rather than
+    # [ValidateRange] — attribute validation fires during parameter
+    # binding, BEFORE our top-level trap can classify the failure as
+    # exit 2. See P1-1 fix in Codex Stage-3 round 4.
     [int]$ObserverPort = 18091,
-    [ValidateRange(1024, 65535)]
     [int]$DriverPort = 18092,
-    [ValidateRange(1024, 65535)]
     [int]$SlavePort = 18093,
-    [ValidateRange(1024, 65535)]
     [int]$StubPort = 18080,
 
     [string]$LoomHome = '',
@@ -115,7 +117,7 @@ trap {
 # --- constants ---------------------------------------------------------
 
 $script:WELL_KNOWN_PORTS = @(22, 23, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995, 3389, 5432, 6379, 8080, 8443)
-$script:ALWAYS_ENV_KEYS = @('PATH', 'HOME', 'LANG', 'LC_ALL', 'TZ', 'USER')
+$script:ALWAYS_ENV_KEYS = @('PATH', 'HOME', 'LANG', 'LC_ALL', 'TZ', 'USER', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'SystemRoot', 'SystemDrive', 'ComSpec')
 $script:IFSET_ENV_KEYS  = @('AGENTSERVER_ROOT', 'MODELSERVER_ROOT', 'APP_ROOT', 'MOCK_MODEL_URL')
 $script:READY_TIMEOUT_DEFAULT = 30
 
@@ -123,7 +125,13 @@ $script:READY_TIMEOUT_DEFAULT = 30
 
 function Resolve-Mode {
     if ($PSCmdlet.ParameterSetName -eq 'ShutdownSet') { return 'shutdown' }
-    if ($PSCmdlet.ParameterSetName -eq 'ModeString')  { return $Mode }
+    if ($PSCmdlet.ParameterSetName -eq 'ModeString') {
+        # Validate here (see param() comment).
+        if ($Mode -cne 'stub' -and $Mode -cne 'prod') {
+            throw "invalid -Mode value: '$Mode' (allowed: stub|prod, case-sensitive)"
+        }
+        return $Mode
+    }
     # ModeSwitch: at most one of -Stub / -Prod may be set.
     if ($Stub -and $Prod) {
         throw "conflicting mode flags: -Stub and -Prod both supplied"
@@ -181,6 +189,13 @@ if ($ResolvedMode -eq 'shutdown') {
 
 function Assert-Port {
     param([string]$Name, [int]$Value)
+    # Range check (previously an [int][ValidateRange(1024,65535)]
+    # attribute on the param block — moved here so range failures
+    # exit with our documented preflight code, not PowerShell's
+    # parameter-binding error path).
+    if ($Value -lt 1024 -or $Value -gt 65535) {
+        throw "${Name}=${Value} out of range [1024,65535]"
+    }
     if ($script:WELL_KNOWN_PORTS -contains $Value) {
         throw "${Name}=${Value} is a well-known port (blacklist: $($script:WELL_KNOWN_PORTS -join ','))"
     }
@@ -622,7 +637,11 @@ function Invoke-BringupStub {
     }
 
     # driver: real install.ps1 with real params — same whitelist +
-    # exit-3 classification as slave above.
+    # exit-3 classification as slave above. -TokenDir is passed
+    # explicitly so the installer does not fall back to
+    # `Join-Path $env:USERPROFILE ...` (which needs USERPROFILE from
+    # the parent env — brittle across whitelisted subprocess envs
+    # even when USERPROFILE is in ALWAYS_ENV_KEYS).
     try {
         Invoke-Whitelisted -FilePath 'pwsh' -ArgList @(
             '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
@@ -630,7 +649,8 @@ function Invoke-BringupStub {
             '-Project', (Join-Path $LoomHome 'driver'),
             '-Name', 'eval-driver',
             '-ObserverUrl', "http://127.0.0.1:$ObserverPort",
-            '-Bin', (Join-Path $BinDir 'driver-agent.windows-amd64.exe')
+            '-Bin', (Join-Path $BinDir 'driver-agent.windows-amd64.exe'),
+            '-TokenDir', (Join-Path $LoomHome 'driver\.loom-tokens')
         ) | Out-Null
     } catch {
         $script:StageFailed = $true; $script:ExitCode = 3; throw "driver install.ps1 failed: $_"
