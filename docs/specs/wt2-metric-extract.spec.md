@@ -74,7 +74,8 @@ rows, `contracted` for §2.2, etc.) UNLESS the row's "Metric-sets"
 column below overrides it. Two lifecycle-listed metrics belong to
 BOTH `lifecycle` AND `overhead` because 08号 files them under both
 groupings — `ManualSetupStepCount` and `ConfigTouchCount` are named
-in 08号 §Overhead (08:87 heading, 08:91 rows) AND cited by 12号
+in 08号 §Overhead (08:87 heading, `ManualSetupStepCount` at 08:91;
+`ConfigTouchCount` at 08:237 as E6 metric) AND cited by 12号
 §D8 for E1/E6 lifecycle probes:
 
 | # | Metric-set membership |
@@ -269,7 +270,15 @@ row for this invocation. There is NO third row.
 The `_notes` companion is written as an extra final column named
 `_notes` whose value is a semicolon-separated list of
 `<metric>: <reason>` pairs, one per metric that returned `null` with
-a `"upstream data missing"` reason (§7 (g)).
+a reason from the closed set:
+
+- `"upstream data missing"` — metric's upstream data source (12号 §A3/§A4/§A6/§B/§C4/§D6c/§D7/§D8) or per-run cohort-projection join key has not landed today (§7 (g))
+- `"denominator zero"` — denominator evaluated to 0 for this cohort (§7 (f))
+
+Every `null` metric MUST land in exactly one of these two categories
+and get exactly one `_notes` entry; the two categories are
+mutually exclusive because a metric whose upstream is not landed
+never reaches the denominator computation.
 
 **JSON.** Single JSON object (not JSON-Lines) with keys:
 
@@ -505,7 +514,17 @@ Total: 3 + 7 + 11 + 2 + 8 = **31 null cells**. Populated 8 + null
 
 ### 4.4 Empty-DB fixture (implicit)
 
-An in-memory DB with the WT-1-run-schema DDL applied but zero rows.
+An in-memory DB with the **full** observer schema DDL from
+`multi-agent/internal/observerstore/schema.sql` applied but zero rows
+in any table. Applying only the WT-1-run-schema DDL would leave
+`route_reasons`, `task_contracts`, `capability_snapshots`, and other
+tables absent, and §2.5 #37 `RoutingLatencyP50P95`'s query to
+`route_reasons` would fail with `no such table`. The extractor's
+`db.py` helper therefore treats a missing companion table the same as
+an empty companion table (both yield `null` + `"upstream data missing"`
+for the affected metric); the empty-DB fixture applies the whole
+schema so this branch is not exercised — an integration test for the
+missing-table branch lives separately in the plan.
 Expected output per §3.3 empty-DB contract:
 
 - CSV: header row + **exactly one data row** with `metric_set=full`,
@@ -537,9 +556,15 @@ Confirms §5 acceptance criterion 1.
    plus §2.3 rows #22 and #23 as cross-listed members, with structured
    metrics flattened) plus the leading `metric_set` / `row_count`
    columns and the trailing `_notes` column.
-4. Every metric whose data source has NOT landed produces `null` in the
-   value cell AND an entry in the `notes` map / stderr warning with the
-   literal string `"upstream data missing"`.
+4. Every metric whose data source has NOT landed **OR whose
+   per-run cohort-projection join key is missing in today's schema
+   (§2.2 row 10 `ContractCompleteness` is the canonical case)**
+   produces `null` in the value cell AND an entry in the `notes` map /
+   stderr warning with the literal string `"upstream data missing"`.
+   Every metric whose upstream IS landed but whose denominator
+   evaluates to 0 for the current cohort produces `null` AND the
+   literal string `"denominator zero"`. These two are the entire
+   closed set of `_notes` reasons.
 5. All security items §7 (a)–(h) have at least one passing pytest test
    (matrix in the plan doc).
 
@@ -684,16 +709,37 @@ from §(b)'s read-target policy. Rules, in order:
 3. **Symlink refusal on the target itself**: if the target exists as a
    dangling symlink or a symlink pointing anywhere, exit 2 with
    `ErrOutIsSymlink`. This is checked AFTER (1) and BEFORE (4).
-4. **Atomic exclusive-nofollow create**: open the target via
-   `os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)`.
-   `O_EXCL` refuses to open if the target exists (redundant with (2),
-   but survives a race between (2) and (4)); `O_NOFOLLOW` refuses to
-   follow a symlink at the last path component (redundant with (3),
-   but again survives the intervening race); mode `0o600` prevents
-   world-readable output. If the open fails, exit 2 with the errno
-   name and no path bytes beyond what the operator supplied. This
-   `O_CREAT|O_EXCL|O_NOFOLLOW` atom is what actually closes the
-   TOCTOU window; (2) and (3) are the belt to its suspenders.
+4. **Atomic exclusive-nofollow create anchored on the resolved parent**:
+   open the target relative to a directory file descriptor of the
+   resolved parent, using `dir_fd`:
+
+   ```python
+   dir_fd = os.open(str(resolved_parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+   try:
+       out_fd = os.open(
+           os.path.basename(target),
+           os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+           0o600,
+           dir_fd=dir_fd,
+       )
+   finally:
+       os.close(dir_fd)
+   ```
+
+   Using `dir_fd` binds the open to the parent directory that step 1
+   resolved; a subsequent rename of the resolved parent to a
+   symlink pointing elsewhere cannot re-target the open, because
+   the kernel opens `basename(target)` **within the fd that already
+   points at the resolved parent's inode**. `O_EXCL` refuses to open
+   if the target basename exists inside that fd (redundant with (2),
+   but survives a race between (2) and (4)); `O_NOFOLLOW` refuses
+   to follow a symlink at the last path component; mode `0o600`
+   prevents world-readable output. The parent-directory `O_DIRECTORY
+   | O_NOFOLLOW` open closes the parent-side TOCTOU too. If either
+   open fails, exit 2 with the errno name and no path bytes beyond
+   what the operator supplied. This anchored-`O_CREAT|O_EXCL|O_NOFOLLOW`
+   sequence is what actually closes the TOCTOU window; (2) and (3)
+   are the belt to its suspenders.
 
 **`/dev/stdout` / `/dev/null` are NOT supported** as `--out` values
 (they would trip the `/dev/` reject in step 1). The `stdout` sink is
@@ -736,10 +782,11 @@ Any metric whose denominator evaluates to 0 emits the JSON literal
   `null`. Reviewers of the CSV see an empty cell.
 
 The `_notes` column / JSON `notes` map records which metrics returned
-`null` and why. When the reason is `"upstream data missing"` (§g) the
-metric's note is emitted whether the denominator is 0 or not — the
-consumer needs to know they're seeing a null-by-schema, not
-null-by-empty-cohort.
+`null` and why, using exactly the two-value closed set defined in
+§3.3: `"upstream data missing"` or `"denominator zero"`. Upstream
+missing takes precedence — if a metric's upstream is not landed, the
+extractor emits that note and never even evaluates the denominator,
+so `"denominator zero"` cannot mask a schema gap.
 
 ### (g) Consumer-view reverse audit
 
@@ -923,3 +970,21 @@ Modified: none. This worktree adds files only. If any file outside
     `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW` open (mode `0o600`) is what
     actually closes the TOCTOU window; the parent-realpath / overwrite-
     refusal / symlink-refusal checks are the belt to its suspenders.
+- 2026-07-03 (round 9, Codex P1 fixes):
+  - §3.3 `_notes` reason set expanded to two-value closed set
+    (`"upstream data missing"` OR `"denominator zero"`) so every
+    `null` gets exactly one categorized reason; §5.1 acceptance
+    criterion #4 updated to enforce both; §7 (f) closing paragraph
+    aligned.
+  - §4.4 empty-DB fixture rewritten to apply the FULL observer
+    schema (was: only WT-1-run-schema DDL — would `no such table`
+    on `route_reasons`); missing-table branch documented as "same
+    as empty table → null + upstream-missing".
+  - §7 (d) step 4 rewritten to anchor the atomic
+    `O_CREAT|O_EXCL|O_NOFOLLOW` open on a `dir_fd` opened
+    `O_DIRECTORY|O_NOFOLLOW` from the resolved parent, closing
+    the parent-side TOCTOU that a plain path-based open leaves
+    open.
+  - §2.1 note: `ManualSetupStepCount` cite is 08:91,
+    `ConfigTouchCount` cite is 08:237 (E6 metrics list) — the
+    round-8 change collapsed both into 08:91 by mistake.
