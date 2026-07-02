@@ -258,3 +258,32 @@ CREATE INDEX IF NOT EXISTS idx_capability_snapshot_usages_agent
 ON capability_snapshot_usages(workspace_id, agent_id, used_at);
 CREATE INDEX IF NOT EXISTS idx_capability_snapshot_usages_hash
 ON capability_snapshot_usages(hash);
+
+-- WT-2-dry-run-validator: §A3 four-class pre-execution block audit.
+-- One row per Block returned by validator.Check(...) that the dry-run
+-- tool persisted. Consumer view (spec §6.1) joins dry_run_blocks with
+-- events (type='PreExecutionFaultCatchRate') for total-attempt
+-- denominator; runs alone cannot supply it because blocked dispatches
+-- never reach runs.
+CREATE TABLE IF NOT EXISTS dry_run_blocks (
+    block_id                 TEXT PRIMARY KEY,
+    attempt_id               TEXT NOT NULL,
+    conversation_id          TEXT NOT NULL,
+    experiment_id            TEXT NOT NULL DEFAULT '',
+    contract_hash            TEXT NOT NULL,
+    capability_snapshot_hash TEXT NOT NULL,
+    block_kind               TEXT NOT NULL
+        CHECK (block_kind IN ('missing_file','wrong_version','forbidden_cred','policy_violation')),
+    field                    TEXT NOT NULL DEFAULT '',
+    expected                 TEXT NOT NULL DEFAULT '',
+    actual                   TEXT NOT NULL DEFAULT '',
+    detail                   TEXT NOT NULL DEFAULT '',
+    blocked_at               TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_dry_run_blocks_conv
+    ON dry_run_blocks(conversation_id, blocked_at);
+CREATE INDEX IF NOT EXISTS idx_dry_run_blocks_contract_hash
+    ON dry_run_blocks(contract_hash);
+CREATE INDEX IF NOT EXISTS idx_dry_run_blocks_attempt
+    ON dry_run_blocks(attempt_id);
