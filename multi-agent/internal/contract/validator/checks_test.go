@@ -214,6 +214,25 @@ func TestCheckWrongVersion_UnparseableSnapshotVersion(t *testing.T) {
 	}
 }
 
+// §3.2 contract-side programmer error: unparseable MinVersion must
+// surface as a block whose Actual identifies the operator-facing
+// diagnostic. Silent pass would let a mis-typed contract deploy.
+func TestCheckWrongVersion_UnparseableContractMinVersion(t *testing.T) {
+	tc := contract.TaskContract{
+		CapabilityRequirements: contract.CapabilityRequirements{
+			ToolRequirements: []contract.ToolRequirement{{Name: "python", MinVersion: "banana"}},
+		},
+	}
+	snap := capability.Snapshot{Tools: []capability.ToolVersion{{Name: "python", Version: "3.12.0"}}}
+	got := New().Check(context.Background(), tc, snap)
+	if len(got) != 1 || got[0].Kind != KindWrongVersion {
+		t.Fatalf("expected 1 wrong_version block; got %+v", got)
+	}
+	if !strings.Contains(got[0].Actual, "contract min_version unparseable") {
+		t.Errorf("Actual sentinel: got %q", got[0].Actual)
+	}
+}
+
 // ---------------------------------------------------------------------
 // Task 5 — checkForbiddenCred (§3.3, §7(e))
 // ---------------------------------------------------------------------

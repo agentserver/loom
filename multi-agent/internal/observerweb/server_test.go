@@ -1809,3 +1809,43 @@ func TestRegister_RejectsAfterRecentIngest(t *testing.T) {
 	require.Contains(t, body, "force")
 	require.Contains(t, body, "recently")
 }
+
+// TestDryRunBlocksAPIRestrictsRoles asserts:
+//   - slave role → 403
+//   - driver role → 201 + row persisted to dry_run_blocks
+//   - master role → 201
+// This is the WT-2-dry-run-validator §4.3 production wire test —
+// exercises the httpDryRunBlockWriter path end-to-end.
+func TestDryRunBlocksAPIRestrictsRoles(t *testing.T) {
+	h, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
+
+	body := `{"block_id":"blk-1","attempt_id":"att-1","conversation_id":"conv-1","experiment_id":"exp-1","contract_hash":"h1","capability_snapshot_hash":"s1","block_kind":"policy_violation","field":"execution_policy.required_reach","expected":"internet","actual":"intranet","detail":"execution_policy.required_reach: expected internet, actual intranet","blocked_at":"2026-07-03T00:00:00Z"}`
+
+	req := httptest.NewRequest(http.MethodPost, "/api/dry-run-blocks", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer slave-token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code)
+
+	req = httptest.NewRequest(http.MethodPost, "/api/dry-run-blocks", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer driver-token")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+
+	// Verify persistence.
+	var n int
+	require.NoError(t, st.DB().QueryRow(`SELECT COUNT(*) FROM dry_run_blocks WHERE block_id=?`, "blk-1").Scan(&n))
+	require.Equal(t, 1, n, "row should be persisted after driver POST")
+
+	// Master role also allowed (WT-2 semantics: masters can produce
+	// their own dry-run blocks; the endpoint's role gate mirrors the
+	// resource-snapshots endpoint).
+	body2 := `{"block_id":"blk-2","attempt_id":"att-2","conversation_id":"conv-2","contract_hash":"h1","capability_snapshot_hash":"s1","block_kind":"missing_file"}`
+	req = httptest.NewRequest(http.MethodPost, "/api/dry-run-blocks", strings.NewReader(body2))
+	req.Header.Set("Authorization", "Bearer master-token")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+}

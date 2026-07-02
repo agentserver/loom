@@ -190,6 +190,16 @@ func runServe(args []string) {
 	sdkClient := driver.NewAgentSDKClient(cli, cfg.Server.URL, cfg.Credentials.ProxyToken)
 	tools := driver.NewTools(reg, audit, sdkClient, cfg, obs)
 	tools.SetTaskJournal(taskJournal)
+	// WT-2-dry-run-validator §4.3: wire the dry_run_blocks writer
+	// through the observer HTTP relay. Fail-loud on nil so the
+	// spec-mandated persistence path can't silently regress.
+	{
+		relay := driver.NewObserverRelay(cfg, obs)
+		if relay == nil {
+			log.Fatal("dry_run_blocks writer not configured — spec §4.3 requires an observer relay (check cfg.Observer.Enabled/URL)")
+		}
+		tools.SetDryRunBlockWriter(relay)
+	}
 	backend, err := newAgentBackend(cfg)
 	if err != nil {
 		log.Fatalf("agentbackend: %v", err)

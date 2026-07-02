@@ -130,6 +130,7 @@ func mountRoutes(mux *http.ServeMux, h *handler, usHandler *userspace.Handler) {
 	mux.HandleFunc("/api/task-contracts/", h.taskContractByID)
 	mux.HandleFunc("/api/resource-snapshots", h.resourceSnapshots)
 	mux.HandleFunc("/api/resource-snapshots/latest", h.latestResourceSnapshot)
+	mux.HandleFunc("/api/dry-run-blocks", h.dryRunBlocks)
 	mux.HandleFunc("/api/workspaces", h.guardWebToken(h.listWorkspaces))
 	if usHandler != nil {
 		userspace.MountRoutes(mux, usHandler)
@@ -1006,6 +1007,83 @@ func (h *handler) resourceSnapshots(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(record)
+}
+
+// dryRunBlocks POSTs one row to observerstore.dry_run_blocks.
+// WT-2-dry-run-validator §4.3 production persistence path — see
+// docs/specs/wt2-dry-run-validator.plan.md §Task 13 step 3.
+func (h *handler) dryRunBlocks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	agent, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	if agent.Role != observer.RoleDriver && agent.Role != observer.RoleMaster {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	// The endpoint needs the underlying *sql.DB to construct the
+	// per-request writer. Type-assert against ManagedStore so we don't
+	// pollute the ingest-only Store interface with a new method that
+	// every postgres/sqlite/test double must implement. If the runtime
+	// store isn't managed (unlikely in production), fail closed.
+	managed, ok := h.s.(observerstore.ManagedStore)
+	if !ok {
+		http.Error(w, "dry_run_blocks endpoint requires ManagedStore backend", http.StatusServiceUnavailable)
+		return
+	}
+	var req struct {
+		BlockID                string `json:"block_id"`
+		AttemptID              string `json:"attempt_id"`
+		ConversationID         string `json:"conversation_id"`
+		ExperimentID           string `json:"experiment_id"`
+		ContractHash           string `json:"contract_hash"`
+		CapabilitySnapshotHash string `json:"capability_snapshot_hash"`
+		BlockKind              string `json:"block_kind"`
+		Field                  string `json:"field"`
+		Expected               string `json:"expected"`
+		Actual                 string `json:"actual"`
+		Detail                 string `json:"detail"`
+		BlockedAt              string `json:"blocked_at"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	blockedAt := time.Time{}
+	if req.BlockedAt != "" {
+		if t, err := time.Parse(time.RFC3339Nano, req.BlockedAt); err == nil {
+			blockedAt = t
+		}
+	}
+	if blockedAt.IsZero() {
+		blockedAt = time.Now().UTC()
+	}
+	writer := observerstore.NewDryRunBlockWriter(managed.DB())
+	row := observerstore.DryRunBlockRow{
+		BlockID:                req.BlockID,
+		AttemptID:              req.AttemptID,
+		ConversationID:         req.ConversationID,
+		ExperimentID:           req.ExperimentID,
+		ContractHash:           req.ContractHash,
+		CapabilitySnapshotHash: req.CapabilitySnapshotHash,
+		BlockKind:              req.BlockKind,
+		Field:                  req.Field,
+		Expected:               req.Expected,
+		Actual:                 req.Actual,
+		Detail:                 req.Detail,
+		BlockedAt:              blockedAt,
+	}
+	if err := writer.WriteDryRunBlock(r.Context(), row); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// Bump agents.last_seen_at to match other tokened endpoints.
+	_ = agent
+	w.WriteHeader(http.StatusCreated)
 }
 
 func (h *handler) latestResourceSnapshot(w http.ResponseWriter, r *http.Request) {

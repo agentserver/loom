@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/yourorg/multi-agent/internal/observerstore"
 )
 
 // defaultObserverWritesMaxBytes caps the JSON response from
@@ -128,6 +130,70 @@ func (r *ObserverRelay) SaveResourceSnapshot(ctx context.Context, body json.RawM
 		return fmt.Errorf("save resource snapshot status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// WriteDryRunBlock POSTs one DryRunBlockRow to observer-server's
+// /api/dry-run-blocks endpoint. Satisfies
+// observerstore.DryRunBlockWriter so *ObserverRelay can be wired
+// directly into driver.Tools.dryRunWriter (WT-2-dry-run-validator
+// spec §4.3 production persistence path — see plan §Task 13 step 3).
+//
+// nil relay ⇒ silent no-op, matches the SaveResourceSnapshot contract.
+// The Tools-level nil-guard on dryRunWriter is a belt-and-braces
+// safeguard so the driver's dry-run tool remains callable in tests
+// that don't configure a relay.
+func (r *ObserverRelay) WriteDryRunBlock(ctx context.Context, row observerstore.DryRunBlockRow) error {
+	if r == nil {
+		return nil
+	}
+	body, _ := json.Marshal(observerDryRunBlockSave{
+		BlockID:                row.BlockID,
+		AttemptID:              row.AttemptID,
+		ConversationID:         row.ConversationID,
+		ExperimentID:           row.ExperimentID,
+		ContractHash:           row.ContractHash,
+		CapabilitySnapshotHash: row.CapabilitySnapshotHash,
+		BlockKind:              row.BlockKind,
+		Field:                  row.Field,
+		Expected:               row.Expected,
+		Actual:                 row.Actual,
+		Detail:                 row.Detail,
+		BlockedAt:              row.BlockedAt.UTC().Format(time.RFC3339Nano),
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.baseURL+"/api/dry-run-blocks", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+r.src.Token())
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := r.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("save dry_run_block status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// observerDryRunBlockSave is the wire shape POSTed to
+// /api/dry-run-blocks. Mirrors observerstore.DryRunBlockRow (with
+// blocked_at serialised as RFC3339Nano string, matching the storage
+// column format).
+type observerDryRunBlockSave struct {
+	BlockID                string `json:"block_id"`
+	AttemptID              string `json:"attempt_id"`
+	ConversationID         string `json:"conversation_id"`
+	ExperimentID           string `json:"experiment_id"`
+	ContractHash           string `json:"contract_hash"`
+	CapabilitySnapshotHash string `json:"capability_snapshot_hash"`
+	BlockKind              string `json:"block_kind"`
+	Field                  string `json:"field"`
+	Expected               string `json:"expected"`
+	Actual                 string `json:"actual"`
+	Detail                 string `json:"detail"`
+	BlockedAt              string `json:"blocked_at"`
 }
 
 func (r *ObserverRelay) RegisterArtifact(ctx context.Context, entry observerArtifactCreate) (*observerArtifactCreateResponse, error) {
