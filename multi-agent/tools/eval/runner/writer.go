@@ -8,7 +8,14 @@ import (
 	"io"
 	"os"
 	"strconv"
+
+	"github.com/yourorg/multi-agent/tools/eval/runner/probes"
 )
+
+// Compile-time interface check: *RunRow satisfies probes.RunRowLike
+// so probes.MergeIntoRow can write into it without importing package
+// main (which would be a cycle).
+var _ probes.RunRowLike = (*RunRow)(nil)
 
 // RunRow is the row schema for a single eval run. The column order in
 // CSVColumns() and the field set here mirror docs/specs/wt1-eval-runner-skeleton.spec.md
@@ -37,6 +44,18 @@ type RunRow struct {
 	CodexConfigPath    string
 	StubListen         string
 	TempdirKept        bool
+
+	// Probe fields (WT-2-e1e6-probes spec §4). Pointer types encode
+	// "unavailable" as nil; the CSV serialiser emits "" for nil.
+	ProbeTaskSuccessRate            *bool
+	ProbeLifecycleClosureRate       *bool
+	ProbeTimeToCompletionNs         *int64
+	ProbeHumanContextSelectionCount *int
+	ProbeWrongContextFailureRate    *bool
+	ProbeArtifactCorrectnessRate    *bool
+	ProbeManualSetupStepCount       *int
+	ProbeConfigTouchCount           *int
+	ProbeNotesJSON                  string // "{}" when empty; MergeIntoRow always sets this
 }
 
 // RunWriter is the seam between this worktree and WT-1-run-schema. Skeleton
@@ -79,6 +98,16 @@ func CSVColumns() []string {
 		"codex_config_path",
 		"stub_listen",
 		"tempdir_kept",
+		// WT-2-e1e6-probes §4 (append-only):
+		"probe_task_success_rate",
+		"probe_lifecycle_closure_rate",
+		"probe_time_to_completion_ns",
+		"probe_human_context_selection_count",
+		"probe_wrong_context_failure_rate",
+		"probe_artifact_correctness_rate",
+		"probe_manual_setup_step_count",
+		"probe_config_touch_count",
+		"probe_notes_json",
 	}
 }
 
@@ -108,7 +137,101 @@ func rowAsCSVRecord(r RunRow) []string {
 		r.CodexConfigPath,
 		r.StubListen,
 		strconv.FormatBool(r.TempdirKept),
+		nilOrBool(r.ProbeTaskSuccessRate),
+		nilOrBool(r.ProbeLifecycleClosureRate),
+		nilOrInt64(r.ProbeTimeToCompletionNs),
+		nilOrInt(r.ProbeHumanContextSelectionCount),
+		nilOrBool(r.ProbeWrongContextFailureRate),
+		nilOrBool(r.ProbeArtifactCorrectnessRate),
+		nilOrInt(r.ProbeManualSetupStepCount),
+		nilOrInt(r.ProbeConfigTouchCount),
+		probeNotesOrDefault(r.ProbeNotesJSON),
 	}
+}
+
+// nilOrBool returns "" for nil pointer inputs and "true"/"false"
+// otherwise. Matches spec §4 nil encoding for probe columns.
+func nilOrBool(b *bool) string {
+	if b == nil {
+		return ""
+	}
+	return strconv.FormatBool(*b)
+}
+
+func nilOrInt(i *int) string {
+	if i == nil {
+		return ""
+	}
+	return strconv.Itoa(*i)
+}
+
+func nilOrInt64(i *int64) string {
+	if i == nil {
+		return ""
+	}
+	return strconv.FormatInt(*i, 10)
+}
+
+func probeNotesOrDefault(s string) string {
+	if s == "" {
+		return "{}"
+	}
+	return s
+}
+
+// SetProbe implements probes.RunRowLike. Last write wins per spec §5.2.
+func (r *RunRow) SetProbe(metric probes.MetricKey, value any) {
+	switch metric {
+	case probes.MetricTaskSuccessRate:
+		r.ProbeTaskSuccessRate = boolPtrOrNil(value)
+	case probes.MetricLifecycleClosureRate:
+		r.ProbeLifecycleClosureRate = boolPtrOrNil(value)
+	case probes.MetricTimeToCompletion:
+		r.ProbeTimeToCompletionNs = int64PtrOrNil(value)
+	case probes.MetricHumanContextSelectionCount:
+		r.ProbeHumanContextSelectionCount = intPtrOrNil(value)
+	case probes.MetricWrongContextFailureRate:
+		r.ProbeWrongContextFailureRate = boolPtrOrNil(value)
+	case probes.MetricArtifactCorrectnessRate:
+		r.ProbeArtifactCorrectnessRate = boolPtrOrNil(value)
+	case probes.MetricManualSetupStepCount:
+		r.ProbeManualSetupStepCount = intPtrOrNil(value)
+	case probes.MetricConfigTouchCount:
+		r.ProbeConfigTouchCount = intPtrOrNil(value)
+	}
+}
+
+// SetProbeNotes implements probes.RunRowLike.
+func (r *RunRow) SetProbeNotes(j string) { r.ProbeNotesJSON = j }
+
+func boolPtrOrNil(v any) *bool {
+	if v == nil {
+		return nil
+	}
+	if b, ok := v.(bool); ok {
+		return &b
+	}
+	return nil
+}
+
+func intPtrOrNil(v any) *int {
+	if v == nil {
+		return nil
+	}
+	if i, ok := v.(int); ok {
+		return &i
+	}
+	return nil
+}
+
+func int64PtrOrNil(v any) *int64 {
+	if v == nil {
+		return nil
+	}
+	if i, ok := v.(int64); ok {
+		return &i
+	}
+	return nil
 }
 
 // WriteCSVRow writes a fresh CSV file at path containing the header row plus

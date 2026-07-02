@@ -25,6 +25,12 @@ func TestCSVColumns_FrozenOrder(t *testing.T) {
 		"os_arch", "machine_hostname", "author_email_sha8",
 		"committer_email_sha8", "codex_config_path", "stub_listen",
 		"tempdir_kept",
+		// WT-2-e1e6-probes §4 (append-only):
+		"probe_task_success_rate", "probe_lifecycle_closure_rate",
+		"probe_time_to_completion_ns", "probe_human_context_selection_count",
+		"probe_wrong_context_failure_rate", "probe_artifact_correctness_rate",
+		"probe_manual_setup_step_count", "probe_config_touch_count",
+		"probe_notes_json",
 	}, ",")
 	if got != want {
 		t.Fatalf("CSV columns drifted:\n got  %s\n want %s", got, want)
@@ -104,5 +110,93 @@ func TestNoopWriter_InsertIsNoop(t *testing.T) {
 	var w RunWriter = NoopWriter{}
 	if err := w.Insert(context.Background(), RunRow{RunID: "x"}); err != nil {
 		t.Fatalf("noop insert: %v", err)
+	}
+}
+
+func TestCSVColumns_AppendOnly_WithProbes(t *testing.T) {
+	t.Parallel()
+	cols := CSVColumns()
+	if len(cols) != 31 {
+		t.Fatalf("column count = %d, want 31", len(cols))
+	}
+	wantProbes := []string{
+		"probe_task_success_rate",
+		"probe_lifecycle_closure_rate",
+		"probe_time_to_completion_ns",
+		"probe_human_context_selection_count",
+		"probe_wrong_context_failure_rate",
+		"probe_artifact_correctness_rate",
+		"probe_manual_setup_step_count",
+		"probe_config_touch_count",
+		"probe_notes_json",
+	}
+	for i, want := range wantProbes {
+		if cols[22+i] != want {
+			t.Fatalf("probe col[%d] = %q, want %q", 22+i, cols[22+i], want)
+		}
+	}
+}
+
+func TestRunRow_ProbeFields_RoundTripCSV(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.csv")
+	row := RunRow{RunID: "r-1", WorkloadID: "wl-1"}
+	tt := true
+	ff := false
+	row.ProbeTaskSuccessRate = &tt
+	row.ProbeLifecycleClosureRate = &tt
+	var nsec int64 = 1234567
+	row.ProbeTimeToCompletionNs = &nsec
+	hi := 3
+	row.ProbeHumanContextSelectionCount = &hi
+	row.ProbeWrongContextFailureRate = &ff
+	row.ProbeArtifactCorrectnessRate = &tt
+	// Manual + config left as nil to exercise nil encoding.
+	row.ProbeNotesJSON = `{"manual_setup_step_count":{"unavailable_reason":"d6c_setup_harness_pending"}}`
+
+	if err := WriteCSVRow(path, row); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	r := csv.NewReader(f)
+	rows, err := r.ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("row count = %d, want 2", len(rows))
+	}
+	header, data := rows[0], rows[1]
+	col := func(name string) string {
+		for i, h := range header {
+			if h == name {
+				return data[i]
+			}
+		}
+		t.Fatalf("column %s missing", name)
+		return ""
+	}
+	if col("probe_task_success_rate") != "true" {
+		t.Fatalf("task success = %q", col("probe_task_success_rate"))
+	}
+	if col("probe_time_to_completion_ns") != "1234567" {
+		t.Fatalf("time = %q", col("probe_time_to_completion_ns"))
+	}
+	if col("probe_human_context_selection_count") != "3" {
+		t.Fatalf("human = %q", col("probe_human_context_selection_count"))
+	}
+	if col("probe_manual_setup_step_count") != "" {
+		t.Fatalf("manual nil not encoded as empty: %q", col("probe_manual_setup_step_count"))
+	}
+	if col("probe_config_touch_count") != "" {
+		t.Fatalf("config nil not encoded as empty: %q", col("probe_config_touch_count"))
+	}
+	if !strings.Contains(col("probe_notes_json"), "d6c_setup_harness_pending") {
+		t.Fatalf("notes: %q", col("probe_notes_json"))
 	}
 }
