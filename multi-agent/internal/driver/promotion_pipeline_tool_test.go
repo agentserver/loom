@@ -30,10 +30,14 @@ func TestPromotionPipelineTool_HappyPath(t *testing.T) {
 			return &agentsdk.DelegateTaskResponse{TaskID: "task-" + req.Skill}, nil
 		},
 		getTaskFunc: func(id string, includeOutput bool) (*agentsdk.TaskInfo, error) {
+			// Put the marker in Output so unwrapResultMarker →
+			// sdkTaskOutput → marshalDelegatedTaskOutput lands it in the
+			// envelope's "output" field, where parseAcceptanceExit finds
+			// the "acceptance_exit_code":0 substring.
 			if strings.HasSuffix(id, "mcp-acceptance") {
-				return &agentsdk.TaskInfo{TaskID: id, Status: "completed", Result: json.RawMessage(`{"acceptance_exit_code":0}`)}, nil
+				return &agentsdk.TaskInfo{TaskID: id, Status: "completed", Output: `{"acceptance_exit_code":0}`}, nil
 			}
-			return &agentsdk.TaskInfo{TaskID: id, Status: "completed", Result: json.RawMessage(`{}`)}, nil
+			return &agentsdk.TaskInfo{TaskID: id, Status: "completed", Output: `{}`}, nil
 		},
 	}
 	tools := newTestTools(t, sdk)
