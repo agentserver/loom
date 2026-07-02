@@ -190,12 +190,20 @@ directly; the other overhead metrics require probe writers that 12号
 §D7 (WT-2-overhead-probes worktree) or 12号 §D6c / §C4 own. The
 extractor emits all 9 columns; only #37 is populated today.
 
-**Structured shape**: per 12号 §D7 all overhead metrics report
-`{p50, p95, count}` (`p50_ns` / `p95_ns` for latency metrics,
-`p50_bytes_per_sec` / `p95_bytes_per_sec` for throughput). #31..#36
-therefore flatten to three sub-columns each in the CSV even when
-they emit `null` (the structured shape is preserved in the empty
-sub-cells so the header count stays stable).
+**Structured shapes**: per 12号 §D7 + 08号 §Overhead, overhead
+metrics carry per-metric dimensions rather than a uniform `{p50, p95,
+count}` triple. See the per-row shape specification in the "Numerator
+/ value" column below (and the flattened enumeration in §3.3). Rows
+#31/#32/#33/#37 carry the 3-key `{p50, p95, count}` shape (latency
+p50/p95 in nanoseconds); #34 uses `{p50_bytes_per_sec,
+p95_bytes_per_sec, count}` (throughput); #35 carries 5 keys (latency
+p50/p95 + CPU delta + mem delta + count, per 08:88 observer-on/off
+delta); #36 carries 6 keys (first-token latency p50/p95 + tokens/sec
+p50/p95 + e2e p95 + count, per 08:89 proxy-vs-direct comparison).
+Sub-column counts therefore differ per metric — total flattened
+sub-columns across #31..#37 = 3 + 3 + 3 + 3 + 5 + 6 + 3 = 26. The
+empty sub-cells are still emitted when a metric is `null`, so the
+header count stays stable regardless of data availability.
 
 | # | Metric | Numerator / value | Denominator | Provenance |
 |---|---|---|---|---|
@@ -762,10 +770,19 @@ Rejected examples (all → exit 2):
   `1 = 1` predicate references only literals). This is the
   broadening-attack case.
 - `1 = 1` alone — same tautology rule.
-- `run_id = workload_id` — accepted **only if both columns are
-  in the whitelist** (they are); a filter like
-  `run_id = capability_snapshot_hash` is rejected because the
+- `run_id = capability_snapshot_hash` — rejected because the
   right-hand column is not in the whitelist.
+
+Also rejected (P1 fix round 14): filters that reference only columns
+on both sides of a comparison — e.g. `run_id = workload_id`,
+`experiment_id = experiment_id` — are treated as tautologies for the
+purpose of the tautology guard even though both sides are Column
+nodes, because they cannot narrow a legitimate cohort without
+external context. The rule: every top-level `AND`/`OR` operand must
+be a predicate whose right-hand side is a **literal or list of
+literals**, not another Column. `col = 'lit'`, `col IN ('a','b')`,
+`col LIKE 'pat'` are allowed; `col1 = col2` is rejected with
+`ErrRunsFilterColumnCompare`.
 
 Accepted examples (all → prepared with `run_id = ?` binding):
 
@@ -1120,7 +1137,7 @@ Modified: none. This worktree adds files only. If any file outside
     `sqlite3.connect` on Linux (the eval harness's only real
     target). Non-Linux falls back to the plain-path form with a
     documented residual TOCTOU risk.
-- 2026-07-03 (round 13, Codex P1 fixes):
+- 2026-07-03 (round 13, Codex P1 fixes — first batch):
   - Scope: added a handoff carve-out — the `internal/evalrun.NewSQLWriter`
     Go-side wiring (14号 §5 item 1) is reassigned to a follow-up
     Go-only worktree, not this Python-only extractor.
@@ -1133,3 +1150,12 @@ Modified: none. This worktree adds files only. If any file outside
     `ModelProxyOverhead` (6-key: first-token latency p50/p95 +
     tokens/sec p50/p95 + e2e p95 + count per 08:89); §3.3 flatten
     list updated.
+- 2026-07-03 (round 14, Codex P1 fixes):
+  - §2.5 "Structured shape" rewritten to acknowledge per-metric
+    variable sub-column counts (3/3/3/3/5/6/3 = 26 flattened
+    sub-columns across #31..#37); removed stale "three sub-columns
+    each" claim.
+  - §7 (c) tautology guard extended to reject column-column
+    comparisons (`col1 = col2`); only `col = literal`,
+    `col IN (literals)`, `col LIKE 'pat'` accepted
+    (`ErrRunsFilterColumnCompare`).
