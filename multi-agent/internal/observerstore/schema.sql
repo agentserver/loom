@@ -290,3 +290,24 @@ CREATE INDEX IF NOT EXISTS idx_promotion_audit_user
     ON promotion_audit(promoted_by_user_id, ts);
 CREATE INDEX IF NOT EXISTS idx_promotion_audit_thread
     ON promotion_audit(driver_thread_id, ts);
+
+-- WT-2-driver-promotion-chain B4: one row per non-ablated
+-- driver.Lookup call, keyed by run_id so D2 can aggregate
+-- RegistryLookupHitRate under Phase 3 parallel runs unambiguously.
+-- Stores only query_hash_prefix (8-hex) — not the raw user intent
+-- text — because the sanitizer can't strip alphanumeric
+-- secret-shaped material. See spec
+-- docs/specs/wt2-driver-promotion-chain-B4.spec.md §5.
+CREATE TABLE IF NOT EXISTS registry_lookup_samples (
+    row_id             TEXT PRIMARY KEY,
+    ts                 TEXT NOT NULL,
+    run_id             TEXT NOT NULL DEFAULT '',
+    workspace_id       TEXT NOT NULL DEFAULT '',
+    query_hash_prefix  TEXT NOT NULL DEFAULT '',
+    hit_count          INTEGER NOT NULL DEFAULT 0,
+    registry_hits      INTEGER NOT NULL DEFAULT 0,
+    userspace_hits     INTEGER NOT NULL DEFAULT 0,
+    top_score          REAL NOT NULL DEFAULT 0.0
+);
+CREATE INDEX IF NOT EXISTS idx_registry_lookup_samples_run
+    ON registry_lookup_samples(run_id, ts);

@@ -182,9 +182,15 @@ func (d *draftTaskContractTool) Call(ctx context.Context, raw json.RawMessage) (
 	}
 	tc.ApplyDefaults()
 	questions := clarificationQuestions(tc)
+	// WT-2 B4: run Lookup on the user's goal to surface reusable MCPs
+	// before the LLM commits to scaffolding a new one. Nil / empty is
+	// the safe default under NoRegistryLookup (Lookup returns nil
+	// itself).
+	registryHits := Lookup(ctx, args.Goal)
 	return json.Marshal(map[string]interface{}{
 		"contract":                tc,
 		"clarification_questions": questions,
+		"registry_hits":           registryHits,
 	})
 }
 
