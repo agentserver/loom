@@ -16,11 +16,19 @@ from tests.fixtures._common import apply_schema
 from tests._extract_helpers import extract_dict
 
 
-_PERF_ENABLED = os.environ.get("CI") == "true"
+# Spec §7 (h): perf tests are skipped by default; explicit opt-in via
+# either `CI=true` in the environment OR `-m perf` on the pytest
+# command line runs them. We inspect both signals here — the marker
+# alone is not enough because pytest does not "activate" marker-gated
+# tests, it only filters when `-m` is passed.
+_PERF_ENABLED = (
+    os.environ.get("CI") == "true"
+    or any(arg == "perf" or arg.endswith("perf") for arg in os.sys.argv)
+)
 
 
 @pytest.mark.perf
-@pytest.mark.skipif(not _PERF_ENABLED, reason="perf mark; enable with CI=true")
+@pytest.mark.skipif(not _PERF_ENABLED, reason="perf mark; enable with CI=true or `-m perf`")
 def test_extract_10k_rows_completes_under_2s(tmp_path: Path) -> None:
     db = tmp_path / "perf.db"
     conn = sqlite3.connect(str(db))

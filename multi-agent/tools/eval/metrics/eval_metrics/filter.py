@@ -155,6 +155,17 @@ def _extract_string_literals(fragment: str) -> tuple[str, list[str]]:
 # refuse the entire IS predicate — the spec §3.1 grammar only names
 # `col = 'lit'`, `IN (...)`, `LIKE 'pat'`, and their AND/OR
 # combinations. Codex round-2 code-review P0.
+# The set below is a superset of spec §3.1's stated grammar (=, IN,
+# LIKE, AND/OR). NEQ (`!=`), GT/GTE/LT/LTE, ILIKE, and BETWEEN are
+# accepted as convenience because each still requires a whitelisted
+# column on one side and a literal on the other (enforced by the
+# tautology / column-compare walker). The reason to be strict at
+# the predicate-type level is to reject IS (which we do above) —
+# once IS is excluded, adding !=/BETWEEN does not open any bypass
+# because the tree-shape + tautology + column-compare rules apply
+# uniformly. If the paper ever needs strict grammar conformance, the
+# operator can be told to use `= 'lit'` / `IN (...)` / `LIKE 'pat'`
+# only; the extractor does not narrow their queries.
 _PREDICATE_TYPES: tuple[type, ...] = (
     exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE,
     exp.In, exp.Like, exp.ILike, exp.Between,

@@ -113,31 +113,42 @@ from eval_metrics.metrics import (  # noqa: E402 -- see comment above
 )
 
 
-# §2 catalog order — the ONE authoritative sequence. CSV / JSON emit
+# §2 catalog order — the ONE authoritative sequence. Section order
+# (§2.1 → §2.2 → §2.3 → §2.4 → §2.5) is the outermost sort key; the
+# metric numbers are secondary and monotonic WITHIN a section but NOT
+# globally, because #40 and #41 belong to §2.3 (per spec §2.3 header
+# "metrics #17..#27, #40, #41") — they were tacked on after #39 in the
+# numbering scheme for insertion-order stability, but the section
+# grouping keeps them next to their §2.3 siblings. CSV / JSON emit
 # headers in this order, and the subset filter preserves it.
 ALL_METRICS: list[Metric] = [
     # §2.1 Lifecycle (#1..#9)
     *lifecycle.METRICS,
     # §2.2 Contracted (#10..#16)
     *contracted.METRICS,
-    # §2.3 User-promoted (#17..#27, #40, #41) — the #40/#41 rows land
-    # in the same module because they belong to `user-promoted` per
-    # spec §2.3 header.
+    # §2.3 User-promoted — #17..#27 first, then #40 and #41 (spec
+    # §2.3 header lists them together).
     *user_promoted.METRICS_17_27,
+    *user_promoted.METRICS_40_41,
     # §2.4 Semantic (#28..#30)
     *semantic.METRICS,
     # §2.5 Overhead (#31..#39)
     *overhead.METRICS,
-    # §2.3 tail (#40, #41) — spec §2 order is 1..39 then 40, 41 tacked
-    # on the user-promoted section, so they land AFTER §2.5.
-    *user_promoted.METRICS_40_41,
 ]
 
 
 def _self_check() -> None:
-    """Belt: catalog must have 41 rows numbered 1..39 + 40, 41 in order."""
+    """Belt: catalog must have 41 rows in §2 section-then-number order."""
     assert len(ALL_METRICS) == 41, f"catalog size drift: {len(ALL_METRICS)}"
-    expected = list(range(1, 40)) + [40, 41]
+    # §2.1 #1..#9, §2.2 #10..#16, §2.3 #17..#27+#40+#41, §2.4 #28..#30, §2.5 #31..#39
+    expected = (
+        list(range(1, 10))       # §2.1: 1..9
+        + list(range(10, 17))    # §2.2: 10..16
+        + list(range(17, 28))    # §2.3 first block: 17..27
+        + [40, 41]               # §2.3 tail: 40, 41
+        + list(range(28, 31))    # §2.4: 28..30
+        + list(range(31, 40))    # §2.5: 31..39
+    )
     actual = [m.number for m in ALL_METRICS]
     assert actual == expected, f"catalog order drift: {actual}"
     names = [m.name for m in ALL_METRICS]
