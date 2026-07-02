@@ -467,6 +467,139 @@ func TestPipeline_AuditWriteFailureDegradesButPipelineProceeds(t *testing.T) {
 	}
 }
 
+// TestPipeline_AcceptanceMissingMarker_TreatsAsFail — spec §7 (a).
+// A missing acceptance_exit_code marker is HARD-FAIL, not silent-pass.
+func TestPipeline_AcceptanceMissingMarker_TreatsAsFail(t *testing.T) {
+	aud := &recAudit{}
+	ev := &recEvents{}
+	registerCalled := false
+	p, err := New(Deps{
+		Delegate: func(_ context.Context, _, _, skill, _ string, _ int) (string, error) {
+			if skill == "mcp-acceptance" {
+				return `{"something_else": true}`, nil // no acceptance_exit_code
+			}
+			return `{}`, nil
+		},
+		RegisterCall: func(_ context.Context, _ buildspec.Spec, _, _, _ string, _ int) (string, error) {
+			registerCalled = true
+			return "", nil
+		},
+		AuditWrite: aud.write,
+		EventEmit:  ev.emit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcomes, err := p.Run(context.Background(), validRequest())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if registerCalled {
+		t.Fatal("register MUST NOT run when acceptance marker is missing — §7 (a)")
+	}
+	if outcomes[1].Success {
+		t.Fatal("acceptance stage should be marked failed when marker missing")
+	}
+}
+
+// TestPipeline_AcceptanceMissingMarker_BypassedUnderNoAcceptanceGate
+// — under the ablation, missing marker is bypassed with a log line.
+func TestPipeline_AcceptanceMissingMarker_BypassedUnderNoAcceptanceGate(t *testing.T) {
+	aud := &recAudit{}
+	ev := &recEvents{}
+	registerCalled := false
+	p, err := New(Deps{
+		Delegate: func(_ context.Context, _, _, skill, _ string, _ int) (string, error) {
+			if skill == "mcp-acceptance" {
+				return `{}`, nil
+			}
+			return `{}`, nil
+		},
+		RegisterCall: func(_ context.Context, _ buildspec.Spec, _, _, _ string, _ int) (string, error) {
+			registerCalled = true
+			return strings.Repeat("e", 64), nil
+		},
+		AuditWrite:               aud.write,
+		EventEmit:                ev.emit,
+		IsAcceptanceGateDisabled: func() bool { return true },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Run(context.Background(), validRequest()); err != nil {
+		t.Fatal(err)
+	}
+	if !registerCalled {
+		t.Fatal("register should run under NoAcceptanceGate even with missing marker")
+	}
+}
+
+// TestPipeline_UsesSourcePathFromScaffoldResponse — spec §2.2 stage 1
+// "record source_path from slave result body".
+func TestPipeline_UsesSourcePathFromScaffoldResponse(t *testing.T) {
+	aud := &recAudit{}
+	ev := &recEvents{}
+	var registerSourcePath string
+	p, err := New(Deps{
+		Delegate: func(_ context.Context, _, _, skill, _ string, _ int) (string, error) {
+			if skill == "scaffold-mcp-server" {
+				return `{"source_path":"custom/path/server.js"}`, nil
+			}
+			if skill == "mcp-acceptance" {
+				return `{"acceptance_exit_code":0}`, nil
+			}
+			return `{}`, nil
+		},
+		RegisterCall: func(_ context.Context, _ buildspec.Spec, sp, _, _ string, _ int) (string, error) {
+			registerSourcePath = sp
+			return strings.Repeat("f", 64), nil
+		},
+		AuditWrite: aud.write,
+		EventEmit:  ev.emit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Run(context.Background(), validRequest()); err != nil {
+		t.Fatal(err)
+	}
+	if registerSourcePath != "custom/path/server.js" {
+		t.Fatalf("register received source_path = %q, want scaffold-supplied path", registerSourcePath)
+	}
+}
+
+// TestPipeline_FallbackSourcePathWhenScaffoldOmitsIt — scaffold that
+// does not surface source_path → fall back to convention + warn.
+func TestPipeline_FallbackSourcePathWhenScaffoldOmitsIt(t *testing.T) {
+	aud := &recAudit{}
+	ev := &recEvents{}
+	var registerSourcePath string
+	p, err := New(Deps{
+		Delegate: func(_ context.Context, _, _, skill, _ string, _ int) (string, error) {
+			if skill == "mcp-acceptance" {
+				return `{"acceptance_exit_code":0}`, nil
+			}
+			return `{}`, nil // no source_path in scaffold response
+		},
+		RegisterCall: func(_ context.Context, _ buildspec.Spec, sp, _, _ string, _ int) (string, error) {
+			registerSourcePath = sp
+			return strings.Repeat("g", 64), nil
+		},
+		AuditWrite: aud.write,
+		EventEmit:  ev.emit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Run(context.Background(), validRequest()); err != nil {
+		t.Fatal(err)
+	}
+	// Fallback shape from pipeline.go: generated_mcp/<name>/server.py
+	if !strings.HasPrefix(registerSourcePath, "generated_mcp/") {
+		t.Fatalf("register received source_path = %q, want fallback under generated_mcp/", registerSourcePath)
+	}
+}
+
 func TestPipeline_TimeoutIsPerStageNotTotal(t *testing.T) {
 	// The pipeline passes timeout_sec verbatim to each Delegate call,
 	// so a 500ms scaffold + 500ms acceptance + 500ms register total 1.5s

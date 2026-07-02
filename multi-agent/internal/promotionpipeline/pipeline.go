@@ -161,15 +161,29 @@ func (p *Pipeline) Run(ctx context.Context, r Request) (StageOutcomes, error) {
 
 	outcomes := make(StageOutcomes, 0, 3)
 
+	// scaffoldSourcePath is set by stage 1 from the slave's response
+	// (see comment in the scaffold runner below). Stage 3 threads
+	// this into the register call; if stage 1 did not surface it we
+	// fall back to the convention.
+	var scaffoldSourcePath string
+
 	// ---- Stage 1: scaffold ----
 	so1 := p.runStage(ctx, StageScaffold, r, auditBase, stageNote, func() (StageOutcome, error) {
 		prompt, _ := json.Marshal(struct {
 			Spec buildspec.Spec `json:"spec"`
 		}{Spec: r.Spec})
 		p.emitEvent(r, StageScaffold, "started")
-		_, err := p.d.Delegate(ctx, r.SlaveAgentID, r.SlaveDisplayName, "scaffold-mcp-server", string(prompt), r.TimeoutSec)
+		result, err := p.d.Delegate(ctx, r.SlaveAgentID, r.SlaveDisplayName, "scaffold-mcp-server", string(prompt), r.TimeoutSec)
 		if err != nil {
 			return StageOutcome{Stage: StageScaffold, Success: false, Error: err, StageNote: stageNote}, err
+		}
+		// Extract source_path from the slave response — spec §2.2.
+		// Slaves may include `"source_path":"..."` in the JSON body;
+		// if absent we fall back to the convention and warn.
+		scaffoldSourcePath = extractSourcePath(result)
+		if scaffoldSourcePath == "" {
+			scaffoldSourcePath = "generated_mcp/" + r.Spec.Name + "/server.py"
+			log.Printf("[warn] scaffold-mcp-server did not surface source_path in result body; falling back to %q", scaffoldSourcePath)
 		}
 		return StageOutcome{Stage: StageScaffold, Success: true, StageNote: stageNote}, nil
 	})
@@ -192,10 +206,14 @@ func (p *Pipeline) Run(ctx context.Context, r Request) (StageOutcomes, error) {
 		}
 		// Parse the acceptance-exit-code marker. If NoAcceptanceGate
 		// is ON, we STILL invoked the skill above (spec §7 (a)); we
-		// just mask the pass/fail decision here.
-		exitOK := parseAcceptanceExit(result) == 0
+		// just mask the pass/fail decision here. A MISSING or
+		// unparseable marker is treated as failure — accepting a
+		// silent-pass on a bad marker would be exactly the C3
+		// tool-poisoning surface B2 exists to close.
+		code, ok := parseAcceptanceExit(result)
+		exitOK := ok && code == 0
 		if !exitOK && p.d.IsAcceptanceGateDisabled != nil && p.d.IsAcceptanceGateDisabled() {
-			log.Printf("[ablation] NoAcceptanceGate: acceptance exit != 0 but gate bypassed for %s", r.Spec.Name)
+			log.Printf("[ablation] NoAcceptanceGate: acceptance exit missing/non-zero but gate bypassed for %s", r.Spec.Name)
 			return StageOutcome{Stage: StageAcceptance, Success: true, StageNote: stageNote}, nil
 		}
 		if !exitOK {
@@ -224,7 +242,7 @@ func (p *Pipeline) Run(ctx context.Context, r Request) (StageOutcomes, error) {
 			}, nil
 		}
 		p.emitEvent(r, StageRegister, "started")
-		hash, err := p.d.RegisterCall(ctx, r.Spec, "generated_mcp/"+r.Spec.Name+"/server.py", r.SlaveAgentID, r.SlaveDisplayName, r.TimeoutSec)
+		hash, err := p.d.RegisterCall(ctx, r.Spec, scaffoldSourcePath, r.SlaveAgentID, r.SlaveDisplayName, r.TimeoutSec)
 		if err != nil {
 			return StageOutcome{Stage: StageRegister, Success: false, Error: err, StageNote: stageNote}, err
 		}
@@ -302,22 +320,19 @@ func appendSkipped(cur StageOutcomes, remaining []Stage) StageOutcomes {
 	return cur
 }
 
-// parseAcceptanceExit finds `"acceptance_exit_code":<int>` in the
-// slave result body. Returns 0 on happy path; any non-zero (or a
-// parse error, defensively) → non-zero.
-func parseAcceptanceExit(result string) int {
-	// Cheap substring scan avoids paying for full JSON parsing on the
-	// hot path. If the marker is missing, treat as 0 (assume success);
-	// tests must exercise both branches to catch a slave that fails
-	// silently. Real slaves always include the marker per B3 spec.
+// parseAcceptanceExit returns (code, ok) parsed from
+// `"acceptance_exit_code":<int>` in the slave result body. ok=false
+// means the marker was ABSENT or unparseable; the caller MUST treat
+// that as failure (§7 (a) — silent-pass would be the C3
+// tool-poisoning surface).
+func parseAcceptanceExit(result string) (int, bool) {
 	const marker = `"acceptance_exit_code":`
 	i := strings.Index(result, marker)
 	if i < 0 {
-		return 0
+		return 0, false
 	}
 	rest := result[i+len(marker):]
 	rest = strings.TrimLeft(rest, " ")
-	// Read digits (and an optional leading -).
 	end := 0
 	if end < len(rest) && rest[end] == '-' {
 		end++
@@ -325,8 +340,13 @@ func parseAcceptanceExit(result string) int {
 	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
 		end++
 	}
-	if end == 0 {
-		return 0
+	// Must have at least one digit. `-` alone doesn't count.
+	digitStart := 0
+	if end > 0 && rest[0] == '-' {
+		digitStart = 1
+	}
+	if end == 0 || end == digitStart {
+		return 0, false
 	}
 	n := 0
 	sign := 1
@@ -338,7 +358,7 @@ func parseAcceptanceExit(result string) int {
 	for _, c := range digits {
 		n = n*10 + int(c-'0')
 	}
-	return sign * n
+	return sign * n, true
 }
 
 // derivedServerCmd returns the command the slave uses to run this MCP
@@ -347,6 +367,25 @@ func parseAcceptanceExit(result string) int {
 // spec if a `command` field lands.
 func derivedServerCmd(spec buildspec.Spec) string {
 	return "python3 generated_mcp/" + spec.Name + "/server.py"
+}
+
+// extractSourcePath finds `"source_path":"..."` in the slave scaffold
+// response body. Returns "" if the marker is absent — the caller
+// falls back to the convention. Does NOT trust the path for
+// traversal — the register call routes through registerCore which
+// re-validates via its own safe_paths guard (see internal/driver/safe_paths.go).
+func extractSourcePath(result string) string {
+	const marker = `"source_path":"`
+	i := strings.Index(result, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := result[i+len(marker):]
+	end := strings.IndexByte(rest, '"')
+	if end < 0 {
+		return ""
+	}
+	return rest[:end]
 }
 
 // emptyBytesSHA256Hex — same constant as internal/driver, replicated
