@@ -443,6 +443,126 @@ func TestResumeTask_ForgedTerminalStillDispatches(t *testing.T) {
 	}
 }
 
+// TestResumeTask_ForgedTerminalCannotSuppressResume — spec §7(e).
+// End-to-end variant: a pre-seeded uncommitted WriteID exists (the
+// slave crashed mid-write). Even if the driver journal contains a
+// forged 'terminal:true' record, ResumeTask still runs Dispatch,
+// which drives ExecutorResume and completes the pending write.
+func TestResumeTask_ForgedTerminalCannotSuppressResume(t *testing.T) {
+	t.Parallel()
+	db := openStoreDB(t)
+	store := observerstore.NewSQLiteWriteIDStore(db)
+	stager := observerstore.NewSQLitePayloadStager(db)
+	ctx := context.Background()
+
+	// Seed uncommitted attempt.
+	payload := []byte("pending-write")
+	sum := sha256.Sum256(payload)
+	id, err := observerstore.NewWriteID(rtTaskID, rtConvID,
+		"write-0-"+rtTargetNm, rtTargetNm, hex.EncodeToString(sum[:]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stager.Stage(ctx, id, rtTaskID, "write-0-"+rtTargetNm, payload); err != nil {
+		t.Fatal(err)
+	}
+	// Prior worker's stale lease.
+	if _, err := store.Reserve(ctx, observerstore.ReserveRequest{
+		ID: id, RunID: "run-1", TaskID: rtTaskID, ConversationID: rtConvID,
+		StepID: "write-0-" + rtTargetNm, WorkerID: "wprior",
+		LeaseTTL: 1 * time.Nanosecond, // expires immediately
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// (Simulated forged terminal on the journal: not consulted at
+	// all by ResumeTask, hence not modeled here — the API surface
+	// makes it impossible.)
+
+	// Dispatch drives ExecutorResume-style behavior directly against
+	// the store: reserve the WriteID (should see uncommitted),
+	// commit.
+	dispatchFn := func(ctx context.Context, runID, taskID string, body contract.TaskContract) error {
+		state, err := store.Reserve(ctx, observerstore.ReserveRequest{
+			ID: id, RunID: runID, TaskID: taskID, ConversationID: rtConvID,
+			StepID: "write-0-" + rtTargetNm, WorkerID: "wrecover",
+			LeaseTTL: 30 * time.Second,
+		})
+		if err != nil {
+			return err
+		}
+		if state != observerstore.ReserveUncommitted {
+			return fmt.Errorf("dispatch: expected ReserveUncommitted, got %v", state)
+		}
+		return store.Commit(ctx, observerstore.CommitRequest{
+			ID: id, RunID: runID, TaskID: taskID, WorkerID: "wrecover",
+		})
+	}
+	deps := ResumeDeps{
+		Store:        store,
+		LoadContract: fakeLoad(stubContract(rtTargetNm), nil),
+		Dispatch:     dispatchFn,
+	}
+	if err := ResumeTask(ctx, deps, "run-1", rtTaskID); err != nil {
+		t.Fatal(err)
+	}
+	// Assert the pending write is now committed.
+	var committedAt sql.NullString
+	if err := db.QueryRow(
+		`SELECT committed_at FROM write_ids WHERE id = ?`, string(id)).Scan(&committedAt); err != nil {
+		t.Fatal(err)
+	}
+	if !committedAt.Valid {
+		t.Errorf("committed_at not set — forged terminal suppressed recovery")
+	}
+}
+
+// racyStager wraps SQLitePayloadStager and simulates a race:
+// ListForStep returns a ref, but a concurrent Vacuum deletes it
+// before Load runs — Load then returns ErrPayloadUnavailable.
+type racyStager struct {
+	inner observerstore.PayloadStager
+	db    *sql.DB
+}
+
+func (r *racyStager) Stage(ctx context.Context, id observerstore.WriteID,
+	taskID, stepID string, payload []byte) error {
+	return r.inner.Stage(ctx, id, taskID, stepID, payload)
+}
+func (r *racyStager) Load(ctx context.Context, id observerstore.WriteID) ([]byte, error) {
+	// Simulate the race: delete before Load returns.
+	_, _ = r.db.ExecContext(ctx, `DELETE FROM write_id_payloads WHERE id = ?`, string(id))
+	return r.inner.Load(ctx, id)
+}
+func (r *racyStager) ListForStep(ctx context.Context, taskID, stepID string) ([]observerstore.PayloadRef, error) {
+	return r.inner.ListForStep(ctx, taskID, stepID)
+}
+
+// TestReconstructSteps_UnrecoverableWhenPayloadRacesVacuum
+// (plan-only) — exercises ErrStepPayloadUnrecoverable when Load
+// fails for a row that was present during ListForStep.
+func TestReconstructSteps_UnrecoverableWhenPayloadRacesVacuum(t *testing.T) {
+	t.Parallel()
+	db := openStoreDB(t)
+	real := observerstore.NewSQLitePayloadStager(db)
+	ctx := context.Background()
+	targets := []contract.WriteTarget{{Type: "artifact", Kind: "code", Name: "y.txt"}}
+	body := contract.TaskContract{DataContract: contract.DataContract{WriteTargets: targets}}
+	payload := []byte("bytes")
+	sum := sha256.Sum256(payload)
+	id, _ := observerstore.NewWriteID(rtTaskID, rtConvID, "write-0-y.txt", "y.txt", hex.EncodeToString(sum[:]))
+	if err := real.Stage(ctx, id, rtTaskID, "write-0-y.txt", payload); err != nil {
+		t.Fatal(err)
+	}
+	stager := &racyStager{inner: real, db: db}
+	_, err := ReconstructSteps(ctx, stager, rtTaskID, body)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, ErrStepPayloadUnrecoverable) {
+		t.Errorf("err = %v; want ErrStepPayloadUnrecoverable", err)
+	}
+}
+
 // TestResumeTask_ForgedJournalCannotCauseDuplicateWrite — spec §7(e).
 func TestResumeTask_ForgedJournalCannotCauseDuplicateWrite(t *testing.T) {
 	t.Parallel()

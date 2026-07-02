@@ -84,14 +84,18 @@ func ResumeTask(ctx context.Context, deps ResumeDeps, runID, taskID string) erro
 	body, err := deps.LoadContract(ctx, taskID)
 	if err != nil {
 		errKind := classifyErr(err)
-		_ = deps.Store.RecordResumeAttempt(ctx, runID, taskID, "error", errKind)
+		if auditErr := deps.Store.RecordResumeAttempt(ctx, runID, taskID, "error", errKind); auditErr != nil {
+			return errors.Join(err, fmt.Errorf("driver: record error audit: %w", auditErr))
+		}
 		return err
 	}
 
 	// Step 4: dispatch.
 	if err := deps.Dispatch(ctx, runID, taskID, body); err != nil {
 		errKind := classifyErr(err)
-		_ = deps.Store.RecordResumeAttempt(ctx, runID, taskID, "error", errKind)
+		if auditErr := deps.Store.RecordResumeAttempt(ctx, runID, taskID, "error", errKind); auditErr != nil {
+			return errors.Join(err, fmt.Errorf("driver: record error audit: %w", auditErr))
+		}
 		return err
 	}
 
@@ -161,7 +165,13 @@ func ReconstructSteps(ctx context.Context, stager observerstore.PayloadStager,
 			}
 			payload, err := stager.Load(ctx, chosen.ID)
 			if err != nil {
-				return nil, fmt.Errorf("driver: load step %d: %w", i, err)
+				// The chosen ref was listed by ListForStep but Load
+				// couldn't retrieve it — the row was deleted between
+				// the two calls (e.g. by a concurrent Vacuum).
+				// Callers can errors.Is-check the sentinel to
+				// distinguish this from a generic DB error.
+				return nil, fmt.Errorf("driver: load step %d: %w: %w",
+					i, ErrStepPayloadUnrecoverable, err)
 			}
 			step.Payload = payload
 		}
