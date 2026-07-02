@@ -223,10 +223,21 @@ belt-and-suspenders against sqlparse edge cases.
 
 `full` emits all 39 metrics from §2 (with structured metrics flattened
 into sub-columns, so the on-wire column count is larger — see §3.3).
-The five subset values narrow to §2.1 / §2.2 / §2.3 / §2.4 / §2.5
-respectively. Any other value → exit 2 with the message `unknown
-metric set: <val> (allowed: full, lifecycle, contracted, user-promoted,
-semantic, overhead)` (§7 (e)).
+The five subset values each emit the section's rows PLUS any metric
+whose §2.1 Metric-set membership table (or an equivalent cross-list
+note in §2.2..§2.5) explicitly names the subset:
+
+| Subset value | Rows emitted |
+|---|---|
+| `lifecycle` | §2.1 rows #1..#9 + #22 `CapabilityReuseRate` + #23 `RepeatedGenerationRate` (cross-listed per §2.1 membership table) |
+| `contracted` | §2.2 rows #10..#16 |
+| `user-promoted` | §2.3 rows #17..#27 |
+| `semantic` | §2.4 rows #28..#30 |
+| `overhead` | §2.5 rows #31..#39 + #7 `ManualSetupStepCount` + #8 `ConfigTouchCount` (cross-listed per §2.1 membership table) |
+
+Any value not in the six-value enum above → exit 2 with the message
+`unknown metric set: <val> (allowed: full, lifecycle, contracted,
+user-promoted, semantic, overhead)` (§7 (e)).
 
 ### 3.3 Output shape
 
@@ -515,9 +526,11 @@ Confirms §5 acceptance criterion 1.
    populated per §3.3 empty-DB contract.
 2. Each of the three golden fixtures produces the hand-computed values
    in §4 to full float64 precision — no rounding, no lossy formatting.
-3. `--metric-set lifecycle` on fixture 1 emits only the §2.1 columns
-   (plus flattened sub-columns of `TimeToCompletion`) plus the leading
-   `metric_set` / `row_count` columns.
+3. `--metric-set lifecycle` on fixture 1 emits exactly the columns
+   per the §3.2 subset table for `lifecycle` (i.e. §2.1 rows #1..#9
+   plus §2.3 rows #22 and #23 as cross-listed members, with structured
+   metrics flattened) plus the leading `metric_set` / `row_count`
+   columns and the trailing `_notes` column.
 4. Every metric whose data source has NOT landed produces `null` in the
    value cell AND an entry in the `notes` map / stderr warning with the
    literal string `"upstream data missing"`.
@@ -605,8 +618,17 @@ following pipeline:
    network I/O): parse the placeholder-substituted fragment as a
    standalone expression with the sqlite dialect. Walk every
    `Column` node in the AST; if any referenced column name is not in
-   the whitelist below → exit 2 `ErrRunsFilterFieldNotAllowed`. If parse
-   fails → exit 2 with the parse error.
+   the whitelist below → exit 2 `ErrRunsFilterFieldNotAllowed`. If
+   parse fails → exit 2 with the parse error. **Additionally** (this
+   guards against the `run_id = 'x' OR 1=1` broadening attack):
+   walk every `Predicate` / `Comparison` / `In` / `Like` /
+   `Between` / `Is` node in the AST; each such node MUST reference
+   at least one column from the whitelist. A predicate that
+   references only literals on both sides (e.g. `1 = 1`, `'a' =
+   'a'`) → exit 2 `ErrRunsFilterTautology`. This closes the
+   OR-broadening surface — `run_id = 'x' OR 1 = 1` is rejected
+   because `1 = 1` fails the "must reference a column" test even
+   though `1` alone is not a Column node.
 4. **Wrap and bind**: prepend `WHERE ` and interpolate the sanitized
    AST-string into `SELECT ... FROM runs WHERE <sanitized>`; parameters
    from step 2 flow through to `cursor.execute(sql, params)` unchanged.
@@ -622,6 +644,14 @@ Rejected examples (all → exit 2):
   denylist (`SELECT`) and by whitelist (`sqlite_master`).
 - `secret_col = 'x'` — caught by whitelist (column `secret_col`).
 - `run_id = 'x' -- ignore` — caught by denylist (`--`).
+- `run_id = 'x' OR 1 = 1` — caught by tautology rule (the
+  `1 = 1` predicate references only literals). This is the
+  broadening-attack case.
+- `1 = 1` alone — same tautology rule.
+- `run_id = workload_id` — accepted **only if both columns are
+  in the whitelist** (they are); a filter like
+  `run_id = capability_snapshot_hash` is rejected because the
+  right-hand column is not in the whitelist.
 
 Accepted examples (all → prepared with `run_id = ?` binding):
 
@@ -859,3 +889,11 @@ Modified: none. This worktree adds files only. If any file outside
     upstream missing.
   - Fixture 3 `ContractCompleteness` null-reason wording aligned
     with §2.2 row 10 (cohort-attribution missing).
+- 2026-07-02 (round 7, Codex P1 fixes):
+  - §3.2 `--metric-set` subset table added; §5.1 acceptance criterion
+    #3 updated to reference the subset table so the two sections no
+    longer disagree about cross-listed metrics.
+  - §7 (c) AST parse step 3 tightened: every Comparison / In / Like /
+    Between / Is node MUST reference at least one whitelisted column,
+    closing the `run_id = 'x' OR 1 = 1` OR-broadening attack that
+    would otherwise pass Column-only whitelisting.
