@@ -214,6 +214,89 @@ def _reject_non_predicate_leaves(node: exp.Expression) -> None:
     )
 
 
+# Node types we allow as the RHS of a comparison / IN element / LIKE
+# pattern / BETWEEN bound. Everything else (Function, Concat, Cast,
+# arithmetic Ops, nested Columns) is rejected as a tautology bypass —
+# they can evaluate to a value that always equals the LHS column
+# (schema-tautology) or introduce covert Column references that the
+# whitelist walker cannot spot behind a Function wrapper.
+_RHS_ATOMIC_TYPES: tuple[type, ...] = (
+    exp.Literal,      # numeric or string literal (post extract, string → Placeholder)
+    exp.Placeholder,  # `?` from parametric extraction
+    exp.Null,         # explicit NULL literal (rare in WHERE fragments)
+    exp.Boolean,      # TRUE/FALSE — the tree-shape walker rejects it at boolean position, but a value context is fine
+    exp.Neg,          # `-1` parses as Neg(Literal(1)); accept for numeric comparisons
+)
+
+
+def _enforce_predicate_shape(pred: exp.Expression) -> None:
+    """LHS must be a bare Column; RHS must be a bare literal / placeholder.
+
+    This is stricter than "at least one Column, no Column-Column
+    comparison" because it also rejects `col = f(col)`, `col = col || ''`,
+    `col = COALESCE(col, '')`, and any other expression that could
+    schema-tautology on a NOT NULL column. Codex round-4 code-review
+    P0 tripwire.
+
+    Applied to every predicate (EQ / NEQ / GT / GTE / LT / LTE / In /
+    Like / ILike / Between) — see `_ast_walk`. The tree-shape and
+    tautology-count walkers above still run first; this is the
+    narrowest final gate.
+    """
+    if isinstance(pred, (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE)):
+        lhs, rhs = pred.this, pred.expression
+        if not isinstance(lhs, exp.Column):
+            raise ErrRunsFilterColumnCompare(
+                f"--runs-filter predicate LHS must be a bare column: {pred.sql()!r} "
+                f"(LHS type={type(lhs).__name__})"
+            )
+        if not isinstance(rhs, _RHS_ATOMIC_TYPES):
+            raise ErrRunsFilterColumnCompare(
+                f"--runs-filter predicate RHS must be a bare literal/placeholder: {pred.sql()!r} "
+                f"(RHS type={type(rhs).__name__})"
+            )
+    elif isinstance(pred, exp.Between):
+        subject = pred.this
+        low, high = pred.args.get("low"), pred.args.get("high")
+        if not isinstance(subject, exp.Column):
+            raise ErrRunsFilterColumnCompare(
+                f"--runs-filter BETWEEN subject must be a bare column: {pred.sql()!r}"
+            )
+        for bound in (low, high):
+            if not isinstance(bound, _RHS_ATOMIC_TYPES):
+                raise ErrRunsFilterColumnCompare(
+                    f"--runs-filter BETWEEN bounds must be literals: {pred.sql()!r}"
+                )
+    elif isinstance(pred, (exp.Like, exp.ILike)):
+        subject, pattern = pred.this, pred.expression
+        if not isinstance(subject, exp.Column):
+            raise ErrRunsFilterColumnCompare(
+                f"--runs-filter LIKE subject must be a bare column: {pred.sql()!r}"
+            )
+        if not isinstance(pattern, _RHS_ATOMIC_TYPES):
+            raise ErrRunsFilterColumnCompare(
+                f"--runs-filter LIKE pattern must be a bare literal: {pred.sql()!r}"
+            )
+    elif isinstance(pred, exp.In):
+        subject = pred.this
+        if not isinstance(subject, exp.Column):
+            raise ErrRunsFilterColumnCompare(
+                f"--runs-filter IN subject must be a bare column: {pred.sql()!r}"
+            )
+        # IN's RHS is either `expressions` (a list) or `query` (a subquery
+        # — already rejected by denylist SELECT/WITH). Accept only the
+        # explicit-list form with all-atomic elements.
+        if pred.args.get("query") is not None:
+            raise ErrRunsFilterColumnCompare(
+                f"--runs-filter IN with subquery not allowed: {pred.sql()!r}"
+            )
+        for elem in (pred.args.get("expressions") or []):
+            if not isinstance(elem, _RHS_ATOMIC_TYPES):
+                raise ErrRunsFilterColumnCompare(
+                    f"--runs-filter IN element must be a bare literal: {elem.sql()!r}"
+                )
+
+
 def _ast_walk(tree: exp.Expression) -> None:
     """Enforce column-whitelist, tautology, and column-compare rules.
 
@@ -260,39 +343,14 @@ def _ast_walk(tree: exp.Expression) -> None:
                 f"--runs-filter contains a predicate with no whitelisted column reference: {pred.sql()}"
             )
 
-        # Column-column compare: for equality/inequality nodes with a
-        # `this` and `expression` side, both being Columns is a
-        # tautology-adjacent broadener even if both are whitelisted.
-        # We treat Between (which has three columns of its own) as
-        # a special case — it's `X BETWEEN Y AND Z`, allowed only when
-        # X is Column and Y/Z are literals.
-        if isinstance(pred, (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE)):
-            lhs, rhs = pred.this, pred.expression
-            if isinstance(lhs, exp.Column) and isinstance(rhs, exp.Column):
-                raise ErrRunsFilterColumnCompare(
-                    f"--runs-filter compares two columns ({lhs.name!r} vs {rhs.name!r}); "
-                    "predicates must compare a column against a literal"
-                )
-        elif isinstance(pred, exp.Between):
-            low, high = pred.args.get("low"), pred.args.get("high")
-            if isinstance(low, exp.Column) or isinstance(high, exp.Column):
-                raise ErrRunsFilterColumnCompare(
-                    "--runs-filter BETWEEN bounds must be literals, not columns"
-                )
-        # For In / Like / ILike / Is: sqlglot flattens the RHS to a
-        # list of Literal nodes for In, a Literal for Like/ILike, and
-        # a Null for Is. If any RHS element is a Column, the earlier
-        # whitelist scan already rejected it (unknown column) or we
-        # fall through here — an In whose RHS is [Column('workload_id')]
-        # is exotic enough that we treat the extra Column-node count
-        # as a red flag: any predicate whose Column count exceeds 1
-        # is rejected.
-        else:
-            if len(cols_in_pred) > 1:
-                raise ErrRunsFilterColumnCompare(
-                    f"--runs-filter predicate references multiple columns "
-                    f"({[c.name for c in cols_in_pred]}); RHS must be a literal"
-                )
+        # Strict shape enforcement: LHS must be a bare Column; RHS
+        # must be a bare literal / placeholder / null (or list of
+        # these for IN). No function calls, no concatenation, no
+        # expressions — otherwise sqlglot-recognised operators like
+        # `col = col || ''` or `col = COALESCE(col, '')` would evaluate
+        # to a schema-tautology at runtime while looking like a
+        # narrowing filter. Codex round-4 code-review P0 tripwire.
+        _enforce_predicate_shape(pred)
 
 
 # --- Step 4: full pipeline --------------------------------------------------

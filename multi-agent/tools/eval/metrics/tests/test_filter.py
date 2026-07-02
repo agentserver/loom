@@ -181,3 +181,62 @@ def test_is_not_null_predicate_reject() -> None:
     from eval_metrics.filter import ErrRunsFilterTautology
     with pytest.raises(ErrRunsFilterTautology):
         compile_runs_filter("workload_id IS NOT NULL")
+
+
+# --- Codex round-4 P0 regressions: RHS expression bypass class -------------
+
+
+def test_expr_rhs_concat_reject() -> None:
+    """`run_id = run_id || ''` — column-concat expression tautology."""
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterColumnCompare
+    with pytest.raises(ErrRunsFilterColumnCompare):
+        compile_runs_filter("run_id = run_id || ''")
+
+
+def test_expr_rhs_coalesce_reject() -> None:
+    """`run_id = COALESCE(run_id, '')` — function wrapping the same column."""
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterColumnCompare
+    with pytest.raises(ErrRunsFilterColumnCompare):
+        compile_runs_filter("run_id = COALESCE(run_id, '')")
+
+
+def test_expr_rhs_lower_col_reject() -> None:
+    """`run_id = LOWER(run_id)` — same-column function; schema-tautology on lowercase runs."""
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterColumnCompare
+    with pytest.raises(ErrRunsFilterColumnCompare):
+        compile_runs_filter("run_id = LOWER(run_id)")
+
+
+def test_expr_rhs_lower_literal_reject() -> None:
+    """`run_id = LOWER('X')` — even function-over-literal fails the bare-literal rule."""
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterColumnCompare
+    with pytest.raises(ErrRunsFilterColumnCompare):
+        compile_runs_filter("run_id = LOWER('X')")
+
+
+def test_in_subquery_reject() -> None:
+    """`experiment_id IN (SELECT ...)` — subquery caught by denylist + shape."""
+    import pytest
+    from eval_metrics.filter import RunsFilterError
+    with pytest.raises(RunsFilterError):
+        compile_runs_filter("experiment_id IN (SELECT experiment_id FROM runs)")
+
+
+def test_between_col_bound_reject() -> None:
+    """`run_id BETWEEN 'a' AND workload_id` — one bound is a Column."""
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterColumnCompare
+    with pytest.raises(ErrRunsFilterColumnCompare):
+        compile_runs_filter("run_id BETWEEN 'a' AND workload_id")
+
+
+def test_expr_lhs_function_reject() -> None:
+    """`LOWER(run_id) = 'x'` — LHS must be a bare Column."""
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterColumnCompare
+    with pytest.raises(ErrRunsFilterColumnCompare):
+        compile_runs_filter("LOWER(run_id) = 'x'")
