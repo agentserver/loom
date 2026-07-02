@@ -1,0 +1,13 @@
+# duplicated from linux/observer/config.yaml.template; keep in sync — enforced by test_template_parity.bats
+listen_addr: "__LISTEN_ADDR__"
+db_path: __LOOM_HOME__/observer.db
+
+# api_keys[] are the bootstrap keys agents POST as Bearer on
+# /api/agents/register to mint a per-agent token. Workspaces are created
+# lazily at register time from the agent's declared observer.workspace_id,
+# so they don't need to be enumerated here. Add more keys by hand to rotate
+# or scope access (e.g. one key per workspace).
+api_keys:
+  - id: bootstrap
+    key: "__WS_APIKEY__"
+    note: "shared bootstrap key (workspace lazy-upserted at register)"
