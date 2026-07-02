@@ -54,6 +54,12 @@ OBSERVER_PORT=18091
 DRIVER_PORT=18092
 SLAVE_PORT=18093
 STUB_PORT=18080
+# Track whether each port was explicitly supplied on the CLI so prod
+# preflight can honor "omitted → adopt operator's yaml value" per spec
+# §4.2 prod row (P1-3 fix, Codex round 2).
+OBSERVER_PORT_SET=0
+DRIVER_PORT_SET=0
+SLAVE_PORT_SET=0
 LOOM_HOME=""
 BIN_DIR="$SCRIPT_DIR/bin"
 DRY_RUN=0
@@ -65,6 +71,10 @@ die() { echo "deploy.sh: $*" >&2; exit "${2:-2}"; }
 usage() { sed -n '4,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 mode_set() {
+    case "$1" in
+        stub|prod) ;;
+        *) die "invalid --mode value: '$1' (allowed: stub|prod)" ;;
+    esac
     if [[ -n "$MODE" && "$MODE" != "$1" ]]; then
         die "conflicting mode flags: $MODE and $1"
     fi
@@ -76,9 +86,9 @@ while (( $# > 0 )); do
         --stub)                          mode_set stub; shift ;;
         --prod)                          mode_set prod; shift ;;
         --mode)                          mode_set "$2"; shift 2 ;;
-        --observer-port)                 OBSERVER_PORT="$2"; shift 2 ;;
-        --driver-port)                   DRIVER_PORT="$2"; shift 2 ;;
-        --slave-port)                    SLAVE_PORT="$2"; shift 2 ;;
+        --observer-port)                 OBSERVER_PORT="$2"; OBSERVER_PORT_SET=1; shift 2 ;;
+        --driver-port)                   DRIVER_PORT="$2"; DRIVER_PORT_SET=1; shift 2 ;;
+        --slave-port)                    SLAVE_PORT="$2"; SLAVE_PORT_SET=1; shift 2 ;;
         --stub-port)                     STUB_PORT="$2"; shift 2 ;;
         --loom-home)                     LOOM_HOME="$2"; shift 2 ;;
         --bin-dir)                       BIN_DIR="$2"; shift 2 ;;
@@ -439,8 +449,16 @@ prod_preflight() {
     obs_listen=$(yq eval '.listen_addr // ""' "$f")
     [[ -n "$obs_listen" ]] || die "prod preflight failed: $f listen_addr is empty; see tests/prod_test/E2E_RUNBOOK.md:83-108"
     obs_port="${obs_listen##*:}"
-    if [[ "$obs_port" =~ ^[0-9]+$ && "$obs_port" != "$OBSERVER_PORT" ]]; then
-        die "prod preflight failed: operator-registered observer uses port $obs_port; --observer-port $OBSERVER_PORT must match or be omitted"
+    if [[ "$obs_port" =~ ^[0-9]+$ ]]; then
+        if (( OBSERVER_PORT_SET == 1 )); then
+            if [[ "$obs_port" != "$OBSERVER_PORT" ]]; then
+                die "prod preflight failed: operator-registered observer uses port $obs_port; --observer-port $OBSERVER_PORT must match or be omitted"
+            fi
+        else
+            # CLI flag was not supplied — adopt the operator's yaml value
+            # so the readiness gate probes the actual bind port.
+            OBSERVER_PORT="$obs_port"
+        fi
     fi
 
     # --- slave --------------------------------------------------------
@@ -460,8 +478,14 @@ prod_preflight() {
     # port and time out at exit 4 instead of exit 2.
     [[ -n "$slave_listen" ]] || die "prod preflight failed: $f daemon.listen is empty; the readiness gate needs an explicit port; see tests/prod_test/E2E_RUNBOOK.md:83-108"
     slave_port="${slave_listen##*:}"
-    if [[ "$slave_port" =~ ^[0-9]+$ && "$slave_port" != "$SLAVE_PORT" ]]; then
-        die "prod preflight failed: operator-registered slave uses port $slave_port; --slave-port $SLAVE_PORT must match or be omitted"
+    if [[ "$slave_port" =~ ^[0-9]+$ ]]; then
+        if (( SLAVE_PORT_SET == 1 )); then
+            if [[ "$slave_port" != "$SLAVE_PORT" ]]; then
+                die "prod preflight failed: operator-registered slave uses port $slave_port; --slave-port $SLAVE_PORT must match or be omitted"
+            fi
+        else
+            SLAVE_PORT="$slave_port"
+        fi
     fi
     [[ -x "$LOOM_HOME/slave/slave-agent" ]] || die "prod preflight failed: $LOOM_HOME/slave/slave-agent not executable"
 
@@ -502,6 +526,23 @@ trap cleanup_on_failure EXIT
 # no-side-effect contract for --dry-run).
 mkdir -p "$LOOM_HOME" "$PIDS_DIR"
 chmod 0700 "$PIDS_DIR"
+
+# run_whitelisted <cmd...>  — foreground exec of a helper subprocess
+# (install.sh, agentserver-stub issue, yq) with the same env whitelist
+# spawn_bg applies to daemons. Bypassing this and running `bash
+# install.sh ...` directly would silently inherit the operator's full
+# env (AWS_*, GITHUB_TOKEN, OPENAI_API_KEY, etc.) — §7(g) requires the
+# whitelist for EVERY spawned subprocess, not just the long-running
+# ones (P0-1 fix, Codex round 2).
+run_whitelisted() {
+    local env_lines
+    env_lines=$(emit_whitelisted_env)
+    local -a env_argv=()
+    while IFS= read -r kv; do
+        [[ -n "$kv" ]] && env_argv+=("$kv")
+    done <<< "$env_lines"
+    env -i "${env_argv[@]}" "$@"
+}
 
 # spawn_bg <role> <log-path> <cmd...>
 spawn_bg() {
@@ -603,7 +644,7 @@ bringup_stub() {
     [[ -n "${obs_bin:-}" ]] || die "no observer-server binary in $BIN_DIR (expected observer-server.linux-*)"
     local obs_apikey
     obs_apikey=$(head -c 16 /dev/urandom | xxd -p -c 32)
-    if ! bash "$SCRIPT_DIR/observer/install.sh" --name eval-obs \
+    if ! run_whitelisted bash "$SCRIPT_DIR/observer/install.sh" --name eval-obs \
             --loom-home "$LOOM_HOME/observer" \
             --listen "127.0.0.1:$OBSERVER_PORT" \
             --api-key "$obs_apikey" \
@@ -623,7 +664,7 @@ bringup_stub() {
         [[ -x "$candidate" ]] && slave_bin="$candidate" && break
     done
     [[ -n "${slave_bin:-}" ]] || die "no slave-agent binary in $BIN_DIR"
-    if ! bash "$SCRIPT_DIR/slave/install.sh" --name eval-slave \
+    if ! run_whitelisted bash "$SCRIPT_DIR/slave/install.sh" --name eval-slave \
             --loom-home "$LOOM_HOME/slave" \
             --observer-url "http://127.0.0.1:$OBSERVER_PORT" \
             --workspace ws-eval-auto \
@@ -637,7 +678,7 @@ bringup_stub() {
     mkdir -p "$LOOM_HOME/slave/creds"
     slave_creds="$LOOM_HOME/slave/creds/slave.json"
     umask 0177
-    "$stub_bin" issue --server "http://127.0.0.1:$STUB_PORT" \
+    run_whitelisted "$stub_bin" issue --server "http://127.0.0.1:$STUB_PORT" \
         --role slave --short-id slv-eval-001 > "$slave_creds"
     umask 0022
     local slave_sandbox slave_tunnel slave_proxy slave_ws slave_short
@@ -666,7 +707,7 @@ bringup_stub() {
         [[ -x "$candidate" ]] && driver_bin="$candidate" && break
     done
     [[ -n "${driver_bin:-}" ]] || die "no driver-agent binary in $BIN_DIR"
-    if ! bash "$SCRIPT_DIR/driver/install.sh" --project "$LOOM_HOME/driver" \
+    if ! run_whitelisted bash "$SCRIPT_DIR/driver/install.sh" --project "$LOOM_HOME/driver" \
             --name eval-driver \
             --observer-url "http://127.0.0.1:$OBSERVER_PORT" \
             --bin "$driver_bin" \
@@ -678,7 +719,7 @@ bringup_stub() {
     mkdir -p "$LOOM_HOME/driver/creds"
     driver_creds="$LOOM_HOME/driver/creds/driver.json"
     umask 0177
-    "$stub_bin" issue --server "http://127.0.0.1:$STUB_PORT" \
+    run_whitelisted "$stub_bin" issue --server "http://127.0.0.1:$STUB_PORT" \
         --role driver --short-id drv-eval-001 > "$driver_creds"
     umask 0022
     local drv_sandbox drv_tunnel drv_proxy drv_ws drv_short

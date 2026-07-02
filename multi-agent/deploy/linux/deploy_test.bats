@@ -258,6 +258,18 @@ teardown() {
     grep -q 'passing OPENAI_API_KEY through' "$tmp_err"
 }
 
+# ----- T-mode-invalid: --mode X rejects invalid values -------------
+@test "T-mode-invalid: --mode nope exits 2" {
+    run bash "$DEPLOY" --mode nope --dry-run --loom-home "$LOOM_HOME"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"invalid --mode value"* ]]
+}
+
+@test "T-mode-invalid-b: --mode STUB (wrong case) exits 2" {
+    run bash "$DEPLOY" --mode STUB --dry-run --loom-home "$LOOM_HOME"
+    [ "$status" -eq 2 ]
+}
+
 # ----- T1b: --dry-run is side-effect-free ---------------------------
 @test "T1b: --dry-run does not create \$LOOM_HOME on disk" {
     fresh="$TMP/nonexistent-loom-$$"

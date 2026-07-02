@@ -84,6 +84,20 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Default exit code for unclassified failures. Each throw site sets
+# $script:ExitCode to the appropriate value (2 = preflight, 3 =
+# sub-installer, 4 = readiness, 5 = topology). The outer catch reads
+# this and exits with the classified code (P1-1 fix, Codex round 2).
+$script:ExitCode = 2
+
+# Track whether the operator explicitly supplied each port (mirrors
+# the Linux *_PORT_SET flags). Prod preflight below uses these to
+# honor the "omitted → adopt operator's yaml value" contract in
+# spec §4.2 prod row (P1-3 fix, Codex round 2).
+$script:ObserverPortSet = $PSBoundParameters.ContainsKey('ObserverPort')
+$script:SlavePortSet    = $PSBoundParameters.ContainsKey('SlavePort')
+$script:DriverPortSet   = $PSBoundParameters.ContainsKey('DriverPort')
+
 # --- constants ---------------------------------------------------------
 
 $script:WELL_KNOWN_PORTS = @(22, 23, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995, 3389, 5432, 6379, 8080, 8443)
@@ -260,10 +274,16 @@ function Get-PlannedCommands {
 }
 
 function Get-ComponentPorts {
-    $cp = [ordered]@{ observer = $ObserverPort; driver = $DriverPort; slave = $SlavePort }
+    # Build the ordered dict incrementally rather than using the
+    # `[ordered]@{...} + [ordered]@{...}` merge operator (which raises
+    # under strict mode on some PowerShell 7.x combinations).
+    $cp = [ordered]@{}
     if ($ResolvedMode -eq 'stub') {
-        $cp = [ordered]@{ agentserver_stub = $StubPort } + $cp
+        $cp['agentserver_stub'] = $StubPort
     }
+    $cp['observer'] = $ObserverPort
+    $cp['driver']   = $DriverPort
+    $cp['slave']    = $SlavePort
     return $cp
 }
 
@@ -320,11 +340,11 @@ function Test-ProdPreflight {
     # --- observer -----------------------------------------------------
     $obs_yaml = Join-Path $LoomHome 'observer\observer.yaml'
     if (-not (Test-Path -PathType Leaf -LiteralPath $obs_yaml)) {
-        throw "prod preflight failed: $obs_yaml missing; see tests/prod_test/E2E_RUNBOOK.md:83-108"
+        $script:ExitCode = 2; throw "prod preflight failed: $obs_yaml missing; see tests/prod_test/E2E_RUNBOOK.md:83-108"
     }
     $obs_bin = Join-Path $LoomHome 'observer\observer-server.exe'
     if (-not (Test-Path -PathType Leaf -LiteralPath $obs_bin)) {
-        throw "prod preflight failed: $obs_bin missing; see tests/prod_test/E2E_RUNBOOK.md:83-108"
+        $script:ExitCode = 2; throw "prod preflight failed: $obs_bin missing; see tests/prod_test/E2E_RUNBOOK.md:83-108"
     }
     # observer.yaml must have listen_addr matching -ObserverPort. See
     # deploy.sh prod_preflight() for the rationale (empty listen_addr
@@ -332,58 +352,67 @@ function Test-ProdPreflight {
     # misconfiguration behind an exit-4 timeout).
     $obs_cfg = Get-Content -Raw -LiteralPath $obs_yaml
     if (-not ($obs_cfg -match '(?m)^\s*listen_addr\s*:\s*["'']?([^"''\s]+)')) {
-        throw "prod preflight failed: $obs_yaml listen_addr is empty; see tests/prod_test/E2E_RUNBOOK.md:83-108"
+        $script:ExitCode = 2; throw "prod preflight failed: $obs_yaml listen_addr is empty; see tests/prod_test/E2E_RUNBOOK.md:83-108"
     }
     $obs_listen = $Matches[1]
     if ($obs_listen -match ':(\d+)$') {
         $obs_port = [int]$Matches[1]
-        if ($obs_port -ne $ObserverPort) {
-            throw "prod preflight failed: operator-registered observer uses port $obs_port; -ObserverPort $ObserverPort must match or be omitted"
+        if ($script:ObserverPortSet) {
+            if ($obs_port -ne $ObserverPort) {
+                $script:ExitCode = 2; throw "prod preflight failed: operator-registered observer uses port $obs_port; -ObserverPort $ObserverPort must match or be omitted"
+            }
+        } else {
+            $script:ObserverPort = $obs_port
+            Set-Variable -Scope Script -Name ObserverPort -Value $obs_port -Force
         }
     }
 
     # --- slave --------------------------------------------------------
     $slave_yaml = Join-Path $LoomHome 'slave\config.yaml'
     if (-not (Test-Path -PathType Leaf -LiteralPath $slave_yaml)) {
-        throw "prod preflight failed: $slave_yaml missing; see tests/prod_test/E2E_RUNBOOK.md:83-108"
+        $script:ExitCode = 2; throw "prod preflight failed: $slave_yaml missing; see tests/prod_test/E2E_RUNBOOK.md:83-108"
     }
     $slave_cfg = Get-Content -Raw -LiteralPath $slave_yaml
     foreach ($field in 'proxy_token', 'short_id', 'workspace_id') {
         if (-not ($slave_cfg -match "(?m)^\s*${field}\s*:\s*[\`"']?\S+")) {
-            throw "prod preflight failed: $slave_yaml credentials.$field is empty; see tests/prod_test/E2E_RUNBOOK.md:83-108"
+            $script:ExitCode = 2; throw "prod preflight failed: $slave_yaml credentials.$field is empty; see tests/prod_test/E2E_RUNBOOK.md:83-108"
         }
     }
     # daemon.listen required (same rationale as deploy.sh: empty means
     # the readiness gate waits on the wrong port).
     if (-not ($slave_cfg -match '(?m)^\s*listen\s*:\s*["'']?([^"''\s]+)')) {
-        throw "prod preflight failed: $slave_yaml daemon.listen is empty; the readiness gate needs an explicit port; see tests/prod_test/E2E_RUNBOOK.md:83-108"
+        $script:ExitCode = 2; throw "prod preflight failed: $slave_yaml daemon.listen is empty; the readiness gate needs an explicit port; see tests/prod_test/E2E_RUNBOOK.md:83-108"
     }
     $slave_listen = $Matches[1]
     if ($slave_listen -match ':(\d+)$') {
         $slave_port_val = [int]$Matches[1]
-        if ($slave_port_val -ne $SlavePort) {
-            throw "prod preflight failed: operator-registered slave uses port $slave_port_val; -SlavePort $SlavePort must match or be omitted"
+        if ($script:SlavePortSet) {
+            if ($slave_port_val -ne $SlavePort) {
+                $script:ExitCode = 2; throw "prod preflight failed: operator-registered slave uses port $slave_port_val; -SlavePort $SlavePort must match or be omitted"
+            }
+        } else {
+            Set-Variable -Scope Script -Name SlavePort -Value $slave_port_val -Force
         }
     }
     $slave_bin = Join-Path $LoomHome 'slave\slave-agent.exe'
     if (-not (Test-Path -PathType Leaf -LiteralPath $slave_bin)) {
-        throw "prod preflight failed: $slave_bin missing; see tests/prod_test/E2E_RUNBOOK.md:83-108"
+        $script:ExitCode = 2; throw "prod preflight failed: $slave_bin missing; see tests/prod_test/E2E_RUNBOOK.md:83-108"
     }
 
     # --- driver -------------------------------------------------------
     $driver_yaml = Join-Path $LoomHome 'driver\config.yaml'
     if (-not (Test-Path -PathType Leaf -LiteralPath $driver_yaml)) {
-        throw "prod preflight failed: $driver_yaml missing; see tests/prod_test/E2E_RUNBOOK.md:83-108"
+        $script:ExitCode = 2; throw "prod preflight failed: $driver_yaml missing; see tests/prod_test/E2E_RUNBOOK.md:83-108"
     }
     $driver_cfg = Get-Content -Raw -LiteralPath $driver_yaml
     foreach ($field in 'proxy_token', 'short_id') {
         if (-not ($driver_cfg -match "(?m)^\s*${field}\s*:\s*[\`"']?\S+")) {
-            throw "prod preflight failed: $driver_yaml credentials.$field is empty; see tests/prod_test/E2E_RUNBOOK.md:83-108"
+            $script:ExitCode = 2; throw "prod preflight failed: $driver_yaml credentials.$field is empty; see tests/prod_test/E2E_RUNBOOK.md:83-108"
         }
     }
     $driver_bin = Join-Path $LoomHome 'driver\driver-agent.exe'
     if (-not (Test-Path -PathType Leaf -LiteralPath $driver_bin)) {
-        throw "prod preflight failed: $driver_bin missing; see tests/prod_test/E2E_RUNBOOK.md:83-108"
+        $script:ExitCode = 2; throw "prod preflight failed: $driver_bin missing; see tests/prod_test/E2E_RUNBOOK.md:83-108"
     }
 }
 
@@ -394,7 +423,10 @@ $script:StageFailed = $false
 
 function Invoke-Cleanup-OnFailure {
     if (-not $script:StageFailed) { return }
-    Write-Error "deploy.ps1: failure — reaping spawned processes"
+    # Write-Warning (not Write-Error) — Write-Error under
+    # $ErrorActionPreference='Stop' would throw here and cut cleanup
+    # short before we reap PIDs (P1-1 fix, Codex round 2).
+    [System.Console]::Error.WriteLine("deploy.ps1: failure — reaping spawned processes")
     foreach ($p in $script:SpawnedPids) {
         try { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue } catch {}
     }
@@ -419,6 +451,35 @@ function Initialize-PidsDir {
     } catch {
         # Non-fatal on non-Windows hosts (Pester-on-Linux exercise).
     }
+}
+
+function Invoke-Whitelisted {
+    # Foreground exec of a helper subprocess (agentserver-stub issue,
+    # per-role installers when they take env-sensitive params) with the
+    # same env-clear + explicit .Add() pattern Start-Sub applies.
+    # Returns the subprocess stdout as a string. Bypassing this and
+    # running `& $bin ...` inherits the current PowerShell process's
+    # full env (AWS_*, GITHUB_TOKEN, OPENAI_API_KEY, …) — §7(g)
+    # requires the whitelist for EVERY spawned subprocess (P0-1 fix,
+    # Codex round 2).
+    param([string]$FilePath, [string[]]$ArgList)
+    $env_map = Get-WhitelistedEnv -Mode $ResolvedMode -AllowModelKey:$AllowModelKeyPassthrough
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $FilePath
+    foreach ($a in $ArgList) { $null = $psi.ArgumentList.Add($a) }
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+    $psi.UseShellExecute = $false
+    $psi.EnvironmentVariables.Clear()
+    foreach ($kv in $env_map.GetEnumerator()) { $psi.EnvironmentVariables.Add($kv.Key, $kv.Value) }
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $stderr = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+    if ($proc.ExitCode -ne 0) {
+        throw "Invoke-Whitelisted: $FilePath returned $($proc.ExitCode): $stderr"
+    }
+    return $stdout
 }
 
 function Start-Sub {
@@ -486,7 +547,7 @@ function Invoke-BringupStub {
     }
     Start-Sub -Role 'agentserver-stub' -LogPath (Join-Path $LoomHome 'logs\agentserver-stub.log') `
               -FilePath $stub_bin -ArgList @('--listen', "127.0.0.1:$StubPort", '--workspace-id', 'auto')
-    if (-not (Wait-TcpListen -Port $StubPort)) { $script:StageFailed = $true; throw "stub :$StubPort did not LISTEN" }
+    if (-not (Wait-TcpListen -Port $StubPort)) { $script:StageFailed = $true; $script:ExitCode = 4; throw "stub :$StubPort did not LISTEN" }
 
     # observer inline-render (§3.2 clause 2).
     $obs_dir = Join-Path $LoomHome 'observer'
@@ -509,7 +570,7 @@ function Invoke-BringupStub {
     Start-Sub -Role 'observer' -LogPath (Join-Path $LoomHome 'logs\observer.log') `
               -FilePath (Join-Path $obs_dir 'observer-server.exe') `
               -ArgList @('-config', (Join-Path $obs_dir 'observer.yaml'))
-    if (-not (Wait-TcpListen -Port $ObserverPort)) { $script:StageFailed = $true; throw "observer :$ObserverPort did not LISTEN" }
+    if (-not (Wait-TcpListen -Port $ObserverPort)) { $script:StageFailed = $true; $script:ExitCode = 4; throw "observer :$ObserverPort did not LISTEN" }
 
     # slave: real install.ps1 (WT-0-owned; do NOT modify) with its real params.
     & (Join-Path $PSScriptRoot 'slave\install.ps1') `
@@ -531,7 +592,7 @@ function Invoke-BringupStub {
     # (§4.2 stub table). We captured proxy_token in the yaml above.
     $slave_token = Get-CredFromYaml -Path (Join-Path $LoomHome 'slave\config.yaml') -Field 'proxy_token'
     if (-not (Wait-Whoami -Port $StubPort -ProxyToken $slave_token)) {
-        $script:StageFailed = $true; throw "slave whoami round-trip failed"
+        $script:StageFailed = $true; $script:ExitCode = 4; throw "slave whoami round-trip failed"
     }
 
     # driver: real install.ps1 with real params.
@@ -545,15 +606,17 @@ function Invoke-BringupStub {
     Start-Sub -Role 'driver' -LogPath (Join-Path $LoomHome 'logs\driver.log') `
               -FilePath (Join-Path $LoomHome 'driver\driver-agent.exe') `
               -ArgList @('serve-daemon', '--config', (Join-Path $LoomHome 'driver\config.yaml'), '--listen', "127.0.0.1:$DriverPort")
-    if (-not (Wait-TcpListen -Port $DriverPort)) { $script:StageFailed = $true; throw "driver :$DriverPort did not LISTEN" }
+    if (-not (Wait-TcpListen -Port $DriverPort)) { $script:StageFailed = $true; $script:ExitCode = 4; throw "driver :$DriverPort did not LISTEN" }
     if (-not (Wait-HttpAny -Url "http://127.0.0.1:$DriverPort/" -TimeoutSec 5)) {
-        $script:StageFailed = $true; throw "driver HTTP did not respond"
+        $script:StageFailed = $true; $script:ExitCode = 4; throw "driver HTTP did not respond"
     }
 }
 
 function Update-SlaveConfigStubMode {
     param([string]$SlaveConfigPath, [string]$StubBin)
-    $creds = & $StubBin issue --server "http://127.0.0.1:$StubPort" --role slave --short-id slv-eval-001 | ConvertFrom-Json
+    $creds = Invoke-Whitelisted -FilePath $StubBin `
+        -ArgList @('issue', '--server', "http://127.0.0.1:$StubPort", '--role', 'slave', '--short-id', 'slv-eval-001') `
+        | ConvertFrom-Json
     Update-YamlLeaf -Path $SlaveConfigPath -Key 'server.url'                -Value ("http://127.0.0.1:" + $StubPort)
     Update-YamlLeaf -Path $SlaveConfigPath -Key 'credentials.sandbox_id'    -Value $creds.sandbox_id
     Update-YamlLeaf -Path $SlaveConfigPath -Key 'credentials.tunnel_token'  -Value $creds.tunnel_token
@@ -566,7 +629,9 @@ function Update-SlaveConfigStubMode {
 
 function Update-DriverConfigStubMode {
     param([string]$DriverConfigPath, [string]$StubBin)
-    $creds = & $StubBin issue --server "http://127.0.0.1:$StubPort" --role driver --short-id drv-eval-001 | ConvertFrom-Json
+    $creds = Invoke-Whitelisted -FilePath $StubBin `
+        -ArgList @('issue', '--server', "http://127.0.0.1:$StubPort", '--role', 'driver', '--short-id', 'drv-eval-001') `
+        | ConvertFrom-Json
     Update-YamlLeaf -Path $DriverConfigPath -Key 'server.url'                -Value ("http://127.0.0.1:" + $StubPort)
     Update-YamlLeaf -Path $DriverConfigPath -Key 'credentials.sandbox_id'    -Value $creds.sandbox_id
     Update-YamlLeaf -Path $DriverConfigPath -Key 'credentials.tunnel_token'  -Value $creds.tunnel_token
@@ -662,15 +727,15 @@ function Invoke-BringupProd {
     Start-Sub -Role 'observer' -LogPath (Join-Path $LoomHome 'logs\observer.log') `
               -FilePath (Join-Path $LoomHome 'observer\observer-server.exe') `
               -ArgList @('-config', (Join-Path $LoomHome 'observer\observer.yaml'))
-    if (-not (Wait-TcpListen -Port $ObserverPort)) { $script:StageFailed = $true; throw "observer :$ObserverPort did not LISTEN" }
+    if (-not (Wait-TcpListen -Port $ObserverPort)) { $script:StageFailed = $true; $script:ExitCode = 4; throw "observer :$ObserverPort did not LISTEN" }
     Start-Sub -Role 'slave' -LogPath (Join-Path $LoomHome 'logs\slave.log') `
               -FilePath (Join-Path $LoomHome 'slave\slave-agent.exe') `
               -ArgList @((Join-Path $LoomHome 'slave\config.yaml'))
-    if (-not (Wait-TcpListen -Port $SlavePort)) { $script:StageFailed = $true; throw "slave :$SlavePort did not LISTEN" }
+    if (-not (Wait-TcpListen -Port $SlavePort)) { $script:StageFailed = $true; $script:ExitCode = 4; throw "slave :$SlavePort did not LISTEN" }
     Start-Sub -Role 'driver' -LogPath (Join-Path $LoomHome 'logs\driver.log') `
               -FilePath (Join-Path $LoomHome 'driver\driver-agent.exe') `
               -ArgList @('serve-daemon', '--config', (Join-Path $LoomHome 'driver\config.yaml'), '--listen', "127.0.0.1:$DriverPort")
-    if (-not (Wait-TcpListen -Port $DriverPort)) { $script:StageFailed = $true; throw "driver :$DriverPort did not LISTEN" }
+    if (-not (Wait-TcpListen -Port $DriverPort)) { $script:StageFailed = $true; $script:ExitCode = 4; throw "driver :$DriverPort did not LISTEN" }
 }
 
 try {
@@ -708,6 +773,7 @@ try {
 } catch {
     $script:StageFailed = $true
     Invoke-Cleanup-OnFailure
-    Write-Error $_
-    exit 4
+    # Write error message to stderr without triggering ErrorActionPreference=Stop.
+    [System.Console]::Error.WriteLine("deploy.ps1: $_")
+    exit $script:ExitCode
 }

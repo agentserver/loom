@@ -301,16 +301,24 @@ Describe 'T6-ps / T6c-ps / T9-ps / T17-ps / T18-ps: Windows-only runtime' {
     # fresh-Windows-host leg (see plan §6.3) is what actually
     # exercises them.
 
-    It 'T6-ps: agentserver-stub -ArgumentList begins with 127.0.0.1' {
+    It 'T6-ps: agentserver-stub -ArgumentList begins with 127.0.0.1 (source-argv check)' {
         if (-not $IsWindows) { Set-ItResult -Skipped -Because 'requires Windows'; return }
-        # Full-stack -Stub run into a tempdir; then read the argv the
-        # stub was started with (Get-Process | Select CommandLine).
-        # Implementation deferred to Task 12 fresh-host transcript.
-        Set-ItResult -Skipped -Because 'implemented as manual fresh-host smoke in Task 12'
+        # On Windows, static grep the built argv construction inside
+        # Invoke-BringupStub — the runtime argv is passed straight from
+        # Start-Sub's -ArgList parameter, so source-argv is dispositive.
+        # (A full-stack live run is the manual fresh-host smoke in
+        # plan §6.3 Windows leg; this test catches the source-level
+        # regression on any Windows Pester run.)
+        $src = Get-Content -Raw -LiteralPath $script:DEPLOY
+        $src | Should -Match "Start-Sub -Role 'agentserver-stub'[\s\S]*?-ArgList\s+@\('--listen',\s*[`"']127\.0\.0\.1:"
     }
-    It 'T6c-ps: post-Stub slave config shows auto_start=false + stub server.url' {
+    It 'T6c-ps: post-Stub slave config shows auto_start=false + stub server.url (source check)' {
         if (-not $IsWindows) { Set-ItResult -Skipped -Because 'requires Windows'; return }
-        Set-ItResult -Skipped -Because 'implemented as manual fresh-host smoke in Task 12'
+        # Static: Update-SlaveConfigStubMode writes both fields. A
+        # regression that dropped either edit fails this Pester assertion.
+        $src = Get-Content -Raw -LiteralPath $script:DEPLOY
+        $src | Should -Match "Update-YamlLeaf -Path \`$SlaveConfigPath -Key 'daemon\.auto_start'"
+        $src | Should -Match "Update-YamlLeaf -Path \`$SlaveConfigPath -Key 'server\.url'"
     }
     It 'T9-ps: -Prod does not clobber pre-registered proxy_token' {
         if (-not $IsWindows) { Set-ItResult -Skipped -Because 'requires Windows'; return }
@@ -374,19 +382,82 @@ credentials:
     }
     It 'T17-ps: fresh Windows -Stub runs to completion with 4 readiness gates' {
         if (-not $IsWindows) { Set-ItResult -Skipped -Because 'requires Windows'; return }
-        Set-ItResult -Skipped -Because 'implemented as manual fresh-host smoke in Task 12; needs prebuilt Windows binaries under deploy/windows/bin/'
+        # Requires prebuilt Windows binaries under deploy/windows/bin/.
+        # When absent (a fresh CI Windows runner without a build step),
+        # skip with a specific reason rather than silently pass.
+        $binDir = Join-Path $PSScriptRoot 'bin'
+        $stubBin = Join-Path $binDir 'agentserver-stub.windows-amd64.exe'
+        if (-not (Test-Path -LiteralPath $stubBin)) {
+            Set-ItResult -Skipped -Because "requires $stubBin (rebuild with go build)"; return
+        }
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('wt2-t17-ps-' + [guid]::NewGuid().ToString('N').Substring(0,8))
+        try {
+            & $script:DEPLOY -Stub -LoomHome $tmp 2>&1 | Out-Null
+            $LASTEXITCODE | Should -Be 0
+            (Test-Path (Join-Path $tmp '.pids\agentserver-stub.pid')) | Should -BeTrue
+            (Test-Path (Join-Path $tmp '.pids\observer.pid')) | Should -BeTrue
+            (Test-Path (Join-Path $tmp '.pids\driver.pid')) | Should -BeTrue
+            (Test-Path (Join-Path $tmp '.pids\slave.pid')) | Should -BeTrue
+        } finally {
+            # Reap via -Shutdown.
+            try { & $script:DEPLOY -Shutdown -LoomHome $tmp 2>&1 | Out-Null } catch {}
+            Remove-Item -Recurse -Force -Path $tmp -ErrorAction SilentlyContinue
+        }
     }
     It 'T18-ps: -Stub writes .pids/*.pid, spawn-then-exit contract' {
         if (-not $IsWindows) { Set-ItResult -Skipped -Because 'requires Windows'; return }
-        Set-ItResult -Skipped -Because 'implemented as manual fresh-host smoke in Task 12'
+        $binDir = Join-Path $PSScriptRoot 'bin'
+        if (-not (Test-Path (Join-Path $binDir 'agentserver-stub.windows-amd64.exe'))) {
+            Set-ItResult -Skipped -Because 'requires prebuilt Windows binaries'; return
+        }
+        # Covered by T17-ps above; explicit assertion of spawn-then-exit
+        # (deploy exits before PIDs are reaped).
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('wt2-t18-ps-' + [guid]::NewGuid().ToString('N').Substring(0,8))
+        try {
+            & $script:DEPLOY -Stub -LoomHome $tmp 2>&1 | Out-Null
+            # Read each PID and assert Get-Process finds it alive.
+            foreach ($role in 'agentserver-stub','observer','slave','driver') {
+                $pf = Join-Path $tmp ".pids\$role.pid"
+                (Test-Path $pf) | Should -BeTrue
+                $pidVal = [int](Get-Content -LiteralPath $pf)
+                (Get-Process -Id $pidVal -ErrorAction SilentlyContinue) | Should -Not -BeNullOrEmpty
+            }
+        } finally {
+            try { & $script:DEPLOY -Shutdown -LoomHome $tmp 2>&1 | Out-Null } catch {}
+            Remove-Item -Recurse -Force -Path $tmp -ErrorAction SilentlyContinue
+        }
     }
     It 'T18b-ps: -Shutdown reaps every pid in .pids' {
         if (-not $IsWindows) { Set-ItResult -Skipped -Because 'requires Windows'; return }
-        Set-ItResult -Skipped -Because 'implemented as manual fresh-host smoke in Task 12'
+        $binDir = Join-Path $PSScriptRoot 'bin'
+        if (-not (Test-Path (Join-Path $binDir 'agentserver-stub.windows-amd64.exe'))) {
+            Set-ItResult -Skipped -Because 'requires prebuilt Windows binaries'; return
+        }
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('wt2-t18b-ps-' + [guid]::NewGuid().ToString('N').Substring(0,8))
+        try {
+            & $script:DEPLOY -Stub -LoomHome $tmp 2>&1 | Out-Null
+            $pids = Get-ChildItem -Path (Join-Path $tmp '.pids') -Filter '*.pid' | ForEach-Object {
+                [int](Get-Content -LiteralPath $_.FullName)
+            }
+            & $script:DEPLOY -Shutdown -LoomHome $tmp 2>&1 | Out-Null
+            Start-Sleep -Seconds 6
+            foreach ($p in $pids) {
+                (Get-Process -Id $p -ErrorAction SilentlyContinue) | Should -BeNullOrEmpty
+            }
+            (Test-Path (Join-Path $tmp '.pids')) | Should -BeFalse
+        } finally {
+            Remove-Item -Recurse -Force -Path $tmp -ErrorAction SilentlyContinue
+        }
     }
     It 'T18c-ps: readiness timeout exits 4 with cleanup' {
         if (-not $IsWindows) { Set-ItResult -Skipped -Because 'requires Windows'; return }
-        Set-ItResult -Skipped -Because 'implemented as manual fresh-host smoke in Task 12'
+        # This one needs a shim stub that never responds to /healthz —
+        # deferred to fresh-host smoke per plan §6.3 (needs a shim exe
+        # or a mock server we don't own on Windows CI yet). Static
+        # source assertion: the timeout branch throws with the exit-4
+        # marker set — same class of check as T6-ps/T6c-ps above.
+        $src = Get-Content -Raw -LiteralPath $script:DEPLOY
+        $src | Should -Match "Wait-TcpListen -Port \`$StubPort[\s\S]*?script:StageFailed = \`$true; \`$script:ExitCode = 4"
     }
 }
 
