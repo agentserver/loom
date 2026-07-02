@@ -139,13 +139,18 @@ func computeCandidateID(runID, family string, taskIDs []string) string {
 
 // SurfacePromoteCandidate — spec §3.
 func SurfacePromoteCandidate(ctx context.Context, sig CandidateSignal) (string, error) {
-	surfacePromotionInitErrorOnce()
-
-	// Ablation short-circuit BEFORE any other side effect.
+	// Ablation short-circuit BEFORE any other side effect (including
+	// the init-error surfacing which itself logs). Under ablation
+	// silence is the invariant except for the one [ablation] line.
 	if IsNoUserPromotionPath() {
-		log.Printf("[ablation] NoUserPromotionPath: candidate suppressed family=%s", sig.Family)
+		// Render family through the family regex sanitiser inline so
+		// a caller-supplied family containing newline/control chars
+		// cannot inject fake log lines. Bad families are shown as %q
+		// (quoted, escapes newlines/nul).
+		log.Printf("[ablation] NoUserPromotionPath: candidate suppressed family=%q", sig.Family)
 		return "", nil
 	}
+	surfacePromotionInitErrorOnce()
 
 	// Validate.
 	if !promoteCandFamilyRE.MatchString(sig.Family) {
