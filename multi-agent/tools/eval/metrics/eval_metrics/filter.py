@@ -220,13 +220,38 @@ def _reject_non_predicate_leaves(node: exp.Expression) -> None:
 # they can evaluate to a value that always equals the LHS column
 # (schema-tautology) or introduce covert Column references that the
 # whitelist walker cannot spot behind a Function wrapper.
+#
+# `exp.Neg` (unary minus) is deliberately absent: `-workload_id` parses
+# as Neg(Column('workload_id')), which slips a Column into the RHS
+# past a simple isinstance check. If a numeric literal is needed, the
+# user writes `-1` in the fragment — but even then, the `-` is a Neg
+# wrapper around a Literal, and we route that through `_is_bare_rhs`
+# below which recognises Neg-of-Literal but NOT Neg-of-Column.
 _RHS_ATOMIC_TYPES: tuple[type, ...] = (
     exp.Literal,      # numeric or string literal (post extract, string → Placeholder)
     exp.Placeholder,  # `?` from parametric extraction
     exp.Null,         # explicit NULL literal (rare in WHERE fragments)
     exp.Boolean,      # TRUE/FALSE — the tree-shape walker rejects it at boolean position, but a value context is fine
-    exp.Neg,          # `-1` parses as Neg(Literal(1)); accept for numeric comparisons
 )
+
+
+def _is_bare_rhs(node: exp.Expression) -> bool:
+    """True iff `node` is a bare literal / placeholder / negated-literal.
+
+    Recognises `-<literal>` (Neg(Literal)) as a bare literal — the
+    parser wraps `= -1` in a Neg node, and rejecting Neg outright would
+    make `= -1` unusable. But `-<column>` (Neg(Column)) is a bypass —
+    we recurse into the Neg's child and require it to be one of the
+    _RHS_ATOMIC_TYPES too, closing the `run_id = -workload_id` /
+    `run_id = -(-run_id)` bypass class Codex round-5 code-review
+    P0 flagged.
+    """
+    if isinstance(node, (exp.Neg, exp.Paren)):
+        # Neg peels a unary minus; Paren peels a `(...)` grouping.
+        # Recursing into both handles `-(1)` (Neg(Paren(Literal))) as
+        # well as the bare `-1` (Neg(Literal)) case.
+        return _is_bare_rhs(node.this)
+    return isinstance(node, _RHS_ATOMIC_TYPES)
 
 
 def _enforce_predicate_shape(pred: exp.Expression) -> None:
@@ -250,7 +275,7 @@ def _enforce_predicate_shape(pred: exp.Expression) -> None:
                 f"--runs-filter predicate LHS must be a bare column: {pred.sql()!r} "
                 f"(LHS type={type(lhs).__name__})"
             )
-        if not isinstance(rhs, _RHS_ATOMIC_TYPES):
+        if not _is_bare_rhs(rhs):
             raise ErrRunsFilterColumnCompare(
                 f"--runs-filter predicate RHS must be a bare literal/placeholder: {pred.sql()!r} "
                 f"(RHS type={type(rhs).__name__})"
@@ -263,7 +288,7 @@ def _enforce_predicate_shape(pred: exp.Expression) -> None:
                 f"--runs-filter BETWEEN subject must be a bare column: {pred.sql()!r}"
             )
         for bound in (low, high):
-            if not isinstance(bound, _RHS_ATOMIC_TYPES):
+            if not _is_bare_rhs(bound):
                 raise ErrRunsFilterColumnCompare(
                     f"--runs-filter BETWEEN bounds must be literals: {pred.sql()!r}"
                 )
@@ -273,7 +298,7 @@ def _enforce_predicate_shape(pred: exp.Expression) -> None:
             raise ErrRunsFilterColumnCompare(
                 f"--runs-filter LIKE subject must be a bare column: {pred.sql()!r}"
             )
-        if not isinstance(pattern, _RHS_ATOMIC_TYPES):
+        if not _is_bare_rhs(pattern):
             raise ErrRunsFilterColumnCompare(
                 f"--runs-filter LIKE pattern must be a bare literal: {pred.sql()!r}"
             )
@@ -291,7 +316,7 @@ def _enforce_predicate_shape(pred: exp.Expression) -> None:
                 f"--runs-filter IN with subquery not allowed: {pred.sql()!r}"
             )
         for elem in (pred.args.get("expressions") or []):
-            if not isinstance(elem, _RHS_ATOMIC_TYPES):
+            if not _is_bare_rhs(elem):
                 raise ErrRunsFilterColumnCompare(
                     f"--runs-filter IN element must be a bare literal: {elem.sql()!r}"
                 )

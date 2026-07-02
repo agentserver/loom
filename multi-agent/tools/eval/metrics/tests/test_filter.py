@@ -240,3 +240,37 @@ def test_expr_lhs_function_reject() -> None:
     from eval_metrics.filter import ErrRunsFilterColumnCompare
     with pytest.raises(ErrRunsFilterColumnCompare):
         compile_runs_filter("LOWER(run_id) = 'x'")
+
+
+def test_neg_column_reject() -> None:
+    """`run_id = -workload_id` — Neg wraps a Column; reject."""
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterColumnCompare
+    with pytest.raises(ErrRunsFilterColumnCompare):
+        compile_runs_filter("run_id = -workload_id")
+
+
+def test_neg_neg_column_reject() -> None:
+    """`run_id = -(-run_id)` — nested Neg still hides a Column."""
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterColumnCompare
+    with pytest.raises(ErrRunsFilterColumnCompare):
+        compile_runs_filter("run_id = -(-run_id)")
+
+
+def test_neg_paren_column_reject() -> None:
+    """`run_id = -(workload_id)` — Paren wrapper does not launder a Column."""
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterColumnCompare
+    with pytest.raises(ErrRunsFilterColumnCompare):
+        compile_runs_filter("run_id = -(workload_id)")
+
+
+def test_neg_literal_accept() -> None:
+    """`run_id = -1` and `run_id = -(1)` — Neg-of-literal is fine."""
+    where, params = compile_runs_filter("run_id = -1")
+    assert "run_id" in where
+    assert params == ()
+    where, params = compile_runs_filter("run_id = -(1)")
+    assert "run_id" in where
+    assert params == ()
