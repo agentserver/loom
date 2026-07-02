@@ -247,7 +247,7 @@ belt-and-suspenders against sqlparse edge cases.
 
 ### 3.2 `--metric-set` selection
 
-`full` emits all 40 metrics from §2 (with structured metrics flattened
+`full` emits all 41 metrics from §2 (with structured metrics flattened
 into sub-columns, so the on-wire column count is larger — see §3.3).
 The five subset values each emit the section's rows PLUS any metric
 whose §2.1 Metric-set membership table (or an equivalent cross-list
@@ -334,7 +334,10 @@ still produces a valid one-record output:
 - JSON: `{"metric_set": "full", "row_count": 0, "metrics": {
   HumanContextSelectionCount: 0, TaskSuccessRate: null,
   ManualSetupStepCount: null, ...}, "notes":
-  {...one entry per metric whose upstream is missing}}`.
+  {TaskSuccessRate: "denominator zero", ...,
+  ManualSetupStepCount: "upstream data missing", ...}}` — one entry
+  per `null` metric, using the two-value closed set from §3.3
+  (`"upstream data missing"` OR `"denominator zero"`).
 
 The distinction between "count metric with real 0" and "count
 metric with unavailable data" is exactly the §7 (f) rationale
@@ -515,7 +518,7 @@ overlapping decision). The join filter is
 `WHERE route_reasons.decision_started_at BETWEEN run.start_time AND
 run.end_time`, restated in §2.5 #37.
 
-Hand-computed values (per-metric, in §2 order — 39 total):
+Hand-computed values (per-metric, in §2 order — 41 total):
 
 Populated metrics:
 
@@ -596,7 +599,7 @@ Confirms §5 acceptance criterion 1.
 ## 5. Acceptance criteria
 
 1. `eval-metrics extract --observer-db <empty.db> --format csv` prints
-   a header line whose column set is `metric_set, row_count, <the 40
+   a header line whose column set is `metric_set, row_count, <the 41
    metric names in §2 order, with structured metrics flattened to
    <metric>.<subkey> sub-columns>, _notes`, followed by exactly one
    data row where `row_count=0`; count-metrics with landed upstream
@@ -670,18 +673,32 @@ Two checks, in order:
    an unreadable/nonexistent input DB is always an error; the `--out`
    path validation in §(d) below uses a **different** policy that
    requires the target to NOT yet exist). Reject if the resolved path
-   descends from any of `/etc/`, `/proc/`, `/sys/`, `/dev/`.
-   Sample-and-hold: the resolved path is
-   the one opened; symlink swap between check and open is impossible
-   because we pass the resolved string to `sqlite3.connect`, never the
-   original.
-2. **Magic-bytes probe**: open with `open(path, 'rb')`, read exactly 16
-   bytes, verify `header == b'SQLite format 3\x00'` (the standard
-   SQLite header per <https://www.sqlite.org/fileformat.html>). Reject
-   otherwise. This runs BEFORE `sqlite3.connect` — sqlite3's own error
-   on a non-DB file is a generic "file is not a database" that can be
-   confused with permission errors; the explicit probe gives a clean
-   exit-2 with `"not a SQLite database"`.
+   descends from any of `/etc/`, `/proc/`, `/sys/`, `/dev/`. The
+   resolved path is the value passed to step 2's open — see
+   TOCTOU-closure step 3 below.
+2. **Magic-bytes probe**: open the resolved path with
+   `os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW)` (NOT
+   `open()` — we need `O_NOFOLLOW` on the final component to reject
+   a symlink that a race installed between step 1's resolve and here);
+   `read(16)`; verify `header == b'SQLite format 3\x00'` (the
+   standard SQLite header per <https://www.sqlite.org/fileformat.html>).
+   Reject otherwise. This runs BEFORE `sqlite3.connect` — sqlite3's own
+   error on a non-DB file is a generic "file is not a database" that
+   can be confused with permission errors; the explicit probe gives a
+   clean exit-2 with `"not a SQLite database"`. **Do NOT close the fd**
+   — carry it into step 3.
+3. **TOCTOU-safe connect**: pass the fd from step 2 to
+   `sqlite3.connect` via the Linux `/proc/self/fd/<fd>` URI form
+   (`f"file:/proc/self/fd/{fd}?mode=ro&immutable=1"`); this opens the
+   already-verified inode, so any post-verify rename or symlink swap
+   of the pathname cannot re-target sqlite3. On non-Linux
+   (macOS/Windows) fall back to `sqlite3.connect(resolved,
+   uri=True)` with `f"file:{resolved}?mode=ro&immutable=1"` and
+   accept the residual TOCTOU risk (`/proc/self/fd` is Linux-only);
+   spec §7 (b) rationale sacrifices strict TOCTOU closure on
+   platforms where the paper's evaluation harness does not run.
+   All eval-runner CI + prod runs use Linux — so the fd form
+   applies to every path the paper cares about.
 
 ### (c) `--runs-filter` — prepared statements + field whitelist
 
@@ -815,7 +832,7 @@ Value MUST be one of `{full, lifecycle, contracted, user-promoted,
 semantic, overhead}`. Any other value → exit 2 immediately with the
 allowed-list printed. **Do NOT default to `full` on unrecognized
 input** — that would let a typo (`--metric-set liflecycle`) silently
-emit the full 40-metric set while the operator thinks they got a
+emit the full 41-metric set while the operator thinks they got a
 subset, corrupting the paper's cohort attribution.
 
 ### (f) Denominator = 0 → `null` (never NaN / inf / 0)
@@ -886,10 +903,10 @@ Created (all under `multi-agent/tools/eval/metrics/`):
 - `eval_metrics/paths.py` — `--observer-db` / `--out` path validators (§7 (b), (d))
 - `eval_metrics/csv_out.py` — CSV serializer + formula-injection escape (§7 (d))
 - `eval_metrics/json_out.py` — JSON serializer
-- `eval_metrics/metrics/__init__.py` — registry of the 40 metrics
+- `eval_metrics/metrics/__init__.py` — registry of the 41 metrics
 - `eval_metrics/metrics/lifecycle.py` — §2.1 (9 metrics)
 - `eval_metrics/metrics/contracted.py` — §2.2 (7 metrics)
-- `eval_metrics/metrics/user_promoted.py` — §2.3 (12 metrics, all null today)
+- `eval_metrics/metrics/user_promoted.py` — §2.3 (13 metrics, all null today)
 - `eval_metrics/metrics/semantic.py` — §2.4 (3 metrics)
 - `eval_metrics/metrics/overhead.py` — §2.5 (9 metrics)
 - `tests/conftest.py`
@@ -1079,3 +1096,15 @@ Modified: none. This worktree adds files only. If any file outside
     are canonicalized to sha256 by the fixture-builder before
     insertion (per `evalrun/schema.go:42` `^[a-f0-9]{64}$`
     validator).
+- 2026-07-03 (round 12, Codex P1 fixes):
+  - Remaining stale 40 references corrected to 41 (§3.2, §5.1, §8
+    manifest, fixture 3 header).
+  - §3.3 empty-DB JSON example now cites BOTH `"upstream data
+    missing"` AND `"denominator zero"` note reasons, matching the
+    closed-set contract.
+  - §7 (b) `--observer-db` TOCTOU tightened: step 2 opens the
+    resolved path with `os.open(..., O_NOFOLLOW)` and carries the
+    fd into step 3, which passes `/proc/self/fd/<fd>` to
+    `sqlite3.connect` on Linux (the eval harness's only real
+    target). Non-Linux falls back to the plain-path form with a
+    documented residual TOCTOU risk.
