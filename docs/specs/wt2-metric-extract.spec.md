@@ -64,6 +64,23 @@ audit finds a named metric not in this catalog, that is a P0 spec bug.
 
 ### 2.1 Lifecycle (9 — from 12 号 §D8 / §A5 + 08 号 §Lifecycle / E1 / E3)
 
+**Metric-set membership.** Each metric row in §2.1..§2.5 has an
+implicit `metric_set` tag equal to its section (`lifecycle` for §2.1
+rows, `contracted` for §2.2, etc.) UNLESS the row's "Metric-sets"
+column below overrides it. Two lifecycle-listed metrics belong to
+BOTH `lifecycle` AND `overhead` because 08号 files them under both
+groupings — `ManualSetupStepCount` and `ConfigTouchCount` are named
+in 08号 §Overhead (08:87 heading, 08:91 rows) AND cited by 12号
+§D8 for E1/E6 lifecycle probes:
+
+| # | Metric-set membership |
+|---|---|
+| 7 | `lifecycle`, `overhead` |
+| 8 | `lifecycle`, `overhead` |
+
+`--metric-set overhead` therefore emits #7 and #8 (in addition to the
+§2.5 rows). All other metrics remain in exactly one metric-set.
+
 | # | Metric | Numerator | Denominator | Provenance |
 |---|---|---|---|---|
 | 1 | `TaskSuccessRate` | `count(runs where success_oracle_result = 'pass')` | `count(runs in selection)` | `runs.success_oracle_result` |
@@ -74,7 +91,7 @@ audit finds a named metric not in this catalog, that is a P0 spec bug.
 | 6 | `ArtifactCorrectnessRate` | `count(runs where success_oracle_result = 'pass' AND artifact_hashes != '[]')` | `count(runs where artifact_hashes != '[]')` | `runs.{success_oracle_result, artifact_hashes}` (oracle-side truth deferred to 12号 §D8; see §7 (g)) |
 | 7 | `ManualSetupStepCount` | `sum(runs.manual_setup_step_count)` if column present, else `null` + `"upstream data missing"` | — | 12号 §D8 owns the writer; not yet landed → emit `null` per §7 (g) |
 | 8 | `ConfigTouchCount` | `sum(runs.config_touch_count)` if column present, else `null` + `"upstream data missing"` | — | same as above |
-| 9 | `StateContinuityRate` | `count(runs where success_oracle_result = 'pass' AND artifact_hashes != '[]' AND task_contract_hash != '' AND observer_trace_path != '')` — matches 08:39's "artifacts/contracts/events traceable" reading of "traced across driver/slave/restart" | `count(runs in selection)` — 08:39 defines the denominator as "# tasks" (all tasks, not just interrupted ones). A finer-grained denominator (interrupted subset only) would over-restrict; the paper explicitly compares Full-Loom StateContinuity against baselines that never interrupt at all. | Named in 08:39 + 12:44 (§A5). **Today**: the numerator is computable from `runs` fields alone (the four columns exist), so this metric can populate a real value from PR #56's schema — no `events`-table join required. The stronger reading (require an interrupted-and-recovered lifecycle) would need 12号 §A6 write_id dedup + resume audit and is **out of scope**; the current denominator+numerator is the conservative closed-form the paper accepts. |
+| 9 | `StateContinuityRate` | data source not landed: 08:39 defines the numerator as "# tasks whose artifacts/contracts/events can be **traced across driver/slave/restart**"; the driver task journal (12号 §A5) has landed and provides the artifact/contract IDs, but there is no observer join today that tests trace-continuity across a driver/slave restart (12号 §A6 owns the resume audit + write_id dedup that would supply the "restart" side of the trace). → `null` + `"upstream data missing"` | — | Named in 08:39 + 12:44 (§A5). §7 (g). A future worktree that adds the §A6 resume audit will populate this metric without spec change. |
 
 **Note on data source status.** Columns `manual_setup_step_count` and
 `config_touch_count` are 08号 §Overhead / §E6 fields; they are NOT in
@@ -83,23 +100,21 @@ the 24-column `runs` DDL landed by PR #56 (see `runs` DDL in
 therefore emits them as `null` today; when 12号 §D8 / §D6c adds the
 columns, no spec change is needed — the extractor SHALL detect column
 presence via `PRAGMA table_info(runs)` and switch from `null` to `sum(...)`.
-`StateContinuityRate` is 08:39 / 12:44 — the driver task journal
-(§A5) has ALREADY landed and the numerator is a straight AND of four
-existing `runs` columns; the paper's stricter reading (require an
-interruption-and-recovery lifecycle) awaits 12号 §A6, but this
-extractor computes the conservative closed-form today and emits a
-real value.
+`StateContinuityRate` (§2.1 #9) is 08:39 / 12:44 — the driver task
+journal (§A5) has landed, but the "traced across driver/slave/restart"
+join requires 12号 §A6 (resume audit + write_id dedup), which has
+not — the metric emits `null` today.
 
 ### 2.2 Contracted (7 — from 12 号 §A + 08 号 §Contracted / E3) — metrics #10..#16
 
 | # | Metric | Numerator | Denominator | Provenance |
 |---|---|---|---|---|
-| 10 | `ContractCompleteness` | `sum(present_field_count)` over `task_contracts` whose `conversation_id` corresponds to at least one run in the runs-cohort. **Cohort projection**: `--runs-filter` narrows `runs`; those runs' `task_contract_hash` values project into `task_contracts` via a whitelisted join. Because `runs.task_contract_hash` (24-column DDL) is a per-run hash and `task_contracts` today has no `hash` column, the projection is implemented in two steps: (i) `SELECT DISTINCT conversation_id FROM task_contracts WHERE conversation_id IN (subquery over runs projected via observer_trace_path or, if the join key is unavailable in the current schema, over all `task_contracts` rows — see fallback note below);` (ii) sum `present_field_count` over that projection. **Fallback**: if a per-run→contract join key is not present in today's schema (it is not — `runs` has no `conversation_id`), the extractor issues a stderr warning `[eval-metrics] warn: ContractCompleteness cohort projection falls back to all task_contracts rows (join key missing; owner: 12号 §D1 follow-up)` and computes over ALL `task_contracts` rows. This is deliberately conservative — the paper's E3 experiment isolates contracted-execution ablations at the experiment-level, so cohort selection typically maps 1:1 to a full DB anyway. | **fixed constant `7 × count(task_contracts in projected cohort)`** — the 7 lifecycle fields per 12号 §A2; **NOT 08号's 8-field count** (§A2 pins the denominator). Denominator = 0 → `null` per §7 (f). | `task_contracts.body` — parsed to count the 7 lifecycle fields (intent.goal / intent.success_criteria / data_contract.read_artifacts / data_contract.write_targets / capability_requirements / execution_policy / recovery_hint) per `internal/contract/completeness.go:36-44` |
+| 10 | `ContractCompleteness` | data source cohort-attribution not landed: while `task_contracts.body` is populated by PR #52 and the 7-field bitmap logic is in `internal/contract/completeness.go`, projecting the runs-cohort (from `--runs-filter`) onto `task_contracts` requires a join key that today's schema does not provide — `runs` has no `conversation_id` and `task_contracts` has no `run_id`/hash. Any per-baseline aggregation would silently include contracts from other baselines and lie. → `null` + `"upstream data missing"` (owner: 12号 §D1 follow-up to add a per-run→contract join key). | — | Requires a per-run→contract join key not yet in schema. §7 (g). **Uncohorted diagnostic** available via a future subcommand (out of scope for this worktree); this row emits `null` in the cohort output. |
 | 11 | `PreExecutionFaultCatchRate` | data source not landed: while `runs.failure_category` can carry the `policy-violation` tag (D4 taxonomy, PR #61), only 12号 §A3 (dry-run pre-exec validator) attributes a caught fault to a pre-execution block — that worktree has NOT landed → `null` + `"upstream data missing"` | — | Requires 12号 §A3 validator + `dry_run_blocks` event stream; not yet in observer schema. §7 (g). |
 | 12 | `ContractViolationRate` | data source not landed: needs the runtime `contract_violations` audit view (12号 §A4, P1); the `failure_category='contract-violation'` tag exists in D4 taxonomy but nothing writes it yet → `null` + `"upstream data missing"` | — | Requires 12号 §A4 audit. §7 (g). |
 | 13 | `MissingArtifactDetectionRate` | data source not landed: needs the artifact-oracle/dry-run detection event (12号 §A3); the `failure_category='missing-file'` tag exists but attribution to a detected-vs-undetected fault is A3's job → `null` + `"upstream data missing"` | — | Requires 12号 §A3. §7 (g). |
 | 14 | `PolicyViolationPreventionRate` | data source not landed (12号 §A3 P1, not this worktree) → `null` + `"upstream data missing"` | — | Requires `dry_run_blocks` table (12号 §A3); not yet in observer schema. §7 (g). |
-| 15 | `RecoverySuccessRate` | `count(runs where failure_category IN ('slave-disconnect','driver-restart','timeout') AND success_oracle_result = 'pass')` | `count(runs where failure_category IN ('slave-disconnect','driver-restart','timeout'))` | `runs.{failure_category, success_oracle_result}` |
+| 15 | `RecoverySuccessRate` | data source not landed: 08:60 defines the numerator as "# interrupted tasks that resume or fail safely / # injected failures". A run's `failure_category` reflects its **terminal** state — a recovered run's `failure_category` is `''` (it passed) and its `success_oracle_result` is `'pass'`, so `runs` alone cannot distinguish "recovered from an interruption" from "never interrupted". This attribution requires 12号 §A6 write_id dedup + resume-event stream. → `null` + `"upstream data missing"` | — | Requires 12号 §A6. §7 (g). |
 | 16 | `DuplicateSideEffectRate` | data source not landed (12号 §A6 P1, write_id dedup table missing) → `null` + `"upstream data missing"` | — | Requires observer `write_id` dedup table (12号 §A6). §7 (g). |
 
 ### 2.3 User-promoted (11 — from 12 号 §B + 08 号 §User-promoted / E4) — metrics #17..#27
@@ -190,12 +205,14 @@ Whitelist (5 columns, matching 12号 §D2 filter axes):
 
 - `run_id`, `workload_id`, `claim_id`, `experiment_id`, `baseline_or_ablation`
 
-The parser accepts equality (`col = 'lit'` / `col = ?`), `IN (...)`,
-`LIKE 'pat'`, and their `AND`/`OR` combinations. `;`, comments (`--`,
-`/*`), subqueries (`SELECT`, `WITH`), and DDL/DML keywords
-(`UPDATE`/`DELETE`/`INSERT`/`DROP`/`ALTER`/`ATTACH`/`PRAGMA`) trigger
-rejection before parse — belt-and-suspenders against sqlparse edge
-cases.
+The parser accepts equality (`col = 'lit'`), `IN (lit, ...)`,
+`LIKE 'pat'`, and their `AND`/`OR` combinations. The extractor is
+the ONLY source of `?` placeholders — the placeholder-substitution
+step below replaces literals with `?` internally; users cannot supply
+`?` on the CLI. `;`, comments (`--`, `/*`), subqueries (`SELECT`,
+`WITH`), and DDL/DML keywords (`UPDATE`/`DELETE`/`INSERT`/`DROP`/
+`ALTER`/`ATTACH`/`PRAGMA`) trigger rejection before parse —
+belt-and-suspenders against sqlparse edge cases.
 
 ### 3.2 `--metric-set` selection
 
@@ -243,16 +260,23 @@ a `"upstream data missing"` reason (§7 (g)).
 **Empty-DB / zero-selection contract.** A cohort of zero `runs` rows
 still produces a valid one-record output:
 
-- CSV: header row + exactly one data row where `row_count = 0`,
-  count-metrics (`HumanContextSelectionCount`, …) = `0`, ratio-metrics
-  = empty cell (JSON `null`), structured metrics = empty flattened
-  sub-columns. The acceptance criterion in §5.1 refers to this shape
-  as "header + one data row with row_count=0"; earlier drafts said
-  "zero data rows" — that phrasing was ambiguous and is corrected
-  here.
-- JSON: `{"metric_set": "full", "row_count": 0, "metrics": {...all
-  count metrics: 0, all ratio/structured metrics: null}, "notes":
+- CSV: header row + exactly one data row where `row_count = 0`.
+  Count-metrics whose data source HAS landed (`HumanContextSelectionCount`
+  from `runs.human_intervention_count`) = `0`. Count-metrics whose
+  data source has NOT landed = **empty cell** (JSON `null`),
+  identical to ratio-metric denominator-0 treatment — the operator
+  must not read "0 manual setup steps" as evidence when in fact the
+  probe never fired. Ratio-metrics = empty cell. Structured metrics
+  = empty flattened sub-columns.
+- JSON: `{"metric_set": "full", "row_count": 0, "metrics": {
+  HumanContextSelectionCount: 0, TaskSuccessRate: null,
+  ManualSetupStepCount: null, ...}, "notes":
   {...one entry per metric whose upstream is missing}}`.
+
+The distinction between "count metric with real 0" and "count
+metric with unavailable data" is exactly the §7 (f) rationale
+against emitting `0` for missing data — it applies to count metrics
+just as it does to ratio metrics.
 
 ## 4. Golden fixture traces
 
@@ -295,10 +319,10 @@ Hand-computed values:
 - `ArtifactCorrectnessRate = 6/6 = 1.0` (all 6 rows with non-empty artifacts also passed; denominator = 6)
 - `ManualSetupStepCount = null` (column absent per §2.1 note)
 - `ConfigTouchCount = null` (same)
-- `StateContinuityRate = 6/10 = 0.6` (same 6 rows as `LifecycleClosureRate`
-  by the conservative closed-form denominator in §2.1 row 9; matches the
-  paper's "# tasks whose artifacts/contracts/events can be traced /
-  # tasks" reading per 08:39)
+- `StateContinuityRate = null` (§2.1 row 9, upstream missing —
+  12号 §A6 resume audit not landed; the paper's "traced across
+  driver/slave/restart" numerator requires a resume-event join
+  this worktree cannot provide today)
 
 ### 4.2 Fixture 2 — Contracted (§2.2)
 
@@ -328,21 +352,28 @@ plus 6 `task_contracts` rows with the JSON bodies below.
 
 Hand-computed values:
 
-- `ContractCompleteness = (7+6+6+6+6+6) / (7 * 6) = 37 / 42 ≈ 0.8809523809523809`
+All seven §2.2 metrics assert to `null` in fixture 2:
+
+- `ContractCompleteness = null` (§2.2 row 10, cohort-attribution
+  join key missing — the per-run→contract join is not in today's
+  schema; the fixture's 6 contracts cannot be legally attributed
+  to the 6-run cohort)
 - `PreExecutionFaultCatchRate = null` (§2.2 row 11, upstream missing — 12号 §A3 not landed)
 - `ContractViolationRate = null` (§2.2 row 12, upstream missing — 12号 §A4 not landed)
 - `MissingArtifactDetectionRate = null` (§2.2 row 13, upstream missing — 12号 §A3 not landed)
 - `PolicyViolationPreventionRate = null` (§2.2 row 14, upstream missing)
-- `RecoverySuccessRate = null` (no rows with failure_category IN slave-disconnect/driver-restart/timeout → denominator=0 → null per §7 (f))
+- `RecoverySuccessRate = null` (§2.2 row 15, upstream missing — 12号 §A6 not landed)
 - `DuplicateSideEffectRate = null` (§2.2 row 16, upstream missing)
 
-**Failure-category tags on fixture 2 rows exist purely to exercise
-`WrongContextFailureRate` (§2.1 row 5) and `RecoverySuccessRate`
-(§2.2 row 15) filtering logic — the tags DO NOT flow into
-`PreExecutionFaultCatchRate` / `ContractViolationRate` /
-`MissingArtifactDetectionRate` because those metrics require a
-per-fault attribution event stream from 12号 §A3/§A4 that has not
-yet landed. Fixture 2 asserts all three as `null`.**
+**Why keep fixture 2 at all if every §2.2 metric is null today?**
+Fixture 2 exercises the FIXTURE-BUILDER (populates `task_contracts`
+correctly) and the null-metric contract for §2.2 — both must
+continue to work once 12号 §A3/§A4/§A6 land and metrics #10..#16
+flip to real values. The hand-computed `ContractCompleteness =
+37/42` and the 6 flag combinations remain here as the reference
+values a future §A3/§D1 follow-up worktree will assert on when it
+enables cohort-projected computation. They are NOT asserted by
+this worktree's tests; each metric asserts `null` today.
 
 ### 4.3 Fixture 3 — Semantic + Overhead + User-promoted (§2.3–§2.5)
 
@@ -412,8 +443,6 @@ Populated metrics:
 - `WrongContextFailureRate = 2/5 = 0.4` (§2.1 #5; rows 2 and 5)
 - `ArtifactCorrectnessRate = 3/3 = 1.0` (§2.1 #6; 3 rows with
   non-empty artifact_hashes all passed)
-- `StateContinuityRate = 0/5 = 0.0` (§2.1 #9; conservative closed
-  form requires task_contract_hash non-empty)
 - `RoutingAccuracy = 3/4 = 0.75` (§2.4 #28; rows 1, 3, 4 match;
   row 2 wrong; row 5 excluded — ground_truth empty)
 - `RoutingLatencyP50P95 = {p50_ns: 1_500_000, p95_ns: 3_700_000,
@@ -421,23 +450,21 @@ Populated metrics:
   [500k, 1M, 2M, 4M]; median = midpoint = 1.5M; p95 at fractional
   index 2.85 → 2M + 0.85·(4M−2M) = 3.7M)
 
-Null metrics (30 total = 39 catalog − 9 populated above):
+Null metrics (31 total = 39 catalog − 8 populated above):
 
-- §2.1: `ManualSetupStepCount` (#7), `ConfigTouchCount` (#8) — 2 nulls
-- §2.2: `ContractCompleteness` (#10) via denominator=0 (no contracts);
-  `PreExecutionFaultCatchRate` (#11), `ContractViolationRate` (#12),
-  `MissingArtifactDetectionRate` (#13),
-  `PolicyViolationPreventionRate` (#14), `RecoverySuccessRate`
-  (#15) via denominator=0 (no rows in the recovery-cohort in
-  fixture 3), `DuplicateSideEffectRate` (#16) — **7 nulls**
+- §2.1: `ManualSetupStepCount` (#7), `ConfigTouchCount` (#8),
+  `StateContinuityRate` (#9) — 3 nulls
+- §2.2: all 7 contracted metrics — `ContractCompleteness` (#10)
+  via cohort-attribution missing; #11..#16 via upstream-missing.
+  **7 nulls**
 - §2.3: all 11 user-promoted metrics (#17..#27) — 11 nulls
 - §2.4: `CapabilityRecall` (#29), `CapabilityPrecision` (#30) —
   2 nulls
 - §2.5: 6 non-routing E5 overhead metrics (#31..#36) plus 2 E6
   onboarding metrics (#38, #39) — 8 nulls
 
-Total: 2 + 7 + 11 + 2 + 8 = **30 null cells**. Populated 9 + null
-30 = 39 metrics.
+Total: 3 + 7 + 11 + 2 + 8 = **31 null cells**. Populated 8 + null
+31 = 39 metrics.
 
 ### 4.4 Empty-DB fixture (implicit)
 
@@ -460,9 +487,10 @@ Confirms §5 acceptance criterion 1.
    a header line whose column set is `metric_set, row_count, <the 39
    metric names in §2 order, with structured metrics flattened to
    <metric>.<subkey> sub-columns>, _notes`, followed by exactly one
-   data row where `row_count=0`, count-metrics are `0`, ratio and
-   structured metric cells are empty, and `_notes` is populated per
-   §3.3 empty-DB contract.
+   data row where `row_count=0`; count-metrics with landed upstream
+   are `0`, count-metrics with unlanded upstream are empty cells,
+   ratio and structured metric cells are empty, and `_notes` is
+   populated per §3.3 empty-DB contract.
 2. Each of the three golden fixtures produces the hand-computed values
    in §4 to full float64 precision — no rounding, no lossy formatting.
 3. `--metric-set lifecycle` on fixture 1 emits only the §2.1 columns
@@ -769,3 +797,28 @@ Modified: none. This worktree adds files only. If any file outside
     null = 39.
   - §7 (d) closing paragraph corrected: "36-column" → "39-metric".
   - Remaining stray "36" references either removed or corrected.
+- 2026-07-02 (round 5, Codex P1 fixes):
+  - §2.1 header adds "Metric-set membership" table making #7
+    `ManualSetupStepCount` / #8 `ConfigTouchCount` members of BOTH
+    `lifecycle` AND `overhead` metric-sets (they're §Overhead in 08
+    but §D8 lifecycle probes in 12).
+  - §2.2 #10 `ContractCompleteness` fallback removed — the metric
+    now emits `null` + upstream-missing when the per-run→contract
+    join key is missing, instead of silently aggregating over ALL
+    rows and lying.
+  - §2.2 #15 `RecoverySuccessRate` reclassified as upstream-missing
+    (12号 §A6 not landed): `runs.failure_category` reflects
+    terminal state only, so `runs`-alone cannot distinguish
+    recovered from never-interrupted.
+  - §2.1 #9 `StateContinuityRate` reclassified as upstream-missing
+    (12号 §A6 not landed): 08:39 numerator explicitly requires
+    "traced across driver/slave/restart", which needs a resume
+    join today's schema does not have.
+  - §3.3 empty-DB contract: count-metrics with landed upstream = 0;
+    count-metrics with unlanded upstream = null (not 0). §5.1
+    aligned.
+  - §3.1 `--runs-filter` grammar removed `col = ?` — placeholders
+    are internally generated, not user-supplied.
+  - Fixture 1 `StateContinuityRate = null`; fixture 2 all §2.2
+    metrics = null (including #10 `ContractCompleteness`); fixture
+    3 arithmetic: 8 populated + 31 null = 39.
