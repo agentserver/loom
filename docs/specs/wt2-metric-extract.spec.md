@@ -4,8 +4,9 @@
 > `eval_metrics`) that reads an observer SQLite DB — primarily the
 > `runs` table (WT-1-run-schema, PR #56) plus companion tables
 > (`route_reasons`, `capability_snapshots{,_usages}`, `task_contracts`,
-> `writes`, `events`) — and emits one paper-metric CSV/JSONL row per
-> `runs`-row selection. Consumers: 08 号 Figures 1–4 / Tables 1–3
+> `writes`, `events`) — and emits one paper-metric row (CSV single row
+> or JSON single object; **not JSON-Lines** — see §3.3) per `runs`-row
+> selection. Consumers: 08 号 Figures 1–4 / Tables 1–3
 > (`docs/intermediate/08_evaluation_plan_v3.md`) and Phase 3 paper
 > back-fill.
 >
@@ -44,14 +45,21 @@ metric across 12 号 §A/§B/§C/§D and 08 号 §Lifecycle / §Semantic /
 the extractor MUST emit a header column for each, even when the
 underlying data source has not yet been instrumented.
 
-## 2. Metric catalog (authoritative — 36 metrics)
+## 2. Metric catalog (authoritative — 39 metrics)
 
-Order is preserved in CSV headers and JSONL keys; renaming or reordering
-this list is a spec change, not an implementation change. `null` handling
-per §7 (f). "Provenance" cites the observer table/column or fixture-event
-type the extractor reads.
+Order is preserved in CSV headers and JSON `metrics`-object keys;
+renaming or reordering this list is a spec change, not an implementation
+change. `null` handling per §7 (f). "Provenance" cites the observer
+table/column or fixture-event type the extractor reads.
 
-### 2.1 Lifecycle (8 — from 12 号 §D8 + 08 号 §Lifecycle / E1)
+Cross-check anchor: this catalog is the union of every metric name
+appearing in 08 号 §Metrics tables (08:32–92), 08 号 §Experiments
+metrics-lines (E1: 08:116, E2: 08:141, E3: 08:163, E4: 08:198, E5:
+08:219, E6: 08:237), and 12 号 §A/§B/§C/§D metric one-liners (12:41,
+12:44, 12:74, 12:87, 12:89, 12:105, 12:106, 12:107). If a future
+audit finds a named metric not in this catalog, that is a P0 spec bug.
+
+### 2.1 Lifecycle (9 — from 12 号 §D8 / §A5 + 08 号 §Lifecycle / E1 / E3)
 
 | # | Metric | Numerator | Denominator | Provenance |
 |---|---|---|---|---|
@@ -63,6 +71,7 @@ type the extractor reads.
 | 6 | `ArtifactCorrectnessRate` | `count(runs where success_oracle_result = 'pass' AND artifact_hashes != '[]')` | `count(runs where artifact_hashes != '[]')` | `runs.{success_oracle_result, artifact_hashes}` (oracle-side truth deferred to 12号 §D8; see §7 (g)) |
 | 7 | `ManualSetupStepCount` | `sum(runs.manual_setup_step_count)` if column present, else `null` + `"upstream data missing"` | — | 12号 §D8 owns the writer; not yet landed → emit `null` per §7 (g) |
 | 8 | `ConfigTouchCount` | `sum(runs.config_touch_count)` if column present, else `null` + `"upstream data missing"` | — | same as above |
+| 9 | `StateContinuityRate` | `count(runs where success_oracle_result = 'pass' AND artifact_hashes != '[]' AND task_contract_hash != '' AND observer_trace_path != '')` restricted to runs whose `failure_category` was `slave-disconnect` OR `driver-restart` at any point in their lifecycle (join to `events` table) | `count(runs where the run was interrupted at least once)` — proxy today: `count(runs where failure_category IN ('slave-disconnect','driver-restart') OR the run's task appears in >1 events with status='resumed')` | Named in 08:39 + 12:44 (§A5); today observer has no `resumed` event type → emit `null` + `"upstream data missing"` per §7 (g) until 12号 §A6 lands the write_id dedup + resume audit. |
 
 **Note on data source status.** Columns `manual_setup_step_count` and
 `config_touch_count` are 08号 §Overhead / §E6 fields; they are NOT in
@@ -71,20 +80,23 @@ the 24-column `runs` DDL landed by PR #56 (see `runs` DDL in
 therefore emits them as `null` today; when 12号 §D8 / §D6c adds the
 columns, no spec change is needed — the extractor SHALL detect column
 presence via `PRAGMA table_info(runs)` and switch from `null` to `sum(...)`.
+`StateContinuityRate` is 08:39 / 12:44 (owner: 12号 §A5 driver task
+journal, ALREADY landed; but the eval-runner-side join to `events`
+for interruption detection is 12号 §A6 P1, not yet landed).
 
-### 2.2 Contracted (7 — from 12 号 §A + 08 号 §Contracted / E3)
+### 2.2 Contracted (7 — from 12 号 §A + 08 号 §Contracted / E3) — metrics #10..#16
 
 | # | Metric | Numerator | Denominator | Provenance |
 |---|---|---|---|---|
-| 9 | `ContractCompleteness` | `sum(present_field_count)` over all contracts | **fixed constant `7 × count(task_contracts in selection)`** — the 7 lifecycle fields per 12号 §A2; **NOT 08号's 8-field count** (§A2 pins the denominator). | `task_contracts.body` — parsed to count the 7 lifecycle fields (intent.goal / intent.success_criteria / data_contract.read_artifacts / data_contract.write_targets / capability_requirements / execution_policy / recovery_hint) per `internal/contract/completeness.go:36-44` |
-| 10 | `PreExecutionFaultCatchRate` | `count(runs where baseline_or_ablation != 'NoDryRun' AND failure_category = 'policy-violation')` | `count(runs where run was fault-injected)` — proxy: `count(runs where experiment_id = 'E3')`, since only E3 injects faults | `runs.{baseline_or_ablation, failure_category, experiment_id}` |
-| 11 | `ContractViolationRate` | `count(runs where failure_category = 'contract-violation')` | `count(runs where task_contract_hash != '')` | `runs.{failure_category, task_contract_hash}` |
-| 12 | `MissingArtifactDetectionRate` | `count(runs where failure_category = 'missing-file' AND success_oracle_result != 'pass')` | `count(runs where experiment_id = 'E3')` | `runs.{failure_category, success_oracle_result, experiment_id}` |
-| 13 | `PolicyViolationPreventionRate` | data source not landed (12号 §A3 P1, not this worktree) → `null` + `"upstream data missing"` | — | Requires `dry_run_blocks` table (12号 §A3); not yet in observer schema. §7 (g). |
-| 14 | `RecoverySuccessRate` | `count(runs where failure_category IN ('slave-disconnect','driver-restart','timeout') AND success_oracle_result = 'pass')` | `count(runs where failure_category IN ('slave-disconnect','driver-restart','timeout'))` | `runs.{failure_category, success_oracle_result}` |
-| 15 | `DuplicateSideEffectRate` | data source not landed (12号 §A6 P1, write_id dedup table missing) → `null` + `"upstream data missing"` | — | Requires observer `write_id` dedup table (12号 §A6). §7 (g). |
+| 10 | `ContractCompleteness` | `sum(present_field_count)` over all contracts | **fixed constant `7 × count(task_contracts in selection)`** — the 7 lifecycle fields per 12号 §A2; **NOT 08号's 8-field count** (§A2 pins the denominator). | `task_contracts.body` — parsed to count the 7 lifecycle fields (intent.goal / intent.success_criteria / data_contract.read_artifacts / data_contract.write_targets / capability_requirements / execution_policy / recovery_hint) per `internal/contract/completeness.go:36-44` |
+| 11 | `PreExecutionFaultCatchRate` | `count(runs where baseline_or_ablation != 'NoDryRun' AND failure_category = 'policy-violation')` | `count(runs where run was fault-injected)` — proxy: `count(runs where experiment_id = 'E3')`, since only E3 injects faults | `runs.{baseline_or_ablation, failure_category, experiment_id}` |
+| 12 | `ContractViolationRate` | `count(runs where failure_category = 'contract-violation')` | `count(runs where task_contract_hash != '')` | `runs.{failure_category, task_contract_hash}` |
+| 13 | `MissingArtifactDetectionRate` | `count(runs where failure_category = 'missing-file' AND success_oracle_result != 'pass')` | `count(runs where experiment_id = 'E3')` | `runs.{failure_category, success_oracle_result, experiment_id}` |
+| 14 | `PolicyViolationPreventionRate` | data source not landed (12号 §A3 P1, not this worktree) → `null` + `"upstream data missing"` | — | Requires `dry_run_blocks` table (12号 §A3); not yet in observer schema. §7 (g). |
+| 15 | `RecoverySuccessRate` | `count(runs where failure_category IN ('slave-disconnect','driver-restart','timeout') AND success_oracle_result = 'pass')` | `count(runs where failure_category IN ('slave-disconnect','driver-restart','timeout'))` | `runs.{failure_category, success_oracle_result}` |
+| 16 | `DuplicateSideEffectRate` | data source not landed (12号 §A6 P1, write_id dedup table missing) → `null` + `"upstream data missing"` | — | Requires observer `write_id` dedup table (12号 §A6). §7 (g). |
 
-### 2.3 User-promoted (11 — from 12 号 §B + 08 号 §User-promoted / E4)
+### 2.3 User-promoted (11 — from 12 号 §B + 08 号 §User-promoted / E4) — metrics #17..#27
 
 All 11 emit `null` + `"upstream data missing"` at spec time — the
 promotion-chain writers (12号 §B1/B2/B4/B6, WT-2-driver-promotion-chain
@@ -94,42 +106,44 @@ pandas readers do not silently drop schema when B chain merges. Numerator
 
 | # | Metric | Numerator / denominator | Data source (once landed) |
 |---|---|---|---|
-| 16 | `PromotionCandidateSurfacingRate` | `count(events where type='promote_candidate') / count(runs where workload requires promotion)` | 12号 §B1 event stream |
-| 17 | `UserInitiatedSynthesisSuccessRate` | `count(events where type='register_slave_mcp' AND acceptance='pass') / count(events where type='user_scaffold_start')` | 12号 §B2 |
-| 18 | `ValidationFalseAcceptRate` | `count(runs where acceptance_result='pass' AND oracle_result='fail') / count(runs where acceptance_result='pass')` | 12号 §B3 (`mcp-acceptance --cases`; PR #57 landed the golden, not the observer event) |
-| 19 | `TimeFromUserDecisionToRegisteredMCP` | structured `{p50_seconds,p95_seconds,mean_seconds,count}` over `(register_ts − user_decision_ts)` per B6 audit row | 12号 §B6 |
-| 20 | `RegistryLookupHitRate` | `count(events where type='registry_lookup' AND result='hit') / count(events where type='registry_lookup')` | 12号 §B4 |
-| 21 | `CapabilityReuseRate` | `count(runs where reused_mcp_hash != '') / count(runs in same capability family)` | 12号 §B4 + `runs.dynamic_mcp_registry_hash` |
-| 22 | `RepeatedGenerationRate` | `count(events where type='user_scaffold_start' with existing valid MCP in registry) / count(repeated capability-family tasks)` | 12号 §B4 |
-| 23 | `PromotionAdoptionRate` | `count(events where type='register_slave_mcp') / count(events where type='promote_candidate')` | 12号 §B1+§B2 |
-| 24 | `AdHocScriptTaskShare` | `count(runs where no promotion event fired) / count(runs)` | 12号 §B1 (absence signal) |
-| 25 | `GeneratedCapabilityDefectRate` | `count(runs where success_oracle_result='fail' AND selected_capability_source='user-promoted') / count(runs where selected_capability_source='user-promoted')` | 12号 §B4 + oracle |
-| 26 | `ReuseSpeedup` | `avg(TimeToCompletion for stage='A') / avg(TimeToCompletion for stage='C')` over same capability family | 12号 §B (family + stage columns not yet in `runs`) |
+| 17 | `PromotionCandidateSurfacingRate` | `count(events where type='promote_candidate') / count(runs where workload requires promotion)` | 12号 §B1 event stream |
+| 18 | `UserInitiatedSynthesisSuccessRate` | `count(events where type='register_slave_mcp' AND acceptance='pass') / count(events where type='user_scaffold_start')` | 12号 §B2 |
+| 19 | `ValidationFalseAcceptRate` | `count(runs where acceptance_result='pass' AND oracle_result='fail') / count(runs where acceptance_result='pass')` | 12号 §B3 (`mcp-acceptance --cases`; PR #57 landed the golden, not the observer event) |
+| 20 | `TimeFromUserDecisionToRegisteredMCP` | structured `{p50_seconds,p95_seconds,mean_seconds,count}` over `(register_ts − user_decision_ts)` per B6 audit row | 12号 §B6 |
+| 21 | `RegistryLookupHitRate` | `count(events where type='registry_lookup' AND result='hit') / count(events where type='registry_lookup')` | 12号 §B4 |
+| 22 | `CapabilityReuseRate` | `count(runs where reused_mcp_hash != '') / count(runs in same capability family)` | 12号 §B4 + `runs.dynamic_mcp_registry_hash` |
+| 23 | `RepeatedGenerationRate` | `count(events where type='user_scaffold_start' with existing valid MCP in registry) / count(repeated capability-family tasks)` | 12号 §B4 |
+| 24 | `PromotionAdoptionRate` | `count(events where type='register_slave_mcp') / count(events where type='promote_candidate')` | 12号 §B1+§B2 |
+| 25 | `AdHocScriptTaskShare` | `count(runs where no promotion event fired) / count(runs)` | 12号 §B1 (absence signal) |
+| 26 | `GeneratedCapabilityDefectRate` | `count(runs where success_oracle_result='fail' AND selected_capability_source='user-promoted') / count(runs where selected_capability_source='user-promoted')` | 12号 §B4 + oracle |
+| 27 | `ReuseSpeedup` | `avg(TimeToCompletion for stage='A') / avg(TimeToCompletion for stage='C')` over same capability family | 12号 §B (family + stage columns not yet in `runs`) |
 
-### 2.4 Semantic (3 — from 12 号 §C2 + 08 号 §Semantic / E2)
+### 2.4 Semantic (3 — from 12 号 §C2 + 08 号 §Semantic / E2) — metrics #28..#30
 
 | # | Metric | Numerator | Denominator | Provenance |
 |---|---|---|---|---|
-| 27 | `RoutingAccuracy` | `count(runs where selected_context = ground_truth_context AND ground_truth_context != '')` | `count(runs where ground_truth_context != '')` — non-empty gates ground-truth availability | `runs.{selected_context, ground_truth_context}` |
-| 28 | `CapabilityRecall` | data source: capability snapshot + ground-truth (12号 §F4) — landed for snapshot (PR #61), NOT for ground-truth requirement labels → `null` + `"upstream data missing"` | — | §7 (g) |
-| 29 | `CapabilityPrecision` | data source: capability smoke tests — no observer schema field yet → `null` + `"upstream data missing"` | — | §7 (g) |
+| 28 | `RoutingAccuracy` | `count(runs where selected_context = ground_truth_context AND ground_truth_context != '')` | `count(runs where ground_truth_context != '')` — non-empty gates ground-truth availability | `runs.{selected_context, ground_truth_context}` |
+| 29 | `CapabilityRecall` | data source: capability snapshot + ground-truth (12号 §F4) — landed for snapshot (PR #61), NOT for ground-truth requirement labels → `null` + `"upstream data missing"` | — | §7 (g) |
+| 30 | `CapabilityPrecision` | data source: capability smoke tests — no observer schema field yet → `null` + `"upstream data missing"` | — | §7 (g) |
 
-### 2.5 Overhead (7 — from 12 号 §D7 + 08 号 §Overhead / E5)
+### 2.5 Overhead (9 — from 12 号 §D7 / §C4 / §D6c + 08 号 §Overhead / E5 / E6)
 
 The `route_reasons` table (PR #55) supplies `RoutingLatencyP50P95`
-directly; the other six overhead metrics require probe writers that
-12号 §D7 (WT-2-overhead-probes worktree) owns. The extractor emits all
-7 columns; only #35 is populated today.
+directly; the other overhead metrics require probe writers that 12号
+§D7 (WT-2-overhead-probes worktree) or 12号 §D6c / §C4 own. The
+extractor emits all 9 columns; only #37 is populated today.
 
 | # | Metric | Numerator / value | Denominator | Provenance |
 |---|---|---|---|---|
-| 30 | `DriverPlanningOverhead` | data source not landed (12号 §D7) → `null` | — | §7 (g) |
-| 31 | `TaskDispatchLatency` | data source not landed (12号 §D7) → `null` | — | §7 (g) |
-| 32 | `TunnelOverhead` | data source not landed (12号 §D7) → `null` | — | §7 (g) |
-| 33 | `ArtifactTransferThroughput` | data source not landed (12号 §D7) → `null` | — | §7 (g) |
-| 34 | `ObserverOverhead` | data source not landed (12号 §D7) → `null` | — | §7 (g) |
-| 35 | `ModelProxyOverhead` | data source not landed (12号 §D7) → `null` | — | §7 (g) |
-| 36 | `RoutingLatencyP50P95` | structured `{p50_ns, p95_ns, count}` over `route_reasons.decision_duration_ns` filtered by `conversation_id` matching runs in selection | — | `route_reasons.decision_duration_ns` (PR #55) |
+| 31 | `DriverPlanningOverhead` | data source not landed (12号 §D7) → `null` | — | §7 (g) |
+| 32 | `TaskDispatchLatency` | data source not landed (12号 §D7) → `null` | — | §7 (g) |
+| 33 | `TunnelOverhead` | data source not landed (12号 §D7) → `null` | — | §7 (g) |
+| 34 | `ArtifactTransferThroughput` | data source not landed (12号 §D7) → `null` | — | §7 (g) |
+| 35 | `ObserverOverhead` | data source not landed (12号 §D7) → `null` | — | §7 (g) |
+| 36 | `ModelProxyOverhead` | data source not landed (12号 §D7) → `null` | — | §7 (g) |
+| 37 | `RoutingLatencyP50P95` | structured `{p50_ns, p95_ns, count}` over `route_reasons.decision_duration_ns` where the row's `decision_started_at` falls within `[runs.start_time, runs.end_time]` for at least one run in the selection (there is NO direct FK between `runs` and `route_reasons` — the join is on the time window, since `runs` has no `conversation_id` column per the 24-column DDL) | — | `route_reasons.decision_duration_ns` + `route_reasons.decision_started_at` (PR #55); `runs.{start_time, end_time}` |
+| 38 | `TimeToFirstTask` | data source not landed (12号 §C4 / §D6c) → `null` | — | Named in 08:90 + 08:237 + 12:89 + 12:105; requires deploy-time timestamp not currently in schema. §7 (g). |
+| 39 | `SetupFailureRate` | data source not landed (12号 §C4 / §D6c) → `null` | — | Named in 08:237 + 12:89 + 12:105; requires deploy harness event stream not currently in schema. §7 (g). |
 
 ## 3. CLI
 
@@ -185,25 +199,51 @@ cases.
 
 ### 3.3 Output shape
 
-**CSV.** Row 1 is the header: column 1 = `run_id` (for row-level
-metrics) or `metric_set` (for aggregated shape — see below); columns
-2..N = metric names in §2 order. Structured metrics (`TimeToCompletion`,
-`TimeFromUserDecisionToRegisteredMCP`, `RoutingLatencyP50P95`) flatten
-into sub-columns using `<metric>.<key>` naming (e.g.
-`TimeToCompletion.p50_seconds`).
-
-Aggregation mode: this extractor produces **one row per selection**
-(not per run), because the paper metrics are cohort-level ratios /
-percentiles. `--runs-filter` narrows the cohort; a single invocation
-produces exactly one output row. To produce Table 2's per-baseline
+**Aggregation model.** The extractor produces **one output "record" per
+invocation** (not per `runs` row), because the paper metrics are
+cohort-level ratios / percentiles. `--runs-filter` narrows the cohort;
+a single invocation always produces exactly one record — including
+when the cohort is empty (in which case count-metrics are 0 and
+ratio-metrics are `null` per §7 (f)). To produce Table 2's per-baseline
 breakdown, the caller invokes the extractor once per
-`baseline_or_ablation` value.
+`baseline_or_ablation` value and concatenates the resulting single-row
+CSVs.
 
-**JSON.** Single JSON object (not JSON-Lines) with keys `metric_set`,
-`row_count` (number of `runs` rows in the selection), `metrics` (an
-object mapping metric-name → scalar or nested object), and `notes` (a
-map from metric-name → status string, present iff at least one metric
-returned `"upstream data missing"`).
+**CSV.** Row 1 is the header: column 1 = `metric_set`, column 2 =
+`row_count` (the number of `runs` rows that matched the selection),
+columns 3..N = metric names in §2 order. Structured metrics
+(`TimeToCompletion`, `TimeFromUserDecisionToRegisteredMCP`,
+`RoutingLatencyP50P95`) flatten into sub-columns using `<metric>.<key>`
+naming (e.g. `TimeToCompletion.p50_seconds`). Row 2 is the single data
+row for this invocation. There is NO third row.
+
+The `_notes` companion is written as an extra final column named
+`_notes` whose value is a semicolon-separated list of
+`<metric>: <reason>` pairs, one per metric that returned `null` with
+a `"upstream data missing"` reason (§7 (g)).
+
+**JSON.** Single JSON object (not JSON-Lines) with keys:
+
+- `metric_set`: the resolved value of `--metric-set`;
+- `row_count`: number of `runs` rows in the selection (integer, may be 0);
+- `metrics`: an object mapping metric-name → scalar or nested object;
+- `notes`: a map from metric-name → status string, always emitted
+  (even when empty `{}`), so downstream consumers can rely on the key
+  being present.
+
+**Empty-DB / zero-selection contract.** A cohort of zero `runs` rows
+still produces a valid one-record output:
+
+- CSV: header row + exactly one data row where `row_count = 0`,
+  count-metrics (`HumanContextSelectionCount`, …) = `0`, ratio-metrics
+  = empty cell (JSON `null`), structured metrics = empty flattened
+  sub-columns. The acceptance criterion in §5.1 refers to this shape
+  as "header + one data row with row_count=0"; earlier drafts said
+  "zero data rows" — that phrasing was ambiguous and is corrected
+  here.
+- JSON: `{"metric_set": "full", "row_count": 0, "metrics": {...all
+  count metrics: 0, all ratio/structured metrics: null}, "notes":
+  {...one entry per metric whose upstream is missing}}`.
 
 ## 4. Golden fixture traces
 
@@ -246,6 +286,8 @@ Hand-computed values:
 - `ArtifactCorrectnessRate = 6/6 = 1.0` (all 6 rows with non-empty artifacts also passed; denominator = 6)
 - `ManualSetupStepCount = null` (column absent per §2.1 note)
 - `ConfigTouchCount = null` (same)
+- `StateContinuityRate = null` (upstream missing per §2.1 note — no
+  `events.status='resumed'` schema yet)
 
 ### 4.2 Fixture 2 — Contracted (§2.2)
 
@@ -309,21 +351,45 @@ Hand-computed values:
 - `CapabilityRecall = null` (§2.4 row 28)
 - `CapabilityPrecision = null` (§2.4 row 29)
 - `RoutingLatencyP50P95 = {p50_ns: 1_500_000, p95_ns: 3_700_000, count: 4}` (numpy linear-interp on sorted [500k, 1M, 2M, 4M]; median = midpoint of 1M and 2M = 1.5M; 95th percentile at fractional index 2.85 → 2M + 0.85·(4M−2M) = 3.7M)
-- All 11 user-promoted metrics + 5 non-routing overhead metrics = `null` with `"upstream data missing"` note.
+- All 11 user-promoted metrics (#17..#27) + 6 non-routing E5 overhead
+  metrics (#31..#36) + 2 E6 onboarding metrics (#38 `TimeToFirstTask`,
+  #39 `SetupFailureRate`) = `null` with `"upstream data missing"`
+  note. Also 2 semantic metrics (#29 `CapabilityRecall`, #30
+  `CapabilityPrecision`), 3 contracted metrics if the fixture bothered
+  to add contracts (which it does not — the fixture has no
+  `task_contracts` rows, so #10 `ContractCompleteness` = `null` per
+  denominator=0). Total assertions on `null` metrics in fixture 3:
+  11 + 6 + 2 + 2 = **21 non-routing metrics assertion is `null`**,
+  plus lifecycle-null metrics (`ManualSetupStepCount`,
+  `ConfigTouchCount`, `StateContinuityRate`) = 3, and contract-null
+  metrics inferred by empty `task_contracts` = 7 (all §2.2 rows
+  either `null`-upstream or denominator=0). Fixture 3 exercises the
+  complete `null` matrix.
 
 ### 4.4 Empty-DB fixture (implicit)
 
 An in-memory DB with the WT-1-run-schema DDL applied but zero rows.
-Expected output: CSV header row + zero data rows for `csv` format;
-`{"metric_set":"full","row_count":0,"metrics":{...all-null},"notes":{...}}`
-for `json` format. Confirms §5 acceptance criterion 1.
+Expected output per §3.3 empty-DB contract:
+
+- CSV: header row + **exactly one data row** with `metric_set=full`,
+  `row_count=0`, all count metrics = `0`, all ratio and structured
+  metrics = empty cells, `_notes` populated for every metric whose
+  upstream is missing.
+- JSON: `{"metric_set":"full","row_count":0,"metrics":{...all count
+  metrics: 0, all ratio metrics: null...},"notes":{...upstream-missing
+  entries...}}`.
+
+Confirms §5 acceptance criterion 1.
 
 ## 5. Acceptance criteria
 
-1. `eval-metrics extract --observer-db <empty.db> --format csv` prints a
-   header line whose column set is a superset of the 36 metric names in
-   §2 (structured metrics flatten to `<metric>.<subkey>` sub-columns)
-   and zero data rows.
+1. `eval-metrics extract --observer-db <empty.db> --format csv` prints
+   a header line whose column set is `metric_set, row_count, <the 39
+   metric names in §2 order, with structured metrics flattened to
+   <metric>.<subkey> sub-columns>, _notes`, followed by exactly one
+   data row where `row_count=0`, count-metrics are `0`, ratio and
+   structured metric cells are empty, and `_notes` is populated per
+   §3.3 empty-DB contract.
 2. Each of the three golden fixtures produces the hand-computed values
    in §4 to full float64 precision — no rounding, no lossy formatting.
 3. `--metric-set lifecycle` on fixture 1 emits only the §2.1 columns
@@ -552,3 +618,20 @@ Modified: none. This worktree adds files only. If any file outside
   collection schema (08:32–288), Phase 1 close-out memo §5 handoff
   (14:111–125). Denominator for `ContractCompleteness` pinned at 7 per
   12号 §A2 (not 08号's 8-field count).
+- 2026-07-02 (round 2, Codex P0 fixes):
+  - Added missing metrics: `StateContinuityRate` (#9, 08:39 / 12:44
+    §A5), `TimeToFirstTask` (#38, 08:90 / 12:89 / 12:105),
+    `SetupFailureRate` (#39, 08:237 / 12:89 / 12:105). Catalog count
+    36 → 39.
+  - Fixed scope-line contradiction: output is CSV single row or JSON
+    single object, NOT JSON-Lines.
+  - Fixed aggregation-vs-empty-DB contradiction: §3.3 now specifies
+    one output record per invocation including empty cohort; §5.1 +
+    §4.4 aligned to "header + one data row with row_count=0".
+  - Fixed `RoutingLatencyP50P95` provenance: `runs` has no
+    `conversation_id` column; join to `route_reasons` is on the time
+    window `[runs.start_time, runs.end_time]`, using
+    `route_reasons.decision_started_at`.
+  - Fixed fixture 3 null-count arithmetic (was "5 non-routing overhead
+    metrics"; is now "6 non-routing E5 + 2 E6 onboarding = 8 overhead
+    metrics all null").
