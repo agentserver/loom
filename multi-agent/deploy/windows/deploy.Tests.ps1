@@ -216,7 +216,13 @@ Describe 'T15-ps / T15b-ps / T15c-ps: env whitelist (any host)' {
         $script:extract = $lines -join "`n"
         # Replace the top-level try/switch with a no-op stub so dot-
         # sourcing does not spawn anything.
-        $script:extract = $script:extract -replace '(?s)try\s*\{\s*(#[^\n]*\n\s*)?Initialize-PidsDir[\s\S]*?exit \d+\s*\}\s*catch[\s\S]*?exit 4\s*\}', ''
+        # Strip the top-level try { Initialize-PidsDir ... } catch
+        # { ... exit $script:ExitCode } block. The pattern below
+        # tolerates either literal `exit N` or `exit $script:ExitCode`
+        # (the current post-round-3 shape), so sourcing the file for
+        # Get-WhitelistedEnv does not accidentally invoke the CLI
+        # bring-up (Codex round 5 P1-2 fix).
+        $script:extract = $script:extract -replace '(?s)try\s*\{\s*(#[^\n]*\n\s*)?Initialize-PidsDir[\s\S]*?\}\s*catch[\s\S]*?exit\s+(\d+|\$script:ExitCode)\s*\}', ''
     }
 
     It 'T15-ps: drops AWS_/GITHUB_TOKEN/DOCKER_CONFIG/NPM_TOKEN' {

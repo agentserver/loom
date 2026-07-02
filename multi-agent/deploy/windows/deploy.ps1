@@ -68,13 +68,15 @@ param(
     [switch]$Shutdown,
 
     # Ports use body-level validation (Assert-Port) rather than
-    # [ValidateRange] — attribute validation fires during parameter
-    # binding, BEFORE our top-level trap can classify the failure as
-    # exit 2. See P1-1 fix in Codex Stage-3 round 4.
-    [int]$ObserverPort = 18091,
-    [int]$DriverPort = 18092,
-    [int]$SlavePort = 18093,
-    [int]$StubPort = 18080,
+    # [int]+[ValidateRange] — attribute + coercion both fire during
+    # parameter binding, BEFORE our top-level trap can classify the
+    # failure as exit 2. `[string]` accepts any input; Assert-Port
+    # rejects non-numeric + out-of-range + blacklisted values via
+    # our trap (Codex Stage-3 rounds 4+5).
+    [string]$ObserverPort = '18091',
+    [string]$DriverPort   = '18092',
+    [string]$SlavePort    = '18093',
+    [string]$StubPort     = '18080',
 
     [string]$LoomHome = '',
     [string]$BinDir = '',
@@ -188,22 +190,30 @@ if ($ResolvedMode -eq 'shutdown') {
 # --- port validation (§7(e)) ------------------------------------------
 
 function Assert-Port {
-    param([string]$Name, [int]$Value)
-    # Range check (previously an [int][ValidateRange(1024,65535)]
-    # attribute on the param block — moved here so range failures
-    # exit with our documented preflight code, not PowerShell's
-    # parameter-binding error path).
-    if ($Value -lt 1024 -or $Value -gt 65535) {
-        throw "${Name}=${Value} out of range [1024,65535]"
+    # Return the parsed int value on success; throw with the trap-
+    # classified exit-2 shape on any failure. Callers assign the
+    # return value back to the port variable so the rest of the
+    # script sees an [int] (mirrors deploy.sh's validate_port).
+    param([string]$Name, [string]$Value)
+    if ($Value -notmatch '^\d+$') {
+        throw "${Name}='${Value}' must be a positive integer"
     }
-    if ($script:WELL_KNOWN_PORTS -contains $Value) {
-        throw "${Name}=${Value} is a well-known port (blacklist: $($script:WELL_KNOWN_PORTS -join ','))"
+    $iv = [int]$Value
+    if ($iv -lt 1024 -or $iv -gt 65535) {
+        throw "${Name}=${iv} out of range [1024,65535]"
     }
+    if ($script:WELL_KNOWN_PORTS -contains $iv) {
+        throw "${Name}=${iv} is a well-known port (blacklist: $($script:WELL_KNOWN_PORTS -join ','))"
+    }
+    return $iv
 }
-Assert-Port -Name '-ObserverPort' -Value $ObserverPort
-Assert-Port -Name '-DriverPort'   -Value $DriverPort
-Assert-Port -Name '-SlavePort'    -Value $SlavePort
-if ($ResolvedMode -eq 'stub') { Assert-Port -Name '-StubPort' -Value $StubPort }
+# Parse + validate → assign back as [int] so subsequent code paths
+# that use $ObserverPort in an integer context (Wait-TcpListen,
+# JSON emit) see a number, not the string parameter value.
+$ObserverPort = Assert-Port -Name '-ObserverPort' -Value $ObserverPort
+$DriverPort   = Assert-Port -Name '-DriverPort'   -Value $DriverPort
+$SlavePort    = Assert-Port -Name '-SlavePort'    -Value $SlavePort
+if ($ResolvedMode -eq 'stub') { $StubPort = Assert-Port -Name '-StubPort' -Value $StubPort }
 
 # Pairwise distinct.
 $ports = @{
