@@ -26,10 +26,20 @@ minimum production code to make them green.
 
 ## 2. Pytest matrix (mapped to spec §7 (a)–(h) and §2 metrics)
 
-The following table lists every test file the plan creates. Each test
-maps to either a specific spec-§2 metric row (functional coverage) or a
-spec-§7 security item (security coverage). Every §7 item has ≥ 1
-passing test per §5.5 acceptance criterion.
+The following table lists every test in every test file the plan
+creates. Test files: `test_cli_help.py`, `test_cli.py`,
+`test_filter.py`, `test_paths.py`, `test_csv_out.py`,
+`test_json_out.py`, `test_metrics_lifecycle.py`,
+`test_metrics_contracted.py`, `test_metrics_semantic.py`,
+`test_metrics_user_promoted.py`, `test_metrics_overhead.py`,
+`test_metrics_null_contract.py`, `test_metrics_golden_fixture_3.py`,
+`test_db_readonly.py`, `test_empty_db.py`, `test_integration.py`,
+`test_perf_gated.py` — plus `tests/conftest.py` (pytest fixture
+plumbing — no test cases of its own).
+
+Each test maps to either a specific spec-§2 metric row (functional
+coverage) or a spec-§7 security item (security coverage). Every §7
+item has ≥ 1 passing test per §5.5 acceptance criterion.
 
 | Test file | Test name | Verifies | Spec anchor |
 |---|---|---|---|
@@ -202,7 +212,7 @@ comparisons and optionally `pandas` in dev-only tests
 
 - All 96 tests in §2 pass (`pytest -q` clean under CI env).
 - `python -m eval_metrics extract --observer-db <empty.db> --format csv | head -2` produces header row + 1 data row per §5.1.
-- `git diff --name-only origin/paper/v3-integration...HEAD` shows only files under `multi-agent/tools/eval/metrics/` and the two spec/plan docs.
+- `git diff --name-only origin/paper/v3-integration...HEAD` shows only files under (a) `multi-agent/tools/eval/metrics/` and (b) `docs/specs/wt2-metric-extract.{spec,plan}.md` (both directories explicitly allowed by spec §8's two-directory rule; the sibling `docs/specs/wt1-*.md` precedent establishes that spec / plan docs land in `docs/specs/`).
 - No `.go` files touched.
 - Commit trailers include `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
 - No push to origin; the branch stays local for review.
@@ -212,3 +222,13 @@ comparisons and optionally `pandas` in dev-only tests
 - 2026-07-03 (initial): plan written against
   `docs/specs/wt2-metric-extract.spec.md` at 14-round CLEAN state
   (catalog=41, security items (a)–(h), fixtures 1/2/3).
+- 2026-07-03 (round 2, Codex P1 fixes):
+  - Test-file list made complete: `conftest.py` +
+    `test_cli_help.py` + `test_json_out.py` +
+    `test_metrics_semantic.py` + `test_metrics_user_promoted.py` +
+    `test_metrics_overhead.py` + `test_metrics_golden_fixture_3.py`
+    + `test_integration.py` + `test_perf_gated.py` explicitly named
+    at the head of §2 (was: implicit).
+  - §6 Definition of done clarified that `docs/specs/` is one of
+    two directories allowed by spec §8's two-directory rule.
+  - (companion spec §8 edit clarifies the two-directory rule.)

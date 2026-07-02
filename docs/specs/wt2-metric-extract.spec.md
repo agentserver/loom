@@ -942,15 +942,28 @@ Created (all under `multi-agent/tools/eval/metrics/`):
 - `tests/fixtures/build_fixture_1.py` + `fixture_1.db` + `expected_1.json`
 - `tests/fixtures/build_fixture_2.py` + `fixture_2.db` + `expected_2.json`
 - `tests/fixtures/build_fixture_3.py` + `fixture_3.db` + `expected_3.json`
-- `tests/test_cli.py`, `tests/test_filter.py`, `tests/test_paths.py`,
-  `tests/test_csv_out.py`, `tests/test_metrics_lifecycle.py`,
-  `tests/test_metrics_contracted.py`, `tests/test_metrics_semantic_overhead.py`,
-  `tests/test_metrics_null_contract.py`, `tests/test_security_denylist.py`,
-  `tests/test_db_readonly.py`, `tests/test_empty_db.py`
+- `tests/test_cli_help.py`, `tests/test_cli.py`, `tests/test_filter.py`,
+  `tests/test_paths.py`, `tests/test_csv_out.py`, `tests/test_json_out.py`,
+  `tests/test_metrics_lifecycle.py`, `tests/test_metrics_contracted.py`,
+  `tests/test_metrics_semantic.py`, `tests/test_metrics_user_promoted.py`,
+  `tests/test_metrics_overhead.py`, `tests/test_metrics_null_contract.py`,
+  `tests/test_metrics_golden_fixture_3.py`, `tests/test_db_readonly.py`,
+  `tests/test_empty_db.py`, `tests/test_integration.py`, `tests/test_perf_gated.py`
+  — the exact decomposition (which tests live in which file) is in
+  `docs/specs/wt2-metric-extract.plan.md` §2; the plan may split or
+  merge test files as long as the coverage matrix is preserved.
 
-Modified: none. This worktree adds files only. If any file outside
-`multi-agent/tools/eval/metrics/` is touched — including any `.go` file
-— that is a spec violation and the reviewer should reject the diff.
+Modified: none. This worktree adds files only, under two directories:
+
+- `multi-agent/tools/eval/metrics/` — production package (all rows above)
+- `docs/specs/` — two new documentation files
+  (`wt2-metric-extract.spec.md`, `wt2-metric-extract.plan.md`) —
+  this is where every WT-* worktree already lands its spec / plan
+  per the sibling `docs/specs/wt1-*.spec.md` precedent.
+
+If any file outside those two directories is touched — including
+any `.go` file — that is a spec violation and the reviewer should
+reject the diff.
 
 ## 9. Change record
 
@@ -1159,3 +1172,10 @@ Modified: none. This worktree adds files only. If any file outside
     comparisons (`col1 = col2`); only `col = literal`,
     `col IN (literals)`, `col LIKE 'pat'` accepted
     (`ErrRunsFilterColumnCompare`).
+- 2026-07-03 (round 15, Codex plan-review P1 fixes):
+  - §8 test-file list expanded to include the finer decomposition
+    the plan uses.
+  - §8 explicit two-directory rule: worktree creates files only
+    under `multi-agent/tools/eval/metrics/` and `docs/specs/`
+    (the sibling `wt1-*.spec.md` precedent already places spec /
+    plan docs in `docs/specs/`).
