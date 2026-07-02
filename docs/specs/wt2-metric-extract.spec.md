@@ -48,11 +48,11 @@ extraction work to WT-2-metric-extract.
 
 The word "全部 metric" is load-bearing. §2 below enumerates every named
 metric across 12 号 §A/§B/§C/§D and 08 号 §Lifecycle / §Semantic /
-§Contracted / §User-promoted / §Overhead — 40 metrics in total — and
+§Contracted / §User-promoted / §Overhead — 41 metrics in total — and
 the extractor MUST emit a header column for each, even when the
 underlying data source has not yet been instrumented.
 
-## 2. Metric catalog (authoritative — 40 metrics)
+## 2. Metric catalog (authoritative — 41 metrics)
 
 Order is preserved in CSV headers and JSON `metrics`-object keys;
 renaming or reordering this list is a spec change, not an implementation
@@ -132,9 +132,16 @@ not — the metric emits `null` today.
 | 15 | `RecoverySuccessRate` | data source not landed: 08:60 defines the numerator as "# interrupted tasks that resume or fail safely / # injected failures". A run's `failure_category` reflects its **terminal** state — a recovered run's `failure_category` is `''` (it passed) and its `success_oracle_result` is `'pass'`, so `runs` alone cannot distinguish "recovered from an interruption" from "never interrupted". This attribution requires 12号 §A6 write_id dedup + resume-event stream. → `null` + `"upstream data missing"` | — | Requires 12号 §A6. §7 (g). |
 | 16 | `DuplicateSideEffectRate` | data source not landed (12号 §A6 P1, write_id dedup table missing) → `null` + `"upstream data missing"` | — | Requires observer `write_id` dedup table (12号 §A6). §7 (g). |
 
-### 2.3 User-promoted (12 — from 12 号 §B + 08 号 §User-promoted / E4) — metrics #17..#27, #40
+### 2.3 User-promoted (13 — from 12 号 §B + 08 号 §User-promoted / E4) — metrics #17..#27, #40, #41
 
-All 12 emit `null` + `"upstream data missing"` at spec time — the
+All 13 emit `null` + `"upstream data missing"` at spec time (see the
+per-row rationale in each metric row below).
+
+Historical: the round-9 draft said 12 metrics; #41 added round-11
+brings the total to 13. The following historical rationale applies
+to #17..#27 and #40:
+
+The
 promotion-chain writers (12号 §B1/B2/B4/B6, WT-2-driver-promotion-chain
 worktree) have not landed. The columns are still emitted so downstream
 pandas readers do not silently drop schema when B chain merges. Numerator
@@ -154,6 +161,7 @@ pandas readers do not silently drop schema when B chain merges. Numerator
 | 26 | `GeneratedCapabilityDefectRate` | 08:76 defines this as "# reuse attempts failing due to a registered tool bug / # reuse attempts" — the numerator is scoped to `failure_category='registered-tool-defect'` (a not-yet-landed D4 taxonomy tag; today's 11-value taxonomy has no equivalent), NOT "any failed run using a user-promoted capability" (that would conflate workload-side failures with tool bugs). Extractor: `count(runs where selected_capability_source='user-promoted' AND failure_category='registered-tool-defect') / count(runs where selected_capability_source='user-promoted' AND was_reuse_attempt=true)`. | 12号 §B4 + oracle + a future §D4 tag |
 | 27 | `ReuseSpeedup` | `avg(TimeToCompletion for stage='A') / avg(TimeToCompletion for stage='C')` over same capability family | 12号 §B (family + stage columns not yet in `runs`) |
 | 40 | `HumanEditCount` | 08:185 (E4 Stage A baseline metric) — number of manual edits the operator makes to a Stage-A ad-hoc script before it works. **Not** the same as `HumanContextSelectionCount` (#4), which counts context-selection interventions. Extractor: `sum(runs.human_edit_count)` if the column is present in `PRAGMA table_info(runs)`, else `null` + `"upstream data missing"`. | Requires a new `runs.human_edit_count` column; owner: 12号 §D8 follow-up (currently focused on §D8's named metrics only). §7 (g). |
+| 41 | `TokenUsage` | 08:185 + 08:186 (E4 Stage A/B collection line: "TaskSuccessRate、TimeToCompletion、HumanEditCount、token") — cumulative model token count (input + output) for the run's LLM turns. Structured `{input_tokens, output_tokens, count}`. Extractor: `sum(runs.model_input_tokens), sum(runs.model_output_tokens), row_count` if the two columns are present in `PRAGMA table_info(runs)`, else structured object with all-null values + `"upstream data missing"`. | Requires new `runs.model_input_tokens` + `runs.model_output_tokens` columns; owner: 12号 §D8 or §D6a mock-model follow-up. §7 (g). Distinct from paper-metric semantics: token count is an operational cost signal, not a per-metric ratio; it lands in the catalog to satisfy 08:185's explicit collection list. |
 
 ### 2.4 Semantic (3 — from 12 号 §C2 + 08 号 §Semantic / E2) — metrics #28..#30
 
@@ -170,14 +178,21 @@ directly; the other overhead metrics require probe writers that 12号
 §D7 (WT-2-overhead-probes worktree) or 12号 §D6c / §C4 own. The
 extractor emits all 9 columns; only #37 is populated today.
 
+**Structured shape**: per 12号 §D7 all overhead metrics report
+`{p50, p95, count}` (`p50_ns` / `p95_ns` for latency metrics,
+`p50_bytes_per_sec` / `p95_bytes_per_sec` for throughput). #31..#36
+therefore flatten to three sub-columns each in the CSV even when
+they emit `null` (the structured shape is preserved in the empty
+sub-cells so the header count stays stable).
+
 | # | Metric | Numerator / value | Denominator | Provenance |
 |---|---|---|---|---|
-| 31 | `DriverPlanningOverhead` | data source not landed (12号 §D7) → `null` | — | §7 (g) |
-| 32 | `TaskDispatchLatency` | data source not landed (12号 §D7) → `null` | — | §7 (g) |
-| 33 | `TunnelOverhead` | data source not landed (12号 §D7) → `null` | — | §7 (g) |
-| 34 | `ArtifactTransferThroughput` | data source not landed (12号 §D7) → `null` | — | §7 (g) |
-| 35 | `ObserverOverhead` | data source not landed (12号 §D7) → `null` | — | §7 (g) |
-| 36 | `ModelProxyOverhead` | data source not landed (12号 §D7) → `null` | — | §7 (g) |
+| 31 | `DriverPlanningOverhead` | structured `{p50_ns, p95_ns, count}` — data source not landed (12号 §D7) → all three sub-cells `null` | — | §7 (g) |
+| 32 | `TaskDispatchLatency` | structured `{p50_ns, p95_ns, count}` — data source not landed → `null` | — | §7 (g) |
+| 33 | `TunnelOverhead` | structured `{p50_ns, p95_ns, count}` — data source not landed → `null` | — | §7 (g) |
+| 34 | `ArtifactTransferThroughput` | structured `{p50_bytes_per_sec, p95_bytes_per_sec, count}` — data source not landed → `null` | — | §7 (g) |
+| 35 | `ObserverOverhead` | structured `{p50_ns, p95_ns, count}` — data source not landed → `null` | — | §7 (g) |
+| 36 | `ModelProxyOverhead` | structured `{p50_ns, p95_ns, count}` — data source not landed → `null` | — | §7 (g) |
 | 37 | `RoutingLatencyP50P95` | structured `{p50_ns, p95_ns, count}` over `route_reasons.decision_duration_ns` where the row's `decision_started_at` falls within `[runs.start_time, runs.end_time]` for at least one run in the selection (there is NO direct FK between `runs` and `route_reasons` — the join is on the time window, since `runs` has no `conversation_id` column per the 24-column DDL) | — | `route_reasons.decision_duration_ns` + `route_reasons.decision_started_at` (PR #55); `runs.{start_time, end_time}` |
 | 38 | `TimeToFirstTask` | data source not landed (12号 §C4 / §D6c) → `null` | — | Named in 08:90 + 08:237 + 12:89 + 12:105; requires deploy-time timestamp not currently in schema. §7 (g). |
 | 39 | `SetupFailureRate` | data source not landed (12号 §C4 / §D6c) → `null` | — | Named in 08:237 + 12:89 + 12:105; requires deploy harness event stream not currently in schema. §7 (g). |
@@ -242,7 +257,7 @@ note in §2.2..§2.5) explicitly names the subset:
 |---|---|
 | `lifecycle` | §2.1 rows #1..#9 + #22 `CapabilityReuseRate` + #23 `RepeatedGenerationRate` (cross-listed per §2.1 membership table) |
 | `contracted` | §2.2 rows #10..#16 |
-| `user-promoted` | §2.3 rows #17..#27 |
+| `user-promoted` | §2.3 rows #17..#27 + #40 `HumanEditCount` + #41 `TokenUsage` (both §2.3 members) |
 | `semantic` | §2.4 rows #28..#30 + #4 `HumanContextSelectionCount` + #5 `WrongContextFailureRate` (cross-listed per §2.1 membership table; 08:140) |
 | `overhead` | §2.5 rows #31..#39 + #7 `ManualSetupStepCount` + #8 `ConfigTouchCount` (cross-listed per §2.1 membership table) |
 
@@ -265,11 +280,23 @@ single-row CSVs.
 
 **CSV.** Row 1 is the header: column 1 = `metric_set`, column 2 =
 `row_count` (the number of `runs` rows that matched the selection),
-columns 3..N = metric names in §2 order. Structured metrics
-(`TimeToCompletion`, `TimeFromUserDecisionToRegisteredMCP`,
-`RoutingLatencyP50P95`) flatten into sub-columns using `<metric>.<key>`
-naming (e.g. `TimeToCompletion.p50_seconds`). Row 2 is the single data
-row for this invocation. There is NO third row.
+columns 3..N = metric names in §2 order. Structured metrics flatten
+into sub-columns using `<metric>.<key>` naming (e.g.
+`TimeToCompletion.p50_seconds`). The structured metrics are:
+
+- `TimeToCompletion` (§2.1 #3) → `{p50_seconds, p95_seconds, mean_seconds, count}`
+- `TimeFromUserDecisionToRegisteredMCP` (§2.3 #20) → `{p50_seconds, p95_seconds, mean_seconds, count}`
+- `TokenUsage` (§2.3 #41) → `{input_tokens, output_tokens, count}`
+- `DriverPlanningOverhead` (§2.5 #31) → `{p50_ns, p95_ns, count}`
+- `TaskDispatchLatency` (§2.5 #32) → `{p50_ns, p95_ns, count}`
+- `TunnelOverhead` (§2.5 #33) → `{p50_ns, p95_ns, count}`
+- `ArtifactTransferThroughput` (§2.5 #34) → `{p50_bytes_per_sec, p95_bytes_per_sec, count}`
+- `ObserverOverhead` (§2.5 #35) → `{p50_ns, p95_ns, count}`
+- `ModelProxyOverhead` (§2.5 #36) → `{p50_ns, p95_ns, count}`
+- `RoutingLatencyP50P95` (§2.5 #37) → `{p50_ns, p95_ns, count}`
+
+Row 2 is the single data row for this invocation. There is NO third
+row.
 
 The `_notes` companion is written as an extra final column named
 `_notes` whose value is a semicolon-separated list of
@@ -331,6 +358,17 @@ by pytest.
 Every row has `capability_snapshot_hash = 'cs-<run#>'` (non-empty on
 all 10) — this is stated once here so the fixture table below does
 not need to carry the column.
+
+**Hash format note**: `internal/evalrun/schema.go:42` requires each
+`artifact_hashes` entry to match `^[a-f0-9]{64}$` (sha256 hex);
+similarly, the four `_hash` columns are conceptually sha256 but the
+DDL constraint is just `TEXT` (see `runs` DDL at
+`internal/observerstore/schema.sql:194-220`). The fixture-builder
+therefore expands each short logical ID below to the 64-hex sha256
+of `hashlib.sha256(short_id.encode()).hexdigest()` before insertion
+— e.g. `a1` becomes `f2ca1bb6c7e907d06dafe4687e579fce76b37e4e93b7605022da52e6ccc26fd2`.
+The tables use the short IDs for readability; the on-disk fixture
+DB contains the expanded values.
 
 | run # | success | end−start (s) | human_intervention_count | failure_category | artifact_hashes | task_contract_hash | observer_trace_path |
 |---|---|---|---|---|---|---|---|
@@ -448,7 +486,8 @@ per-run→contract join key is absent regardless of whether
 The full per-run lifecycle-column matrix is (every row has
 `capability_snapshot_hash = ''` — no capability snapshot recorded —
 so `LifecycleClosureRate` correctly evaluates to 0/5 under the
-5-column predicate in §2.1 row 2):
+5-column predicate in §2.1 row 2). Same fixture-builder sha256
+expansion applies as fixture 1: `ar1` → `hashlib.sha256(b"ar1").hexdigest()`:
 
 | run # | success | end−start (s) | human | failure_category | artifact_hashes | task_contract_hash | observer_trace_path |
 |---|---|---|---|---|---|---|---|
@@ -500,21 +539,21 @@ Populated metrics:
   [500k, 1M, 2M, 4M]; median = midpoint = 1.5M; p95 at fractional
   index 2.85 → 2M + 0.85·(4M−2M) = 3.7M)
 
-Null metrics (32 total = 40 catalog − 8 populated above):
+Null metrics (33 total = 41 catalog − 8 populated above):
 
 - §2.1: `ManualSetupStepCount` (#7), `ConfigTouchCount` (#8),
   `StateContinuityRate` (#9) — 3 nulls
 - §2.2: all 7 contracted metrics — `ContractCompleteness` (#10)
   via cohort-attribution missing; #11..#16 via upstream-missing.
   **7 nulls**
-- §2.3: all 11 user-promoted metrics (#17..#27) — 11 nulls
+- §2.3: all 13 user-promoted metrics (#17..#27, #40, #41) — 13 nulls
 - §2.4: `CapabilityRecall` (#29), `CapabilityPrecision` (#30) —
   2 nulls
 - §2.5: 6 non-routing E5 overhead metrics (#31..#36) plus 2 E6
   onboarding metrics (#38, #39) — 8 nulls
 
-Total: 3 + 7 + 11 + 2 + 8 = **31 null cells**. Populated 8 + null
-32 = 40 metrics.
+Total: 3 + 7 + 13 + 2 + 8 = **33 null cells**. Populated 8 + null
+33 = 41 metrics.
 
 ### 4.4 Empty-DB fixture (implicit)
 
@@ -543,11 +582,14 @@ Expected output per §3.3 empty-DB contract:
   `row_count=0`; count-metrics with landed upstream emit `0`,
   count-metrics with unlanded upstream emit empty cell (JSON
   `null`), all ratio and structured metrics = empty cells,
-  `_notes` populated for every metric whose upstream is missing.
-- JSON: `{"metric_set":"full","row_count":0,"metrics":{count-metric
-  with landed upstream: 0, count-metric with unlanded upstream: null,
-  ratio-metric: null, ...},"notes":{...upstream-missing
-  entries...}}`.
+  `_notes` populated for **every** metric that is `null` — with
+  either `"upstream data missing"` (unlanded metrics) or
+  `"denominator zero"` (landed ratio/structured metrics whose
+  cohort is empty). No `null` cell is note-free.
+- JSON: `{"metric_set":"full","row_count":0,"metrics":{...count with
+  landed upstream: 0, count with unlanded upstream: null, ratio: null,
+  ...},"notes":{TaskSuccessRate: "denominator zero", ...,
+  ManualSetupStepCount: "upstream data missing", ...}}`.
 
 Confirms §5 acceptance criterion 1.
 
@@ -1021,3 +1063,19 @@ Modified: none. This worktree adds files only. If any file outside
   - P1: `GeneratedCapabilityDefectRate` numerator narrowed to
     `failure_category='registered-tool-defect' AND was_reuse_attempt=true`
     per 08:76 (was any-failed-run-using-user-promoted-capability).
+- 2026-07-03 (round 11, Codex P0 + 5 P1 fixes):
+  - P0: `TokenUsage` added as metric #41 (08:185/186 E4 Stage-A
+    collection line lists `token`); structured
+    `{input_tokens, output_tokens, count}`. Catalog 40 → 41.
+  - P1: §3.2 subset table: `user-promoted` now emits #40 + #41.
+  - P1: §2.5 all six non-routing overhead metrics carry structured
+    `{p50, p95, count}` shape per 12号 §D7; §3.3 flatten list
+    updated to enumerate all 10 structured metrics.
+  - P1: fixture 3 arithmetic recomputed for catalog=41 (33 nulls
+    + 8 populated); §2.3 header updated to 13 metrics.
+  - P1: empty-DB JSON example includes both
+    `"upstream data missing"` AND `"denominator zero"` notes.
+  - P1: fixture hash-format note added — short IDs like `a1`/`ar1`
+    are canonicalized to sha256 by the fixture-builder before
+    insertion (per `evalrun/schema.go:42` `^[a-f0-9]{64}$`
+    validator).
