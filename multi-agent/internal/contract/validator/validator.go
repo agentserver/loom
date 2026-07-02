@@ -64,9 +64,16 @@ func New() Validator { return staticValidator{} }
 
 type staticValidator struct{}
 
-func (staticValidator) Check(_ context.Context, _ contract.TaskContract, _ capability.Snapshot) []Block {
-	// Tasks 3–6 replace this body with the four ordered check calls.
-	return nil
+func (staticValidator) Check(_ context.Context, tc contract.TaskContract, snap capability.Snapshot) []Block {
+	// Deterministic order (spec §2): missing_file → wrong_version →
+	// forbidden_cred → policy_violation. Table tests grep blocks[i]
+	// by this order.
+	var blocks []Block
+	blocks = append(blocks, checkMissingFile(tc, snap)...)
+	blocks = append(blocks, checkWrongVersion(tc, snap)...)
+	blocks = append(blocks, checkForbiddenCred(tc, snap)...)
+	blocks = append(blocks, checkPolicyViolation(tc, snap)...)
+	return blocks
 }
 
 // newBlock assembles a Block with the required three-field Detail and

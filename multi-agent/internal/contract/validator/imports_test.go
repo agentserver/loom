@@ -26,6 +26,38 @@ var allowedImports = map[string]struct{}{
 	`"github.com/yourorg/multi-agent/internal/contract"`:   {},
 }
 
+// §7(b) regression bait: any use of strings.Split with a literal "."
+// under this package is a spec-forbidden hand-rolled semver split.
+// Coarse text-grep (an AST walk would be more precise but false-positives
+// are cheap to work around here).
+func TestNoHandRolledSemverSplit(t *testing.T) {
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
+			continue
+		}
+		// Skip _test.go files so this guard itself doesn't trigger.
+		if strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(body), `strings.Split(`) &&
+			strings.Contains(string(body), `"."`) {
+			t.Errorf("%s: strings.Split + literal \".\" — hand-rolled semver split forbidden (§7(b))", e.Name())
+		}
+	}
+}
+
 func TestImportPurity(t *testing.T) {
 	fset := token.NewFileSet()
 	dir, err := os.Getwd()
