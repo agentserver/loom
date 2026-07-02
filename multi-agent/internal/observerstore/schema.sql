@@ -258,3 +258,34 @@ CREATE INDEX IF NOT EXISTS idx_capability_snapshot_usages_agent
 ON capability_snapshot_usages(workspace_id, agent_id, used_at);
 CREATE INDEX IF NOT EXISTS idx_capability_snapshot_usages_hash
 ON capability_snapshot_usages(hash);
+
+-- WT-2-driver-promotion-chain B6: per-register/unregister/install audit row.
+-- Populated by internal/promotionaudit.SQLiteWriter via the register /
+-- unregister driver tools and the mcp-userspace install CLI. Reserved
+-- columns `stage` / `stage_result` are filled by sub-B2 (acceptance
+-- pipeline) which reuses this table for per-stage rows. See spec
+-- docs/specs/wt2-driver-promotion-chain-B6.spec.md §3.2 and §7 for the
+-- Security invariants; the CHECK constraints belt-and-suspenders the
+-- Go-side promotionaudit.Validate enums.
+CREATE TABLE IF NOT EXISTS promotion_audit (
+    row_id                    TEXT PRIMARY KEY,
+    ts                        TEXT NOT NULL,
+    workspace_id              TEXT NOT NULL DEFAULT '',
+    mcp_name                  TEXT NOT NULL,
+    action                    TEXT NOT NULL CHECK(action IN ('register','unregister','install')),
+    promoted_by_user_id       TEXT NOT NULL,
+    driver_thread_id          TEXT NOT NULL,
+    promotion_reason          TEXT NOT NULL CHECK(promotion_reason IN (
+        'explicit_user_request','driver_agent_inferred','batch_import','ci_seed'
+    )),
+    candidate_source_task_id  TEXT NOT NULL,
+    registry_hash_after       TEXT NOT NULL DEFAULT '',
+    stage                     TEXT NOT NULL DEFAULT '',
+    stage_result              TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_promotion_audit_mcp
+    ON promotion_audit(mcp_name, ts);
+CREATE INDEX IF NOT EXISTS idx_promotion_audit_user
+    ON promotion_audit(promoted_by_user_id, ts);
+CREATE INDEX IF NOT EXISTS idx_promotion_audit_thread
+    ON promotion_audit(driver_thread_id, ts);
