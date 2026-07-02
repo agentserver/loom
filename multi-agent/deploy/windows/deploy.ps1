@@ -112,8 +112,11 @@ if ([string]::IsNullOrEmpty($LoomHome)) {
     $home_dir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $env:HOME }
     $LoomHome = Join-Path $home_dir '.loom\eval-deploy'
 }
-$null = New-Item -ItemType Directory -Force -Path $LoomHome
-$LoomHome = (Resolve-Path $LoomHome).Path
+# --dry-run must be side-effect free (spec §3.3); create the dir only
+# in the actual spawn path below.
+if (Test-Path -LiteralPath $LoomHome) {
+    $LoomHome = (Resolve-Path -LiteralPath $LoomHome).Path
+}
 
 if ([string]::IsNullOrEmpty($BinDir)) {
     $BinDir = Join-Path $PSScriptRoot 'bin'
@@ -239,19 +242,19 @@ function Get-PlannedCommands {
         return @(
             @((Join-Path $BinDir 'agentserver-stub.windows-amd64.exe'), '--listen', "127.0.0.1:$StubPort", '--workspace-id', 'auto'),
             @('<observer-inline-render>', (Join-Path $LoomHome 'observer\observer.yaml'), '--api-key', '<REDACTED>'),
-            @((Join-Path $LoomHome 'observer\observer-server.windows-amd64.exe'), '-config', (Join-Path $LoomHome 'observer\observer.yaml')),
+            @((Join-Path $LoomHome 'observer\observer-server.exe'), '-config', (Join-Path $LoomHome 'observer\observer.yaml')),
             @((Join-Path $PSScriptRoot 'slave\install.ps1'), '-Name', 'eval-slave', '-ObserverUrl', "http://127.0.0.1:$ObserverPort", '-Workspace', 'ws-eval-auto', '-LoomHome', (Join-Path $LoomHome 'slave'), '-Bin', (Join-Path $BinDir 'slave-agent.windows-amd64.exe')),
             @('<yq-patch>', (Join-Path $LoomHome 'slave\config.yaml'), "server.url=http://127.0.0.1:$StubPort", 'credentials.*=<REDACTED>', 'daemon.auto_start=false', "daemon.listen=127.0.0.1:$SlavePort"),
-            @((Join-Path $LoomHome 'slave\slave-agent.windows-amd64.exe'), (Join-Path $LoomHome 'slave\config.yaml')),
+            @((Join-Path $LoomHome 'slave\slave-agent.exe'), (Join-Path $LoomHome 'slave\config.yaml')),
             @((Join-Path $PSScriptRoot 'driver\install.ps1'), '-Project', (Join-Path $LoomHome 'driver'), '-Name', 'eval-driver', '-ObserverUrl', "http://127.0.0.1:$ObserverPort", '-Bin', (Join-Path $BinDir 'driver-agent.windows-amd64.exe')),
             @('<yq-patch>', (Join-Path $LoomHome 'driver\config.yaml'), "server.url=http://127.0.0.1:$StubPort", 'credentials.*=<REDACTED>'),
-            @((Join-Path $LoomHome 'driver\driver-agent.windows-amd64.exe'), 'serve-daemon', '--config', (Join-Path $LoomHome 'driver\config.yaml'), '--listen', "127.0.0.1:$DriverPort")
+            @((Join-Path $LoomHome 'driver\driver-agent.exe'), 'serve-daemon', '--config', (Join-Path $LoomHome 'driver\config.yaml'), '--listen', "127.0.0.1:$DriverPort")
         )
     } else {
         return @(
-            @((Join-Path $LoomHome 'observer\observer-server.windows-amd64.exe'), '-config', (Join-Path $LoomHome 'observer\observer.yaml')),
-            @((Join-Path $LoomHome 'slave\slave-agent.windows-amd64.exe'), (Join-Path $LoomHome 'slave\config.yaml')),
-            @((Join-Path $LoomHome 'driver\driver-agent.windows-amd64.exe'), 'serve-daemon', '--config', (Join-Path $LoomHome 'driver\config.yaml'), '--listen', "127.0.0.1:$DriverPort")
+            @((Join-Path $LoomHome 'observer\observer-server.exe'), '-config', (Join-Path $LoomHome 'observer\observer.yaml')),
+            @((Join-Path $LoomHome 'slave\slave-agent.exe'), (Join-Path $LoomHome 'slave\config.yaml')),
+            @((Join-Path $LoomHome 'driver\driver-agent.exe'), 'serve-daemon', '--config', (Join-Path $LoomHome 'driver\config.yaml'), '--listen', "127.0.0.1:$DriverPort")
         )
     }
 }
@@ -314,15 +317,32 @@ if ($DryRun) {
 # --- non-dry-run: preflight (prod) ------------------------------------
 
 function Test-ProdPreflight {
+    # --- observer -----------------------------------------------------
     $obs_yaml = Join-Path $LoomHome 'observer\observer.yaml'
     if (-not (Test-Path -PathType Leaf -LiteralPath $obs_yaml)) {
         throw "prod preflight failed: $obs_yaml missing; see tests/prod_test/E2E_RUNBOOK.md:83-108"
     }
-    $obs_bin = Join-Path $LoomHome 'observer\observer-server.windows-amd64.exe'
+    $obs_bin = Join-Path $LoomHome 'observer\observer-server.exe'
     if (-not (Test-Path -PathType Leaf -LiteralPath $obs_bin)) {
         throw "prod preflight failed: $obs_bin missing; see tests/prod_test/E2E_RUNBOOK.md:83-108"
     }
+    # observer.yaml must have listen_addr matching -ObserverPort. See
+    # deploy.sh prod_preflight() for the rationale (empty listen_addr
+    # would let observer-server pick a random port, hiding the actual
+    # misconfiguration behind an exit-4 timeout).
+    $obs_cfg = Get-Content -Raw -LiteralPath $obs_yaml
+    if (-not ($obs_cfg -match '(?m)^\s*listen_addr\s*:\s*["'']?([^"''\s]+)')) {
+        throw "prod preflight failed: $obs_yaml listen_addr is empty; see tests/prod_test/E2E_RUNBOOK.md:83-108"
+    }
+    $obs_listen = $Matches[1]
+    if ($obs_listen -match ':(\d+)$') {
+        $obs_port = [int]$Matches[1]
+        if ($obs_port -ne $ObserverPort) {
+            throw "prod preflight failed: operator-registered observer uses port $obs_port; -ObserverPort $ObserverPort must match or be omitted"
+        }
+    }
 
+    # --- slave --------------------------------------------------------
     $slave_yaml = Join-Path $LoomHome 'slave\config.yaml'
     if (-not (Test-Path -PathType Leaf -LiteralPath $slave_yaml)) {
         throw "prod preflight failed: $slave_yaml missing; see tests/prod_test/E2E_RUNBOOK.md:83-108"
@@ -333,7 +353,24 @@ function Test-ProdPreflight {
             throw "prod preflight failed: $slave_yaml credentials.$field is empty; see tests/prod_test/E2E_RUNBOOK.md:83-108"
         }
     }
+    # daemon.listen required (same rationale as deploy.sh: empty means
+    # the readiness gate waits on the wrong port).
+    if (-not ($slave_cfg -match '(?m)^\s*listen\s*:\s*["'']?([^"''\s]+)')) {
+        throw "prod preflight failed: $slave_yaml daemon.listen is empty; the readiness gate needs an explicit port; see tests/prod_test/E2E_RUNBOOK.md:83-108"
+    }
+    $slave_listen = $Matches[1]
+    if ($slave_listen -match ':(\d+)$') {
+        $slave_port_val = [int]$Matches[1]
+        if ($slave_port_val -ne $SlavePort) {
+            throw "prod preflight failed: operator-registered slave uses port $slave_port_val; -SlavePort $SlavePort must match or be omitted"
+        }
+    }
+    $slave_bin = Join-Path $LoomHome 'slave\slave-agent.exe'
+    if (-not (Test-Path -PathType Leaf -LiteralPath $slave_bin)) {
+        throw "prod preflight failed: $slave_bin missing; see tests/prod_test/E2E_RUNBOOK.md:83-108"
+    }
 
+    # --- driver -------------------------------------------------------
     $driver_yaml = Join-Path $LoomHome 'driver\config.yaml'
     if (-not (Test-Path -PathType Leaf -LiteralPath $driver_yaml)) {
         throw "prod preflight failed: $driver_yaml missing; see tests/prod_test/E2E_RUNBOOK.md:83-108"
@@ -343,6 +380,10 @@ function Test-ProdPreflight {
         if (-not ($driver_cfg -match "(?m)^\s*${field}\s*:\s*[\`"']?\S+")) {
             throw "prod preflight failed: $driver_yaml credentials.$field is empty; see tests/prod_test/E2E_RUNBOOK.md:83-108"
         }
+    }
+    $driver_bin = Join-Path $LoomHome 'driver\driver-agent.exe'
+    if (-not (Test-Path -PathType Leaf -LiteralPath $driver_bin)) {
+        throw "prod preflight failed: $driver_bin missing; see tests/prod_test/E2E_RUNBOOK.md:83-108"
     }
 }
 
@@ -361,17 +402,23 @@ function Invoke-Cleanup-OnFailure {
     Remove-Item -Recurse -Force -Path $PidsDir -ErrorAction SilentlyContinue
 }
 
-$null = New-Item -ItemType Directory -Force -Path $PidsDir
-# NTFS restrict to current user (loose 0600 analog).
-try {
-    $acl = Get-Acl -Path $PidsDir
-    $acl.SetAccessRuleProtection($true, $false)
-    $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($user, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
-    $acl.ResetAccessRule($rule)
-    Set-Acl -Path $PidsDir -AclObject $acl
-} catch {
-    # Non-fatal on non-Windows hosts (Pester-on-Linux exercise).
+function Initialize-PidsDir {
+    # Called only from the non-dry-run bring-up path. Creates $LoomHome
+    # + $PidsDir on disk and restricts the .pids ACL to the current
+    # user. --dry-run must not reach this function (spec §3.3
+    # no-side-effects contract).
+    $null = New-Item -ItemType Directory -Force -Path $LoomHome
+    $null = New-Item -ItemType Directory -Force -Path $PidsDir
+    try {
+        $acl = Get-Acl -Path $PidsDir
+        $acl.SetAccessRuleProtection($true, $false)
+        $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($user, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+        $acl.ResetAccessRule($rule)
+        Set-Acl -Path $PidsDir -AclObject $acl
+    } catch {
+        # Non-fatal on non-Windows hosts (Pester-on-Linux exercise).
+    }
 }
 
 function Start-Sub {
@@ -452,9 +499,15 @@ function Invoke-BringupStub {
     $tpl = $tpl.Replace('__LOOM_HOME__', $obs_dir)
     $tpl = $tpl.Replace('__WS_APIKEY__', $apikey)
     Set-Content -LiteralPath (Join-Path $obs_dir 'observer.yaml') -Value $tpl -Encoding utf8
-    Copy-Item -LiteralPath (Join-Path $BinDir 'observer-server.windows-amd64.exe') -Destination $obs_dir -Force
+    # Copy the arch-suffixed prebuilt into the installed dir under the
+    # stable name observer-server.exe so the subsequent Start-Sub and
+    # any operator-side re-invocation both target one canonical path
+    # (matches driver/slave installers which likewise rename to
+    # driver-agent.exe / slave-agent.exe).
+    Copy-Item -LiteralPath (Join-Path $BinDir 'observer-server.windows-amd64.exe') `
+              -Destination (Join-Path $obs_dir 'observer-server.exe') -Force
     Start-Sub -Role 'observer' -LogPath (Join-Path $LoomHome 'logs\observer.log') `
-              -FilePath (Join-Path $obs_dir 'observer-server.windows-amd64.exe') `
+              -FilePath (Join-Path $obs_dir 'observer-server.exe') `
               -ArgList @('-config', (Join-Path $obs_dir 'observer.yaml'))
     if (-not (Wait-TcpListen -Port $ObserverPort)) { $script:StageFailed = $true; throw "observer :$ObserverPort did not LISTEN" }
 
@@ -472,7 +525,7 @@ function Invoke-BringupStub {
     Update-SlaveConfigStubMode -SlaveConfigPath (Join-Path $LoomHome 'slave\config.yaml') `
                                -StubBin $stub_bin
     Start-Sub -Role 'slave' -LogPath (Join-Path $LoomHome 'logs\slave.log') `
-              -FilePath (Join-Path $LoomHome 'slave\slave-agent.windows-amd64.exe') `
+              -FilePath (Join-Path $LoomHome 'slave\slave-agent.exe') `
               -ArgList @((Join-Path $LoomHome 'slave\config.yaml'))
     # Stub-mode slave readiness gate: HTTP whoami round-trip with slave.proxy_token
     # (§4.2 stub table). We captured proxy_token in the yaml above.
@@ -490,7 +543,7 @@ function Invoke-BringupStub {
     Update-DriverConfigStubMode -DriverConfigPath (Join-Path $LoomHome 'driver\config.yaml') `
                                 -StubBin $stub_bin
     Start-Sub -Role 'driver' -LogPath (Join-Path $LoomHome 'logs\driver.log') `
-              -FilePath (Join-Path $LoomHome 'driver\driver-agent.windows-amd64.exe') `
+              -FilePath (Join-Path $LoomHome 'driver\driver-agent.exe') `
               -ArgList @('serve-daemon', '--config', (Join-Path $LoomHome 'driver\config.yaml'), '--listen', "127.0.0.1:$DriverPort")
     if (-not (Wait-TcpListen -Port $DriverPort)) { $script:StageFailed = $true; throw "driver :$DriverPort did not LISTEN" }
     if (-not (Wait-HttpAny -Url "http://127.0.0.1:$DriverPort/" -TimeoutSec 5)) {
@@ -607,20 +660,23 @@ function Wait-Whoami {
 function Invoke-BringupProd {
     Test-ProdPreflight
     Start-Sub -Role 'observer' -LogPath (Join-Path $LoomHome 'logs\observer.log') `
-              -FilePath (Join-Path $LoomHome 'observer\observer-server.windows-amd64.exe') `
+              -FilePath (Join-Path $LoomHome 'observer\observer-server.exe') `
               -ArgList @('-config', (Join-Path $LoomHome 'observer\observer.yaml'))
     if (-not (Wait-TcpListen -Port $ObserverPort)) { $script:StageFailed = $true; throw "observer :$ObserverPort did not LISTEN" }
     Start-Sub -Role 'slave' -LogPath (Join-Path $LoomHome 'logs\slave.log') `
-              -FilePath (Join-Path $LoomHome 'slave\slave-agent.windows-amd64.exe') `
+              -FilePath (Join-Path $LoomHome 'slave\slave-agent.exe') `
               -ArgList @((Join-Path $LoomHome 'slave\config.yaml'))
     if (-not (Wait-TcpListen -Port $SlavePort)) { $script:StageFailed = $true; throw "slave :$SlavePort did not LISTEN" }
     Start-Sub -Role 'driver' -LogPath (Join-Path $LoomHome 'logs\driver.log') `
-              -FilePath (Join-Path $LoomHome 'driver\driver-agent.windows-amd64.exe') `
+              -FilePath (Join-Path $LoomHome 'driver\driver-agent.exe') `
               -ArgList @('serve-daemon', '--config', (Join-Path $LoomHome 'driver\config.yaml'), '--listen', "127.0.0.1:$DriverPort")
     if (-not (Wait-TcpListen -Port $DriverPort)) { $script:StageFailed = $true; throw "driver :$DriverPort did not LISTEN" }
 }
 
 try {
+    # Realize $LoomHome + $PidsDir now (post-dry-run branch). --dry-run
+    # returned above without touching the filesystem.
+    Initialize-PidsDir
     switch ($ResolvedMode) {
         'stub' { Invoke-BringupStub }
         'prod' { Invoke-BringupProd }

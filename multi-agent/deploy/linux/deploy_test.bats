@@ -258,6 +258,16 @@ teardown() {
     grep -q 'passing OPENAI_API_KEY through' "$tmp_err"
 }
 
+# ----- T1b: --dry-run is side-effect-free ---------------------------
+@test "T1b: --dry-run does not create \$LOOM_HOME on disk" {
+    fresh="$TMP/nonexistent-loom-$$"
+    # Sanity: the path really does not exist.
+    [ ! -e "$fresh" ]
+    LOOM_TEST_HOSTNAME=h1 run bash "$DEPLOY" --stub --dry-run --loom-home "$fresh"
+    [ "$status" -eq 0 ]
+    [ ! -e "$fresh" ]
+}
+
 # ----- T16: install.ps1 boundary (spec §0) ---------------------------
 @test "T16: deploy/windows/slave/install.ps1 is unchanged vs origin" {
     if ! git -C "$ROOT/.." rev-parse --verify origin/paper/v3-integration >/dev/null 2>&1; then

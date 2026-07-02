@@ -193,6 +193,203 @@ Describe 'T11-ps: topology hostname redaction (any host)' {
     }
 }
 
+Describe 'T15-ps / T15b-ps / T15c-ps: env whitelist (any host)' {
+    # The Get-WhitelistedEnv function is defined inside deploy.ps1.
+    # For any-host execution we source deploy.ps1 with mode/flag globals
+    # pre-set and invoke Get-WhitelistedEnv directly. To avoid running
+    # the CLI shim (which would kick off port validation etc.), we
+    # dot-source only the function definitions via a scoped extract.
+
+    BeforeAll {
+        # Extract every `function ...` block plus the ALWAYS_/IFSET_
+        # constants; skip the top-level CLI code by filtering out lines
+        # after the first `try { ... Invoke-Bringup*` block.
+        $lines = Get-Content -LiteralPath $script:DEPLOY
+        $script:extract = ($lines | ForEach-Object {
+            if ($_ -match '^(function|\$script:ALWAYS_ENV_KEYS|\$script:IFSET_ENV_KEYS|\$script:READY_TIMEOUT_DEFAULT|\$script:WELL_KNOWN_PORTS|.*# --- constants)') {
+                $inFn = $true
+            }
+            $_
+        }) -join "`n"
+        # Simpler: source the file as a script block, wrapping the
+        # CLI-body in a `if ($false) { }` guard.
+        $script:extract = $lines -join "`n"
+        # Replace the top-level try/switch with a no-op stub so dot-
+        # sourcing does not spawn anything.
+        $script:extract = $script:extract -replace '(?s)try\s*\{\s*(#[^\n]*\n\s*)?Initialize-PidsDir[\s\S]*?exit \d+\s*\}\s*catch[\s\S]*?exit 4\s*\}', ''
+    }
+
+    It 'T15-ps: drops AWS_/GITHUB_TOKEN/DOCKER_CONFIG/NPM_TOKEN' {
+        # Dot-source into a scoped scriptblock so the extraction does not
+        # pollute the Pester runner globals.
+        $mode = 'stub'; $flag = $false
+        $sb = [scriptblock]::Create($script:extract + "`n" + '
+            $env:AWS_ACCESS_KEY_ID = "NOPE_AWS"
+            $env:GITHUB_TOKEN      = "NOPE_GH"
+            $env:DOCKER_CONFIG     = "/etc/docker"
+            $env:NPM_TOKEN         = "NOPE_NPM"
+            Get-WhitelistedEnv -Mode "stub"
+        ')
+        $out = & $sb
+        # $out is a hashtable; check absence of the four keys.
+        $out.ContainsKey('AWS_ACCESS_KEY_ID') | Should -BeFalse
+        $out.ContainsKey('GITHUB_TOKEN')      | Should -BeFalse
+        $out.ContainsKey('DOCKER_CONFIG')     | Should -BeFalse
+        $out.ContainsKey('NPM_TOKEN')         | Should -BeFalse
+    }
+
+    It 'T15b-ps: passes always-allowed + if-set + LOOM_* keys' {
+        $env:MOCK_MODEL_URL     = 'http://127.0.0.1:9090'
+        $env:AGENTSERVER_ROOT   = '/repo/agentserver'
+        $env:LOOM_OBSERVER_URL  = 'http://127.0.0.1:18091'
+        try {
+            $sb = [scriptblock]::Create($script:extract + "`n" + 'Get-WhitelistedEnv -Mode "stub"')
+            $out = & $sb
+            $out['PATH']                | Should -Not -BeNullOrEmpty
+            $out['MOCK_MODEL_URL']      | Should -Be 'http://127.0.0.1:9090'
+            $out['AGENTSERVER_ROOT']    | Should -Be '/repo/agentserver'
+            $out['LOOM_OBSERVER_URL']   | Should -Be 'http://127.0.0.1:18091'
+        } finally {
+            Remove-Item Env:\MOCK_MODEL_URL    -ErrorAction SilentlyContinue
+            Remove-Item Env:\AGENTSERVER_ROOT  -ErrorAction SilentlyContinue
+            Remove-Item Env:\LOOM_OBSERVER_URL -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'T15c-i-ps: stub never propagates OPENAI/ANTHROPIC even with AllowModelKey' {
+        $env:OPENAI_API_KEY   = 'STUB_KEY_9zzz'
+        $env:ANTHROPIC_API_KEY = 'STUB_KEY_8yyy'
+        try {
+            $sb = [scriptblock]::Create($script:extract + "`n" + 'Get-WhitelistedEnv -Mode "stub" -AllowModelKey')
+            $out = & $sb
+            $out.ContainsKey('OPENAI_API_KEY')    | Should -BeFalse
+            $out.ContainsKey('ANTHROPIC_API_KEY') | Should -BeFalse
+        } finally {
+            Remove-Item Env:\OPENAI_API_KEY    -ErrorAction SilentlyContinue
+            Remove-Item Env:\ANTHROPIC_API_KEY -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'T15c-ii-ps: prod without flag drops OPENAI_API_KEY' {
+        $env:OPENAI_API_KEY = 'PROD_KEY_1234'
+        try {
+            $sb = [scriptblock]::Create($script:extract + "`n" + 'Get-WhitelistedEnv -Mode "prod"')
+            $out = & $sb
+            $out.ContainsKey('OPENAI_API_KEY') | Should -BeFalse
+        } finally {
+            Remove-Item Env:\OPENAI_API_KEY -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'T15c-iii-ps: prod with flag passes OPENAI_API_KEY' {
+        $env:OPENAI_API_KEY = 'PROD_KEY_9999'
+        try {
+            $sb = [scriptblock]::Create($script:extract + "`n" + 'Get-WhitelistedEnv -Mode "prod" -AllowModelKey')
+            $out = & $sb
+            $out['OPENAI_API_KEY'] | Should -Be 'PROD_KEY_9999'
+        } finally {
+            Remove-Item Env:\OPENAI_API_KEY -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'T6-ps / T6c-ps / T9-ps / T17-ps / T18-ps: Windows-only runtime' {
+    # These rows require Windows-native cmdlets (Test-NetConnection,
+    # Start-Process semantics that materially differ from Linux) and
+    # real binaries under $BinDir. They are Set-ItResult -Skipped on
+    # non-Windows so Pester-on-Linux still runs green — Task 12's
+    # fresh-Windows-host leg (see plan §6.3) is what actually
+    # exercises them.
+
+    It 'T6-ps: agentserver-stub -ArgumentList begins with 127.0.0.1' {
+        if (-not $IsWindows) { Set-ItResult -Skipped -Because 'requires Windows'; return }
+        # Full-stack -Stub run into a tempdir; then read the argv the
+        # stub was started with (Get-Process | Select CommandLine).
+        # Implementation deferred to Task 12 fresh-host transcript.
+        Set-ItResult -Skipped -Because 'implemented as manual fresh-host smoke in Task 12'
+    }
+    It 'T6c-ps: post-Stub slave config shows auto_start=false + stub server.url' {
+        if (-not $IsWindows) { Set-ItResult -Skipped -Because 'requires Windows'; return }
+        Set-ItResult -Skipped -Because 'implemented as manual fresh-host smoke in Task 12'
+    }
+    It 'T9-ps: -Prod does not clobber pre-registered proxy_token' {
+        if (-not $IsWindows) { Set-ItResult -Skipped -Because 'requires Windows'; return }
+        # Synthetic pre-existing $LoomHome/slave/config.yaml with
+        # proxy_token=PROXY_TOKEN_SECRET_WIN; run deploy.ps1 -Prod;
+        # assert Get-FileHash before/after equal AND grep for the token
+        # returns exactly the original file (§7(b) Windows counterpart
+        # of Linux T9).
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('wt2-t9-ps-' + [guid]::NewGuid().ToString('N').Substring(0,8))
+        New-Item -ItemType Directory -Force -Path (Join-Path $tmp 'slave')    | Out-Null
+        New-Item -ItemType Directory -Force -Path (Join-Path $tmp 'observer') | Out-Null
+        New-Item -ItemType Directory -Force -Path (Join-Path $tmp 'driver')   | Out-Null
+        try {
+            # Minimal fixture: observer + slave + driver configs with real
+            # credentials + observer listen_addr matching -ObserverPort.
+            Set-Content -LiteralPath (Join-Path $tmp 'observer\observer.yaml') `
+                -Value @'
+listen_addr: "127.0.0.1:18091"
+db_path: /tmp/prod-fixture.db
+api_keys:
+  - id: bootstrap
+    key: "fixture-key"
+    note: "fixture"
+'@
+            Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'bin\observer-server.windows-amd64.exe') `
+                      -Destination (Join-Path $tmp 'observer\observer-server.exe') -Force -ErrorAction SilentlyContinue
+            Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'bin\slave-agent.windows-amd64.exe') `
+                      -Destination (Join-Path $tmp 'slave\slave-agent.exe') -Force -ErrorAction SilentlyContinue
+            Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'bin\driver-agent.windows-amd64.exe') `
+                      -Destination (Join-Path $tmp 'driver\driver-agent.exe') -Force -ErrorAction SilentlyContinue
+
+            Set-Content -LiteralPath (Join-Path $tmp 'slave\config.yaml') `
+                -Value @'
+credentials:
+  proxy_token: "PROXY_TOKEN_SECRET_WIN"
+  short_id: "slv-x"
+  workspace_id: "ws-x"
+daemon:
+  listen: "127.0.0.1:18093"
+'@
+            $preHash = (Get-FileHash -LiteralPath (Join-Path $tmp 'slave\config.yaml') -Algorithm SHA256).Hash
+
+            Set-Content -LiteralPath (Join-Path $tmp 'driver\config.yaml') `
+                -Value @'
+credentials:
+  proxy_token: "DRIVER_TOKEN_X"
+  short_id: "drv-x"
+'@
+            # Run -Prod as a dry-run analog: we only need preflight to
+            # succeed and no config edit to happen. Full spawn requires
+            # real binaries so we accept exit != 0 on the spawn attempt
+            # and only assert the file-unchanged property.
+            & $script:DEPLOY -Prod -LoomHome $tmp -ObserverPort 18091 -SlavePort 18093 -DriverPort 18092 2>&1 | Out-Null
+            $postHash = (Get-FileHash -LiteralPath (Join-Path $tmp 'slave\config.yaml') -Algorithm SHA256).Hash
+            $preHash | Should -Be $postHash
+            $hits = Select-String -Path (Join-Path $tmp 'slave\config.yaml') -SimpleMatch -Pattern 'PROXY_TOKEN_SECRET_WIN'
+            $hits.Count | Should -Be 1
+        } finally {
+            Remove-Item -Recurse -Force -Path $tmp -ErrorAction SilentlyContinue
+        }
+    }
+    It 'T17-ps: fresh Windows -Stub runs to completion with 4 readiness gates' {
+        if (-not $IsWindows) { Set-ItResult -Skipped -Because 'requires Windows'; return }
+        Set-ItResult -Skipped -Because 'implemented as manual fresh-host smoke in Task 12; needs prebuilt Windows binaries under deploy/windows/bin/'
+    }
+    It 'T18-ps: -Stub writes .pids/*.pid, spawn-then-exit contract' {
+        if (-not $IsWindows) { Set-ItResult -Skipped -Because 'requires Windows'; return }
+        Set-ItResult -Skipped -Because 'implemented as manual fresh-host smoke in Task 12'
+    }
+    It 'T18b-ps: -Shutdown reaps every pid in .pids' {
+        if (-not $IsWindows) { Set-ItResult -Skipped -Because 'requires Windows'; return }
+        Set-ItResult -Skipped -Because 'implemented as manual fresh-host smoke in Task 12'
+    }
+    It 'T18c-ps: readiness timeout exits 4 with cleanup' {
+        if (-not $IsWindows) { Set-ItResult -Skipped -Because 'requires Windows'; return }
+        Set-ItResult -Skipped -Because 'implemented as manual fresh-host smoke in Task 12'
+    }
+}
+
 Describe 'T19-ps: observer template parity (any host)' {
     It "windows/observer/config.yaml.template body matches linux template modulo header" {
         $winTpl = Join-Path $PSScriptRoot 'observer\config.yaml.template'

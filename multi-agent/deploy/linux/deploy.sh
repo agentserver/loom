@@ -94,9 +94,22 @@ done
 # Default mode = stub (spec §3.1).
 [[ -z "$MODE" && "$SHUTDOWN" -eq 0 ]] && MODE=stub
 
-# LOOM_HOME default.
+# LOOM_HOME default. Compute the intended path but DO NOT create it yet —
+# --dry-run must not touch the filesystem (spec §3.3 code 0 "no side
+# effects"). Only realize the directory when we actually spawn.
 [[ -z "$LOOM_HOME" ]] && LOOM_HOME="${HOME:-/tmp}/.loom/eval-deploy"
-LOOM_HOME="$(mkdir -p "$LOOM_HOME" && cd "$LOOM_HOME" && pwd)"
+# Resolve without mkdir. If the parent doesn't exist we fall back to the
+# literal path — dry-run's planned_commands only needs a string.
+if [[ -d "$LOOM_HOME" ]]; then
+    LOOM_HOME="$(cd "$LOOM_HOME" && pwd)"
+else
+    # Normalize any relative segment via bash parameter expansion; do not
+    # touch disk.
+    case "$LOOM_HOME" in
+        /*) : ;;                                                   # already absolute
+        *) LOOM_HOME="$(cd "$(dirname "$LOOM_HOME")" 2>/dev/null && pwd)/$(basename "$LOOM_HOME")" || LOOM_HOME="$LOOM_HOME" ;;
+    esac
+fi
 readonly LOOM_HOME BIN_DIR
 PIDS_DIR="$LOOM_HOME/.pids"
 
@@ -411,14 +424,29 @@ fi
 
 prod_preflight() {
     local f
+    command -v yq >/dev/null 2>&1 || die "prod preflight failed: yq not found on PATH; see tests/prod_test/E2E_RUNBOOK.md:83-108"
+
+    # --- observer -----------------------------------------------------
     f="$LOOM_HOME/observer/observer.yaml"
     [[ -r "$f" ]] || die "prod preflight failed: $f missing or unreadable; see tests/prod_test/E2E_RUNBOOK.md:83-108"
     [[ -x "$LOOM_HOME/observer/observer-server" ]] || die "prod preflight failed: $LOOM_HOME/observer/observer-server not executable; see tests/prod_test/E2E_RUNBOOK.md:83-108"
+    # observer.yaml must have listen_addr matching --observer-port. The
+    # yaml canonical shape is `listen_addr: "127.0.0.1:18091"` (see
+    # deploy/linux/observer/config.yaml.template). Empty listen_addr
+    # would let observer-server pick a random port — the readiness gate
+    # would time out at exit 4, hiding an actionable misconfiguration.
+    local obs_listen obs_port
+    obs_listen=$(yq eval '.listen_addr // ""' "$f")
+    [[ -n "$obs_listen" ]] || die "prod preflight failed: $f listen_addr is empty; see tests/prod_test/E2E_RUNBOOK.md:83-108"
+    obs_port="${obs_listen##*:}"
+    if [[ "$obs_port" =~ ^[0-9]+$ && "$obs_port" != "$OBSERVER_PORT" ]]; then
+        die "prod preflight failed: operator-registered observer uses port $obs_port; --observer-port $OBSERVER_PORT must match or be omitted"
+    fi
 
+    # --- slave --------------------------------------------------------
     f="$LOOM_HOME/slave/config.yaml"
     [[ -r "$f" ]] || die "prod preflight failed: $f missing or unreadable; see tests/prod_test/E2E_RUNBOOK.md:83-108"
-    command -v yq >/dev/null 2>&1 || die "prod preflight failed: yq not found on PATH"
-    local slave_token slave_short_id slave_ws slave_listen
+    local slave_token slave_short_id slave_ws slave_listen slave_port
     slave_token=$(yq eval '.credentials.proxy_token // ""' "$f")
     [[ -n "$slave_token" ]] || die "prod preflight failed: $f credentials.proxy_token is empty; see tests/prod_test/E2E_RUNBOOK.md:83-108"
     slave_short_id=$(yq eval '.credentials.short_id // ""' "$f")
@@ -426,14 +454,18 @@ prod_preflight() {
     slave_ws=$(yq eval '.credentials.workspace_id // ""' "$f")
     [[ -n "$slave_ws" ]] || die "prod preflight failed: $f credentials.workspace_id is empty; see tests/prod_test/E2E_RUNBOOK.md:83-108"
     slave_listen=$(yq eval '.daemon.listen // ""' "$f")
-    if [[ -n "$slave_listen" ]]; then
-        local yaml_port="${slave_listen##*:}"
-        if [[ "$yaml_port" =~ ^[0-9]+$ && "$yaml_port" != "$SLAVE_PORT" ]]; then
-            die "prod preflight failed: operator-registered slave uses port $yaml_port; --slave-port $SLAVE_PORT must match or be omitted"
-        fi
+    # daemon.listen is required in prod mode — an empty value would let
+    # slave-agent pick 127.0.0.1:0 (see internal/config/config.go:213),
+    # and our TCP LISTEN readiness gate would then wait on the wrong
+    # port and time out at exit 4 instead of exit 2.
+    [[ -n "$slave_listen" ]] || die "prod preflight failed: $f daemon.listen is empty; the readiness gate needs an explicit port; see tests/prod_test/E2E_RUNBOOK.md:83-108"
+    slave_port="${slave_listen##*:}"
+    if [[ "$slave_port" =~ ^[0-9]+$ && "$slave_port" != "$SLAVE_PORT" ]]; then
+        die "prod preflight failed: operator-registered slave uses port $slave_port; --slave-port $SLAVE_PORT must match or be omitted"
     fi
     [[ -x "$LOOM_HOME/slave/slave-agent" ]] || die "prod preflight failed: $LOOM_HOME/slave/slave-agent not executable"
 
+    # --- driver -------------------------------------------------------
     f="$LOOM_HOME/driver/config.yaml"
     [[ -r "$f" ]] || die "prod preflight failed: $f missing or unreadable; see tests/prod_test/E2E_RUNBOOK.md:83-108"
     local drv_token drv_short_id
@@ -466,7 +498,9 @@ cleanup_on_failure() {
     exit "$ec"
 }
 trap cleanup_on_failure EXIT
-mkdir -p "$PIDS_DIR"
+# LOOM_HOME + .pids are only created here (post-dry-run branch, per §3.3
+# no-side-effect contract for --dry-run).
+mkdir -p "$LOOM_HOME" "$PIDS_DIR"
 chmod 0700 "$PIDS_DIR"
 
 # spawn_bg <role> <log-path> <cmd...>
