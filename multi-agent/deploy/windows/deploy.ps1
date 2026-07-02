@@ -87,7 +87,11 @@ $ErrorActionPreference = 'Stop'
 # Default exit code for unclassified failures. Each throw site sets
 # $script:ExitCode to the appropriate value (2 = preflight, 3 =
 # sub-installer, 4 = readiness, 5 = topology). The outer catch reads
-# this and exits with the classified code (P1-1 fix, Codex round 2).
+# this and exits with the classified code. The main body below is
+# wrapped in a top-level try/catch that starts BEFORE the CLI preflight
+# checks (mode-conflict / port range / port-collision / model-key
+# gate) so those throws produce the classified exit code, not the
+# default PowerShell error exit (P1-1 fix, Codex rounds 2+3).
 $script:ExitCode = 2
 
 # Track whether the operator explicitly supplied each port (mirrors
@@ -97,6 +101,16 @@ $script:ExitCode = 2
 $script:ObserverPortSet = $PSBoundParameters.ContainsKey('ObserverPort')
 $script:SlavePortSet    = $PSBoundParameters.ContainsKey('SlavePort')
 $script:DriverPortSet   = $PSBoundParameters.ContainsKey('DriverPort')
+
+# --- top-level trap for classified preflight exits --------------------
+# Registered here so any throw between here and the main try/catch
+# below (particularly the CLI preflight in Resolve-Mode, Assert-Port,
+# port-collision, and model-key checks) exits with the classified code
+# in $script:ExitCode instead of the default PowerShell error exit.
+trap {
+    [System.Console]::Error.WriteLine("deploy.ps1: $_")
+    exit $script:ExitCode
+}
 
 # --- constants ---------------------------------------------------------
 
@@ -572,13 +586,25 @@ function Invoke-BringupStub {
               -ArgList @('-config', (Join-Path $obs_dir 'observer.yaml'))
     if (-not (Wait-TcpListen -Port $ObserverPort)) { $script:StageFailed = $true; $script:ExitCode = 4; throw "observer :$ObserverPort did not LISTEN" }
 
-    # slave: real install.ps1 (WT-0-owned; do NOT modify) with its real params.
-    & (Join-Path $PSScriptRoot 'slave\install.ps1') `
-        -Name 'eval-slave' `
-        -ObserverUrl "http://127.0.0.1:$ObserverPort" `
-        -Workspace 'ws-eval-auto' `
-        -LoomHome (Join-Path $LoomHome 'slave') `
-        -Bin (Join-Path $BinDir 'slave-agent.windows-amd64.exe')
+    # slave: real install.ps1 (WT-0-owned; do NOT modify) with its real
+    # params. Invoke via `pwsh -NoProfile -File` so the child inherits
+    # only the whitelisted env — the same posture Start-Sub applies to
+    # daemons. `& install.ps1` inside our process would inherit our
+    # full env (§7(g) violation). $script:ExitCode = 3 marks the
+    # failure as sub-installer.
+    try {
+        Invoke-Whitelisted -FilePath 'pwsh' -ArgList @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+            (Join-Path $PSScriptRoot 'slave\install.ps1'),
+            '-Name', 'eval-slave',
+            '-ObserverUrl', "http://127.0.0.1:$ObserverPort",
+            '-Workspace', 'ws-eval-auto',
+            '-LoomHome', (Join-Path $LoomHome 'slave'),
+            '-Bin', (Join-Path $BinDir 'slave-agent.windows-amd64.exe')
+        ) | Out-Null
+    } catch {
+        $script:StageFailed = $true; $script:ExitCode = 3; throw "slave install.ps1 failed: $_"
+    }
     # Post-process config.yaml — server.url, credentials, daemon.auto_start,
     # daemon.listen. Implemented via plain regex-replace + append since Windows
     # doesn't ship yq by default; deploy.ps1's YAML edits are constrained to
@@ -595,12 +621,20 @@ function Invoke-BringupStub {
         $script:StageFailed = $true; $script:ExitCode = 4; throw "slave whoami round-trip failed"
     }
 
-    # driver: real install.ps1 with real params.
-    & (Join-Path $PSScriptRoot 'driver\install.ps1') `
-        -Project (Join-Path $LoomHome 'driver') `
-        -Name 'eval-driver' `
-        -ObserverUrl "http://127.0.0.1:$ObserverPort" `
-        -Bin (Join-Path $BinDir 'driver-agent.windows-amd64.exe')
+    # driver: real install.ps1 with real params — same whitelist +
+    # exit-3 classification as slave above.
+    try {
+        Invoke-Whitelisted -FilePath 'pwsh' -ArgList @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+            (Join-Path $PSScriptRoot 'driver\install.ps1'),
+            '-Project', (Join-Path $LoomHome 'driver'),
+            '-Name', 'eval-driver',
+            '-ObserverUrl', "http://127.0.0.1:$ObserverPort",
+            '-Bin', (Join-Path $BinDir 'driver-agent.windows-amd64.exe')
+        ) | Out-Null
+    } catch {
+        $script:StageFailed = $true; $script:ExitCode = 3; throw "driver install.ps1 failed: $_"
+    }
     Update-DriverConfigStubMode -DriverConfigPath (Join-Path $LoomHome 'driver\config.yaml') `
                                 -StubBin $stub_bin
     Start-Sub -Role 'driver' -LogPath (Join-Path $LoomHome 'logs\driver.log') `

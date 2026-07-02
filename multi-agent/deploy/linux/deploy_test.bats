@@ -270,6 +270,18 @@ teardown() {
     [ "$status" -eq 2 ]
 }
 
+@test "T-mode-missing-arg: --mode (no value) exits 2, not 1" {
+    run bash "$DEPLOY" --mode
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--mode requires a value"* ]]
+}
+
+@test "T-observer-port-missing-arg: --observer-port (no value) exits 2" {
+    run bash "$DEPLOY" --observer-port
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--observer-port requires a value"* ]]
+}
+
 # ----- T1b: --dry-run is side-effect-free ---------------------------
 @test "T1b: --dry-run does not create \$LOOM_HOME on disk" {
     fresh="$TMP/nonexistent-loom-$$"

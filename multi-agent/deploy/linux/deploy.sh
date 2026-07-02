@@ -81,20 +81,28 @@ mode_set() {
     MODE="$1"
 }
 
+# require_arg <flag> — asserts $# is high enough for a value-taking flag.
+# Called before every `$2` deref in the case below so `--mode` (with no
+# value) exits preflight-2 with a clear error instead of hitting
+# `set -u`'s "$2: unbound variable" (P1-1 fix, Codex round 3).
+require_arg() {
+    (( $# >= 2 )) || die "$1 requires a value"
+}
+
 while (( $# > 0 )); do
     case "$1" in
         --stub)                          mode_set stub; shift ;;
         --prod)                          mode_set prod; shift ;;
-        --mode)                          mode_set "$2"; shift 2 ;;
-        --observer-port)                 OBSERVER_PORT="$2"; OBSERVER_PORT_SET=1; shift 2 ;;
-        --driver-port)                   DRIVER_PORT="$2"; DRIVER_PORT_SET=1; shift 2 ;;
-        --slave-port)                    SLAVE_PORT="$2"; SLAVE_PORT_SET=1; shift 2 ;;
-        --stub-port)                     STUB_PORT="$2"; shift 2 ;;
-        --loom-home)                     LOOM_HOME="$2"; shift 2 ;;
-        --bin-dir)                       BIN_DIR="$2"; shift 2 ;;
+        --mode)                          require_arg "$@"; mode_set "$2"; shift 2 ;;
+        --observer-port)                 require_arg "$@"; OBSERVER_PORT="$2"; OBSERVER_PORT_SET=1; shift 2 ;;
+        --driver-port)                   require_arg "$@"; DRIVER_PORT="$2"; DRIVER_PORT_SET=1; shift 2 ;;
+        --slave-port)                    require_arg "$@"; SLAVE_PORT="$2"; SLAVE_PORT_SET=1; shift 2 ;;
+        --stub-port)                     require_arg "$@"; STUB_PORT="$2"; shift 2 ;;
+        --loom-home)                     require_arg "$@"; LOOM_HOME="$2"; shift 2 ;;
+        --bin-dir)                       require_arg "$@"; BIN_DIR="$2"; shift 2 ;;
         --dry-run)                       DRY_RUN=1; shift ;;
         --allow-model-key-passthrough)   ALLOW_MODEL_KEY=1; shift ;;
-        --topology-out)                  TOPOLOGY_OUT="$2"; shift 2 ;;
+        --topology-out)                  require_arg "$@"; TOPOLOGY_OUT="$2"; shift 2 ;;
         --shutdown)                      SHUTDOWN=1; shift ;;
         -h|--help)                       usage; exit 0 ;;
         *)                               die "unknown flag: $1" ;;
@@ -682,19 +690,19 @@ bringup_stub() {
         --role slave --short-id slv-eval-001 > "$slave_creds"
     umask 0022
     local slave_sandbox slave_tunnel slave_proxy slave_ws slave_short
-    slave_sandbox=$(jq -r .sandbox_id "$slave_creds")
-    slave_tunnel=$(jq -r .tunnel_token "$slave_creds")
-    slave_proxy=$(jq -r .proxy_token "$slave_creds")
-    slave_ws=$(jq -r .workspace_id "$slave_creds")
-    slave_short=$(jq -r .short_id "$slave_creds")
-    yq -i ".server.url = \"http://127.0.0.1:$STUB_PORT\"" "$slave_cfg"
-    yq -i ".credentials.sandbox_id = \"$slave_sandbox\"" "$slave_cfg"
-    yq -i ".credentials.tunnel_token = \"$slave_tunnel\"" "$slave_cfg"
-    yq -i ".credentials.proxy_token = \"$slave_proxy\"" "$slave_cfg"
-    yq -i ".credentials.workspace_id = \"$slave_ws\"" "$slave_cfg"
-    yq -i ".credentials.short_id = \"$slave_short\"" "$slave_cfg"
-    yq -i ".daemon.auto_start = false" "$slave_cfg"
-    yq -i ".daemon.listen = \"127.0.0.1:$SLAVE_PORT\"" "$slave_cfg"
+    slave_sandbox=$(run_whitelisted jq -r .sandbox_id "$slave_creds")
+    slave_tunnel=$(run_whitelisted jq -r .tunnel_token "$slave_creds")
+    slave_proxy=$(run_whitelisted jq -r .proxy_token "$slave_creds")
+    slave_ws=$(run_whitelisted jq -r .workspace_id "$slave_creds")
+    slave_short=$(run_whitelisted jq -r .short_id "$slave_creds")
+    run_whitelisted yq -i ".server.url = \"http://127.0.0.1:$STUB_PORT\"" "$slave_cfg"
+    run_whitelisted yq -i ".credentials.sandbox_id = \"$slave_sandbox\"" "$slave_cfg"
+    run_whitelisted yq -i ".credentials.tunnel_token = \"$slave_tunnel\"" "$slave_cfg"
+    run_whitelisted yq -i ".credentials.proxy_token = \"$slave_proxy\"" "$slave_cfg"
+    run_whitelisted yq -i ".credentials.workspace_id = \"$slave_ws\"" "$slave_cfg"
+    run_whitelisted yq -i ".credentials.short_id = \"$slave_short\"" "$slave_cfg"
+    run_whitelisted yq -i ".daemon.auto_start = false" "$slave_cfg"
+    run_whitelisted yq -i ".daemon.listen = \"127.0.0.1:$SLAVE_PORT\"" "$slave_cfg"
 
     spawn_bg slave "$LOOM_HOME/logs/slave.log" \
         "$LOOM_HOME/slave/slave-agent" "$slave_cfg"
@@ -723,17 +731,17 @@ bringup_stub() {
         --role driver --short-id drv-eval-001 > "$driver_creds"
     umask 0022
     local drv_sandbox drv_tunnel drv_proxy drv_ws drv_short
-    drv_sandbox=$(jq -r .sandbox_id "$driver_creds")
-    drv_tunnel=$(jq -r .tunnel_token "$driver_creds")
-    drv_proxy=$(jq -r .proxy_token "$driver_creds")
-    drv_ws=$(jq -r .workspace_id "$driver_creds")
-    drv_short=$(jq -r .short_id "$driver_creds")
-    yq -i ".server.url = \"http://127.0.0.1:$STUB_PORT\"" "$driver_cfg"
-    yq -i ".credentials.sandbox_id = \"$drv_sandbox\"" "$driver_cfg"
-    yq -i ".credentials.tunnel_token = \"$drv_tunnel\"" "$driver_cfg"
-    yq -i ".credentials.proxy_token = \"$drv_proxy\"" "$driver_cfg"
-    yq -i ".credentials.workspace_id = \"$drv_ws\"" "$driver_cfg"
-    yq -i ".credentials.short_id = \"$drv_short\"" "$driver_cfg"
+    drv_sandbox=$(run_whitelisted jq -r .sandbox_id "$driver_creds")
+    drv_tunnel=$(run_whitelisted jq -r .tunnel_token "$driver_creds")
+    drv_proxy=$(run_whitelisted jq -r .proxy_token "$driver_creds")
+    drv_ws=$(run_whitelisted jq -r .workspace_id "$driver_creds")
+    drv_short=$(run_whitelisted jq -r .short_id "$driver_creds")
+    run_whitelisted yq -i ".server.url = \"http://127.0.0.1:$STUB_PORT\"" "$driver_cfg"
+    run_whitelisted yq -i ".credentials.sandbox_id = \"$drv_sandbox\"" "$driver_cfg"
+    run_whitelisted yq -i ".credentials.tunnel_token = \"$drv_tunnel\"" "$driver_cfg"
+    run_whitelisted yq -i ".credentials.proxy_token = \"$drv_proxy\"" "$driver_cfg"
+    run_whitelisted yq -i ".credentials.workspace_id = \"$drv_ws\"" "$driver_cfg"
+    run_whitelisted yq -i ".credentials.short_id = \"$drv_short\"" "$driver_cfg"
 
     spawn_bg driver "$LOOM_HOME/logs/driver.log" \
         "$driver_bin" serve-daemon --config "$driver_cfg" --listen "127.0.0.1:$DRIVER_PORT"
