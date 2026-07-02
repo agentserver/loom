@@ -138,6 +138,126 @@ teardown() {
     [[ "$output" == *"only valid with --mode prod"* ]]
 }
 
+# ----- T15: env whitelist DROPS sensitive parent env keys ------------
+@test "T15: emit_whitelisted_env drops AWS_/GITHUB_TOKEN/DOCKER_/NPM_ keys" {
+    # Source deploy.sh's env-whitelist function via a tiny extractor.
+    # We eval only the helper function definitions (no top-level code).
+    extract=$(awk '
+        /^emit_whitelisted_env\(\)/,/^}$/ { print }
+        /^ALWAYS_ENV_KEYS=/ { print }
+        /^IFSET_ENV_KEYS=/  { print }
+        /^readonly ALWAYS_ENV_KEYS/ { print }
+        /^readonly IFSET_ENV_KEYS/  { print }
+    ' "$DEPLOY")
+    # These arrays are declared with `readonly` at the top of deploy.sh —
+    # strip the readonly-marker line so eval in the subshell doesn't refuse
+    # to re-declare them.
+    extract=$(printf '%s\n' "$extract" | sed -E 's/^readonly[[:space:]]+//')
+
+    out=$(
+        set +e
+        MODE=stub
+        ALLOW_MODEL_KEY=0
+        AWS_ACCESS_KEY_ID=SHOULD_NOT_LEAK \
+        GITHUB_TOKEN=SHOULD_NOT_LEAK \
+        DOCKER_CONFIG=/etc/docker \
+        NPM_TOKEN=SHOULD_NOT_LEAK \
+        bash -c "MODE=stub ALLOW_MODEL_KEY=0; $extract; emit_whitelisted_env" \
+             2>/dev/null
+    )
+    ! echo "$out" | grep -q '^AWS_ACCESS_KEY_ID='
+    ! echo "$out" | grep -q '^GITHUB_TOKEN='
+    ! echo "$out" | grep -q '^DOCKER_CONFIG='
+    ! echo "$out" | grep -q '^NPM_TOKEN='
+    ! echo "$out" | grep -q 'SHOULD_NOT_LEAK'
+}
+
+@test "T15b: emit_whitelisted_env passes always-allowed + if-set + LOOM_* keys" {
+    extract=$(awk '
+        /^emit_whitelisted_env\(\)/,/^}$/ { print }
+        /^ALWAYS_ENV_KEYS=/ { print }
+        /^IFSET_ENV_KEYS=/  { print }
+        /^readonly ALWAYS_ENV_KEYS/ { print }
+        /^readonly IFSET_ENV_KEYS/  { print }
+    ' "$DEPLOY")
+    extract=$(printf '%s\n' "$extract" | sed -E 's/^readonly[[:space:]]+//')
+
+    out=$(
+        # Present a controlled env (env -i strips everything else).
+        /usr/bin/env -i \
+            PATH="/usr/bin:/bin" HOME=/root LANG=C LC_ALL=C TZ=UTC USER=root \
+            MOCK_MODEL_URL=http://127.0.0.1:9090 \
+            AGENTSERVER_ROOT=/repo/agentserver \
+            LOOM_OBSERVER_URL=http://127.0.0.1:18091 \
+            LOOM_=empty_prefix_only \
+            bash -c "MODE=stub ALLOW_MODEL_KEY=0; $extract; emit_whitelisted_env"
+    )
+    echo "$out" | grep -q '^PATH='
+    echo "$out" | grep -q '^HOME=/root$'
+    echo "$out" | grep -q '^MOCK_MODEL_URL=http://127.0.0.1:9090$'
+    echo "$out" | grep -q '^AGENTSERVER_ROOT=/repo/agentserver$'
+    echo "$out" | grep -q '^LOOM_OBSERVER_URL=http://127.0.0.1:18091$'
+    # `LOOM_=empty_prefix_only` must NOT slip through (guard: len(k) > 5).
+    ! echo "$out" | grep -q '^LOOM_=empty_prefix_only'
+}
+
+@test "T15c-i: --stub never propagates OPENAI_API_KEY / ANTHROPIC_API_KEY" {
+    extract=$(awk '
+        /^emit_whitelisted_env\(\)/,/^}$/ { print }
+        /^ALWAYS_ENV_KEYS=/ { print }
+        /^IFSET_ENV_KEYS=/  { print }
+        /^readonly ALWAYS_ENV_KEYS/ { print }
+        /^readonly IFSET_ENV_KEYS/  { print }
+    ' "$DEPLOY")
+    extract=$(printf '%s\n' "$extract" | sed -E 's/^readonly[[:space:]]+//')
+
+    out=$(
+        /usr/bin/env -i \
+            PATH=/usr/bin OPENAI_API_KEY=STUB_KEY_9zzz ANTHROPIC_API_KEY=STUB_KEY_8yyy \
+            bash -c "MODE=stub ALLOW_MODEL_KEY=1; $extract; emit_whitelisted_env" 2>/dev/null
+    )
+    ! echo "$out" | grep -q '^OPENAI_API_KEY='
+    ! echo "$out" | grep -q '^ANTHROPIC_API_KEY='
+}
+
+@test "T15c-ii: --prod without --allow-model-key-passthrough drops OPENAI_API_KEY" {
+    extract=$(awk '
+        /^emit_whitelisted_env\(\)/,/^}$/ { print }
+        /^ALWAYS_ENV_KEYS=/ { print }
+        /^IFSET_ENV_KEYS=/  { print }
+        /^readonly ALWAYS_ENV_KEYS/ { print }
+        /^readonly IFSET_ENV_KEYS/  { print }
+    ' "$DEPLOY")
+    extract=$(printf '%s\n' "$extract" | sed -E 's/^readonly[[:space:]]+//')
+
+    out=$(
+        /usr/bin/env -i \
+            PATH=/usr/bin OPENAI_API_KEY=PROD_KEY_1234 \
+            bash -c "MODE=prod ALLOW_MODEL_KEY=0; $extract; emit_whitelisted_env" 2>/dev/null
+    )
+    ! echo "$out" | grep -q '^OPENAI_API_KEY='
+}
+
+@test "T15c-iii: --prod --allow-model-key-passthrough passes OPENAI_API_KEY with WARN" {
+    extract=$(awk '
+        /^emit_whitelisted_env\(\)/,/^}$/ { print }
+        /^ALWAYS_ENV_KEYS=/ { print }
+        /^IFSET_ENV_KEYS=/  { print }
+        /^readonly ALWAYS_ENV_KEYS/ { print }
+        /^readonly IFSET_ENV_KEYS/  { print }
+    ' "$DEPLOY")
+    extract=$(printf '%s\n' "$extract" | sed -E 's/^readonly[[:space:]]+//')
+
+    # Capture stdout + stderr separately.
+    tmp_out="$TMP/prod_pass.out"; tmp_err="$TMP/prod_pass.err"
+    /usr/bin/env -i PATH=/usr/bin OPENAI_API_KEY=PROD_KEY_9999 \
+        bash -c "MODE=prod ALLOW_MODEL_KEY=1; $extract; emit_whitelisted_env" \
+        >"$tmp_out" 2>"$tmp_err" || true
+
+    grep -q '^OPENAI_API_KEY=PROD_KEY_9999$' "$tmp_out"
+    grep -q 'passing OPENAI_API_KEY through' "$tmp_err"
+}
+
 # ----- T16: install.ps1 boundary (spec §0) ---------------------------
 @test "T16: deploy/windows/slave/install.ps1 is unchanged vs origin" {
     if ! git -C "$ROOT/.." rev-parse --verify origin/paper/v3-integration >/dev/null 2>&1; then
