@@ -258,3 +258,96 @@ CREATE INDEX IF NOT EXISTS idx_capability_snapshot_usages_agent
 ON capability_snapshot_usages(workspace_id, agent_id, used_at);
 CREATE INDEX IF NOT EXISTS idx_capability_snapshot_usages_hash
 ON capability_snapshot_usages(hash);
+
+-- WT-2-task-resume: idempotency ledger for task-level resume.
+-- One row per (task_id, conversation_id, step_id, target_path,
+-- content_hash) tuple; see docs/specs/wt2-task-resume.spec.md §3
+-- for derivation. reserved_at is set by Reserve (atomic INSERT OR
+-- IGNORE); committed_at is set by Commit after the observable side
+-- effect completes. lease_owner + lease_expires_at track the live
+-- worker holding the reservation (§4 lease model).
+CREATE TABLE IF NOT EXISTS write_ids (
+    id                 TEXT PRIMARY KEY,
+    task_id            TEXT NOT NULL,
+    conversation_id    TEXT NOT NULL,
+    step_id            TEXT NOT NULL,
+    reserved_at        TEXT NOT NULL,
+    committed_at       TEXT,
+    lease_owner        TEXT NOT NULL DEFAULT '',
+    lease_expires_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_write_ids_conv_step
+    ON write_ids(conversation_id, step_id);
+CREATE INDEX IF NOT EXISTS idx_write_ids_task_id
+    ON write_ids(task_id);
+CREATE INDEX IF NOT EXISTS idx_write_ids_committed_at
+    ON write_ids(committed_at);
+
+-- Per-attempt audit trail for §7(g). One row per Reserve invocation
+-- (fresh, uncommitted, inflight, or committed outcome) and one row
+-- per Commit invocation ('commit' outcome). Keyed by
+-- (event_id = hex(sha256(id || occurred_at || outcome))).
+--   DuplicateSideEffectRate =
+--       count(outcome IN ('uncommitted','committed'))
+--     / count(outcome IN ('fresh','uncommitted','inflight','committed'))
+-- The denominator MUST filter to Reserve outcomes only — 'commit'
+-- rows are Commit events, not reserve attempts, and would
+-- double-count.
+CREATE TABLE IF NOT EXISTS write_id_reserve_events (
+    event_id     TEXT PRIMARY KEY,
+    id           TEXT NOT NULL,
+    run_id       TEXT NOT NULL,
+    task_id      TEXT NOT NULL,
+    outcome      TEXT NOT NULL CHECK(outcome IN ('fresh','uncommitted','inflight','committed','commit')),
+    occurred_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_write_id_reserve_events_run
+    ON write_id_reserve_events(run_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_write_id_reserve_events_id
+    ON write_id_reserve_events(id, occurred_at);
+
+-- Task-level resume attempt audit for §5.3 RecoverySuccessRate.
+-- One row per (run_id, task_id) — INSERTed at ResumeTask entry
+-- with outcome='started', then UPDATEd on exit to outcome='replayed'
+-- or 'error'. A row stuck in 'started' means ResumeTask crashed
+-- between dispatch and audit-update: D4 counts these as incomplete
+-- recoveries.
+CREATE TABLE IF NOT EXISTS resume_task_attempts (
+    run_id       TEXT NOT NULL,
+    task_id      TEXT NOT NULL,
+    outcome      TEXT NOT NULL CHECK(outcome IN ('started','replayed','error')),
+    error_kind   TEXT NOT NULL DEFAULT '',
+    started_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    PRIMARY KEY (run_id, task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_resume_task_attempts_run
+    ON resume_task_attempts(run_id, updated_at);
+
+-- Run-scoped task index used by ResumeTask candidate discovery
+-- (§5.1). Populated atomically with SaveTaskContract by the
+-- follow-up wt2-contract-tools-run-binding worktree.
+CREATE TABLE IF NOT EXISTS task_run_bindings (
+    run_id      TEXT NOT NULL,
+    task_id     TEXT NOT NULL,
+    bound_at    TEXT NOT NULL,
+    PRIMARY KEY (run_id, task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_run_bindings_run
+    ON task_run_bindings(run_id, bound_at);
+
+-- Pre-write payload staging for §6.2a byte-identical retry after
+-- crash. Written BEFORE Reserve so a resumed ExecutorResume can
+-- reconstruct contentHash and re-issue the exact byte stream that
+-- was pending at crash time. Keyed by WriteID (content-derived) so
+-- legitimate content changes never conflict.
+CREATE TABLE IF NOT EXISTS write_id_payloads (
+    id          TEXT PRIMARY KEY,
+    task_id     TEXT NOT NULL,
+    step_id     TEXT NOT NULL,
+    payload     BLOB NOT NULL,
+    sha256      TEXT NOT NULL,
+    staged_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_write_id_payloads_task_step
+    ON write_id_payloads(task_id, step_id, staged_at);
