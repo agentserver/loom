@@ -1,0 +1,8 @@
+{
+  "model_alias": "acme-bound-model-v1",
+  "proxy_context_id": "ctx-modelproxy-001",
+  "hops": [
+    {"role": "driver"},
+    {"role": "model_proxy", "proxy_addr": "127.0.0.1.evil.com:53452"}
+  ]
+}

@@ -41,6 +41,11 @@ type Opts struct {
 	StubBin         string // path to agentserver-stub binary; empty = auto-build
 	ObserverDB      string
 	CodexConfigPath string
+	// CodexConfigMode is the WT-2 dual-path selector ("a" | "b" | "").
+	// When non-empty (and/or CodexConfigPath is non-empty), the runner
+	// invokes validateCodexConfig at pre-flight; see spec §7.a-.d.
+	// Empty preserves the PR #53 pass-through behaviour.
+	CodexConfigMode string
 	RunID           string
 	Timeout         time.Duration
 	OutCSV          string
@@ -100,6 +105,16 @@ func Run(ctx context.Context, opts Opts) Result {
 		return preflight(opts, err)
 	}
 	if err := validateObserverDB(opts.ObserverDB); err != nil {
+		return preflight(opts, err)
+	}
+	// WT-2 pre-flight: codex config dual-path validation (spec §7.a-.d).
+	// No-op when neither --codex-config-path nor --codex-config-mode is
+	// supplied — preserves PR #53 pass-through semantics.
+	if err := validateCodexConfig(codexConfigInputs{
+		Path:     opts.CodexConfigPath,
+		Mode:     opts.CodexConfigMode,
+		RepoRoot: findCodexRepoRoot(),
+	}); err != nil {
 		return preflight(opts, err)
 	}
 	if opts.ObserverDB != "" && !writerSupplied {

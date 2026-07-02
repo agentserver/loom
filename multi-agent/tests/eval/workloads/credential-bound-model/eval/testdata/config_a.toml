@@ -1,0 +1,13 @@
+# Fixture codex config — path (a) local proxy, for --dry-run when the
+# operator's real prod_test/driver-codex-local/ isn't populated. The
+# bearer here is deliberately obviously fake (never a real token) so
+# a --dry-run that accidentally exercises this fixture cannot leak
+# credentials.
+model_provider = "modelserver"
+model = "glm-5.2"
+
+[model_providers.modelserver]
+name = "modelserver"
+base_url = "http://127.0.0.1:53452/v1"
+experimental_bearer_token = "sk-fake-for-dry-run-only"
+wire_api = "responses"

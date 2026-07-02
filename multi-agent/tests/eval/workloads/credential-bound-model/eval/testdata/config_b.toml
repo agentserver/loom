@@ -1,0 +1,14 @@
+# Fixture codex config — path (b) upstream direct, for --dry-run when
+# the operator's real prod_test/driver-codex-local/ isn't populated.
+# The env_key reference is real (`OPENAI_API_KEY`) so the runner's
+# assertion about that env var still runs; the DRY-RUN harness itself
+# refuses to proceed unless OPENAI_API_KEY is set to a non-sentinel
+# value, so this fixture cannot smuggle a fake key into a real run.
+model_provider = "openai-direct"
+model = "gpt-5.5"
+
+[model_providers.openai-direct]
+name = "openai-direct"
+base_url = "https://code.ai.cs.ac.cn/v1"
+env_key = "OPENAI_API_KEY"
+wire_api = "responses"
