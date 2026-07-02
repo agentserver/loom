@@ -12,11 +12,14 @@
 >
 > Out of scope: no Go code changes (**this worktree touches only
 > `multi-agent/tools/eval/metrics/`**); no new observer tables; no
-> upstream data source implementation — every metric this spec lists is
-> emitted from data sources that **already** landed (12 号 §D1 / §A / §C /
-> Phase 1 close-out memo §4), and metrics whose data source has NOT yet
-> landed are still emitted as columns but populated with `null` and a
-> `"upstream data missing"` note (see §7 (g)).
+> upstream data source implementation. Metrics whose data source
+> **has** landed (12 号 §D1 + §A2 + §C2, Phase 1 close-out memo §4) are
+> populated with real values; metrics whose data source has **not** yet
+> landed (12 号 §A3 / §A6 / §B / §C4 / §D6c / §D7 / §D8, Phase 1
+> close-out memo §5) are still emitted as columns but populated with
+> `null` and a `"upstream data missing"` note (see §7 (g)). The
+> per-metric provenance table in §2 marks which category each metric
+> falls in today.
 
 ## 1. Background
 
@@ -41,7 +44,7 @@ extraction work to WT-2-metric-extract.
 
 The word "全部 metric" is load-bearing. §2 below enumerates every named
 metric across 12 号 §A/§B/§C/§D and 08 号 §Lifecycle / §Semantic /
-§Contracted / §User-promoted / §Overhead — 36 metrics in total — and
+§Contracted / §User-promoted / §Overhead — 39 metrics in total — and
 the extractor MUST emit a header column for each, even when the
 underlying data source has not yet been instrumented.
 
@@ -88,7 +91,7 @@ for interruption detection is 12号 §A6 P1, not yet landed).
 
 | # | Metric | Numerator | Denominator | Provenance |
 |---|---|---|---|---|
-| 10 | `ContractCompleteness` | `sum(present_field_count)` over all contracts | **fixed constant `7 × count(task_contracts in selection)`** — the 7 lifecycle fields per 12号 §A2; **NOT 08号's 8-field count** (§A2 pins the denominator). | `task_contracts.body` — parsed to count the 7 lifecycle fields (intent.goal / intent.success_criteria / data_contract.read_artifacts / data_contract.write_targets / capability_requirements / execution_policy / recovery_hint) per `internal/contract/completeness.go:36-44` |
+| 10 | `ContractCompleteness` | `sum(present_field_count)` over `task_contracts` whose `conversation_id` corresponds to at least one run in the runs-cohort. **Cohort projection**: `--runs-filter` narrows `runs`; those runs' `task_contract_hash` values project into `task_contracts` via a whitelisted join. Because `runs.task_contract_hash` (24-column DDL) is a per-run hash and `task_contracts` today has no `hash` column, the projection is implemented in two steps: (i) `SELECT DISTINCT conversation_id FROM task_contracts WHERE conversation_id IN (subquery over runs projected via observer_trace_path or, if the join key is unavailable in the current schema, over all `task_contracts` rows — see fallback note below);` (ii) sum `present_field_count` over that projection. **Fallback**: if a per-run→contract join key is not present in today's schema (it is not — `runs` has no `conversation_id`), the extractor issues a stderr warning `[eval-metrics] warn: ContractCompleteness cohort projection falls back to all task_contracts rows (join key missing; owner: 12号 §D1 follow-up)` and computes over ALL `task_contracts` rows. This is deliberately conservative — the paper's E3 experiment isolates contracted-execution ablations at the experiment-level, so cohort selection typically maps 1:1 to a full DB anyway. | **fixed constant `7 × count(task_contracts in projected cohort)`** — the 7 lifecycle fields per 12号 §A2; **NOT 08号's 8-field count** (§A2 pins the denominator). Denominator = 0 → `null` per §7 (f). | `task_contracts.body` — parsed to count the 7 lifecycle fields (intent.goal / intent.success_criteria / data_contract.read_artifacts / data_contract.write_targets / capability_requirements / execution_policy / recovery_hint) per `internal/contract/completeness.go:36-44` |
 | 11 | `PreExecutionFaultCatchRate` | `count(runs where baseline_or_ablation != 'NoDryRun' AND failure_category = 'policy-violation')` | `count(runs where run was fault-injected)` — proxy: `count(runs where experiment_id = 'E3')`, since only E3 injects faults | `runs.{baseline_or_ablation, failure_category, experiment_id}` |
 | 12 | `ContractViolationRate` | `count(runs where failure_category = 'contract-violation')` | `count(runs where task_contract_hash != '')` | `runs.{failure_category, task_contract_hash}` |
 | 13 | `MissingArtifactDetectionRate` | `count(runs where failure_category = 'missing-file' AND success_oracle_result != 'pass')` | `count(runs where experiment_id = 'E3')` | `runs.{failure_category, success_oracle_result, experiment_id}` |
@@ -193,9 +196,12 @@ cases.
 
 ### 3.2 `--metric-set` selection
 
-`full` emits all 36 columns from §2. The five subset values narrow to
-§2.1 / §2.2 / §2.3 / §2.4 / §2.5 respectively. Any other value → exit
-2 with the message `unknown metric set: <val> (allowed: full, lifecycle, contracted, user-promoted, semantic, overhead)` (§7 (e)).
+`full` emits all 39 metrics from §2 (with structured metrics flattened
+into sub-columns, so the on-wire column count is larger — see §3.3).
+The five subset values narrow to §2.1 / §2.2 / §2.3 / §2.4 / §2.5
+respectively. Any other value → exit 2 with the message `unknown
+metric set: <val> (allowed: full, lifecycle, contracted, user-promoted,
+semantic, overhead)` (§7 (e)).
 
 ### 3.3 Output shape
 
@@ -330,8 +336,16 @@ Hand-computed values:
 5 runs (`experiment_id='E2'`), 4 `route_reasons` rows, no
 `task_contracts`. Establishes the two populated metrics
 (`RoutingAccuracy`, `RoutingLatencyP50P95`) and asserts that all 11
-user-promoted metrics + 5 overhead metrics + 2 semantic metrics emit as
-`null` with the `"upstream data missing"` note.
+user-promoted metrics (#17..#27), all 6 non-routing E5 overhead
+metrics (#31..#36), both E6 onboarding metrics (#38, #39), and both
+non-`RoutingAccuracy` semantic metrics (#29, #30) emit as `null` with
+the `"upstream data missing"` note. In addition, all 7 contracted
+metrics (#10..#16) emit as `null` — either upstream-missing (#14, #16)
+or denominator=0 for the empty-contracts cohort (#10..#13, #15). The
+2 lifecycle upstream-missing metrics (#7, #8) plus #9 also emit
+`null`. The total null-metric assertion count for fixture 3 is thus
+11 + 6 + 2 + 2 + 7 + 3 = **31 metric cells assert to null**; the 2
+populated metrics assert to the exact hand-computed values below.
 
 | run # | selected_context | ground_truth_context |
 |---|---|---|
@@ -341,9 +355,23 @@ user-promoted metrics + 5 overhead metrics + 2 semantic metrics emit as
 | 4 | slave-A | slave-A |
 | 5 | slave-C | ''        |
 
-`route_reasons.decision_duration_ns` values keyed to the 5 runs'
-conversation_ids: `[500_000, 1_000_000, 2_000_000, 4_000_000]` (only 4
-decisions total; run #5 never dispatched).
+`route_reasons` rows: 4 decisions total (run #5 never dispatched).
+Since `runs` has no `conversation_id` column (see §2.5 #37 provenance
+clause on the time-window join), the fixture pins the join via
+timestamps:
+
+| decision # | decision_started_at | decision_duration_ns | conversation_id |
+|---|---|---|---|
+| 1 | 2026-07-02T10:00:05Z | 500_000     | conv-1 |
+| 2 | 2026-07-02T10:01:05Z | 1_000_000   | conv-2 |
+| 3 | 2026-07-02T10:02:05Z | 2_000_000   | conv-3 |
+| 4 | 2026-07-02T10:03:05Z | 4_000_000   | conv-4 |
+
+And the 4 dispatched runs' `[start_time, end_time]` windows contain
+exactly the above decision timestamps in order (run 5 has no
+overlapping decision). The join filter is
+`WHERE route_reasons.decision_started_at BETWEEN run.start_time AND
+run.end_time`, restated in §2.5 #37.
 
 Hand-computed values:
 
@@ -351,20 +379,10 @@ Hand-computed values:
 - `CapabilityRecall = null` (§2.4 row 28)
 - `CapabilityPrecision = null` (§2.4 row 29)
 - `RoutingLatencyP50P95 = {p50_ns: 1_500_000, p95_ns: 3_700_000, count: 4}` (numpy linear-interp on sorted [500k, 1M, 2M, 4M]; median = midpoint of 1M and 2M = 1.5M; 95th percentile at fractional index 2.85 → 2M + 0.85·(4M−2M) = 3.7M)
-- All 11 user-promoted metrics (#17..#27) + 6 non-routing E5 overhead
-  metrics (#31..#36) + 2 E6 onboarding metrics (#38 `TimeToFirstTask`,
-  #39 `SetupFailureRate`) = `null` with `"upstream data missing"`
-  note. Also 2 semantic metrics (#29 `CapabilityRecall`, #30
-  `CapabilityPrecision`), 3 contracted metrics if the fixture bothered
-  to add contracts (which it does not — the fixture has no
-  `task_contracts` rows, so #10 `ContractCompleteness` = `null` per
-  denominator=0). Total assertions on `null` metrics in fixture 3:
-  11 + 6 + 2 + 2 = **21 non-routing metrics assertion is `null`**,
-  plus lifecycle-null metrics (`ManualSetupStepCount`,
-  `ConfigTouchCount`, `StateContinuityRate`) = 3, and contract-null
-  metrics inferred by empty `task_contracts` = 7 (all §2.2 rows
-  either `null`-upstream or denominator=0). Fixture 3 exercises the
-  complete `null` matrix.
+- Every metric NOT populated above asserts to `null`, per the null
+  breakdown in the fixture intro paragraph (31 cells total). No entry
+  under `metrics` deviates from `null` besides `RoutingAccuracy` (=
+  `0.75`) and `RoutingLatencyP50P95` (= structured object above).
 
 ### 4.4 Empty-DB fixture (implicit)
 
@@ -445,8 +463,12 @@ Two checks, in order:
 
 1. **Realpath scrub**: resolve with `pathlib.Path(...).expanduser().resolve(strict=True)`
    (strict=True forces existence — non-existent → immediate `FileNotFoundError`
-   → exit 2). Reject if the resolved path descends from any of `/etc/`,
-   `/proc/`, `/sys/`, `/dev/`. Sample-and-hold: the resolved path is
+   → exit 2 — this is the correct policy for `--observer-db` because
+   an unreadable/nonexistent input DB is always an error; the `--out`
+   path validation in §(d) below uses a **different** policy that
+   requires the target to NOT yet exist). Reject if the resolved path
+   descends from any of `/etc/`, `/proc/`, `/sys/`, `/dev/`.
+   Sample-and-hold: the resolved path is
    the one opened; symlink swap between check and open is impossible
    because we pass the resolved string to `sqlite3.connect`, never the
    original.
@@ -504,12 +526,31 @@ Accepted examples (all → prepared with `run_id = ?` binding):
 
 ### (d) `--out` path validation + CSV formula-injection escape
 
-`--out` path is validated by the same rules as `--observer-db` (§b,
-sans magic-bytes check). Additionally: reject if parent directory does
-not exist (do NOT `mkdir -p` — the tool has no business creating
-directories under paths it did not choose). Refuse to overwrite by
-default; `--out` may only point at a non-existent file or `/dev/stdout`
-/ `/dev/null`.
+`--out` is a **write target**, so its path-validation policy differs
+from §(b)'s read-target policy. Rules, in order:
+
+1. **Parent-only realpath**: `parent = pathlib.Path(--out).expanduser().parent.resolve(strict=True)`
+   (parent MUST exist — do NOT `mkdir -p`; the tool has no business
+   creating directories under paths it did not choose). Reject if the
+   resolved parent descends from `/etc/`, `/proc/`, `/sys/`, `/dev/`.
+   The `strict=True` applies to the **parent**, not the target file
+   itself — an `--out` pointing at a not-yet-created file inside an
+   existing parent directory is the normal case.
+2. **Overwrite refusal**: if the target file already exists, exit 2
+   with `ErrOutFileExists`. There is no `--force` flag; callers who
+   want to overwrite must delete the target first (an explicit,
+   auditable act).
+3. **Symlink refusal on the target itself**: if the target exists as a
+   dangling symlink or a symlink pointing anywhere, exit 2 with
+   `ErrOutIsSymlink` — this closes the TOCTOU window between
+   parent-directory realpath and file open.
+
+**`/dev/stdout` / `/dev/null` are NOT supported** as `--out` values
+(they would trip the `/dev/` reject in step 1). The `stdout` sink is
+addressed by **omitting `--out`** entirely; there is no other way to
+send output to a terminal. This paragraph corrects the round-2 draft
+that mentioned `/dev/stdout` — that would have conflicted with step 1
+above.
 
 CSV cells are escaped identically to `cmd/evalrun-export` (spec §7 (e)
 of WT-1-run-schema, `main.go:283`): if the cell's first byte is one of
@@ -591,12 +632,12 @@ Created (all under `multi-agent/tools/eval/metrics/`):
 - `eval_metrics/paths.py` — `--observer-db` / `--out` path validators (§7 (b), (d))
 - `eval_metrics/csv_out.py` — CSV serializer + formula-injection escape (§7 (d))
 - `eval_metrics/json_out.py` — JSON serializer
-- `eval_metrics/metrics/__init__.py` — registry of the 36 metrics
-- `eval_metrics/metrics/lifecycle.py` — §2.1 (8 metrics)
+- `eval_metrics/metrics/__init__.py` — registry of the 39 metrics
+- `eval_metrics/metrics/lifecycle.py` — §2.1 (9 metrics)
 - `eval_metrics/metrics/contracted.py` — §2.2 (7 metrics)
 - `eval_metrics/metrics/user_promoted.py` — §2.3 (11 metrics, all null today)
 - `eval_metrics/metrics/semantic.py` — §2.4 (3 metrics)
-- `eval_metrics/metrics/overhead.py` — §2.5 (7 metrics)
+- `eval_metrics/metrics/overhead.py` — §2.5 (9 metrics)
 - `tests/conftest.py`
 - `tests/fixtures/build_fixture_1.py` + `fixture_1.db` + `expected_1.json`
 - `tests/fixtures/build_fixture_2.py` + `fixture_2.db` + `expected_2.json`
@@ -635,3 +676,22 @@ Modified: none. This worktree adds files only. If any file outside
   - Fixed fixture 3 null-count arithmetic (was "5 non-routing overhead
     metrics"; is now "6 non-routing E5 + 2 E6 onboarding = 8 overhead
     metrics all null").
+- 2026-07-02 (round 3, Codex P1 fixes):
+  - Scope §1: reworded to acknowledge some data sources have NOT
+    landed (§A3 / §A6 / §B / §C4 / §D6c / §D7 / §D8), instead of the
+    round-1 "every metric uses landed data sources" claim.
+  - Metric counts: fixed 36 → 39 everywhere; §8 file manifest
+    line-counts corrected (lifecycle 8 → 9; overhead 7 → 9).
+  - §7 (d) `--out` policy rewritten: parent must exist (not target
+    itself), overwrite refused, symlink refused, no `/dev/stdout`
+    (which conflicted with the `/dev/` reject); §7 (b) note added
+    to disambiguate the two policies.
+  - Fixture 3 `route_reasons` join keys rewritten to time-window
+    timestamps (matches §2.5 #37 join rule; removed dead
+    conversation-id keying).
+  - Fixture 3 null-metric total reconciled: introduces the number
+    once (31 cells), removes the per-paragraph re-derivation that
+    contradicted itself.
+  - §2.2 #10 `ContractCompleteness` cohort-projection clause added,
+    including the fallback stderr warning when the per-run→contract
+    join key is missing in the current schema.
