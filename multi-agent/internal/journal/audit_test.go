@@ -1,9 +1,11 @@
 package journal
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -243,27 +245,48 @@ func TestRecorder_InsertFailure_ReturnsErrorNoSwallow(t *testing.T) {
 	require.ErrorIs(t, err, sql.ErrConnDone, "insert error must propagate; no swallow")
 }
 
-// recordOrLog is the in-package test harness that names the required
-// caller shape from spec §7 (a): log + counter-bump + no propagation.
-// The follow-up wiring WT extracts this helper into production code;
-// today it lives here so the invariant has a real running test.
+// recordOrLog is the in-package test harness that IS the required
+// caller shape from spec §7 (a) verbatim: log via log.Printf using the
+// exact `journal: audit write dropped:` prefix, bump the counter, and
+// return nil so business logic proceeds. The follow-up wiring WT
+// extracts this helper into production code at each of the spec
+// §3.1-§3.4 hook sites; today it lives here so the invariant has a
+// real running test AND so a log-capturing assertion can pin the
+// exact prefix a downstream operator will grep for.
 func recordOrLog(r Recorder, ev AuditEvent) error {
 	if err := r.Record(context.Background(), ev); err != nil {
-		// spec §7 (a) — log + counter-bump + do NOT propagate.
+		log.Printf("journal: audit write dropped: %v", err)
 		AuditWriteDroppedTotal().Add(1)
-		_ = err // in production this is `log.Printf("journal: audit write dropped: %v", err)`
 	}
 	return nil
 }
 
 func TestRecorder_CallerLogsAndContinues(t *testing.T) {
+	// Capture the standard logger's output so we can assert on the
+	// exact prefix — the string is what downstream operators grep.
+	var buf bytes.Buffer
+	oldOut := log.Writer()
+	oldFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(oldOut)
+		log.SetFlags(oldFlags)
+	})
+
 	before := AuditWriteDroppedTotal().Value()
 	r := &sqlRecorder{
 		writer: errWriter{err: sql.ErrConnDone},
 		newID:  func() (string, error) { return "id-1", nil },
 	}
 	require.NoError(t, recordOrLog(r, baseEvent(KindRead)), "harness must swallow after logging + counter bump")
-	require.Equal(t, before+1, AuditWriteDroppedTotal().Value())
+	require.Equal(t, before+1, AuditWriteDroppedTotal().Value(),
+		"AuditWriteDroppedTotal MUST bump by exactly 1")
+	got := buf.String()
+	require.Contains(t, got, "journal: audit write dropped:",
+		"log line MUST carry the exact operator-grep prefix")
+	require.Contains(t, got, "sql: connection is already closed",
+		"log line MUST include the wrapped write error")
 }
 
 func TestRecorder_DoesNotBlockOnDBHang(t *testing.T) {
