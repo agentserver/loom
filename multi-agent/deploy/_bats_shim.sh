@@ -17,6 +17,19 @@
 #
 # Not supported: `bats-assert`, `bats-support`, load(), and file-scope
 # `@test` names that contain literal newlines.
+#
+# Parser constraints (P2-3 fresh-review round 8) — these differ from
+# real bats:
+#   - Opening `{` MUST be on the same line as the `@test "name" {`
+#     header (real bats also requires this, so no divergence).
+#   - Closing `}` MUST be on its own line (bats accepts a `}` at end
+#     of an inline block). If a test body needs a literal `}` on its
+#     own line (e.g. a heredoc containing `\n}\n`), the shim will
+#     truncate at that point — split the string or use printf.
+#   - Real bats is authoritative; this shim exists so `bash
+#     _bats_shim.sh file.bats` gives a pass/fail signal on hosts
+#     without bats-core installed. Any divergence between shim and
+#     real bats is a shim bug — file it as such.
 
 set -euo pipefail
 

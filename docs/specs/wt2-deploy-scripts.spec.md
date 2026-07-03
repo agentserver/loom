@@ -935,7 +935,10 @@ an unrelated third party.
   `tools/eval/runner/subprocess.go:AlwaysAllowedEnvKeys` (line 223) +
   `AlwaysAllowedIfSetEnvKeys` (line 235) verbatim, so the two harnesses
   can't drift out of sync:
-  - **Always** (dropped only if absent from parent): `PATH`, `HOME`,
+  - **Always** (emit even when absent from parent — empty value
+    passes through, matching bash `emit_whitelisted_env` behaviour;
+    empty PATH etc. are semantically distinct from unset only on a
+    handful of legacy tools we don't care about here): `PATH`, `HOME`,
     `LANG`, `LC_ALL`, `TZ`, `USER`.
   - **If set**: `AGENTSERVER_ROOT`, `MODELSERVER_ROOT`, `APP_ROOT`,
     `MOCK_MODEL_URL`.

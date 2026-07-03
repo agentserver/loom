@@ -72,7 +72,13 @@ strip_hostname_from() {
     esc=$(printf '%s' "$first" | sed 's/[][\/.^$*]/\\&/g')
     text=$(printf '%s' "$text" | sed -E "s/[[:space:]]*hostname=[^[:space:]]+//g")
     if [[ -n "$esc" ]]; then
-        text=$(printf '%s' "$text" | sed -E "s/\b${esc}\b//g")
+        # Word-boundary via POSIX character classes rather than `\b`
+        # (which is a GNU-sed extension — BSD/macOS sed treats it as
+        # a literal `b`, so the strip silently no-ops there).
+        # `(^|[^A-Za-z0-9_])` is the leading edge; we emit the matched
+        # non-word char back via `\1` so it isn't consumed.
+        # Fresh-review P2-4 round 8.
+        text=$(printf '%s' "$text" | sed -E "s/(^|[^A-Za-z0-9_])${esc}([^A-Za-z0-9_]|$)/\1\2/g")
     fi
     printf '%s' "$text"
 }
