@@ -96,14 +96,23 @@ var ErrNoReservation = errors.New("observerstore: no reservation for id")
 var ErrInvalidLeaseTTL = errors.New("observerstore: LeaseTTL must be > 0")
 
 // ErrLeaseLostAfterWrite is returned by Commit when the row is
-// already committed AND this WorkerID never held the lease (per
-// the write_id_reserve_events audit trail). Means another worker
-// stole the lease and committed while this caller's own WriteStep
-// may or may not have partially succeeded. Distinct from the
-// idempotent-noop path (where the SAME worker committed twice).
-// Executor callers MUST surface this as a real error, not treat
-// as success; the caller's local side-effects (e.g. tempfile
-// leftover) may need cleanup. Round-3 review P1 #4.
+// already committed AND the recorded commit-emitter's WorkerID
+// disagrees with the caller's WorkerID (i.e. another worker won
+// the race and committed). Distinct from the idempotent-noop
+// path (where the SAME worker committed twice).
+//
+// Contract: this sentinel is DIAGNOSTIC ONLY. This worktree does
+// NOT provide an automated rollback / cleanup path for the
+// caller's local side-effects (e.g. tempfile leftover from an
+// atomic-rename write that landed on disk after the lease
+// expired). The executor SHOULD log + emit a metric on this
+// error so operators can investigate, but it MUST NOT treat this
+// as success. Adding a Rollback(step) hook to ExecutorDeps is a
+// follow-up worktree (wt2-executor-writes-through-gate) that
+// also owns the WriteStep atomicity guarantees.
+//
+// Round-3 review P1 #4 introduced the sentinel; round-4 review
+// P1 #4 narrowed the doc after noting no rollback hook exists.
 var ErrLeaseLostAfterWrite = errors.New("observerstore: lease lost — another worker committed")
 
 // ErrJournalChainBroken is a retained sentinel for a future
@@ -490,11 +499,12 @@ func (s *SQLiteWriteIDStore) Reserve(ctx context.Context, req ReserveRequest) (R
 		state = ReserveInFlight
 	}
 
-	// 4. Emit audit row. run_id is included in the derivation so
-	// two runs Reserving the same id at the same fake-clock instant
-	// with the same outcome don't collide on the audit PK (F7).
+	// 4. Emit audit row. run_id + worker_id in the derivation so
+	// two runs OR two workers Reserving the same id at the same
+	// fake-clock instant with the same outcome don't collide on
+	// the audit PK (F7 + round-4 P1 #5).
 	outcome := state.String()
-	eventID := deriveEventID(req.ID, req.RunID, nowStr, outcome)
+	eventID := deriveEventID(req.ID, req.RunID, req.WorkerID, nowStr, outcome)
 	if _, err := tx.ExecContext(ctx, sqlReserveEvent,
 		eventID, string(req.ID), req.RunID, req.TaskID, outcome, nowStr, req.WorkerID); err != nil {
 		return 0, fmt.Errorf("observerstore: reserve audit: %w", err)
@@ -554,15 +564,30 @@ func (s *SQLiteWriteIDStore) Commit(ctx context.Context, req CommitRequest) erro
 			// audit trail "which worker emitted the commit event?".
 			// If it's THIS worker → idempotent noop nil.
 			// If it's ANOTHER worker → ErrLeaseLostAfterWrite so
-			// the caller can log + clean up its half-written temp
-			// files.
+			// the caller can log + emit a metric (see the
+			// sentinel doc for the diagnostic-only contract).
+			//
+			// Round-4 review P1 #1: if the audit row is missing
+			// (sql.ErrNoRows) we CANNOT distinguish "same worker"
+			// from "other worker" because the disambiguating
+			// evidence is gone. VacuumAudit legitimately removes
+			// commit event rows independent of Vacuum's write_ids
+			// retention, so an audit-row-missing state can be
+			// perfectly legitimate. The safe default is to treat
+			// this as a noop nil rather than an
+			// ErrLeaseLostAfterWrite: raising the sentinel would
+			// falsely flag same-worker retries whose audit rows
+			// were vacuumed, breaking the invariant proven by
+			// TestCommit_IdempotentSameWorkerReturnsNil.
 			var commitWorker string
 			err := tx.QueryRowContext(ctx, sqlLookupCommitWorker, string(req.ID)).
 				Scan(&commitWorker)
-			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			switch {
+			case errors.Is(err, sql.ErrNoRows):
+				// Audit row vacuumed. Fall through to noop nil.
+			case err != nil:
 				return fmt.Errorf("observerstore: commit lookup: %w", err)
-			}
-			if commitWorker != req.WorkerID {
+			case commitWorker != req.WorkerID:
 				return fmt.Errorf("observerstore: commit id=%s worker=%s (committed by %q): %w",
 					req.ID, req.WorkerID, commitWorker, ErrLeaseLostAfterWrite)
 			}
@@ -578,9 +603,10 @@ func (s *SQLiteWriteIDStore) Commit(ctx context.Context, req CommitRequest) erro
 		return ErrLeaseLost
 	}
 
-	// Emit audit row. run_id included in derivation (F7).
+	// Emit audit row. run_id + worker_id included in derivation
+	// (F7 + round-4 P1 #5).
 	outcome := "commit"
-	eventID := deriveEventID(req.ID, req.RunID, nowStr, outcome)
+	eventID := deriveEventID(req.ID, req.RunID, req.WorkerID, nowStr, outcome)
 	if _, err := tx.ExecContext(ctx, sqlReserveEvent,
 		eventID, string(req.ID), req.RunID, req.TaskID, outcome, nowStr, req.WorkerID); err != nil {
 		return fmt.Errorf("observerstore: commit audit: %w", err)
@@ -595,21 +621,27 @@ func (s *SQLiteWriteIDStore) Commit(ctx context.Context, req CommitRequest) erro
 }
 
 // deriveEventID computes event_id = hex(sha256(LP(id) || LP(run_id) ||
-// LP(occurred_at) || LP(outcome))) where LP is the length-prefixed
-// encoding from writeLP. Includes run_id (F7) so two runs Reserving
-// the same id at the same wall-clock instant with the same outcome
-// don't collide on the audit PK — this matters under fake-clock
-// tests and is defence-in-depth in prod where sub-nanosecond clock
-// resolution makes collisions astronomically unlikely.
+// LP(worker_id) || LP(occurred_at) || LP(outcome))) where LP is the
+// length-prefixed encoding from writeLP. Includes run_id (F7) so
+// two runs Reserving the same id at the same wall-clock instant
+// with the same outcome don't collide on the audit PK, and includes
+// worker_id (round-4 P1 #5) so two DIFFERENT workers Reserving the
+// same id at the same instant with the same outcome (e.g. both see
+// a third worker's live lease and both derive outcome='inflight')
+// also don't collide. In prod, sub-nanosecond clock resolution makes
+// collisions astronomically unlikely, but the fake-clock tests + the
+// need for a deterministic per-(worker,attempt) audit id justify
+// the extra field.
 //
 // Length-prefixed rather than \x1e-separated (round-2 review): an
-// unvalidated run_id containing \x1e byte would collide with a
-// different (run_id, occurred_at) tuple; uvarint LEB128 length
-// prefixes make the derivation injective regardless of input bytes.
-func deriveEventID(id WriteID, runID, occurredAt, outcome string) string {
+// unvalidated field containing \x1e byte would collide with a
+// different tuple; uvarint LEB128 length prefixes make the
+// derivation injective regardless of input bytes.
+func deriveEventID(id WriteID, runID, workerID, occurredAt, outcome string) string {
 	h := sha256.New()
 	writeLP(h, string(id))
 	writeLP(h, runID)
+	writeLP(h, workerID)
 	writeLP(h, occurredAt)
 	writeLP(h, outcome)
 	return hex.EncodeToString(h.Sum(nil))

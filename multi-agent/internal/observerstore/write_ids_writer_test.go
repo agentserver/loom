@@ -474,14 +474,17 @@ func checkAuditFailureRollsBackAll(t *testing.T) {
 	id := mustNewWriteID(t, validTaskID, validConvID, validStepID, validTargetPath, validHash)
 	nowStr := formatTS(fixed)
 	req := makeReq(id, "w1")
-	eventID := deriveEventID(id, req.RunID, nowStr, "fresh")
+	eventID := deriveEventID(id, req.RunID, req.WorkerID, nowStr, "fresh")
 
 	// Pre-seed the audit table with a row that will PK-conflict on
-	// the exact event_id Reserve is about to compute.
+	// the exact event_id Reserve is about to compute. Include the
+	// worker_id column (round-3 add) so this pre-seed doesn't
+	// depend on the DEFAULT '' — if someone later drops the default
+	// the seed still works.
 	if _, err := db.ExecContext(ctx, `
-INSERT INTO write_id_reserve_events (event_id, id, run_id, task_id, outcome, occurred_at)
-VALUES (?, ?, ?, ?, 'fresh', ?);`,
-		eventID, string(id), req.RunID, validTaskID, nowStr); err != nil {
+INSERT INTO write_id_reserve_events (event_id, id, run_id, task_id, outcome, occurred_at, worker_id)
+VALUES (?, ?, ?, ?, 'fresh', ?, ?);`,
+		eventID, string(id), req.RunID, validTaskID, nowStr, req.WorkerID); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -662,7 +665,7 @@ func TestReserve_EventIDDeterministicallyDerived(t *testing.T) {
 	}
 	nowStr := formatTS(fixed)
 	req := makeReq(id, "w1")
-	wantEventID := deriveEventID(id, req.RunID, nowStr, "fresh")
+	wantEventID := deriveEventID(id, req.RunID, req.WorkerID, nowStr, "fresh")
 	var gotEventID string
 	if err := store.db.QueryRow(
 		"SELECT event_id FROM write_id_reserve_events WHERE id = ? AND outcome = 'fresh'",
@@ -1752,6 +1755,90 @@ func TestCommit_ErrLeaseLostAfterWrite(t *testing.T) {
 	}
 	if errors.Is(err, ErrNoReservation) {
 		t.Errorf("wA commit: misclassified as ErrNoReservation; want ErrLeaseLostAfterWrite")
+	}
+}
+
+// TestDeriveEventID_DifferentWorkersDoNotCollide — round-4 P1 #5
+// guard. Two workers deriving event_ids at the same instant with
+// the same outcome must produce distinct event_ids, otherwise
+// their audit inserts PK-collide and one Reserve tx rolls back
+// with an opaque UNIQUE constraint error instead of a proper
+// ReserveState.
+func TestDeriveEventID_DifferentWorkersDoNotCollide(t *testing.T) {
+	t.Parallel()
+	id := mustNewWriteID(t, validTaskID, validConvID, validStepID, validTargetPath, validHash)
+	nowStr := formatTS(time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC))
+	eA := deriveEventID(id, "run-1", "wA", nowStr, "inflight")
+	eB := deriveEventID(id, "run-1", "wB", nowStr, "inflight")
+	if eA == eB {
+		t.Errorf("event_ids collide across workers: A=%s B=%s (round-4 P1 #5 regression)", eA, eB)
+	}
+	// Same worker + same everything = same id (deterministic).
+	eA2 := deriveEventID(id, "run-1", "wA", nowStr, "inflight")
+	if eA != eA2 {
+		t.Errorf("deriveEventID non-deterministic: %s vs %s", eA, eA2)
+	}
+	// Same worker but different run_id = distinct.
+	eAr2 := deriveEventID(id, "run-2", "wA", nowStr, "inflight")
+	if eA == eAr2 {
+		t.Errorf("event_ids collide across runs: %s vs %s", eA, eAr2)
+	}
+}
+
+// TestCommit_IdempotentAfterVacuumAudit — round-4 P1 #1 guard.
+// If VacuumAudit deleted the commit event row, the same worker
+// retrying Commit MUST NOT falsely receive ErrLeaseLostAfterWrite.
+// Without this test, the round-3 fix silently breaks under any
+// interleaving of VacuumAudit followed by an idempotent Commit
+// retry.
+func TestCommit_IdempotentAfterVacuumAudit(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	clk := newFakeClock(base)
+	store, _ := newTestStoreAt(t, clk)
+	ctx := context.Background()
+	id := mustNewWriteID(t, validTaskID, validConvID, validStepID, validTargetPath, validHash)
+
+	// Worker wSame Reserves + Commits.
+	if _, err := store.Reserve(ctx, makeReq(id, "wSame")); err != nil {
+		t.Fatal(err)
+	}
+	cr := CommitRequest{
+		ID: id, RunID: "run-1", TaskID: validTaskID, WorkerID: "wSame",
+	}
+	if err := store.Commit(ctx, cr); err != nil {
+		t.Fatal(err)
+	}
+
+	// Time passes, VacuumAudit runs with a cutoff that reaps the
+	// audit rows but NOT the write_ids row (Vacuum is separate and
+	// with a longer retention window).
+	clk.Advance(31 * 24 * time.Hour)
+	if _, _, err := store.VacuumAudit(ctx, base.Add(30*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	// Sanity: audit row is gone, write_ids row still committed.
+	if got := countRows(t, store.db, "write_id_reserve_events"); got != 0 {
+		t.Fatalf("audit rows post-VacuumAudit = %d; want 0", got)
+	}
+	var committedAt sql.NullString
+	if err := store.db.QueryRow(
+		`SELECT committed_at FROM write_ids WHERE id = ?`, string(id)).Scan(&committedAt); err != nil {
+		t.Fatal(err)
+	}
+	if !committedAt.Valid {
+		t.Fatalf("write_ids row unexpectedly vacuumed")
+	}
+
+	// Same worker retries Commit. Must be nil (idempotent noop),
+	// NOT ErrLeaseLostAfterWrite — the audit row's absence carries
+	// no information about who committed.
+	err := store.Commit(ctx, cr)
+	if err != nil {
+		t.Errorf("commit after audit vacuum: err = %v; want nil (round-4 P1 #1 regression)", err)
+	}
+	if errors.Is(err, ErrLeaseLostAfterWrite) {
+		t.Errorf("commit misclassified as ErrLeaseLostAfterWrite when audit row was legitimately vacuumed")
 	}
 }
 

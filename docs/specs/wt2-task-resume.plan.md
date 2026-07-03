@@ -327,6 +327,58 @@ rows. `t.TempDir` file path per test.
   `if testing.Short() || os.Getenv("CI") != "" { t.Skip("perf") }`
   guard (spec §7(h)).
 
+### 3.10 Fresh-review round-2 regression guards (plan-only)
+
+Added after 3 review rounds surfaced fixes that landed without
+regression coverage. Each test would fail if the corresponding fix
+is reverted.
+
+- `TestReserve_InvalidLeaseTTLRejected` (plan-only) — LeaseTTL <= 0
+  returns `ErrInvalidLeaseTTL`, not `ErrEmptyReserveField`.
+- `TestReserve_SameWorkerRefreshesLeaseExpiry` (plan-only) — a
+  same-worker re-Reserve bumps `lease_expires_at` (sqlReserveExtend).
+- `TestCommit_ErrNoReservation` (plan-only) — Commit on a purged/
+  never-Reserved id returns `ErrNoReservation`, not `ErrLeaseLost`.
+- `TestResumeTask_ErrKindIsStepPayloadUnrecoverable` (plan-only) —
+  `classifyErr` picks the more specific sentinel first, so D4's
+  `error_kind` column reads `ErrStepPayloadUnrecoverable`.
+- `TestReserve_EventIDDeterministicallyDerived` (plan-only) — the
+  event_id encoding is stable + PK-uniqueness-enforcing.
+
+### 3.11 Fresh-review round-3 regression guards (plan-only)
+
+- `TestVacuum_ReapsOrphanedPayloads` (plan-only) — Stage-only rows
+  (no matching write_ids row) older than cutoff are reaped by
+  `Vacuum`; without the sweep, a lossy-network / hot-restart loop
+  grows `write_id_payloads` unboundedly.
+- `TestVacuum_KeepsRecentOrphanedPayloads` (plan-only) — recent
+  Stage-only rows survive Vacuum (age gate protects racing Reserves).
+- `TestVacuumAudit_DeletesOldRowsBothTables` (plan-only) —
+  `VacuumAudit(cutoff)` reaps both `write_id_reserve_events` and
+  `resume_task_attempts` in one transaction.
+- `TestVacuumAudit_KeepsRecentRows` (plan-only) — cutoff is
+  exclusive; rows AT or newer survive.
+- `TestCommit_ErrLeaseLostAfterWrite` (plan-only) — Commit on an
+  already-committed id whose commit was emitted by a DIFFERENT
+  worker returns `ErrLeaseLostAfterWrite`, not silent nil.
+- `TestCommit_IdempotentSameWorkerReturnsNil` (plan-only) — same
+  worker's second Commit is still nil (invariant preserved).
+
+### 3.12 Fresh-review round-4 regression guards (plan-only)
+
+- `TestCommit_IdempotentAfterVacuumAudit` (plan-only) — the same
+  worker's Commit retry is nil even after `VacuumAudit` deleted the
+  original commit event row (round-4 P1 #1 fix: `sql.ErrNoRows`
+  from the commit-worker lookup means we can't distinguish workers,
+  so default to noop rather than false `ErrLeaseLostAfterWrite`).
+- `TestDeriveEventID_DifferentWorkersDoNotCollide` (plan-only) —
+  two workers deriving event_ids at the same instant with the same
+  outcome produce distinct event_ids (round-4 P1 #5: worker_id
+  added to the length-prefixed derivation).
+- `TestResumeTask_ErrKindIsLeaseLostAfterWrite` (plan-only) — the
+  new sentinel's error_kind label surfaces through the executor →
+  driver classifier stack (round-4 P1 #3).
+
 ---
 
 ## 4. File 3: `multi-agent/internal/executor/resume.go`

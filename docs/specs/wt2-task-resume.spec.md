@@ -428,9 +428,28 @@ type WriteIDStore interface {
     // scoped to the current run (§7(g)).
     Commit(ctx context.Context, req CommitRequest) error
 
-    // Vacuum drops committed rows older than cutoff. Returns the number
-    // of rows removed. Called by a periodic janitor; §7(f).
+    // Vacuum drops committed rows older than cutoff AND orphaned
+    // write_id_payloads rows (staged but never Reserved) older
+    // than cutoff. Returns the number of write_ids rows removed.
+    // Called by a periodic janitor; §7(f). Round-3 review added
+    // the orphan-payload sweep.
     Vacuum(ctx context.Context, cutoff time.Time) (int64, error)
+
+    // VacuumAudit drops append-only audit rows older than cutoff:
+    // write_id_reserve_events.occurred_at < cutoff AND
+    // resume_task_attempts.updated_at < cutoff. Returns
+    // (reserveEventsDeleted, resumeAttemptsDeleted, err). Runs
+    // inside a single transaction. Caller contract: the D4
+    // evaluator MUST have materialised any aggregates
+    // (DuplicateSideEffectRate / RecoverySuccessRate) it cares
+    // about BEFORE calling this — the deletes are unconditional.
+    // Eval-runner (D3) invokes this at run-teardown after writing
+    // its CSV/JSONL; observer-server operators schedule it against
+    // their own retention policy. Round-3 review P1 #3 added this
+    // separate retention pass from Vacuum because prior rounds'
+    // doc-only "grows unbounded" acknowledgement was inadequate
+    // for prod deployments.
+    VacuumAudit(ctx context.Context, cutoff time.Time) (int64, int64, error)
 
     // RecordResumeAttempt UPSERTs one row in resume_task_attempts
     // keyed by (run_id, task_id). outcome ∈ {"started", "replayed",
@@ -620,13 +639,19 @@ CREATE INDEX IF NOT EXISTS idx_write_ids_committed_at
 -- The denominator MUST filter to Reserve outcomes only — 'commit'
 -- rows are Commit events, not reserve attempts, and would double-count.
 -- Scoped to a single run without joining on task_contracts.
+-- worker_id (round-3 review P1 #4) records which worker emitted
+-- the event. Used by Commit's noop-branch disambiguation: if a
+-- commit already exists and its worker_id != req.WorkerID, return
+-- ErrLeaseLostAfterWrite instead of silently succeeding. Default ''
+-- so pre-existing rows (there are none in prod today) don't reject.
 CREATE TABLE IF NOT EXISTS write_id_reserve_events (
     event_id     TEXT PRIMARY KEY,
     id           TEXT NOT NULL,
     run_id       TEXT NOT NULL,
     task_id      TEXT NOT NULL,
     outcome      TEXT NOT NULL CHECK(outcome IN ('fresh','uncommitted','inflight','committed','commit')),
-    occurred_at  TEXT NOT NULL
+    occurred_at  TEXT NOT NULL,
+    worker_id    TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_write_id_reserve_events_run
     ON write_id_reserve_events(run_id, occurred_at);
@@ -1667,7 +1692,10 @@ a real Prometheus registry wired up.
 | `observerstore.ErrEmptyReserveField` | §4 any ReserveRequest field empty | `observerstore/write_ids_writer.go` | yes — programmer bug, fix caller |
 | `observerstore.ErrPayloadUnavailable` | §6.2a `PayloadStager.Load` found no row for id | `observerstore/write_ids_writer.go` (re-exported by `executor`) | yes — driver-side reconstructor supplies fallback bytes |
 | `observerstore.ErrConcurrentLease` | §4 `Reserve` returned `ReserveInFlight` | `observerstore/write_ids_writer.go` | yes — back off then retry after lease TTL |
-| `observerstore.ErrLeaseLost` | §4 `Commit` update matched zero rows because lease_owner != req.WorkerID | `observerstore/write_ids_writer.go` | yes — the write happened but another worker won the lease |
+| `observerstore.ErrLeaseLost` | §4 `Commit` update matched zero rows because lease_owner != req.WorkerID (row still uncommitted) | `observerstore/write_ids_writer.go` | yes — the write happened but another worker won the lease |
+| `observerstore.ErrNoReservation` | §4 `Commit` invoked for an id that was never Reserved OR was Vacuum'd before Commit ran | `observerstore/write_ids_writer.go` | yes — programmer bug or retention race |
+| `observerstore.ErrInvalidLeaseTTL` | §4 `Reserve` called with `LeaseTTL <= 0` | `observerstore/write_ids_writer.go` | yes — programmer bug, fix caller |
+| `observerstore.ErrLeaseLostAfterWrite` | §4 `Commit` invoked after another worker committed the same id (per the `write_id_reserve_events.worker_id` audit trail); this caller's local side-effects may have partially landed. Diagnostic-only — no automated cleanup path in this worktree. Re-exported as `executor.ErrLeaseLostAfterWrite`. | `observerstore/write_ids_writer.go` | yes — log + emit metric; automated rollback is a follow-up worktree |
 | wrapped SQL errors | DB connection / statement failures | `observerstore/*` | yes — retry loop lives above `ResumeTask` |
 
 Ownership follows the import graph: `driver` and `executor` both

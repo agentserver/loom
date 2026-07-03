@@ -948,3 +948,46 @@ func TestResumeTask_ErrKindIsStepPayloadUnrecoverable(t *testing.T) {
 	}
 }
 
+// TestResumeTask_ErrKindIsLeaseLostAfterWrite — round-4 P1 #3.
+// If Dispatch propagates a wrapped executor.ErrLeaseLostAfterWrite
+// (the executor's Commit hit the noop-branch with commit_worker !=
+// req.WorkerID), the resume_task_attempts row MUST carry error_kind
+// = "ErrLeaseLostAfterWrite". Reverting the alias in
+// executor/resume.go or dropping the classifyErr case would silently
+// downgrade the D4 label to "unknown".
+func TestResumeTask_ErrKindIsLeaseLostAfterWrite(t *testing.T) {
+	t.Parallel()
+	db := openStoreDB(t)
+	store := observerstore.NewSQLiteWriteIDStore(db)
+	// Dispatch surfaces the sentinel exactly the way ExecutorResume
+	// would (Commit's error propagates via fmt.Errorf %w).
+	wrapped := fmt.Errorf(
+		"executor: commit step 0: %w",
+		observerstore.ErrLeaseLostAfterWrite,
+	)
+	// Sanity: the sentinel matches via both the executor alias AND
+	// the direct observerstore reference (proves the alias chain).
+	if !errors.Is(wrapped, observerstore.ErrLeaseLostAfterWrite) {
+		t.Fatal("test-setup bug: wrapped err doesn't match observerstore sentinel")
+	}
+	deps := ResumeDeps{
+		Store:        store,
+		LoadContract: fakeLoad(stubContract(rtTargetNm), nil),
+		Dispatch: func(context.Context, string, string, contract.TaskContract) error {
+			return wrapped
+		},
+	}
+	_ = ResumeTask(context.Background(), deps, "run-1", rtTaskID)
+	var errKind string
+	if err := db.QueryRow(
+		`SELECT error_kind FROM resume_task_attempts WHERE run_id = 'run-1' AND task_id = ?`,
+		rtTaskID).Scan(&errKind); err != nil {
+		t.Fatal(err)
+	}
+	if errKind != "ErrLeaseLostAfterWrite" {
+		t.Errorf("error_kind = %q; want ErrLeaseLostAfterWrite "+
+			"(classifyErr must recognise the alias)",
+			errKind)
+	}
+}
+
