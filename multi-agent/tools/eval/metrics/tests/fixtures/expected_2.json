@@ -1,0 +1,9 @@
+{
+  "ContractCompleteness": null,
+  "ContractViolationRate": null,
+  "DuplicateSideEffectRate": null,
+  "MissingArtifactDetectionRate": null,
+  "PolicyViolationPreventionRate": null,
+  "PreExecutionFaultCatchRate": null,
+  "RecoverySuccessRate": null
+}
