@@ -3281,9 +3281,9 @@ Add the field to the `Tools` struct: `dryRunWriter observerstore.DryRunBlockWrit
 
 Unit tests inject a real SQLite-backed writer directly (bypassing HTTP) via `tools.dryRunWriter = observerstore.NewDryRunBlockWriter(sqliteDB)` — see `TestDryRunContractTool_PersistsOneRowPerBlock` and `TestDryRunContractTool_NoDryRunAblation_ShortCircuits`.
 
-**If a test on a wired driver finds `t.dryRunWriter == nil`, that is a bug.** The plan's `dryRunBlockWriter()` accessor is only tolerant of nil for narrow test cases. Production fail-loud mechanism (current `NewTools` returns `*Tools`, not `(*Tools, error)` — no refactor required by this WT):
+**If a test on a wired driver finds `t.dryRunWriter == nil`, that is a bug.** The plan's `dryRunBlockWriter()` accessor is only tolerant of nil for narrow test cases. Production warn-loud mechanism (current `NewTools` returns `*Tools`, not `(*Tools, error)` — no refactor required by this WT):
 
-- In the driver's `main.go` (or the equivalent process entrypoint that wires `ObserverRelay` → `NewTools`), add a post-construction assertion: `if tools.dryRunWriter == nil { log.Fatal("dry_run_blocks writer not configured — spec §4.3 requires production wire-up") }`. Placed in `main`, this aborts the process before any dry-run call could silently drop persistence — the "fail loudly at startup" semantics the WT-2 spec requires without touching `NewTools`'s signature.
+- In the driver's `main.go` (or the equivalent process entrypoint that wires `ObserverRelay` → `NewTools`), add a post-construction check: `if relay := driver.NewObserverRelay(cfg, obs); relay != nil { tools.SetDryRunBlockWriter(relay) } else { log.Printf("[WARN] dry_run_blocks writer not configured — spec §4.3 persistence degraded (check cfg.Observer.Enabled/URL)") }`. Warn-loud (not `log.Fatal`) because the smoke-test / demo drivers legitimately run without observer wiring — production operators still get a clear WARN in the audit log.
 - Tests that intentionally construct `Tools` without a writer (existing driver test suite pre-WT-2) are unaffected because they never traverse `main.go`; they operate at unit-test scope where `tools.dryRunWriter` may be nil and the accessor's nil-guard covers them.
 
 4. Add `nowUTC()` if not present (mirror `observerstore.nowUTC`): declare `var nowUTC = func() time.Time { return time.Now().UTC() }` at package scope.
