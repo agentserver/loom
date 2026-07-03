@@ -144,7 +144,7 @@ Describe 'T9b-ps: static §7(b) guard for Windows prod' {
 
 Describe 'T13: -Stub -DryRun works on any host' {
     It "emits JSON with all 4 component_ports keys" {
-        $out = & $script:DEPLOY -Stub -DryRun -LoomHome (Join-Path ([System.IO.Path]::GetTempPath()) 'wt2-pester-dryrun') 2>&1
+        $out = & $script:DEPLOY -Stub -DryRun -LoomHome (Join-Path ([System.IO.Path]::GetTempPath()) ('wt2-pester-dryrun-' + [guid]::NewGuid().ToString('N').Substring(0,8))) 2>&1
         $obj = $out | ConvertFrom-Json
         $obj.mode | Should -Be 'stub'
         ($obj.component_ports.PSObject.Properties.Name).Count | Should -Be 4
@@ -156,7 +156,7 @@ Describe 'T8-ps: dry-run redacts secrets (any host)' {
     It "LOOM_API_KEY does not appear in -Prod -DryRun output" {
         $env:LOOM_API_KEY = 'SECRET_TOKEN_WIN_1234'
         try {
-            $out = & $script:DEPLOY -Prod -DryRun -LoomHome (Join-Path ([System.IO.Path]::GetTempPath()) 'wt2-pester-dryrun-prod') 2>&1
+            $out = & $script:DEPLOY -Prod -DryRun -LoomHome (Join-Path ([System.IO.Path]::GetTempPath()) ('wt2-pester-dryrun-prod-' + [guid]::NewGuid().ToString('N').Substring(0,8))) 2>&1
             $joined = ($out -join "`n")
             $joined | Should -Not -Match 'SECRET_TOKEN_WIN_1234'
         } finally {
@@ -167,13 +167,13 @@ Describe 'T8-ps: dry-run redacts secrets (any host)' {
 
 Describe 'T3-ps / T4-ps / T5-ps: port validation (any host)' {
     It "T3-ps: -ObserverPort 3389 (RDP) rejected" {
-        { & $script:DEPLOY -Stub -ObserverPort 3389 -DryRun -LoomHome (Join-Path ([System.IO.Path]::GetTempPath()) 'wt2-pester-t3') 2>&1 } | Should -Throw
+        { & $script:DEPLOY -Stub -ObserverPort 3389 -DryRun -LoomHome (Join-Path ([System.IO.Path]::GetTempPath()) ('wt2-pester-t3-' + [guid]::NewGuid().ToString('N').Substring(0,8))) 2>&1 } | Should -Throw
     }
     It "T4-ps: -ObserverPort 80 rejected (< 1024 by ValidateRange)" {
-        { & $script:DEPLOY -Stub -ObserverPort 80 -DryRun -LoomHome (Join-Path ([System.IO.Path]::GetTempPath()) 'wt2-pester-t4') 2>&1 } | Should -Throw
+        { & $script:DEPLOY -Stub -ObserverPort 80 -DryRun -LoomHome (Join-Path ([System.IO.Path]::GetTempPath()) ('wt2-pester-t4-' + [guid]::NewGuid().ToString('N').Substring(0,8))) 2>&1 } | Should -Throw
     }
     It "T5-ps: colliding ports rejected" {
-        { & $script:DEPLOY -Stub -ObserverPort 18091 -DriverPort 18091 -DryRun -LoomHome (Join-Path ([System.IO.Path]::GetTempPath()) 'wt2-pester-t5') 2>&1 } | Should -Throw
+        { & $script:DEPLOY -Stub -ObserverPort 18091 -DriverPort 18091 -DryRun -LoomHome (Join-Path ([System.IO.Path]::GetTempPath()) ('wt2-pester-t5-' + [guid]::NewGuid().ToString('N').Substring(0,8))) 2>&1 } | Should -Throw
     }
 }
 
@@ -181,7 +181,7 @@ Describe 'T11-ps: topology hostname redaction (any host)' {
     It "hostname with @ produces <hash>@<hash>; no plaintext leak" {
         $env:LOOM_TEST_HOSTNAME = 'alice@corp-laptop'
         try {
-            $out = & $script:DEPLOY -Stub -DryRun -LoomHome (Join-Path ([System.IO.Path]::GetTempPath()) 'wt2-pester-t11') 2>&1
+            $out = & $script:DEPLOY -Stub -DryRun -LoomHome (Join-Path ([System.IO.Path]::GetTempPath()) ('wt2-pester-t11-' + [guid]::NewGuid().ToString('N').Substring(0,8))) 2>&1
             $obj = $out | ConvertFrom-Json
             $obj.host | Should -Match '^[0-9a-f]{8}@[0-9a-f]{8}$'
             $joined = ($out -join "`n")
@@ -194,56 +194,37 @@ Describe 'T11-ps: topology hostname redaction (any host)' {
 }
 
 Describe 'T15-ps / T15b-ps / T15c-ps: env whitelist (any host)' {
-    # The Get-WhitelistedEnv function is defined inside deploy.ps1.
-    # For any-host execution we source deploy.ps1 with mode/flag globals
-    # pre-set and invoke Get-WhitelistedEnv directly. To avoid running
-    # the CLI shim (which would kick off port validation etc.), we
-    # dot-source only the function definitions via a scoped extract.
-
+    # Import deploy.internal.psm1 directly instead of dot-sourcing
+    # deploy.ps1 with a regex strip of the CLI body. The previous
+    # regex-based approach (Codex rounds 4-6) fragile-ly depended on
+    # the exact shape of the top-level try/catch; fresh-review P1-4
+    # (round 8) moved Get-WhitelistedEnv into the module for exactly
+    # this reason. Same source of truth, no strip fragility.
     BeforeAll {
-        # Extract every `function ...` block plus the ALWAYS_/IFSET_
-        # constants; skip the top-level CLI code by filtering out lines
-        # after the first `try { ... Invoke-Bringup*` block.
-        $lines = Get-Content -LiteralPath $script:DEPLOY
-        $script:extract = ($lines | ForEach-Object {
-            if ($_ -match '^(function|\$script:ALWAYS_ENV_KEYS|\$script:IFSET_ENV_KEYS|\$script:READY_TIMEOUT_DEFAULT|\$script:WELL_KNOWN_PORTS|.*# --- constants)') {
-                $inFn = $true
-            }
-            $_
-        }) -join "`n"
-        # Simpler: source the file as a script block, wrapping the
-        # CLI-body in a `if ($false) { }` guard.
-        $script:extract = $lines -join "`n"
-        # Replace the top-level try/switch with a no-op stub so dot-
-        # sourcing does not spawn anything.
-        # Strip the top-level try { Initialize-PidsDir ... } catch
-        # { ... exit $script:ExitCode } block. The pattern tolerates
-        # any number of leading comment lines between `try {` and
-        # `Initialize-PidsDir` (an earlier tightened form only
-        # tolerated ONE comment; the current source has two, which
-        # would leave the bring-up code in the extract and cause
-        # Get-WhitelistedEnv-only tests to actually spawn — Codex
-        # rounds 5 P1-2 + 6 P1-1 fix).
-        $script:extract = $script:extract -replace '(?s)try\s*\{\s*(#[^\n]*\n\s*)*Initialize-PidsDir[\s\S]*?\}\s*catch[\s\S]*?exit\s+(\d+|\$script:ExitCode)\s*\}', ''
+        $script:MODULE_PATH = Join-Path $PSScriptRoot 'deploy.internal.psm1'
+        Import-Module -Force $script:MODULE_PATH
+    }
+    AfterAll {
+        Remove-Module deploy.internal -ErrorAction SilentlyContinue
     }
 
     It 'T15-ps: drops AWS_/GITHUB_TOKEN/DOCKER_CONFIG/NPM_TOKEN' {
-        # Dot-source into a scoped scriptblock so the extraction does not
-        # pollute the Pester runner globals.
-        $mode = 'stub'; $flag = $false
-        $sb = [scriptblock]::Create($script:extract + "`n" + '
-            $env:AWS_ACCESS_KEY_ID = "NOPE_AWS"
-            $env:GITHUB_TOKEN      = "NOPE_GH"
-            $env:DOCKER_CONFIG     = "/etc/docker"
-            $env:NPM_TOKEN         = "NOPE_NPM"
-            Get-WhitelistedEnv -Mode "stub"
-        ')
-        $out = & $sb
-        # $out is a hashtable; check absence of the four keys.
-        $out.ContainsKey('AWS_ACCESS_KEY_ID') | Should -BeFalse
-        $out.ContainsKey('GITHUB_TOKEN')      | Should -BeFalse
-        $out.ContainsKey('DOCKER_CONFIG')     | Should -BeFalse
-        $out.ContainsKey('NPM_TOKEN')         | Should -BeFalse
+        $env:AWS_ACCESS_KEY_ID = 'NOPE_AWS'
+        $env:GITHUB_TOKEN      = 'NOPE_GH'
+        $env:DOCKER_CONFIG     = '/etc/docker'
+        $env:NPM_TOKEN         = 'NOPE_NPM'
+        try {
+            $out = Get-WhitelistedEnv -Mode 'stub'
+            $out.ContainsKey('AWS_ACCESS_KEY_ID') | Should -BeFalse
+            $out.ContainsKey('GITHUB_TOKEN')      | Should -BeFalse
+            $out.ContainsKey('DOCKER_CONFIG')     | Should -BeFalse
+            $out.ContainsKey('NPM_TOKEN')         | Should -BeFalse
+        } finally {
+            Remove-Item Env:\AWS_ACCESS_KEY_ID -ErrorAction SilentlyContinue
+            Remove-Item Env:\GITHUB_TOKEN      -ErrorAction SilentlyContinue
+            Remove-Item Env:\DOCKER_CONFIG     -ErrorAction SilentlyContinue
+            Remove-Item Env:\NPM_TOKEN         -ErrorAction SilentlyContinue
+        }
     }
 
     It 'T15b-ps: passes always-allowed + if-set + LOOM_* keys' {
@@ -251,8 +232,7 @@ Describe 'T15-ps / T15b-ps / T15c-ps: env whitelist (any host)' {
         $env:AGENTSERVER_ROOT   = '/repo/agentserver'
         $env:LOOM_OBSERVER_URL  = 'http://127.0.0.1:18091'
         try {
-            $sb = [scriptblock]::Create($script:extract + "`n" + 'Get-WhitelistedEnv -Mode "stub"')
-            $out = & $sb
+            $out = Get-WhitelistedEnv -Mode 'stub'
             $out['PATH']                | Should -Not -BeNullOrEmpty
             $out['MOCK_MODEL_URL']      | Should -Be 'http://127.0.0.1:9090'
             $out['AGENTSERVER_ROOT']    | Should -Be '/repo/agentserver'
@@ -268,8 +248,7 @@ Describe 'T15-ps / T15b-ps / T15c-ps: env whitelist (any host)' {
         $env:OPENAI_API_KEY   = 'STUB_KEY_9zzz'
         $env:ANTHROPIC_API_KEY = 'STUB_KEY_8yyy'
         try {
-            $sb = [scriptblock]::Create($script:extract + "`n" + 'Get-WhitelistedEnv -Mode "stub" -AllowModelKey')
-            $out = & $sb
+            $out = Get-WhitelistedEnv -Mode 'stub' -AllowModelKey
             $out.ContainsKey('OPENAI_API_KEY')    | Should -BeFalse
             $out.ContainsKey('ANTHROPIC_API_KEY') | Should -BeFalse
         } finally {
@@ -281,22 +260,33 @@ Describe 'T15-ps / T15b-ps / T15c-ps: env whitelist (any host)' {
     It 'T15c-ii-ps: prod without flag drops OPENAI_API_KEY' {
         $env:OPENAI_API_KEY = 'PROD_KEY_1234'
         try {
-            $sb = [scriptblock]::Create($script:extract + "`n" + 'Get-WhitelistedEnv -Mode "prod"')
-            $out = & $sb
+            $out = Get-WhitelistedEnv -Mode 'prod'
             $out.ContainsKey('OPENAI_API_KEY') | Should -BeFalse
         } finally {
             Remove-Item Env:\OPENAI_API_KEY -ErrorAction SilentlyContinue
         }
     }
 
-    It 'T15c-iii-ps: prod with flag passes OPENAI_API_KEY' {
+    It 'T15c-iii-ps: prod with flag passes OPENAI_API_KEY AND emits WARN' {
+        # Fresh-review P1-8 (round 8): previous test asserted only that
+        # the key was propagated. Spec §7(g) mitigation includes the
+        # WARN line so operators see "silent leak" preventable in real
+        # time. Capture stderr via a temp file + pwsh subprocess.
         $env:OPENAI_API_KEY = 'PROD_KEY_9999'
+        $errFile = Join-Path ([System.IO.Path]::GetTempPath()) ("wt2-t15c-iii-" + [guid]::NewGuid().ToString('N').Substring(0,8) + ".err")
         try {
-            $sb = [scriptblock]::Create($script:extract + "`n" + 'Get-WhitelistedEnv -Mode "prod" -AllowModelKey')
-            $out = & $sb
-            $out['OPENAI_API_KEY'] | Should -Be 'PROD_KEY_9999'
+            $modPath = $script:MODULE_PATH
+            $inner = @"
+Import-Module -Force '$modPath'
+`$out = Get-WhitelistedEnv -Mode 'prod' -AllowModelKey
+Write-Output ('KEY=' + `$out['OPENAI_API_KEY'])
+"@
+            $stdout = pwsh -NoProfile -Command $inner 2> $errFile
+            ($stdout | Out-String) | Should -Match 'KEY=PROD_KEY_9999'
+            (Get-Content -Raw -LiteralPath $errFile) | Should -Match 'passing OPENAI_API_KEY through'
         } finally {
             Remove-Item Env:\OPENAI_API_KEY -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $errFile -ErrorAction SilentlyContinue
         }
     }
 }
@@ -351,12 +341,21 @@ api_keys:
     key: "fixture-key"
     note: "fixture"
 '@
-            Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'bin\observer-server.windows-amd64.exe') `
-                      -Destination (Join-Path $tmp 'observer\observer-server.exe') -Force -ErrorAction SilentlyContinue
-            Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'bin\slave-agent.windows-amd64.exe') `
-                      -Destination (Join-Path $tmp 'slave\slave-agent.exe') -Force -ErrorAction SilentlyContinue
-            Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'bin\driver-agent.windows-amd64.exe') `
-                      -Destination (Join-Path $tmp 'driver\driver-agent.exe') -Force -ErrorAction SilentlyContinue
+            # Fresh-review P1-6 (round 8): the previous test used
+            # `Copy-Item -ErrorAction SilentlyContinue`, which silently
+            # dropped the copy on any host without prebuilt binaries —
+            # prod preflight then threw at the first `Test-Path
+            # -PathType Leaf` and Invoke-BringupProd never ran, making
+            # the file-hash assertion trivially green. We now bake in
+            # tiny dummy `.exe` placeholders that satisfy Test-Path
+            # so preflight passes and the real bring-up path (which
+            # would be where a config-clobber regression would land)
+            # is exercised.
+            foreach ($p in @('observer\observer-server.exe',
+                             'slave\slave-agent.exe',
+                             'driver\driver-agent.exe')) {
+                Set-Content -LiteralPath (Join-Path $tmp $p) -Value 'MZ' -Encoding Byte
+            }
 
             Set-Content -LiteralPath (Join-Path $tmp 'slave\config.yaml') `
                 -Value @'
