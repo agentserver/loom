@@ -15,7 +15,10 @@ require (
 	modernc.org/sqlite v1.50.0
 )
 
-require github.com/santhosh-tekuri/jsonschema/v5 v5.3.1
+require (
+	github.com/santhosh-tekuri/jsonschema/v5 v5.3.1
+	golang.org/x/mod v0.37.0
+)
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -43,7 +46,6 @@ require (
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/crypto v0.51.0 // indirect
-	golang.org/x/mod v0.37.0 // indirect
 	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 	gopkg.in/ini.v1 v1.67.2 // indirect
