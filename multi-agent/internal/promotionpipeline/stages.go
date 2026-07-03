@@ -47,6 +47,51 @@ var ErrPromotionPathDisabled = errors.New("promotionpipeline: driver-initiated p
 // cases_path is refused by the traversal guard.
 var ErrInvalidCasesPath = errors.New("promotionpipeline: cases_path contains path traversal or leads outside the workspace")
 
+// ErrInvalidScaffoldSourcePath is returned when the scaffold slave's
+// returned source_path fails validation. A compromised or buggy slave
+// could return an absolute path or a traversal-shaped value; stage 3
+// refuses to hand that to register. See PR #71 review P1-B2-1.
+var ErrInvalidScaffoldSourcePath = errors.New("promotionpipeline: scaffold source_path is absolute or contains traversal — refusing to register")
+
+// validateScaffoldSourcePath enforces the same "must be workspace-
+// relative, no `..` segments" invariant that
+// internal/driver.AssertSafeRelPath enforces for driver-local read
+// paths. Copied inline rather than imported so this package stays
+// free of the internal/driver import (which would create a cycle
+// through promotion_pipeline_tool.go).
+//
+// Rules (matching driver.AssertSafeRelPath):
+//   - Empty is accepted (a scaffold that legitimately omits the
+//     field lets stage 3 fall back to the convention path — see
+//     pipeline.go extractSourcePath fallback).
+//   - Absolute paths (leading `/`) are refused.
+//   - Any `..` segment after Clean is refused.
+//   - URL-encoded traversals are refused via a percent-decoded
+//     re-check (defence-in-depth even though slaves rarely encode
+//     paths).
+func validateScaffoldSourcePath(p string) error {
+	if p == "" {
+		return nil
+	}
+	if strings.HasPrefix(p, "/") {
+		return ErrInvalidScaffoldSourcePath
+	}
+	decoded, err := url.PathUnescape(p)
+	if err == nil && decoded != p && strings.Contains(decoded, "..") {
+		return ErrInvalidScaffoldSourcePath
+	}
+	clean := filepath.Clean(p)
+	for _, seg := range strings.Split(clean, "/") {
+		if seg == ".." {
+			return ErrInvalidScaffoldSourcePath
+		}
+	}
+	if strings.Contains(p, "..") {
+		return ErrInvalidScaffoldSourcePath
+	}
+	return nil
+}
+
 // validateCasesPath enforces §7 (h): reject any `..` segment (leading
 // or mid-path), URL-encoded traversal, and absolute paths under
 // /etc/. Accepts relative paths whose cleaned form does not touch

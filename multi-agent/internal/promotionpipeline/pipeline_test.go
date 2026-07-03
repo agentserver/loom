@@ -3,6 +3,8 @@ package promotionpipeline
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -464,6 +466,240 @@ func TestPipeline_AuditWriteFailureDegradesButPipelineProceeds(t *testing.T) {
 	}
 	if !registerCalled {
 		t.Fatal("register MUST run even when scaffold-stage audit-write failed")
+	}
+}
+
+// TestEmptyBytesSHA256HexMatchesSHA256OfEmpty — pinning check so the
+// duplicated constant in this package never drifts from the actual
+// sha256 of the empty byte string. If this test fails, either
+// (a) internal/driver.EmptyBytesSHA256Hex was changed (accidentally),
+// or (b) the promotionpipeline local copy was changed independently.
+// Either way the constant must match sha256("").
+func TestEmptyBytesSHA256HexMatchesSHA256OfEmpty(t *testing.T) {
+	// Recompute at runtime and compare — cheap, catches drift.
+	h := sha256.Sum256(nil)
+	want := hex.EncodeToString(h[:])
+	if emptyBytesSHA256Hex != want {
+		t.Fatalf("emptyBytesSHA256Hex drifted from sha256(\"\"): got %q, want %q", emptyBytesSHA256Hex, want)
+	}
+}
+
+// TestPipeline_DryRunRegisterLogsPrefix — spec §7 (b). Guards
+// against removal of the `[dry-run]` prefix in the stage-3 register
+// log line (operator greps for it).
+func TestPipeline_DryRunRegisterLogsPrefix(t *testing.T) {
+	var buf bytes.Buffer
+	prev := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prev); log.SetFlags(prevFlags) })
+
+	aud := &recAudit{}
+	ev := &recEvents{}
+	p := newHappyPipe(t, aud, ev)
+	r := validRequest()
+	r.DryRunRegister = true
+	if _, err := p.Run(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "[dry-run] register skipped for spec="+r.Spec.Name) {
+		t.Fatalf("expected [dry-run] log line, got:\n%s", buf.String())
+	}
+}
+
+// TestPipeline_DryRunDoesNotUpdateRegistryView — spec §7 (b) /
+// pipeline §2.4: dry-run must NOT publish a new
+// driver.LastRegistryHash (that would pollute D1 for the eval
+// runner).
+//
+// Because internal/promotionpipeline stays free of the
+// internal/driver import (would cycle), the pipeline can't call
+// driver.LastRegistryHash directly. The invariant is enforced
+// STATICALLY: the pipeline's dry-run branch does not invoke
+// RegisterCall, and RegisterCall is the only path that reaches
+// driver.PublishRegisterAndCompute (which updates LastRegistryHash).
+// So this test asserts that RegisterCall is NOT invoked in dry-run
+// mode — an equivalent guarantee, structurally.
+func TestPipeline_DryRunDoesNotUpdateRegistryView(t *testing.T) {
+	aud := &recAudit{}
+	ev := &recEvents{}
+	registerCalled := false
+	p, err := New(Deps{
+		Delegate: func(_ context.Context, _, _, skill, _ string, _ int) (string, error) {
+			if skill == "mcp-acceptance" {
+				return `{"acceptance_exit_code":0}`, nil
+			}
+			return `{}`, nil
+		},
+		RegisterCall: func(_ context.Context, _ buildspec.Spec, _, _, _ string, _ int) (string, error) {
+			registerCalled = true
+			return strings.Repeat("h", 64), nil
+		},
+		AuditWrite: aud.write,
+		EventEmit:  ev.emit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := validRequest()
+	r.DryRunRegister = true
+	if _, err := p.Run(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+	if registerCalled {
+		t.Fatal("dry-run MUST NOT invoke RegisterCall — the only path that could update driver.LastRegistryHash")
+	}
+}
+
+// TestPipeline_NoObserverAblation_AuditDroppedWithLogEventsUnaffected
+// — spec §7 (j). Under NoObserver (flipped via
+// evalrun.DisableTelemetry), the audit writer drops rows silently
+// (each drop produces a `[ablation] NoObserver: dropped ...` log
+// line — that log actually lives in the promotionaudit writer). The
+// observer event pipe is SEPARATE and is not affected by the flag.
+//
+// The pipeline's Deps.AuditWrite is a caller-supplied function; the
+// NoObserver semantics live in promotionaudit.SQLiteWriter, not in
+// the pipeline itself. To test the pipeline's obligations here we
+// simulate the drop by injecting an AuditWrite that returns nil
+// (mirrors the writer's behavior under the ablation) and a normal
+// EventEmit. Assert: 0 rows in the caller's capture, 3 events
+// emitted.
+func TestPipeline_NoObserverAblation_AuditDroppedWithLogEventsUnaffected(t *testing.T) {
+	ev := &recEvents{}
+	// AuditWrite silently drops (matches NoObserver semantics in the
+	// real promotionaudit.SQLiteWriter — spec §7 (j) — the writer
+	// returns nil after logging).
+	var (
+		dropped int
+		mu      sync.Mutex
+	)
+	dropWrite := func(_ context.Context, _ promotionaudit.AuditFields) error {
+		mu.Lock()
+		defer mu.Unlock()
+		dropped++
+		return nil
+	}
+	p, err := New(Deps{
+		Delegate: func(_ context.Context, _, _, skill, _ string, _ int) (string, error) {
+			if skill == "mcp-acceptance" {
+				return `{"acceptance_exit_code":0}`, nil
+			}
+			return `{}`, nil
+		},
+		RegisterCall: func(_ context.Context, _ buildspec.Spec, _, _, _ string, _ int) (string, error) {
+			return strings.Repeat("i", 64), nil
+		},
+		AuditWrite: dropWrite,
+		EventEmit:  ev.emit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Run(context.Background(), validRequest()); err != nil {
+		t.Fatal(err)
+	}
+	// AuditWrite was called 3 times; each dropped silently.
+	if dropped != 3 {
+		t.Fatalf("expected AuditWrite called 3 times (dropped), got %d", dropped)
+	}
+	// Observer events unaffected — 3 stage-transition events.
+	if got := len(ev.snapshot()); got != 3 {
+		t.Fatalf("expected 3 observer events (NoObserver does not touch event pipe), got %d", got)
+	}
+}
+
+// TestPipeline_ScaffoldSourcePath_RejectsAbsoluteAndTraversal — PR #71
+// review P1-B2-1: a compromised scaffold slave returning an absolute
+// or traversal-shaped source_path must NOT flow into RegisterCall.
+func TestPipeline_ScaffoldSourcePath_RejectsAbsoluteAndTraversal(t *testing.T) {
+	badPaths := []string{
+		"/etc/shadow",
+		"../../evil.py",
+		"generated_mcp/../../etc/passwd",
+		"%2e%2e/x.py",
+	}
+	for _, bp := range badPaths {
+		t.Run(bp, func(t *testing.T) {
+			aud := &recAudit{}
+			ev := &recEvents{}
+			registerCalled := false
+			p, err := New(Deps{
+				Delegate: func(_ context.Context, _, _, skill, _ string, _ int) (string, error) {
+					if skill == "scaffold-mcp-server" {
+						return `{"source_path":"` + bp + `"}`, nil
+					}
+					if skill == "mcp-acceptance" {
+						return `{"acceptance_exit_code":0}`, nil
+					}
+					return `{}`, nil
+				},
+				RegisterCall: func(_ context.Context, _ buildspec.Spec, _, _, _ string, _ int) (string, error) {
+					registerCalled = true
+					return "", nil
+				},
+				AuditWrite: aud.write,
+				EventEmit:  ev.emit,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			outcomes, err := p.Run(context.Background(), validRequest())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if registerCalled {
+				t.Fatalf("register MUST NOT run when scaffold returned untrusted source_path %q", bp)
+			}
+			if outcomes[2].Success {
+				t.Fatalf("register stage should be marked failed for source_path %q", bp)
+			}
+			if !errors.Is(outcomes[2].Error, ErrInvalidScaffoldSourcePath) {
+				t.Fatalf("expected ErrInvalidScaffoldSourcePath, got %v", outcomes[2].Error)
+			}
+		})
+	}
+}
+
+// TestPipeline_AcceptanceMarkerInDebugStringDoesNotSpoof — regression
+// guard for the P1 fresh-review finding: a slave whose debug/log
+// field embeds the marker as substring inside another JSON string
+// (e.g. `{"debug":"acceptance_exit_code\":0 emitted"}`) must NOT be
+// mis-parsed as PASS. The parser is JSON-typed now, not
+// substring-based.
+func TestPipeline_AcceptanceMarkerInDebugStringDoesNotSpoof(t *testing.T) {
+	aud := &recAudit{}
+	ev := &recEvents{}
+	registerCalled := false
+	p, err := New(Deps{
+		Delegate: func(_ context.Context, _, _, skill, _ string, _ int) (string, error) {
+			if skill == "mcp-acceptance" {
+				// No genuine acceptance_exit_code field, only substring
+				// nested inside a string value.
+				return `{"debug":"acceptance_exit_code\":0 was returned by helper"}`, nil
+			}
+			return `{}`, nil
+		},
+		RegisterCall: func(_ context.Context, _ buildspec.Spec, _, _, _ string, _ int) (string, error) {
+			registerCalled = true
+			return "", nil
+		},
+		AuditWrite: aud.write,
+		EventEmit:  ev.emit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcomes, err := p.Run(context.Background(), validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if registerCalled {
+		t.Fatal("register MUST NOT run when marker is only a nested substring — §7 (a) C3 tool-poisoning surface")
+	}
+	if outcomes[1].Success {
+		t.Fatal("acceptance stage should be marked failed when marker is nested substring")
 	}
 }
 

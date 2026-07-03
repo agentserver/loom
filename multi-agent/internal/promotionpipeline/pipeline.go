@@ -241,6 +241,16 @@ func (p *Pipeline) Run(ctx context.Context, r Request) (StageOutcomes, error) {
 				Error:        nil, // dry-run is not an error
 			}, nil
 		}
+		// PR #71 review P1-B2-1: the scaffold slave's returned
+		// source_path is HOSTILE — a compromised slave could return
+		// `/etc/shadow` or `../../evil.py` to poke driver-local
+		// paths through the register skill. Reject those here
+		// BEFORE handing to RegisterCall (which threads the path
+		// into the register_mcp delegate prompt with no other
+		// validation).
+		if err := validateScaffoldSourcePath(scaffoldSourcePath); err != nil {
+			return StageOutcome{Stage: StageRegister, Success: false, Error: err, StageNote: stageNote}, err
+		}
 		p.emitEvent(r, StageRegister, "started")
 		hash, err := p.d.RegisterCall(ctx, r.Spec, scaffoldSourcePath, r.SlaveAgentID, r.SlaveDisplayName, r.TimeoutSec)
 		if err != nil {
@@ -320,45 +330,65 @@ func appendSkipped(cur StageOutcomes, remaining []Stage) StageOutcomes {
 	return cur
 }
 
-// parseAcceptanceExit returns (code, ok) parsed from
-// `"acceptance_exit_code":<int>` in the slave result body. ok=false
-// means the marker was ABSENT or unparseable; the caller MUST treat
-// that as failure (§7 (a) — silent-pass would be the C3
-// tool-poisoning surface).
+// parseAcceptanceExit returns (code, ok) parsed from the slave result
+// body. ok=false means the marker was ABSENT or unparseable; the
+// caller MUST treat that as failure (§7 (a) — silent-pass would be
+// the C3 tool-poisoning surface).
+//
+// The slave-side skill returns a JSON body with a top-level
+// `acceptance_exit_code` int. Because the pipeline's Delegate adapter
+// wraps that in the driver-tool envelope shape
+// `{"task_id":..., "output":"<raw slave body>", "result":<parsed>}`,
+// we look for the marker in two shapes:
+//
+//   1. As a top-level key on the envelope (unusual — slaves don't put
+//      it there directly, but json.Unmarshal into a struct with the
+//      field pointer succeeds if it's ever surfaced that way).
+//   2. On the parsed `result` field (the common shape when the slave
+//      returns a JSON object).
+//   3. On the raw `output` string parsed as JSON (fallback for slaves
+//      that stream their body as a stringified JSON in `output`).
+//
+// A substring `strings.Contains` scan is REJECTED here — the previous
+// implementation would mis-parse a slave debug log like
+// `{"debug":"acceptance_exit_code\":0 emitted"}` as PASS, opening the
+// exact C3 tool-poisoning surface B2 exists to close.
 func parseAcceptanceExit(result string) (int, bool) {
-	const marker = `"acceptance_exit_code":`
-	i := strings.Index(result, marker)
-	if i < 0 {
-		return 0, false
+	type marker struct {
+		Code *int `json:"acceptance_exit_code"`
 	}
-	rest := result[i+len(marker):]
-	rest = strings.TrimLeft(rest, " ")
-	end := 0
-	if end < len(rest) && rest[end] == '-' {
-		end++
+	// Shape 1: parsed envelope.
+	var env struct {
+		Output string          `json:"output"`
+		Result json.RawMessage `json:"result"`
+		Code   *int            `json:"acceptance_exit_code"`
 	}
-	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
-		end++
+	if err := json.Unmarshal([]byte(result), &env); err == nil {
+		if env.Code != nil {
+			return *env.Code, true
+		}
+		// Shape 2: parsed .result.
+		if len(env.Result) > 0 {
+			var m marker
+			if err := json.Unmarshal(env.Result, &m); err == nil && m.Code != nil {
+				return *m.Code, true
+			}
+		}
+		// Shape 3: .output as stringified JSON.
+		if env.Output != "" {
+			var m marker
+			if err := json.Unmarshal([]byte(env.Output), &m); err == nil && m.Code != nil {
+				return *m.Code, true
+			}
+		}
 	}
-	// Must have at least one digit. `-` alone doesn't count.
-	digitStart := 0
-	if end > 0 && rest[0] == '-' {
-		digitStart = 1
+	// Shape 4 (last-ditch): the caller passed the bare slave body
+	// (no envelope). Tests use this form.
+	var m marker
+	if err := json.Unmarshal([]byte(result), &m); err == nil && m.Code != nil {
+		return *m.Code, true
 	}
-	if end == 0 || end == digitStart {
-		return 0, false
-	}
-	n := 0
-	sign := 1
-	digits := rest[:end]
-	if strings.HasPrefix(digits, "-") {
-		sign = -1
-		digits = digits[1:]
-	}
-	for _, c := range digits {
-		n = n*10 + int(c-'0')
-	}
-	return sign * n, true
+	return 0, false
 }
 
 // derivedServerCmd returns the command the slave uses to run this MCP
@@ -371,9 +401,13 @@ func derivedServerCmd(spec buildspec.Spec) string {
 
 // extractSourcePath finds `"source_path":"..."` in the slave scaffold
 // response body. Returns "" if the marker is absent — the caller
-// falls back to the convention. Does NOT trust the path for
-// traversal — the register call routes through registerCore which
-// re-validates via its own safe_paths guard (see internal/driver/safe_paths.go).
+// falls back to the convention path. The extracted value is UNTRUSTED
+// (a compromised slave can return anything); stage 3 validates it via
+// validateScaffoldSourcePath BEFORE handing it to RegisterCall. PR
+// #71 review P1-B2-1 called out that the previous docstring claimed
+// registerCore's safe_paths guard was the sole gate — it isn't;
+// registerCore forwards the value into the register_mcp delegate
+// prompt as-is. The single gate is now the stage-3 validator.
 func extractSourcePath(result string) string {
 	const marker = `"source_path":"`
 	i := strings.Index(result, marker)
@@ -388,6 +422,12 @@ func extractSourcePath(result string) string {
 	return rest[:end]
 }
 
-// emptyBytesSHA256Hex — same constant as internal/driver, replicated
-// here to avoid a driver → pipeline → driver cycle risk.
+// emptyBytesSHA256Hex — REPLICATED from
+// internal/driver.EmptyBytesSHA256Hex (that package is the canonical
+// source of truth). We keep a copy here because internal/driver
+// imports this package via promotion_pipeline_tool.go, so importing
+// internal/driver from here would create a cycle. If you change one
+// side, change both — a package-level init() cross-check would be
+// nice but is not worth adding until a third package needs the
+// constant. See PR #71 review P1-B6-C.
 const emptyBytesSHA256Hex = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
