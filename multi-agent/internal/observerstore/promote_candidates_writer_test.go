@@ -162,13 +162,17 @@ func TestPromoteCandidatesWriter_Expire_LeavesTerminalDecisionsAlone(t *testing.
 	require.Contains(t, buf.String(), "[expiry] promote_candidates expired=1")
 
 	// Assert states.
-	var dec1, dec2, dec3 string
-	require.NoError(t, s.DB().QueryRow(`SELECT decision FROM promote_candidates WHERE candidate_id='cand_old0001'`).Scan(&dec1))
+	var dec1, dec2, dec3, decAt1 string
+	require.NoError(t, s.DB().QueryRow(`SELECT decision, decision_at FROM promote_candidates WHERE candidate_id='cand_old0001'`).Scan(&dec1, &decAt1))
 	require.NoError(t, s.DB().QueryRow(`SELECT decision FROM promote_candidates WHERE candidate_id='cand_prom0001'`).Scan(&dec2))
 	require.NoError(t, s.DB().QueryRow(`SELECT decision FROM promote_candidates WHERE candidate_id='cand_new00001'`).Scan(&dec3))
 	require.Equal(t, "expired", dec1)
 	require.Equal(t, "promoted", dec2)
 	require.Equal(t, "", dec3)
+	// PR #71 review: decision_at MUST be a fresh timestamp (NOT the
+	// 24h-ago cutoff). Concrete guard: decision_at is not the cutoff.
+	require.NotEqual(t, "2026-07-02T00:00:00.000000000Z", decAt1,
+		"decision_at must be current time, not the cutoff")
 
 	// Second expiry with same cutoff: nothing to do (0 rows).
 	buf.Reset()

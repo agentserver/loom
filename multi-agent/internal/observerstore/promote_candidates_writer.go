@@ -76,7 +76,13 @@ const expirePromoteCandidatesSQL = `UPDATE promote_candidates
     WHERE decision = '' AND surfaced_at < ?`
 
 func (w *promoteCandidatesWriter) ExpirePromoteCandidates(ctx context.Context, cutoffRFC3339 string) (int, error) {
-	res, err := w.db.ExecContext(ctx, expirePromoteCandidatesSQL, cutoffRFC3339, cutoffRFC3339)
+	// decision_at gets the CURRENT time (not the cutoff — an earlier
+	// version bound cutoffRFC3339 to both ?s, stamping expired rows
+	// 24h in the past which broke
+	// TimeFromUserDecisionToRegisteredMCP's decision-timestamp
+	// assumptions). See PR #71 review P2 finding on this function.
+	decisionAt := NowUTC()
+	res, err := w.db.ExecContext(ctx, expirePromoteCandidatesSQL, decisionAt, cutoffRFC3339)
 	if err != nil {
 		return 0, fmt.Errorf("observerstore: promote_candidates expire: %w", err)
 	}
@@ -86,6 +92,6 @@ func (w *promoteCandidatesWriter) ExpirePromoteCandidates(ctx context.Context, c
 	}
 	// §7 (d) audit log — silent expiry would break the paper's
 	// PromotionCandidateSurfacingRate denominator story.
-	log.Printf("[expiry] promote_candidates expired=%d cutoff=%s", n, cutoffRFC3339)
+	log.Printf("[expiry] promote_candidates expired=%d cutoff=%s decision_at=%s", n, cutoffRFC3339, decisionAt)
 	return int(n), nil
 }

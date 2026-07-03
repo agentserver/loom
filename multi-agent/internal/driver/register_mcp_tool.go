@@ -202,10 +202,14 @@ func computeSpecHash(spec buildspec.Spec) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// emptyBytesSHA256Hex is a compile-time constant so the register-tool
-// precheck can pre-fill RegistryHashAfter without importing the driver
-// package back into itself.
-const emptyBytesSHA256Hex = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+// emptyBytesSHA256Hex is the file-local alias for backwards
+// readability. Same value as EmptyBytesSHA256Hex (canonical
+// definition in registryhash.go). Keeping the alias here means the
+// audit-precheck sites throughout this file don't need to sprout an
+// exported identifier for a value that's morally file-private, while
+// still having ONE source of truth for the string bytes. See PR #71
+// review P1-B6-C.
+const emptyBytesSHA256Hex = EmptyBytesSHA256Hex
 
 // errNoPromoAuditSink is the sentinel logged when the driver was
 // constructed without a promoAudit writer. Kept as a package variable

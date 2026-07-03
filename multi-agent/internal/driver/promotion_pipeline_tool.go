@@ -58,6 +58,13 @@ type promotionPipelineArgs struct {
 }
 
 func (pt *promotionPipelineTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	// Surface a one-time ERROR log line if NoUserPromotionPath's
+	// *bool target failed to register at init. B1 spec §5 requires
+	// all three driver-side entrypoints (SurfacePromoteCandidate,
+	// promotion_pipeline_tool, registerSlaveMCPTool) to invoke this;
+	// PR #71 fresh review P1-B1-1 called out that only two of three
+	// did.
+	surfacePromotionInitErrorOnce()
 	var args promotionPipelineArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return nil, &MCPToolError{Message: "invalid args: " + err.Error(), Category: observerstore.FailContractViolation}
