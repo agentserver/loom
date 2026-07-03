@@ -27,11 +27,40 @@ type PromoteCandidatesWriter interface {
 	ExpirePromoteCandidates(ctx context.Context, cutoffRFC3339 string) (int, error)
 }
 
-type promoteCandidatesWriter struct{ db *sql.DB }
+// telemetryDisabledFn is the ablation-check predicate the writer
+// consults on every mutation. Injected by the caller (driver-agent
+// wires it to a closure reading evalrun.DisableTelemetry). Kept as
+// an injected function — not a direct evalrun import — because
+// evalrun already imports observerstore, so importing evalrun back
+// into observerstore would create a cycle.
+type telemetryDisabledFn func() bool
 
-// NewPromoteCandidatesWriter wraps *sql.DB into the writer.
+type promoteCandidatesWriter struct {
+	db        *sql.DB
+	disabled  telemetryDisabledFn
+}
+
+// NewPromoteCandidatesWriter wraps *sql.DB into the writer with NO
+// ablation gating (production callers use NewPromoteCandidatesWriterWithAblation).
+// Kept for tests that don't care about the ablation.
 func NewPromoteCandidatesWriter(db *sql.DB) PromoteCandidatesWriter {
 	return &promoteCandidatesWriter{db: db}
+}
+
+// NewPromoteCandidatesWriterWithAblation is the production
+// constructor. `disabled` is called before every mutation; when it
+// returns true the mutation is DROPPED with an ablation log line
+// (matching promotionaudit.SQLiteWriter NoObserver semantics). PR
+// #71 round-2 review P1-B.
+func NewPromoteCandidatesWriterWithAblation(db *sql.DB, disabled telemetryDisabledFn) PromoteCandidatesWriter {
+	return &promoteCandidatesWriter{db: db, disabled: disabled}
+}
+
+// telemetryDropped reports whether the writer should skip the SQL
+// exec because the caller's ablation predicate returned true. Nil
+// predicate → never drops (matches the legacy constructor).
+func (w *promoteCandidatesWriter) telemetryDropped() bool {
+	return w.disabled != nil && w.disabled()
 }
 
 const insertPromoteCandidateSQL = `INSERT OR IGNORE INTO promote_candidates (
@@ -43,6 +72,11 @@ func (w *promoteCandidatesWriter) InsertPromoteCandidate(ctx context.Context, r 
 	rowID, err := PrefixedID("promcand")
 	if err != nil {
 		return fmt.Errorf("observerstore: promote_candidates row_id: %w", err)
+	}
+	if w.telemetryDropped() {
+		log.Printf("[ablation] NoObserver: dropped promote_candidates row_id=%s candidate_id=%s family=%s",
+			rowID, r.CandidateID, r.Family)
+		return nil
 	}
 	if _, err := w.db.ExecContext(ctx, insertPromoteCandidateSQL,
 		rowID,
@@ -64,6 +98,11 @@ const updatePromoteCandidateDecisionSQL = `UPDATE promote_candidates
     WHERE candidate_id = ? AND decision = ''`
 
 func (w *promoteCandidatesWriter) UpdatePromoteCandidateDecision(ctx context.Context, candidateID, decision, decisionAt string) error {
+	if w.telemetryDropped() {
+		log.Printf("[ablation] NoObserver: dropped promote_candidates decision update candidate_id=%s decision=%s",
+			candidateID, decision)
+		return nil
+	}
 	if _, err := w.db.ExecContext(ctx, updatePromoteCandidateDecisionSQL,
 		decision, decisionAt, candidateID); err != nil {
 		return fmt.Errorf("observerstore: promote_candidates update: %w", err)
@@ -76,6 +115,10 @@ const expirePromoteCandidatesSQL = `UPDATE promote_candidates
     WHERE decision = '' AND surfaced_at < ?`
 
 func (w *promoteCandidatesWriter) ExpirePromoteCandidates(ctx context.Context, cutoffRFC3339 string) (int, error) {
+	if w.telemetryDropped() {
+		log.Printf("[ablation] NoObserver: dropped promote_candidates expiry sweep cutoff=%s", cutoffRFC3339)
+		return 0, nil
+	}
 	// decision_at gets the CURRENT time (not the cutoff — an earlier
 	// version bound cutoffRFC3339 to both ?s, stamping expired rows
 	// 24h in the past which broke

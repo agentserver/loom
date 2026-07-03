@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"time"
 )
 
@@ -29,12 +30,29 @@ type RegistryLookupSamplesWriter interface {
 	WriteRegistryLookupSample(ctx context.Context, r RegistryLookupSampleRow) error
 }
 
-type registryLookupSamplesWriter struct{ db *sql.DB }
+type registryLookupSamplesWriter struct {
+	db       *sql.DB
+	disabled telemetryDisabledFn
+}
 
-// NewRegistryLookupSamplesWriter wraps *sql.DB into the writer. The
-// schema migration is applied by OpenSQLite via schema.sql.
+// NewRegistryLookupSamplesWriter wraps *sql.DB into the writer with
+// no ablation gating. Kept for tests that don't care about the
+// ablation.
 func NewRegistryLookupSamplesWriter(db *sql.DB) RegistryLookupSamplesWriter {
 	return &registryLookupSamplesWriter{db: db}
+}
+
+// NewRegistryLookupSamplesWriterWithAblation is the production
+// constructor. `disabled` is called before every mutation; when it
+// returns true the mutation is DROPPED with an ablation log line.
+// Matches promotionaudit.SQLiteWriter NoObserver semantics. PR #71
+// round-2 review P1-B.
+func NewRegistryLookupSamplesWriterWithAblation(db *sql.DB, disabled telemetryDisabledFn) RegistryLookupSamplesWriter {
+	return &registryLookupSamplesWriter{db: db, disabled: disabled}
+}
+
+func (w *registryLookupSamplesWriter) telemetryDropped() bool {
+	return w.disabled != nil && w.disabled()
 }
 
 // insertRegistryLookupSampleSQL — compile-time const with `?`
@@ -48,6 +66,14 @@ func (w *registryLookupSamplesWriter) WriteRegistryLookupSample(ctx context.Cont
 	rowID, err := PrefixedID("regslot")
 	if err != nil {
 		return fmt.Errorf("observerstore: registry_lookup_samples row_id: %w", err)
+	}
+	if w.telemetryDropped() {
+		// PR #71 round-2 review P1-B: matches promotionaudit
+		// NoObserver semantics. Hash prefix is safe to log; raw
+		// query text is not stored in this row (§5).
+		log.Printf("[ablation] NoObserver: dropped registry_lookup_samples row_id=%s run_id=%s query_hash=%s",
+			rowID, r.RunID, r.QueryHashPrefix)
+		return nil
 	}
 	tsStr := r.TS.UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
 	if r.TS.IsZero() {

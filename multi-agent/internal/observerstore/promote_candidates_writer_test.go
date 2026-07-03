@@ -11,6 +11,69 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestPromoteCandidatesWriter_NoObserverAblation — PR #71 round-2
+// review P1-B. When the injected `disabled` predicate returns true,
+// Insert / UpdateDecision / Expire all skip the SQL exec and log
+// `[ablation] NoObserver: dropped promote_candidates ...`. Matches
+// promotionaudit.SQLiteWriter's NoObserver semantics so all three
+// observer-store writers behave symmetrically under the ablation.
+func TestPromoteCandidatesWriter_NoObserverAblation(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "observer.db"))
+	require.NoError(t, err)
+	defer s.Close()
+
+	var disabled bool
+	w := NewPromoteCandidatesWriterWithAblation(s.DB(), func() bool { return disabled })
+
+	// Capture logs.
+	var buf bytes.Buffer
+	prev := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() { log.SetOutput(prev); log.SetFlags(prevFlags) }()
+
+	// Insert one row with ablation OFF — lands in DB.
+	require.NoError(t, w.InsertPromoteCandidate(context.Background(), PromoteCandidateRow{
+		CandidateID: "cand_ok0001",
+		Family:      "fam",
+		SurfacedAt:  "2026-07-02T12:00:00.000000000Z",
+		SurfacedBy:  "user_hint",
+	}))
+	var n int
+	require.NoError(t, s.DB().QueryRow(`SELECT COUNT(*) FROM promote_candidates`).Scan(&n))
+	require.Equal(t, 1, n)
+
+	// Flip ablation ON — subsequent Insert drops with log line.
+	disabled = true
+	buf.Reset()
+	require.NoError(t, w.InsertPromoteCandidate(context.Background(), PromoteCandidateRow{
+		CandidateID: "cand_drop0001",
+		Family:      "fam",
+		SurfacedAt:  "2026-07-02T13:00:00.000000000Z",
+		SurfacedBy:  "user_hint",
+	}))
+	require.NoError(t, s.DB().QueryRow(`SELECT COUNT(*) FROM promote_candidates`).Scan(&n))
+	require.Equal(t, 1, n, "ablated Insert must NOT persist")
+	require.Contains(t, buf.String(), "[ablation] NoObserver: dropped promote_candidates row_id=promcand_")
+	require.Contains(t, buf.String(), "candidate_id=cand_drop0001")
+
+	// UpdateDecision under ablation also drops.
+	buf.Reset()
+	require.NoError(t, w.UpdatePromoteCandidateDecision(context.Background(), "cand_ok0001", "promoted", "2026-07-02T14:00:00.000000000Z"))
+	require.Contains(t, buf.String(), "[ablation] NoObserver: dropped promote_candidates decision update")
+	var dec string
+	require.NoError(t, s.DB().QueryRow(`SELECT decision FROM promote_candidates WHERE candidate_id='cand_ok0001'`).Scan(&dec))
+	require.Equal(t, "", dec, "ablated UpdateDecision must NOT touch DB")
+
+	// Expire under ablation also drops.
+	buf.Reset()
+	nExp, err := w.ExpirePromoteCandidates(context.Background(), "2026-07-03T00:00:00.000000000Z")
+	require.NoError(t, err)
+	require.Equal(t, 0, nExp)
+	require.Contains(t, buf.String(), "[ablation] NoObserver: dropped promote_candidates expiry sweep")
+}
+
 func TestSchema_PromoteCandidatesExists(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "observer.db"))
 	require.NoError(t, err)

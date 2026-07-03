@@ -25,6 +25,7 @@ import (
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/yourorg/multi-agent/internal/commander"
 	"github.com/yourorg/multi-agent/internal/driver"
+	"github.com/yourorg/multi-agent/internal/evalrun"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/observerclient"
 	"github.com/yourorg/multi-agent/internal/observerstore"
@@ -215,6 +216,14 @@ func runServe(args []string) {
 			log.Printf("promotion_audit: OpenSQLite(%q): %v — audit writer disabled",
 				cfg.Observer.PromotionAuditDBPath, err)
 		} else {
+			// PR #71 round-2 review P1-C: replay promotion_audit
+			// history into the in-process slaveRegistryView so a
+			// driver-agent sharing this observer.db with another
+			// process sees the same starting registry hash. Best-
+			// effort — see docstring for the trade-offs.
+			if err := driver.ReconstructRegistryViewFromAudit(context.Background(), promoStore.DB()); err != nil {
+				log.Printf("promote_candidate: registry view reconstruct failed: %v — continuing with empty view", err)
+			}
 			tools.SetPromotionAuditWriter(promotionaudit.NewSQLiteWriter(promoStore.DB()))
 			// WT-2 B4: same local observer store handle powers the
 			// registry_lookup_samples writer AND the userspace search
@@ -223,10 +232,16 @@ func runServe(args []string) {
 			// Lookup samples yet — future HTTP-piped variant handles
 			// that; for now Lookup runs registry-only with a WARN
 			// per §7 (d).
-			lookupSampleWriter := observerstore.NewRegistryLookupSamplesWriter(promoStore.DB())
+			// PR #71 round-2 review P1-B: both writers now honour the
+			// shared NoObserver ablation (via evalrun.DisableTelemetry)
+			// so all three observer-store writers (promotion_audit +
+			// promote_candidates + registry_lookup_samples) behave
+			// symmetrically under `--ablation NoObserver`.
+			isNoObserver := func() bool { return evalrun.DisableTelemetry }
+			lookupSampleWriter := observerstore.NewRegistryLookupSamplesWriterWithAblation(promoStore.DB(), isNoObserver)
 			usStore := userspace.NewStore(promoStore.DB())
 			// WT-2 B1: promote-candidate deps + expiry goroutine.
-			promoWriter := observerstore.NewPromoteCandidatesWriter(promoStore.DB())
+			promoWriter := observerstore.NewPromoteCandidatesWriterWithAblation(promoStore.DB(), isNoObserver)
 			driver.SetPromoteCandidateDeps(driver.PromoteCandidateDeps{
 				Writer: &driverPromoWriterAdapter{w: promoWriter},
 				Events: obs,
