@@ -370,18 +370,24 @@ func extractExperimentID(tc contract.TaskContract) string {
 		}
 		// Boundary check: must be at position 0 or preceded by an
 		// obvious separator. This rejects `foo_experiment_id=...`
-		// (part of a longer identifier).
+		// (part of a longer identifier). Include \r so Windows-authored
+		// BusinessContext ("line1\rexperiment_id=x") isn't a false
+		// negative. UTF-8 caveat: this compares one byte; a multi-byte
+		// rune preceding the marker (e.g. Chinese `任务:experiment_id=`)
+		// reads the trailing continuation byte, which fails the switch
+		// and rejects the match — safe direction (nothing extracted,
+		// no denominator contamination) but strict.
 		if i > 0 {
 			prev := c[i-1]
 			switch prev {
-			case ' ', '\t', '\n', ',', ';', '.':
+			case ' ', '\t', '\n', '\r', ',', ';', '.':
 				// ok — legitimate delimiter.
 			default:
 				continue
 			}
 		}
 		rest := c[i+len(marker):]
-		end := strings.IndexAny(rest, " \t\n,;")
+		end := strings.IndexAny(rest, " \t\n\r,;")
 		if end < 0 {
 			return rest
 		}

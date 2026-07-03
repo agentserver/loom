@@ -1044,7 +1044,8 @@ func (h *handler) dryRunBlocks(w http.ResponseWriter, r *http.Request) {
 	// Body cap: mirror postEvent's MaxBytesReader guard so an
 	// authenticated but malicious driver cannot OOM the observer with
 	// a giant `detail` field. h.maxEventBodyBytes applies uniformly to
-	// every ingest endpoint (default 1 MiB, configurable via Options).
+	// every ingest endpoint (default 256 KiB — see
+	// defaultMaxEventBodyBytes at line 28; configurable via Options).
 	r.Body = http.MaxBytesReader(w, r.Body, h.maxEventBodyBytes)
 
 	var req struct {

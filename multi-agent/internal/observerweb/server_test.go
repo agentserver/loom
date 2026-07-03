@@ -1908,7 +1908,9 @@ func TestDryRunBlocksAPIRejectsOversizedBody(t *testing.T) {
 	seedWorkspaceAndAgents(t, st)
 
 	// Build a body larger than the default MaxEventBodyBytes cap.
-	// newTestHandler uses defaults (1 MiB); a 2 MiB detail overshoots.
+	// newTestHandler uses defaults (256 KiB — see
+	// defaultMaxEventBodyBytes at server.go:28); a 2 MiB detail
+	// overshoots by ~8x.
 	huge := make([]byte, 2*1024*1024)
 	for i := range huge {
 		huge[i] = 'x'

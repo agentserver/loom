@@ -500,6 +500,8 @@ func TestExtractExperimentID_BoundaryMatching(t *testing.T) {
 		{"note: experiment_id=exp-alpha", "exp-alpha"},
 		{"tag,experiment_id=exp-alpha", "exp-alpha"},
 		{"line1\nexperiment_id=exp-alpha", "exp-alpha"},
+		{"line1\rexperiment_id=exp-alpha", "exp-alpha"},          // Windows-authored
+		{"experiment_id=exp-alpha\r\ntail", "exp-alpha"},         // \r as terminator
 		{"foo. experiment_id=exp-alpha rest", "exp-alpha"},
 		// Partial-word bypasses — must NOT match.
 		{"my_experiment_id=leak", ""},

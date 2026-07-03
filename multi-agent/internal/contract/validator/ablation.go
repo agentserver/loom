@@ -42,6 +42,12 @@ func SetDryRunDisabled(v bool) {
 // ablation.Default.SetByName("NoDryRun", ...) batch and BEFORE
 // spawning any goroutine that reads the flag — the ablation registry
 // writes only through the *bool, and readers see the atomic.
+//
+// Safe to call from a single goroutine at process start. NOT safe to
+// call concurrently with dryRunContractTool.Call reads without
+// external synchronisation — but the ablation package's own
+// "pre-run-only mutation" contract covers that. Mirrors
+// capability.SyncDisableUpload's threading contract.
 func SyncDisableDryRun() { disableDryRunAtomic.Store(disableDryRun) }
 
 func init() {
