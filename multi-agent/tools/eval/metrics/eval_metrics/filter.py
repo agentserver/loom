@@ -109,6 +109,28 @@ def _denylist_scan(fragment: str) -> None:
         raise ErrRunsFilterDenylist(
             f"--runs-filter contains denylisted keyword {m.group(1).upper()!r}"
         )
+    # Reject user-supplied `?` and `:name` / `@name` / `$name` bind
+    # markers before parse — the sanitizer's own extraction step is the
+    # only source of `?` placeholders, and spec §3.1 explicitly forbids
+    # users from supplying them. Without this reject, a filter like
+    # `run_id = ?` compiles cleanly with 0 params and then dies at
+    # cursor.execute with "Incorrect number of bindings supplied" — a
+    # confusing runtime error instead of a clean compile-time reject.
+    # Fresh-Claude PR-review round-2 P1.
+    for marker in ("?", ":", "@", "$"):
+        if marker in fragment:
+            # A `?` inside a string literal is legal (post-extract it
+            # becomes a stored param), but at this point we haven't
+            # extracted yet — the string-literal regex only strips
+            # single-quoted content. Any `?` outside a quoted literal
+            # is a user bind-marker attempt. We check by masking the
+            # quoted regions first.
+            masked = _STRING_LITERAL_RE.sub("", fragment)
+            if marker in masked:
+                raise ErrRunsFilterDenylist(
+                    f"--runs-filter contains user bind-marker {marker!r}; "
+                    "only the extractor may introduce placeholders"
+                )
 
 
 # --- Step 2: parametric extraction ------------------------------------------
@@ -172,7 +194,17 @@ _PREDICATE_TYPES: tuple[type, ...] = (
 )
 
 
-def _reject_non_predicate_leaves(node: exp.Expression) -> None:
+# Bound on recursion depth in _reject_non_predicate_leaves. The
+# sanitizer already caps parse-time recursion (see the RecursionError
+# wrap in compile_runs_filter), but a fragment like `NOT NOT NOT ...
+# run_id = 'x'` walks past parse into our own tree walker; a 500-deep
+# NOT chain would blow the Python stack here. Legitimate paper
+# filters don't nest anywhere near 32 levels of AND/OR/NOT/Paren.
+# Fresh-Claude PR-review round-2 P2.
+_MAX_TREE_DEPTH = 32
+
+
+def _reject_non_predicate_leaves(node: exp.Expression, depth: int = 0) -> None:
     """Walk the boolean tree; every leaf must be a predicate.
 
     Recurses through the AND/OR/NOT/Paren combinators; when it reaches
@@ -187,19 +219,27 @@ def _reject_non_predicate_leaves(node: exp.Expression) -> None:
     predicate-only walk misses. Any future combinator sqlglot adds
     at the AST level (unlikely — AND/OR/NOT/Paren are stable) must be
     added here explicitly, so a silent broadening cannot happen.
+
+    The depth argument caps how deep the tree walker descends — a
+    fragment exceeding `_MAX_TREE_DEPTH` levels is rejected outright
+    to keep the walker from blowing Python's stack.
     """
+    if depth > _MAX_TREE_DEPTH:
+        raise ErrRunsFilterParseError(
+            f"--runs-filter tree exceeds max depth {_MAX_TREE_DEPTH}"
+        )
     # Peel a Paren wrapper — `(...)` is a no-op grouping.
     if isinstance(node, exp.Paren):
-        _reject_non_predicate_leaves(node.this)
+        _reject_non_predicate_leaves(node.this, depth + 1)
         return
     # NOT wraps a single sub-expression; recurse into it.
     if isinstance(node, exp.Not):
-        _reject_non_predicate_leaves(node.this)
+        _reject_non_predicate_leaves(node.this, depth + 1)
         return
     # AND / OR wrap two sub-expressions (`this` + `expression`).
     if isinstance(node, (exp.And, exp.Or)):
-        _reject_non_predicate_leaves(node.this)
-        _reject_non_predicate_leaves(node.expression)
+        _reject_non_predicate_leaves(node.this, depth + 1)
+        _reject_non_predicate_leaves(node.expression, depth + 1)
         return
     # Predicate leaf — OK.
     if isinstance(node, _PREDICATE_TYPES):
@@ -315,7 +355,17 @@ def _enforce_predicate_shape(pred: exp.Expression) -> None:
             raise ErrRunsFilterColumnCompare(
                 f"--runs-filter IN with subquery not allowed: {pred.sql()!r}"
             )
-        for elem in (pred.args.get("expressions") or []):
+        elements = pred.args.get("expressions") or []
+        if not elements:
+            # Empty IN list — `run_id IN ()` — is legal SQLite (always
+            # false, cohort collapses to zero) but not covered by spec
+            # §3.1's grammar and easy to write by accident. Reject so
+            # the operator gets a clean error instead of silent zero
+            # results. Fresh-Claude PR-review round-2 P2.
+            raise ErrRunsFilterColumnCompare(
+                f"--runs-filter IN list is empty: {pred.sql()!r}"
+            )
+        for elem in elements:
             if not _is_bare_rhs(elem):
                 raise ErrRunsFilterColumnCompare(
                     f"--runs-filter IN element must be a bare literal: {elem.sql()!r}"
@@ -403,6 +453,18 @@ def compile_runs_filter(fragment: str) -> tuple[str, tuple[Any, ...]]:
         tree = sqlglot.parse_one(with_placeholders, dialect="sqlite")
     except sqlglot.errors.ParseError as e:
         raise ErrRunsFilterParseError(f"--runs-filter parse error: {e}") from e
+    except RecursionError as e:
+        # Deep-nesting fragments (e.g. thousands of parens) blow the
+        # Python recursion limit inside sqlglot's descent parser. Left
+        # uncaught this would exit 1 with a stack trace, violating the
+        # spec §3 exit-code contract (validation failures MUST exit 2)
+        # and leaking sqlglot's internal module paths to stderr. Wrap
+        # as ErrRunsFilterParseError so the CLI's normal RunsFilterError
+        # handler emits a clean exit-2 message. Fresh-Claude PR-review
+        # round-2 P1.
+        raise ErrRunsFilterParseError(
+            "--runs-filter parse recursion limit exceeded (fragment too deeply nested)"
+        ) from e
 
     if tree is None:
         raise ErrRunsFilterParseError("--runs-filter parsed to empty AST")

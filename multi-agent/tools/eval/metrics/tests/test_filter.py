@@ -274,3 +274,63 @@ def test_neg_literal_accept() -> None:
     where, params = compile_runs_filter("run_id = -(1)")
     assert "run_id" in where
     assert params == ()
+
+
+# --- Round-2 fresh-Claude PR-review regressions ----------------------------
+
+
+def test_bare_qmark_placeholder_reject() -> None:
+    """`run_id = ?` — user-supplied placeholder is a spec §3.1 violation."""
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterDenylist
+    with pytest.raises(ErrRunsFilterDenylist):
+        compile_runs_filter("run_id = ?")
+
+
+def test_named_bind_colon_reject() -> None:
+    """`run_id IN (:foo)` — named-parameter marker forbidden too."""
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterDenylist
+    with pytest.raises(ErrRunsFilterDenylist):
+        compile_runs_filter("run_id IN (:foo)")
+
+
+def test_named_bind_at_reject() -> None:
+    """`run_id = @x` — SQLite `@name` marker forbidden."""
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterDenylist
+    with pytest.raises(ErrRunsFilterDenylist):
+        compile_runs_filter("run_id = @x")
+
+
+def test_qmark_inside_literal_accepted() -> None:
+    """`run_id = 'sk?y'` — `?` inside a quoted literal is fine (belt: unquote first)."""
+    where, params = compile_runs_filter("run_id = 'sk?y'")
+    assert params == ("sk?y",)
+
+
+def test_recursion_deep_parens_rejected_cleanly() -> None:
+    """5000-nested parens must exit as ErrRunsFilterParseError, not RecursionError."""
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterParseError
+    deep = "(" * 5000 + "run_id = 'x'" + ")" * 5000
+    with pytest.raises(ErrRunsFilterParseError):
+        compile_runs_filter(deep)
+
+
+def test_deep_not_tree_rejected() -> None:
+    """A NOT-chain deeper than _MAX_TREE_DEPTH must reject cleanly (spec §3 exit 2)."""
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterParseError
+    # 40 NOTs > _MAX_TREE_DEPTH (32).
+    frag = "NOT " * 40 + "run_id = 'x'"
+    with pytest.raises(ErrRunsFilterParseError):
+        compile_runs_filter(frag)
+
+
+def test_empty_in_list_reject() -> None:
+    """`run_id IN ()` — empty IN list rejected explicitly."""
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterColumnCompare
+    with pytest.raises(ErrRunsFilterColumnCompare):
+        compile_runs_filter("run_id IN ()")

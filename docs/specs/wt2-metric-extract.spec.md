@@ -247,18 +247,27 @@ and error messages. `stdout` is reserved for CSV/JSON output when
 ### 3.1 `--runs-filter` semantics
 
 `--runs-filter` is a **WHERE-clause fragment** — the extractor prepends
-`WHERE ` (or `AND ` after its own filter) and passes it to sqlite3's
-prepared-statement compiler. **No user text is ever string-concatenated
-into SQL** (§7 (c)). Only the columns in the whitelist below may be
-referenced; any other identifier → exit 2 `ErrRunsFilterFieldNotAllowed`.
+`WHERE ` and passes the sanitised fragment to sqlite3's
+prepared-statement compiler. There is no built-in filter to `AND`
+against; the extractor's `SELECT` is exactly `SELECT * FROM runs
+[WHERE <sanitised fragment>]`. **No user text is ever
+string-concatenated into SQL** (§7 (c)). Only the columns in the
+whitelist below may be referenced; any other identifier → exit 2
+`ErrRunsFilterFieldNotAllowed`.
 
 Whitelist (5 columns, matching 12号 §D2 filter axes):
 
 - `run_id`, `workload_id`, `claim_id`, `experiment_id`, `baseline_or_ablation`
 
-The parser accepts equality (`col = 'lit'`), `IN (lit, ...)`,
-`LIKE 'pat'`, `NOT <predicate>`, and their `AND`/`OR`/parenthesised
-combinations. The extractor is the ONLY source of `?` placeholders —
+The parser accepts equality / comparison (`col = 'lit'`, `col != 'lit'`,
+`col < N`, `col <= N`, `col > N`, `col >= N`), membership
+(`col IN (lit, ...)`, non-empty list), pattern matching
+(`col LIKE 'pat'`, `col ILIKE 'pat'`), range (`col BETWEEN lit AND lit`),
+negation (`NOT <predicate>`), and their `AND`/`OR`/parenthesised
+combinations. Every predicate must have a whitelisted column on the
+left and a bare literal / numeric-Neg-literal / placeholder on the
+right — no function calls, no concatenation, no column-to-column
+comparisons, no bind markers supplied by the user. The extractor is the ONLY source of `?` placeholders —
 the placeholder-substitution step below replaces literals with `?`
 internally; users cannot supply `?` on the CLI. `;`, comments (`--`,
 `/*`), subqueries (`SELECT`, `WITH`), and DDL/DML keywords
@@ -1196,6 +1205,35 @@ reject the diff.
     under `multi-agent/tools/eval/metrics/` and `docs/specs/`
     (the sibling `wt1-*.spec.md` precedent already places spec /
     plan docs in `docs/specs/`).
+- 2026-07-03 (round 17, fresh-Claude PR-review round-2 P1/P2 fixes):
+  - P1: `--runs-filter` denylist scan now rejects user-supplied bind
+    markers (`?`, `:name`, `@name`, `$name`) before parse; without
+    this, `run_id = ?` compiled cleanly with 0 params and died at
+    cursor.execute with a confusing "Incorrect number of bindings"
+    error, violating spec §3.1 "users cannot supply `?`".
+  - P1: `compile_runs_filter` wraps `RecursionError` from
+    `sqlglot.parse_one` as `ErrRunsFilterParseError` so deeply-nested
+    fragments (e.g. 5000 parens) exit 2 with a clean message
+    instead of exit 1 with a Python stack trace.
+  - P2: `_reject_non_predicate_leaves` caps recursion at
+    `_MAX_TREE_DEPTH=32`; a fragment exceeding this rejects as
+    `ErrRunsFilterParseError`. Legitimate paper filters don't nest
+    anywhere near 32 levels.
+  - P2: `IN ()` (empty list) now explicitly rejected — was legal
+    SQLite (always false → zero cohort) but not in spec §3.1
+    grammar and easy to author by accident.
+  - P2: `cli.py` compute loop now distinguishes `sqlite3.Error` from
+    generic exceptions so schema drift surfaces with a distinct
+    stderr line instead of being buried under `upstream data missing`.
+  - P2: §3.1 grammar text acknowledges `!=`, `<`, `<=`, `>`, `>=`,
+    `ILIKE`, `BETWEEN` (implementation already accepted them; spec
+    caught up).
+  - P2: §3.1 corrected misleading "AND after its own filter" text —
+    the extractor's SELECT is exactly `SELECT * FROM runs [WHERE
+    <sanitised>]`, no built-in filter to AND against.
+  - Regression tests: 7 new (bare `?`, `:foo`, `@x`, `?` inside literal
+    accepted, 5000-paren RecursionError → clean exit, deep-NOT depth
+    cap, empty-IN reject). 129 pass, 1 skipped.
 - 2026-07-03 (round 16, fresh-Claude PR-review P2 fixes):
   - §3.1 grammar acknowledges `NOT <predicate>` and
     parenthesised combinations (implementation already accepted

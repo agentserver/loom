@@ -211,9 +211,25 @@ def _run_extract(args: argparse.Namespace) -> int:
     for m in metrics:
         try:
             res = m.compute(ctx)
+        except sqlite3.Error as e:
+            # sqlite3.Error covers OperationalError (schema drift — a
+            # renamed column in a companion table) and DatabaseError.
+            # These are DIFFERENT from "not-yet-implemented upstream":
+            # a schema mismatch means the observer DB has drifted from
+            # what this extractor knows, and burying it under
+            # `upstream data missing` would silently hide the drift.
+            # We surface it with a distinct stderr line and still emit
+            # a null cell so the paper-back-fill run does not crash
+            # mid-batch. Fresh-Claude PR-review round-2 P2.
+            sys.stderr.write(
+                f"[eval-metrics] error: metric {m.name} DB error (schema drift?): {e}\n"
+            )
+            res = MetricResult(m.null_value(), NOTE_UPSTREAM_MISSING)
         except Exception as e:  # noqa: BLE001 — turn any compute bug into
             # a stderr line and a null cell; the extractor should never
-            # crash a paper back-fill mid-batch.
+            # crash a paper back-fill mid-batch. This branch only fires
+            # for genuinely unexpected exceptions (not sqlite3 errors,
+            # which are handled above).
             sys.stderr.write(
                 f"[eval-metrics] error: metric {m.name} compute failed: {e}\n"
             )
