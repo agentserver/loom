@@ -56,6 +56,11 @@ type Tools struct {
 	// a helper-error line and still succeed the underlying task
 	// (matches the existing journal-append degrade pattern).
 	promoAudit promotionaudit.Writer
+	// dryRunWriter persists validator.Block rows to the
+	// dry_run_blocks table (WT-2-dry-run-validator §6). Nil in tests
+	// that don't need persistence; production main.go must wire this
+	// (see plan §Task 13 step 3).
+	dryRunWriter observerstore.DryRunBlockWriter
 }
 
 // NewTools constructs a Tools bundle.
@@ -89,6 +94,15 @@ func (t *Tools) workspaceID() string {
 
 func (t *Tools) SetTaskJournal(j *TaskJournal) {
 	t.taskJournal = j
+}
+
+// SetDryRunBlockWriter installs the observerstore writer used to
+// persist validator.Block rows to dry_run_blocks. Production main.go
+// wires this once at startup — see wt2-dry-run-validator.plan.md
+// §Task 13 step 3. Nil is tolerated (persistence is best-effort;
+// the metric events still fire).
+func (t *Tools) SetDryRunBlockWriter(w observerstore.DryRunBlockWriter) {
+	t.dryRunWriter = w
 }
 
 func (t *Tools) SetContractRunner(r ContractRunner) {

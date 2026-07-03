@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eval-metrics"
+version = "0.1.0"
+description = "WT-2-metric-extract: paper-metric CSV/JSON extractor for observer SQLite DBs (see docs/specs/wt2-metric-extract.spec.md)"
+requires-python = ">=3.10"
+dependencies = [
+  # sqlglot: pure-Python SQL AST parser used by eval_metrics.filter to
+  # walk --runs-filter fragments (see spec §7 (c)). We deliberately
+  # avoid sqlparse: it accepts and silently passes through DDL/DML
+  # keywords, which would broaden the attack surface even with our
+  # denylist. sqlglot round-trips through a typed AST that lets the
+  # tautology / column-compare / whitelist checks reject expressions
+  # that a token-stream parser would miss. Pinned <27 because the AST
+  # node names (Column, Comparison, In, Like, Between, Is) are stable
+  # up to sqlglot 26; a major bump could rename them, which our
+  # tests/test_filter.py would catch at CI time.
+  "sqlglot>=20,<27",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "pytest-cov>=5",
+]
+
+[project.scripts]
+# `pip install -e .` in this directory registers the `eval-metrics`
+# entry point; `python -m eval_metrics extract ...` also works
+# because eval_metrics/__main__.py delegates to eval_metrics.cli:main.
+eval-metrics = "eval_metrics.cli:main"
+
+[tool.setuptools.packages.find]
+# Restrict discovery to the eval_metrics package; tests/ is not a
+# package (it's a pytest rootdir with plain modules).
+include = ["eval_metrics*"]
+exclude = ["tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "perf: wall-clock timing assertion (skipped by default; enabled with CI=true or -m perf, per spec §7 (h))",
+  "linux_only: relies on Linux-only /proc/self/fd handoff for --observer-db TOCTOU closure (spec §7 (b) step 3)",
+]
+addopts = "-ra --strict-markers"

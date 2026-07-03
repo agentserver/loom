@@ -1,0 +1,5 @@
+header_a,header_b,header_c
+1,safe,'=A1
+2,"has ""quote""",'+1
+3,"line
+break",'-x

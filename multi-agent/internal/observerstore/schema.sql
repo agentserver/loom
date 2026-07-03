@@ -339,3 +339,152 @@ CREATE INDEX IF NOT EXISTS idx_promote_candidates_candidate
     ON promote_candidates(candidate_id);
 CREATE INDEX IF NOT EXISTS idx_promote_candidates_run
     ON promote_candidates(run_id, surfaced_at);
+
+-- WT-2-dry-run-validator: §A3 four-class pre-execution block audit.
+-- One row per Block returned by validator.Check(...) that the dry-run
+-- tool persisted. Consumer view (spec §6.1) joins dry_run_blocks with
+-- events (type='PreExecutionFaultCatchRate') for total-attempt
+-- denominator; runs alone cannot supply it because blocked dispatches
+-- never reach runs.
+CREATE TABLE IF NOT EXISTS dry_run_blocks (
+    block_id                 TEXT PRIMARY KEY,
+    attempt_id               TEXT NOT NULL,
+    conversation_id          TEXT NOT NULL,
+    experiment_id            TEXT NOT NULL DEFAULT '',
+    contract_hash            TEXT NOT NULL,
+    capability_snapshot_hash TEXT NOT NULL,
+    block_kind               TEXT NOT NULL
+        CHECK (block_kind IN ('missing_file','wrong_version','forbidden_cred','policy_violation')),
+    field                    TEXT NOT NULL DEFAULT '',
+    expected                 TEXT NOT NULL DEFAULT '',
+    actual                   TEXT NOT NULL DEFAULT '',
+    detail                   TEXT NOT NULL DEFAULT '',
+    blocked_at               TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_dry_run_blocks_conv
+    ON dry_run_blocks(conversation_id, blocked_at);
+CREATE INDEX IF NOT EXISTS idx_dry_run_blocks_contract_hash
+    ON dry_run_blocks(contract_hash);
+CREATE INDEX IF NOT EXISTS idx_dry_run_blocks_attempt
+    ON dry_run_blocks(attempt_id);
+
+-- WT-2-overhead-probes: in-process latency spans (driver planning,
+-- agentserver task dispatch, observer write). Consumed by
+-- DriverPlanningOverhead / TaskDispatchLatency / ObserverOverhead p50/p95
+-- via the WT-2-metric-extract SELECT in §4.5 of wt2-overhead-probes.spec.
+-- event_id is derived server-side (sha256 of convID|kind|start|nonce);
+-- callers never supply it.
+CREATE TABLE IF NOT EXISTS probe_events (
+    event_id            TEXT PRIMARY KEY,
+    probe_kind          TEXT NOT NULL,     -- 'driver_planning' | 'task_dispatch' | 'observer_write'
+    conversation_id     TEXT NOT NULL,     -- validated ^[A-Za-z0-9_-]{8,128}$ before insert
+    span_start_at       TEXT NOT NULL,     -- RFC3339Nano, audit only
+    span_end_at         TEXT NOT NULL,     -- RFC3339Nano, audit only
+    duration_ns         INTEGER NOT NULL,  -- AUTHORITATIVE latency; end.Sub(start) w/ monotonic
+    wallclock_delta_ms  INTEGER NOT NULL DEFAULT 0  -- cross-machine skew; 0 for same-process spans
+);
+CREATE INDEX IF NOT EXISTS idx_probe_events_kind_conv
+    ON probe_events(probe_kind, conversation_id, span_start_at);
+
+-- WT-2-runtime-audit: per-execution runtime audit events for the
+-- ContractViolationRate metric (12号 §A4). Writer: NewSQLRecorder /
+-- WriteAuditEvent in internal/journal + internal/observerstore/
+-- contract_violations_view.go. No other writer path is permitted
+-- (spec §7 (f), enforced by TestOnlyOneAuditEventsWriter).
+CREATE TABLE IF NOT EXISTS audit_events (
+    event_id        TEXT PRIMARY KEY,
+    workspace_id    TEXT NOT NULL DEFAULT '',
+    conversation_id TEXT NOT NULL,
+    run_id          TEXT NOT NULL DEFAULT '',
+    kind            TEXT NOT NULL CHECK(kind IN
+                        ('read','write','tool_call','model_call')),
+    target          TEXT NOT NULL,
+    size_bytes      INTEGER NOT NULL DEFAULT 0,
+    hash            TEXT NOT NULL DEFAULT '',
+    ts              TEXT NOT NULL     -- fixed-width UTC RFC3339Nano
+);
+CREATE INDEX IF NOT EXISTS idx_audit_events_conv
+    ON audit_events(workspace_id, conversation_id, ts);
+CREATE INDEX IF NOT EXISTS idx_audit_events_run
+    ON audit_events(run_id, ts);
+
+-- WT-2-runtime-audit: contract_violations is a READ-ONLY VIEW over
+-- audit_events joined against the in-force task_contracts rows for the
+-- conversation. SQLite treats a plain CREATE VIEW as read-only unless
+-- an INSTEAD OF trigger is attached — this WT MUST NOT define such a
+-- trigger (spec §7 (e), enforced by TestContractViolationsView_NoTrigger_Static).
+--
+-- task_contracts is keyed by (workspace_id, task_id) — not by
+-- (workspace_id, conversation_id) — so more than one row per pair is
+-- possible (retries, dispatch-per-turn, follow-ups). The `all_conv_contracts`
+-- CTE surfaces the SET of tied rows (rows whose updated_at equals the
+-- pair's MAX). The WHERE clause uses NOT EXISTS over the cross-product
+-- of (tied contracts, their declared entries) so any one tied contract
+-- declaring the target defeats the violation, and outer rows are NOT
+-- multiplied by ties.
+CREATE VIEW IF NOT EXISTS contract_violations AS
+WITH
+    all_conv_contracts AS (
+        SELECT tc.workspace_id, tc.conversation_id, tc.body, tc.updated_at
+        FROM task_contracts tc
+        WHERE tc.updated_at = (
+            SELECT MAX(tc2.updated_at)
+            FROM task_contracts tc2
+            WHERE tc2.workspace_id    = tc.workspace_id
+              AND tc2.conversation_id = tc.conversation_id
+        )
+    )
+SELECT
+    ae.run_id                                                       AS run_id,
+    ae.conversation_id                                              AS conversation_id,
+    CASE ae.kind
+         WHEN 'read'       THEN 'undeclared_read'
+         WHEN 'write'      THEN 'undeclared_write'
+         WHEN 'tool_call'  THEN 'undeclared_tool_call'
+         WHEN 'model_call' THEN 'undeclared_model_call'
+    END                                                             AS violation_kind,
+    ae.target                                                       AS target,
+    (
+        SELECT json_group_array(declared.value)
+        FROM all_conv_contracts tc
+        JOIN json_each(
+            CASE ae.kind
+                 WHEN 'read'       THEN json_extract(tc.body, '$.data_contract.read_artifacts')
+                 WHEN 'write'      THEN json_extract(tc.body, '$.data_contract.write_targets')
+                 WHEN 'tool_call'  THEN json_extract(tc.body, '$.capability_requirements.tools')
+                 WHEN 'model_call' THEN json_extract(tc.body, '$.capability_requirements.skills')
+            END
+        ) AS declared
+        WHERE tc.workspace_id    = ae.workspace_id
+          AND tc.conversation_id = ae.conversation_id
+    )                                                               AS expected,
+    ae.target                                                       AS observed,
+    ae.ts                                                           AS ts
+FROM audit_events AS ae
+WHERE
+    NOT EXISTS (
+        SELECT 1 FROM all_conv_contracts tc
+        WHERE tc.workspace_id    = ae.workspace_id
+          AND tc.conversation_id = ae.conversation_id
+    )
+    OR NOT EXISTS (
+        SELECT 1
+        FROM all_conv_contracts tc
+        JOIN json_each(
+            CASE ae.kind
+                 WHEN 'read'       THEN json_extract(tc.body, '$.data_contract.read_artifacts')
+                 WHEN 'write'      THEN json_extract(tc.body, '$.data_contract.write_targets')
+                 WHEN 'tool_call'  THEN json_extract(tc.body, '$.capability_requirements.tools')
+                 WHEN 'model_call' THEN json_extract(tc.body, '$.capability_requirements.skills')
+            END
+        ) AS declared
+        WHERE tc.workspace_id    = ae.workspace_id
+          AND tc.conversation_id = ae.conversation_id
+          AND (
+              declared.value = ae.target
+              OR (declared.type = 'object' AND json_extract(declared.value, '$.name')        = ae.target)
+              OR (declared.type = 'object' AND json_extract(declared.value, '$.artifact_id') = ae.target)
+          )
+    )
+ORDER BY ae.ts ASC;

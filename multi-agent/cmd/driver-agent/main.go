@@ -206,6 +206,17 @@ func runServe(args []string) {
 	if runID := os.Getenv("LOOM_EVAL_RUN_ID"); runID != "" {
 		driver.SetCurrentRunID(runID)
 	}
+	// WT-2-dry-run-validator §4.3: wire the dry_run_blocks writer
+	// through the observer HTTP relay. Warn-loud (not fail-loud) when
+	// the observer is disabled — the driver still boots for demo /
+	// smoke-test flows that intentionally run without observer, but
+	// operators see a clear WARN in the log so a misconfigured
+	// production driver doesn't silently drop persistence.
+	if relay := driver.NewObserverRelay(cfg, obs); relay != nil {
+		tools.SetDryRunBlockWriter(relay)
+	} else {
+		log.Printf("[WARN] dry_run_blocks writer not configured — spec §4.3 persistence degraded (check cfg.Observer.Enabled/URL)")
+	}
 	// WT-2 B6: wire the promotion-audit writer if a local observer.db
 	// path is configured. Empty path leaves the writer nil — the
 	// register / unregister tools then degrade to a helper-error log

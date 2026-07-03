@@ -15,7 +15,10 @@ require (
 	modernc.org/sqlite v1.50.0
 )
 
-require github.com/santhosh-tekuri/jsonschema/v5 v5.3.1
+require (
+	github.com/santhosh-tekuri/jsonschema/v5 v5.3.1
+	golang.org/x/mod v0.37.0
+)
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
