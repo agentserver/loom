@@ -64,8 +64,9 @@ type ExecutorDeps struct {
 // errors.Is against the executor package without importing
 // observerstore. See spec §9.
 var (
-	ErrPayloadUnavailable = observerstore.ErrPayloadUnavailable
-	ErrConcurrentLease    = observerstore.ErrConcurrentLease
+	ErrPayloadUnavailable  = observerstore.ErrPayloadUnavailable
+	ErrConcurrentLease     = observerstore.ErrConcurrentLease
+	ErrLeaseLostAfterWrite = observerstore.ErrLeaseLostAfterWrite
 )
 
 // ErrInvalidExecutorDeps is returned by ExecutorResume when any

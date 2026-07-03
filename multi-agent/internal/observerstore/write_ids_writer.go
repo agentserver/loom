@@ -95,6 +95,17 @@ var ErrNoReservation = errors.New("observerstore: no reservation for id")
 // programmer bugs vs missing fields.
 var ErrInvalidLeaseTTL = errors.New("observerstore: LeaseTTL must be > 0")
 
+// ErrLeaseLostAfterWrite is returned by Commit when the row is
+// already committed AND this WorkerID never held the lease (per
+// the write_id_reserve_events audit trail). Means another worker
+// stole the lease and committed while this caller's own WriteStep
+// may or may not have partially succeeded. Distinct from the
+// idempotent-noop path (where the SAME worker committed twice).
+// Executor callers MUST surface this as a real error, not treat
+// as success; the caller's local side-effects (e.g. tempfile
+// leftover) may need cleanup. Round-3 review P1 #4.
+var ErrLeaseLostAfterWrite = errors.New("observerstore: lease lost — another worker committed")
+
 // ErrJournalChainBroken is a retained sentinel for a future
 // hardening worktree that adds per-record hash chaining to the
 // task journal. This worktree never raises it in normal operation.
@@ -238,6 +249,20 @@ type WriteIDStore interface {
 	Commit(ctx context.Context, req CommitRequest) error
 	Vacuum(ctx context.Context, cutoff time.Time) (int64, error)
 	RecordResumeAttempt(ctx context.Context, runID, taskID, outcome, errorKind string) error
+
+	// VacuumAudit deletes append-only audit rows older than cutoff:
+	// write_id_reserve_events.occurred_at < cutoff AND
+	// resume_task_attempts.updated_at < cutoff. Returns
+	// (reserveEventsDeleted, resumeAttemptsDeleted, err).
+	//
+	// CALLER CONTRACT: the D4 evaluator MUST have materialised any
+	// DuplicateSideEffectRate / RecoverySuccessRate aggregates it
+	// cares about BEFORE calling this — the deletes are unconditional.
+	// Eval-runner (D3) invokes this at run-teardown after writing its
+	// CSV/JSONL. In long-lived observer-server deployments the
+	// operator schedules it (e.g. daily cron) with a cutoff that
+	// matches their retention policy.
+	VacuumAudit(ctx context.Context, cutoff time.Time) (int64, int64, error)
 }
 
 // PayloadStager persists pre-write payload bytes so a resumed
@@ -343,8 +368,31 @@ SELECT committed_at, lease_owner, lease_expires_at
 
 	sqlReserveEvent = `
 INSERT INTO write_id_reserve_events
-    (event_id, id, run_id, task_id, outcome, occurred_at)
-VALUES (?, ?, ?, ?, ?, ?);`
+    (event_id, id, run_id, task_id, outcome, occurred_at, worker_id)
+VALUES (?, ?, ?, ?, ?, ?, ?);`
+
+	// sqlLookupCommitWorker asks "which worker emitted the
+	// existing 'commit' event for this id, if any?". Used by
+	// Commit's noop-branch disambiguation (round-3 P1 #4). Returns
+	// empty string if no commit event exists yet (shouldn't happen
+	// if committed_at IS NOT NULL — but defensive), or the
+	// worker_id of the FIRST commit event otherwise.
+	//
+	// If the returned worker_id equals req.WorkerID → this caller
+	// is the one who committed → idempotent noop.
+	// If it differs → another worker won the race → ErrLeaseLostAfterWrite.
+	//
+	// ORDER BY occurred_at LIMIT 1 for determinism: only one commit
+	// event should ever exist per id (Commit's UPDATE ... WHERE
+	// committed_at IS NULL fires exactly once), but the LIMIT
+	// makes the caller-side logic robust to a future edit that
+	// might allow re-commits.
+	sqlLookupCommitWorker = `
+SELECT worker_id
+  FROM write_id_reserve_events
+ WHERE id = ? AND outcome = 'commit'
+ ORDER BY occurred_at
+ LIMIT 1;`
 
 	sqlCommitUpdate = `
 UPDATE write_ids
@@ -448,7 +496,7 @@ func (s *SQLiteWriteIDStore) Reserve(ctx context.Context, req ReserveRequest) (R
 	outcome := state.String()
 	eventID := deriveEventID(req.ID, req.RunID, nowStr, outcome)
 	if _, err := tx.ExecContext(ctx, sqlReserveEvent,
-		eventID, string(req.ID), req.RunID, req.TaskID, outcome, nowStr); err != nil {
+		eventID, string(req.ID), req.RunID, req.TaskID, outcome, nowStr, req.WorkerID); err != nil {
 		return 0, fmt.Errorf("observerstore: reserve audit: %w", err)
 	}
 
@@ -497,17 +545,28 @@ func (s *SQLiteWriteIDStore) Commit(ctx context.Context, req CommitRequest) erro
 		if committedAt.Valid {
 			// The row is already committed. Two possibilities:
 			//   1. This caller called Commit twice (idempotent
-			//      no-op — the caller's write did happen).
+			//      no-op — the SAME worker committed earlier).
 			//   2. This caller lost the lease to another worker,
 			//      the stealer already Committed, and this
-			//      caller's own write may or may not have happened.
-			// Both surface as `outcome=noop` because from D4's
-			// perspective a durably-committed WriteID is FINAL
-			// (spec §7(g)) — a "committed is committed" invariant.
-			// Callers that need to distinguish "was I the winner?"
-			// must compare the lease_owner column separately
-			// BEFORE calling Commit; there is no way to recover
-			// that information after this branch.
+			//      caller's own WriteStep may have partially
+			//      succeeded.
+			// Round-3 review P1 #4: disambiguate by asking the
+			// audit trail "which worker emitted the commit event?".
+			// If it's THIS worker → idempotent noop nil.
+			// If it's ANOTHER worker → ErrLeaseLostAfterWrite so
+			// the caller can log + clean up its half-written temp
+			// files.
+			var commitWorker string
+			err := tx.QueryRowContext(ctx, sqlLookupCommitWorker, string(req.ID)).
+				Scan(&commitWorker)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("observerstore: commit lookup: %w", err)
+			}
+			if commitWorker != req.WorkerID {
+				return fmt.Errorf("observerstore: commit id=%s worker=%s (committed by %q): %w",
+					req.ID, req.WorkerID, commitWorker, ErrLeaseLostAfterWrite)
+			}
+			// Idempotent no-op. No audit row.
 			if err := tx.Commit(); err != nil {
 				return fmt.Errorf("observerstore: commit tx (noop): %w", err)
 			}
@@ -523,7 +582,7 @@ func (s *SQLiteWriteIDStore) Commit(ctx context.Context, req CommitRequest) erro
 	outcome := "commit"
 	eventID := deriveEventID(req.ID, req.RunID, nowStr, outcome)
 	if _, err := tx.ExecContext(ctx, sqlReserveEvent,
-		eventID, string(req.ID), req.RunID, req.TaskID, outcome, nowStr); err != nil {
+		eventID, string(req.ID), req.RunID, req.TaskID, outcome, nowStr, req.WorkerID); err != nil {
 		return fmt.Errorf("observerstore: commit audit: %w", err)
 	}
 
@@ -557,7 +616,13 @@ func deriveEventID(id WriteID, runID, occurredAt, outcome string) string {
 }
 
 // Vacuum implements WriteIDStore. Removes committed rows older than
-// cutoff AND their associated write_id_payloads.
+// cutoff AND their associated write_id_payloads. Also reaps
+// ORPHANED write_id_payloads rows (staged but their write_ids row
+// was never inserted — e.g. Stage succeeded then Reserve/network
+// failed) that are older than cutoff. Without the orphan sweep,
+// a lossy-network or hot-restart loop could grow write_id_payloads
+// unboundedly since Vacuum's original JOIN-on-write_ids can never
+// match them (round-3 review P1 #2).
 func (s *SQLiteWriteIDStore) Vacuum(ctx context.Context, cutoff time.Time) (int64, error) {
 	cut := formatTS(cutoff)
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -566,8 +631,8 @@ func (s *SQLiteWriteIDStore) Vacuum(ctx context.Context, cutoff time.Time) (int6
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// First delete the payloads (child rows) so the write_ids delete
-	// doesn't leave orphans.
+	// First delete the payloads (child rows) whose parent will also
+	// be deleted, so the write_ids delete doesn't leave orphans.
 	if _, err := tx.ExecContext(ctx, `
 DELETE FROM write_id_payloads
  WHERE id IN (
@@ -575,6 +640,17 @@ DELETE FROM write_id_payloads
     WHERE committed_at IS NOT NULL AND committed_at < ?
  );`, cut); err != nil {
 		return 0, fmt.Errorf("observerstore: vacuum payloads: %w", err)
+	}
+	// Sweep truly-orphaned payloads: rows whose id has no
+	// corresponding write_ids row AND whose staged_at is older
+	// than the same cutoff. Age-gating protects against reaping
+	// payloads that were just Stage'd milliseconds before Reserve
+	// races in on another goroutine.
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM write_id_payloads
+ WHERE staged_at < ?
+   AND id NOT IN (SELECT id FROM write_ids);`, cut); err != nil {
+		return 0, fmt.Errorf("observerstore: vacuum orphan payloads: %w", err)
 	}
 	res, err := tx.ExecContext(ctx, `
 DELETE FROM write_ids
@@ -587,6 +663,39 @@ DELETE FROM write_ids
 		return 0, fmt.Errorf("observerstore: vacuum tx: %w", err)
 	}
 	return aff, nil
+}
+
+// VacuumAudit implements WriteIDStore. Bounds the growth of the
+// append-only audit tables that Vacuum leaves alone (round-3 review
+// P1 #3). Runs both DELETEs in one transaction so the two counts
+// are consistent with each other. Callers must have materialised
+// D4 aggregates first; see the interface doc for the caller contract.
+func (s *SQLiteWriteIDStore) VacuumAudit(ctx context.Context, cutoff time.Time) (int64, int64, error) {
+	cut := formatTS(cutoff)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	resEvents, err := tx.ExecContext(ctx, `
+DELETE FROM write_id_reserve_events WHERE occurred_at < ?;`, cut)
+	if err != nil {
+		return 0, 0, fmt.Errorf("observerstore: vacuum reserve events: %w", err)
+	}
+	eventsAff, _ := resEvents.RowsAffected()
+
+	resAttempts, err := tx.ExecContext(ctx, `
+DELETE FROM resume_task_attempts WHERE updated_at < ?;`, cut)
+	if err != nil {
+		return 0, 0, fmt.Errorf("observerstore: vacuum resume attempts: %w", err)
+	}
+	attemptsAff, _ := resAttempts.RowsAffected()
+
+	if err := tx.Commit(); err != nil {
+		return 0, 0, fmt.Errorf("observerstore: vacuum audit tx: %w", err)
+	}
+	return eventsAff, attemptsAff, nil
 }
 
 // RecordResumeAttempt UPSERTs a row in resume_task_attempts keyed by

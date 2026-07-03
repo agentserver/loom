@@ -1566,6 +1566,218 @@ func TestCommit_ErrNoReservation(t *testing.T) {
 }
 
 // -------------------------------------------------------------------
+// Fresh-review round 3 regression tests
+// -------------------------------------------------------------------
+
+// TestVacuum_ReapsOrphanedPayloads — round-3 P1 #2 guard.
+// Stage a payload but never Reserve — Vacuum with a cutoff after
+// the stage MUST reap it, otherwise a lossy-network / hot-restart
+// loop grows write_id_payloads unboundedly.
+func TestVacuum_ReapsOrphanedPayloads(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	clk := newFakeClock(base.Add(-31 * 24 * time.Hour))
+	db := openStoreDB(t)
+	store := NewSQLiteWriteIDStore(db, WithWriteIDClock(clk.Now))
+	ps := NewSQLitePayloadStager(db, WithPayloadStagerClock(clk.Now))
+	ctx := context.Background()
+
+	// Stage but never Reserve — this is the orphan case.
+	payload := []byte("orphan-payload")
+	sum := sha256.Sum256(payload)
+	id, _ := NewWriteID(validTaskID, validConvID, validStepID, validTargetPath,
+		hex.EncodeToString(sum[:]))
+	if err := ps.Stage(ctx, id, validTaskID, validStepID, payload); err != nil {
+		t.Fatal(err)
+	}
+	// Sanity: 1 payload row, 0 write_ids rows.
+	if got := countRows(t, db, "write_id_payloads"); got != 1 {
+		t.Fatalf("pre: payloads = %d; want 1", got)
+	}
+	if got := countRows(t, db, "write_ids"); got != 0 {
+		t.Fatalf("pre: write_ids = %d; want 0", got)
+	}
+	// Advance clock past cutoff and Vacuum.
+	clk.Advance(31 * 24 * time.Hour) // now at base
+	if _, err := store.Vacuum(ctx, base.Add(-30*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := countRows(t, db, "write_id_payloads"); got != 0 {
+		t.Errorf("post-vacuum: orphan payloads = %d; want 0 (round-3 P1 #2 regression)", got)
+	}
+}
+
+// TestVacuum_KeepsRecentOrphanedPayloads — companion to the above.
+// Payloads staged more recently than cutoff MUST survive so a
+// Reserve racing behind the vacuum doesn't lose its just-staged
+// bytes.
+func TestVacuum_KeepsRecentOrphanedPayloads(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	clk := newFakeClock(base) // stage-time = now
+	db := openStoreDB(t)
+	store := NewSQLiteWriteIDStore(db, WithWriteIDClock(clk.Now))
+	ps := NewSQLitePayloadStager(db, WithPayloadStagerClock(clk.Now))
+	ctx := context.Background()
+	payload := []byte("recent")
+	sum := sha256.Sum256(payload)
+	id, _ := NewWriteID(validTaskID, validConvID, validStepID, validTargetPath,
+		hex.EncodeToString(sum[:]))
+	if err := ps.Stage(ctx, id, validTaskID, validStepID, payload); err != nil {
+		t.Fatal(err)
+	}
+	// Cutoff 30 days ago; the row is at "now", so it should survive.
+	if _, err := store.Vacuum(ctx, base.Add(-30*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := countRows(t, db, "write_id_payloads"); got != 1 {
+		t.Errorf("recent orphan payload was reaped: got %d rows; want 1", got)
+	}
+}
+
+// TestVacuumAudit_DeletesOldRowsBothTables — round-3 P1 #3 guard.
+// Seeds both write_id_reserve_events (via Reserve) and
+// resume_task_attempts (via RecordResumeAttempt) at t=old, then
+// advances clock and runs VacuumAudit with cutoff between old and
+// new. Both tables must be reaped.
+func TestVacuumAudit_DeletesOldRowsBothTables(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	clk := newFakeClock(base.Add(-31 * 24 * time.Hour))
+	db := openStoreDB(t)
+	store := NewSQLiteWriteIDStore(db, WithWriteIDClock(clk.Now))
+	ctx := context.Background()
+
+	// Reserve at old-time emits one write_id_reserve_events row.
+	id := mustNewWriteID(t, validTaskID, validConvID, validStepID, validTargetPath, validHash)
+	if _, err := store.Reserve(ctx, makeReq(id, "w1")); err != nil {
+		t.Fatal(err)
+	}
+	// RecordResumeAttempt at old-time.
+	if err := store.RecordResumeAttempt(ctx, "run-1", validTaskID, "started", ""); err != nil {
+		t.Fatal(err)
+	}
+	// Sanity.
+	if got := countRows(t, db, "write_id_reserve_events"); got != 1 {
+		t.Fatalf("pre: reserve_events = %d; want 1", got)
+	}
+	if got := countRows(t, db, "resume_task_attempts"); got != 1 {
+		t.Fatalf("pre: resume_task_attempts = %d; want 1", got)
+	}
+	// Advance and vacuum.
+	clk.Advance(31 * 24 * time.Hour)
+	eventsDel, attemptsDel, err := store.VacuumAudit(ctx, base.Add(-30*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eventsDel != 1 {
+		t.Errorf("eventsDel = %d; want 1", eventsDel)
+	}
+	if attemptsDel != 1 {
+		t.Errorf("attemptsDel = %d; want 1", attemptsDel)
+	}
+	if got := countRows(t, db, "write_id_reserve_events"); got != 0 {
+		t.Errorf("post: reserve_events = %d; want 0", got)
+	}
+	if got := countRows(t, db, "resume_task_attempts"); got != 0 {
+		t.Errorf("post: resume_task_attempts = %d; want 0", got)
+	}
+}
+
+// TestVacuumAudit_KeepsRecentRows — cutoff MUST be exclusive; rows
+// AT or newer than cutoff survive.
+func TestVacuumAudit_KeepsRecentRows(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	clk := newFakeClock(base)
+	db := openStoreDB(t)
+	store := NewSQLiteWriteIDStore(db, WithWriteIDClock(clk.Now))
+	ctx := context.Background()
+	id := mustNewWriteID(t, validTaskID, validConvID, validStepID, validTargetPath, validHash)
+	if _, err := store.Reserve(ctx, makeReq(id, "w1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordResumeAttempt(ctx, "run-1", validTaskID, "started", ""); err != nil {
+		t.Fatal(err)
+	}
+	// Cutoff 30 days ago — recent rows must survive.
+	e, a, err := store.VacuumAudit(ctx, base.Add(-30*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e != 0 || a != 0 {
+		t.Errorf("recent rows reaped: events=%d attempts=%d; want 0/0", e, a)
+	}
+}
+
+// TestCommit_ErrLeaseLostAfterWrite — round-3 P1 #4 guard.
+// Worker A Reserves. Worker B waits for A's lease to expire, then
+// Reserves + Commits. Worker A THEN Commits. Result must be
+// ErrLeaseLostAfterWrite (NOT silent nil), because A's WriteStep
+// might have partially succeeded and A needs to know to clean up.
+func TestCommit_ErrLeaseLostAfterWrite(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	clk := newFakeClock(base)
+	store, _ := newTestStoreAt(t, clk)
+	ctx := context.Background()
+	id := mustNewWriteID(t, validTaskID, validConvID, validStepID, validTargetPath, validHash)
+
+	// Worker A Reserves.
+	if _, err := store.Reserve(ctx, makeReq(id, "wA")); err != nil {
+		t.Fatal(err)
+	}
+	// A's lease expires.
+	clk.Advance(2 * time.Minute)
+	// Worker B steals + commits.
+	if _, err := store.Reserve(ctx, makeReq(id, "wB")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Commit(ctx, CommitRequest{
+		ID: id, RunID: "run-1", TaskID: validTaskID, WorkerID: "wB",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A finally comes back and tries to Commit.
+	err := store.Commit(ctx, CommitRequest{
+		ID: id, RunID: "run-1", TaskID: validTaskID, WorkerID: "wA",
+	})
+	if !errors.Is(err, ErrLeaseLostAfterWrite) {
+		t.Errorf("wA commit: err = %v; want ErrLeaseLostAfterWrite (round-3 P1 #4 regression)", err)
+	}
+	// It should NOT be misclassified as ErrLeaseLost (that's the
+	// pre-commit-race sentinel) or ErrNoReservation.
+	if errors.Is(err, ErrLeaseLost) {
+		t.Errorf("wA commit: misclassified as ErrLeaseLost; want ErrLeaseLostAfterWrite")
+	}
+	if errors.Is(err, ErrNoReservation) {
+		t.Errorf("wA commit: misclassified as ErrNoReservation; want ErrLeaseLostAfterWrite")
+	}
+}
+
+// TestCommit_IdempotentSameWorkerReturnsNil — companion to the
+// above: the SAME worker calling Commit twice is still nil
+// (idempotent no-op), NOT ErrLeaseLostAfterWrite.
+func TestCommit_IdempotentSameWorkerReturnsNil(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+	id := mustNewWriteID(t, validTaskID, validConvID, validStepID, validTargetPath, validHash)
+	if _, err := store.Reserve(ctx, makeReq(id, "wSame")); err != nil {
+		t.Fatal(err)
+	}
+	cr := CommitRequest{
+		ID: id, RunID: "run-1", TaskID: validTaskID, WorkerID: "wSame",
+	}
+	if err := store.Commit(ctx, cr); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Commit(ctx, cr); err != nil {
+		t.Errorf("second same-worker commit: %v; want nil (idempotent noop)", err)
+	}
+}
+
+// -------------------------------------------------------------------
 // Helpers
 // -------------------------------------------------------------------
 // (fakeClock and newTestStoreAt live near the top of the file.)

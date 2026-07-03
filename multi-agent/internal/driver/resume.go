@@ -123,6 +123,8 @@ func classifyErr(err error) string {
 		return "ErrStepPayloadUnrecoverable"
 	case errors.Is(err, executor.ErrConcurrentLease):
 		return "ErrConcurrentLease"
+	case errors.Is(err, executor.ErrLeaseLostAfterWrite):
+		return "ErrLeaseLostAfterWrite"
 	case errors.Is(err, executor.ErrPayloadUnavailable):
 		return "ErrPayloadUnavailable"
 	default:

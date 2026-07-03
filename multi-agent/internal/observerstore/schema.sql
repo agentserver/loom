@@ -297,13 +297,20 @@ CREATE INDEX IF NOT EXISTS idx_write_ids_committed_at
 -- The denominator MUST filter to Reserve outcomes only — 'commit'
 -- rows are Commit events, not reserve attempts, and would
 -- double-count.
+-- worker_id is populated on every Reserve/Commit so that a stale
+-- Commit call from a lease-lost worker can distinguish "I ever
+-- held the lease and my write may have happened" from "someone
+-- else did all the work" (round-3 review P1 #4). Default '' for
+-- forward-compat with rows written before the column existed
+-- (currently zero — schema is APPEND ONLY per spec §1).
 CREATE TABLE IF NOT EXISTS write_id_reserve_events (
     event_id     TEXT PRIMARY KEY,
     id           TEXT NOT NULL,
     run_id       TEXT NOT NULL,
     task_id      TEXT NOT NULL,
     outcome      TEXT NOT NULL CHECK(outcome IN ('fresh','uncommitted','inflight','committed','commit')),
-    occurred_at  TEXT NOT NULL
+    occurred_at  TEXT NOT NULL,
+    worker_id    TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_write_id_reserve_events_run
     ON write_id_reserve_events(run_id, occurred_at);
