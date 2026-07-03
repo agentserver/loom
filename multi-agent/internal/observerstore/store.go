@@ -207,6 +207,13 @@ func ensureColumns(db *sql.DB) error {
 	if _, err := db.Exec(`ALTER TABLE writes ADD COLUMN object_key TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
 		return err
 	}
+	// WT-2-driver-promotion-chain B2 §2.4.1: stage_note column added
+	// after the initial promotion_audit table shipped in B6. Guarded by
+	// isDuplicateColumn so this migration is idempotent — matches the
+	// existing pattern for every other ALTER above.
+	if _, err := db.Exec(`ALTER TABLE promotion_audit ADD COLUMN stage_note TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
+		return err
+	}
 	return nil
 }
 

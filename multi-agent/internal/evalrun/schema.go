@@ -31,6 +31,11 @@ type Schema struct {
 	ContextGroundTruth     string    // 08:266
 	CapabilitySnapshotHash string    // 08:267 — interface placeholder
 	TaskContractHash       string    // 08:268 — interface placeholder
+	// 08:269 — populated from driver.LastRegistryHash() by the eval
+	// runner. The publisher lives in multi-agent/internal/driver/
+	// registryhash.go (WT-2-driver-promotion-chain B6 spec §3.3);
+	// this field remains a plain string here so evalrun does not
+	// import driver.
 	DynamicMCPRegistryHash string    // 08:269 — interface placeholder
 	SelectedContext        string    // 08:270
 	GroundTruthContext     string    // 08:271

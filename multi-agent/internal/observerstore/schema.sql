@@ -259,6 +259,87 @@ ON capability_snapshot_usages(workspace_id, agent_id, used_at);
 CREATE INDEX IF NOT EXISTS idx_capability_snapshot_usages_hash
 ON capability_snapshot_usages(hash);
 
+-- WT-2-driver-promotion-chain B6: per-register/unregister/install audit row.
+-- Populated by internal/promotionaudit.SQLiteWriter via the register /
+-- unregister driver tools and the mcp-userspace install CLI. Reserved
+-- columns `stage` / `stage_result` are filled by sub-B2 (acceptance
+-- pipeline) which reuses this table for per-stage rows. See spec
+-- docs/specs/wt2-driver-promotion-chain-B6.spec.md §3.2 and §7 for the
+-- Security invariants; the CHECK constraints belt-and-suspenders the
+-- Go-side promotionaudit.Validate enums.
+CREATE TABLE IF NOT EXISTS promotion_audit (
+    row_id                    TEXT PRIMARY KEY,
+    ts                        TEXT NOT NULL,
+    workspace_id              TEXT NOT NULL DEFAULT '',
+    mcp_name                  TEXT NOT NULL,
+    action                    TEXT NOT NULL CHECK(action IN ('register','unregister','install')),
+    promoted_by_user_id       TEXT NOT NULL,
+    driver_thread_id          TEXT NOT NULL,
+    promotion_reason          TEXT NOT NULL CHECK(promotion_reason IN (
+        'explicit_user_request','driver_agent_inferred','batch_import','ci_seed'
+    )),
+    candidate_source_task_id  TEXT NOT NULL,
+    registry_hash_after       TEXT NOT NULL DEFAULT '',
+    stage                     TEXT NOT NULL DEFAULT '',
+    stage_result              TEXT NOT NULL DEFAULT '',
+    stage_note                TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_promotion_audit_mcp
+    ON promotion_audit(mcp_name, ts);
+CREATE INDEX IF NOT EXISTS idx_promotion_audit_user
+    ON promotion_audit(promoted_by_user_id, ts);
+CREATE INDEX IF NOT EXISTS idx_promotion_audit_thread
+    ON promotion_audit(driver_thread_id, ts);
+
+-- WT-2-driver-promotion-chain B4: one row per non-ablated
+-- driver.Lookup call, keyed by run_id so D2 can aggregate
+-- RegistryLookupHitRate under Phase 3 parallel runs unambiguously.
+-- Stores only query_hash_prefix (8-hex) — not the raw user intent
+-- text — because the sanitizer can't strip alphanumeric
+-- secret-shaped material. See spec
+-- docs/specs/wt2-driver-promotion-chain-B4.spec.md §5.
+CREATE TABLE IF NOT EXISTS registry_lookup_samples (
+    row_id             TEXT PRIMARY KEY,
+    ts                 TEXT NOT NULL,
+    run_id             TEXT NOT NULL DEFAULT '',
+    workspace_id       TEXT NOT NULL DEFAULT '',
+    query_hash_prefix  TEXT NOT NULL DEFAULT '',
+    hit_count          INTEGER NOT NULL DEFAULT 0,
+    registry_hits      INTEGER NOT NULL DEFAULT 0,
+    userspace_hits     INTEGER NOT NULL DEFAULT 0,
+    top_score          REAL NOT NULL DEFAULT 0.0
+);
+CREATE INDEX IF NOT EXISTS idx_registry_lookup_samples_run
+    ON registry_lookup_samples(run_id, ts);
+
+-- WT-2-driver-promotion-chain B1: promote-candidate surfacing rows.
+-- Populated by driver.SurfacePromoteCandidate; consumed by
+-- PromotionCandidateSurfacingRate / PromotionAdoptionRate /
+-- TimeFromUserDecisionToRegisteredMCP metrics. Keyed by
+-- UNIQUE(run_id, candidate_id) so parallel Phase 3 runs stay
+-- unambiguous; the JOIN to promotion_audit uses candidate_id (which
+-- itself embeds run_id — see spec §4.1). See spec
+-- docs/specs/wt2-driver-promotion-chain-B1.spec.md §2.
+CREATE TABLE IF NOT EXISTS promote_candidates (
+    row_id            TEXT PRIMARY KEY,
+    candidate_id      TEXT NOT NULL,
+    family            TEXT NOT NULL,
+    source_task_ids   TEXT NOT NULL DEFAULT '[]',
+    surfaced_at       TEXT NOT NULL,
+    decision          TEXT NOT NULL DEFAULT '' CHECK(decision IN ('','promoted','declined','expired')),
+    decision_at       TEXT NOT NULL DEFAULT '',
+    surfaced_by       TEXT NOT NULL DEFAULT '' CHECK(surfaced_by IN ('','user_hint','driver_inferred','similarity_signal')),
+    workspace_id      TEXT NOT NULL DEFAULT '',
+    run_id            TEXT NOT NULL DEFAULT '',
+    UNIQUE(run_id, candidate_id)
+);
+CREATE INDEX IF NOT EXISTS idx_promote_candidates_family
+    ON promote_candidates(family, surfaced_at);
+CREATE INDEX IF NOT EXISTS idx_promote_candidates_candidate
+    ON promote_candidates(candidate_id);
+CREATE INDEX IF NOT EXISTS idx_promote_candidates_run
+    ON promote_candidates(run_id, surfaced_at);
+
 -- WT-2-dry-run-validator: §A3 four-class pre-execution block audit.
 -- One row per Block returned by validator.Check(...) that the dry-run
 -- tool persisted. Consumer view (spec §6.1) joins dry_run_blocks with

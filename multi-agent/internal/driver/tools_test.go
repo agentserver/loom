@@ -98,6 +98,11 @@ func newTestToolsWithObserver(t *testing.T, sdk SDKClient, obs ObserverSink) *To
 	cfg.Server.URL = "https://srv.example.com"
 	cfg.Credentials.ShortID = "drv-001"
 	cfg.Credentials.SandboxID = "sbx-driver"
+	// Default workspace so promotion-audit precheck in B6 register /
+	// unregister tools doesn't reject on empty workspace_id in tests
+	// that only care about the field they're exercising. Tests can
+	// still override to "" to exercise the workspace-missing path.
+	cfg.Observer.WorkspaceID = "ws-test0001"
 	cfg.DriverDefaults.TaskTimeoutSec = 600
 	cfg.DriverDefaults.AuditLogDir = dir // expose so cache root and audit log path are predictable
 	cfg.DriverDefaults.WorkDir = dir     // §1.4 #17: tests place source_path inputs here
