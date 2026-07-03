@@ -1,0 +1,95 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/agentserver/loom/multi-agent/deploy/topology_schema.json",
+  "title": "WT-2 deploy machine_topology payload",
+  "description": "Schema for the machine_topology JSON emitted by deploy.sh / deploy.ps1 and consumed by the eval-runner as the Schema.MachineTopology TEXT column (internal/evalrun/schema.go:30). See docs/specs/wt2-deploy-scripts.spec.md §5.1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "host",
+    "os",
+    "os_release",
+    "arch",
+    "kernel",
+    "cpu_count",
+    "mem_bytes",
+    "mode",
+    "component_ports",
+    "collected_at_unix",
+    "deploy_script_version"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "host": {
+      "type": "string",
+      "description": "Redacted hostname per spec §5.3 (either 8-hex or 8-hex@8-hex)",
+      "pattern": "^[0-9a-f]{8}(@[0-9a-f]{8})?$"
+    },
+    "os": {
+      "type": "string",
+      "enum": ["linux", "windows", "darwin"]
+    },
+    "os_release": {
+      "type": "string",
+      "description": "Free-form uname -sr / Windows version string; hostname substrings stripped per spec §5.3"
+    },
+    "arch": {
+      "type": "string",
+      "enum": ["amd64", "arm64", "aarch64", "x86_64"]
+    },
+    "kernel": {
+      "type": "string"
+    },
+    "cpu_count": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "mem_bytes": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["stub", "prod"]
+    },
+    "component_ports": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observer", "driver", "slave"],
+      "properties": {
+        "agentserver_stub": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535
+        },
+        "observer": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535
+        },
+        "driver": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535
+        },
+        "slave": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535
+        }
+      }
+    },
+    "collected_at_unix": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "deploy_script_version": {
+      "type": "string",
+      "pattern": "^wt2-deploy-scripts@[0-9a-f]{7,40}$"
+    }
+  }
+}

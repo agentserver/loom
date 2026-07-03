@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "host": "not-hex-and-not-@-form",
+  "os": "linux",
+  "os_release": "6.9.0-arch1-1",
+  "arch": "amd64",
+  "kernel": "6.9.0-arch1-1",
+  "cpu_count": 8,
+  "mem_bytes": 16777216000,
+  "mode": "stub",
+  "component_ports": {
+    "observer": 18091,
+    "driver": 18092,
+    "slave": 18093
+  },
+  "collected_at_unix": 1751520000,
+  "deploy_script_version": "wt2-deploy-scripts@d053897"
+}
