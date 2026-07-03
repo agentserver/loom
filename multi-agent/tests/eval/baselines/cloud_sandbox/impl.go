@@ -52,6 +52,10 @@ type CloudSandboxE2BImpl struct {
 	// "skipped ≠ safe"). A file skipped by the scan admission gates
 	// (binary / >8 MiB) is NOT in this set, so it is never uploaded.
 	safeToUpload []string
+	// planOverride, when non-zero, replaces the `cloudPlans[workloadID]`
+	// lookup. Used by tests that want to exercise a synthetic workload
+	// without racing on the package-level `cloudPlans` map.
+	planOverride *remoteExecPlan
 }
 
 // NewImpl constructs the impl. `apiKey` should be empty unless the
@@ -126,9 +130,15 @@ func (c *CloudSandboxE2BImpl) Prepare(ctx context.Context, ws *harness.Workspace
 // planning are what matter for §E3, not the arithmetic-correctness of
 // the shell snippet inside a remote container.
 func (c *CloudSandboxE2BImpl) ExecuteAgent(ctx context.Context, ws *harness.Workspace, agentEnv []string, dryRun bool) (harness.ExecuteMetrics, error) {
-	plan, ok := cloudPlans[c.workloadID]
-	if !ok {
-		return harness.ExecuteMetrics{}, fmt.Errorf("%w: %s", ErrCloudSandboxWorkloadUnknown, c.workloadID)
+	var plan remoteExecPlan
+	if c.planOverride != nil {
+		plan = *c.planOverride
+	} else {
+		p, ok := cloudPlans[c.workloadID]
+		if !ok {
+			return harness.ExecuteMetrics{}, fmt.Errorf("%w: %s", ErrCloudSandboxWorkloadUnknown, c.workloadID)
+		}
+		plan = p
 	}
 	start := time.Now()
 

@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/yourorg/multi-agent/internal/secretscrub"
 )
@@ -113,13 +114,19 @@ func ScanTreeForSecrets(root string) (ScanReport, error) {
 		}
 		body = append(body, rest...)
 
-		// Use RedactedTotal delta to distinguish "regex-matched a
-		// secret" from "Sanitize truncated a long string" — both mutate
-		// the return value, but only the former should flag. The
-		// counter is bumped iff at least one regex match was replaced.
-		before := secretscrub.RedactedTotal.Value()
-		_ = secretscrub.Sanitize(string(body))
-		if secretscrub.RedactedTotal.Value() > before {
+		// Distinguish "regex-matched a secret" from "Sanitize truncated
+		// a long string" by looking for the `[REDACTED]` literal in the
+		// output that was NOT already present in the input. Sanitize
+		// replaces every match with exactly this literal (see
+		// internal/secretscrub/scrub.go); truncation appends
+		// `...[truncated]` instead. Using a per-call byte check rather
+		// than the process-global RedactedTotal counter avoids a race
+		// if the harness is ever embedded alongside a background
+		// Sanitize caller.
+		src := string(body)
+		out := secretscrub.Sanitize(src)
+		const redactedMarker = "[REDACTED]"
+		if strings.Count(out, redactedMarker) > strings.Count(src, redactedMarker) {
 			report.Flagged = append(report.Flagged, rel)
 			return nil
 		}

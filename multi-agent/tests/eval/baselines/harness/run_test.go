@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -34,6 +35,24 @@ type erroringImpl struct{ stubImpl }
 
 func (erroringImpl) ExecuteAgent(ctx context.Context, ws *Workspace, agentEnv []string, dryRun bool) (ExecuteMetrics, error) {
 	return ExecuteMetrics{WallTimeMS: 2}, errors.New("stub: agent failed")
+}
+
+// panickyImpl panics inside ExecuteAgent — regression for the P2
+// finding that spec §7(f) promised exit 3 on a "dry-run reached real
+// client" panic but harness.Run had no defer recover().
+type panickyImpl struct{ stubImpl }
+
+func (panickyImpl) ExecuteAgent(ctx context.Context, ws *Workspace, agentEnv []string, dryRun bool) (ExecuteMetrics, error) {
+	panic("simulated: dry-run reached real client")
+}
+
+// controlByteErrImpl returns an ExecuteAgent error whose message
+// contains ANSI escapes, tab, bell, and non-ASCII runes — the shapes
+// that fmt.Sprintf("%q", …) would produce Go-quoted (not JSON-quoted).
+type controlByteErrImpl struct{ stubImpl }
+
+func (controlByteErrImpl) ExecuteAgent(ctx context.Context, ws *Workspace, agentEnv []string, dryRun bool) (ExecuteMetrics, error) {
+	return ExecuteMetrics{WallTimeMS: 3}, errors.New("stderr=\x1b[31mred\x1b[0m\t\a非ascii\v")
 }
 
 // TestRun_EndToEnd_StubImpl — plan #21. StubImpl produces mock_workspace;
@@ -107,6 +126,80 @@ func TestBaseline_MetricsFieldsPresent(t *testing.T) {
 	// column 14 = index 13 (metrics_baseline_upload_bytes)
 	if _, err := strconv.ParseInt(recs[1][13], 10, 64); err != nil {
 		t.Errorf("upload_bytes not parseable: %q", recs[1][13])
+	}
+}
+
+// TestRun_RecoversImplPanic_ExitCode3 — spec §7(f) promise that a
+// dry-run panic maps to exit 3 (not a Go stack trace crash).
+func TestRun_RecoversImplPanic_ExitCode3(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "row.csv")
+	res := Run(context.Background(), Opts{
+		WorkloadID:  "cross-device-code-mod",
+		WorkloadDir: workloadsDir(t),
+		OutCSV:      out,
+		DryRun:      true,
+	}, panickyImpl{stubImpl: stubImpl{name: "manual_ssh"}}, io.Discard)
+	if res.ExitCode != 3 {
+		t.Fatalf("want exit 3 on impl panic, got %d; err=%v", res.ExitCode, res.Err)
+	}
+	if res.Err == nil {
+		t.Errorf("expected non-nil err carrying panic value")
+	}
+}
+
+// TestRun_AgentErrorJSON_ParsesWithControlBytes — regression for the
+// P1 fresh-review finding: fmt.Sprintf("%q", …) emits Go-quoted strings
+// (\x1b, \a, \v), which json.Unmarshal rejects with "invalid character
+// in string escape code". Since ExecuteAgent errors wrap subprocess
+// stderr (very likely to contain ANSI escapes), the harness must emit
+// oracle_details_json that a downstream D1 fold-in can actually parse.
+func TestRun_AgentErrorJSON_ParsesWithControlBytes(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "row.csv")
+	res := Run(context.Background(), Opts{
+		WorkloadID:  "cross-device-code-mod",
+		WorkloadDir: workloadsDir(t),
+		OutCSV:      out,
+		DryRun:      true,
+	}, controlByteErrImpl{stubImpl: stubImpl{name: "manual_ssh"}}, io.Discard)
+	if res.ExitCode != 1 {
+		t.Fatalf("want exit 1 on agent failure, got %d", res.ExitCode)
+	}
+	// The row's oracle_details_json must be valid JSON — round-trip it.
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(res.Row.OracleDetailsJSON), &parsed); err != nil {
+		t.Fatalf("oracle_details_json must be valid JSON; parse err=%v; raw=%q", err, res.Row.OracleDetailsJSON)
+	}
+	if _, ok := parsed["agent_error"]; !ok {
+		t.Errorf("expected agent_error key; got %v", parsed)
+	}
+}
+
+// TestRun_RejectsWorkloadPathTraversal — regression for the P2 fresh-
+// review finding: `--workload ../../etc/passwd` would construct
+// `<dir>/../../etc/passwd/spec.yaml` and stat outside the workloads
+// root, exposing an existence oracle. loadWorkloadSpec must reject
+// any id containing a path separator or `..` BEFORE touching disk.
+func TestRun_RejectsWorkloadPathTraversal(t *testing.T) {
+	cases := []string{
+		"../../etc/passwd",
+		"..",
+		"foo/bar",
+		`foo\bar`,
+		".",
+		"foo/..",
+		"..foo", // contains ".." substring — belt and braces
+	}
+	for _, id := range cases {
+		out := filepath.Join(t.TempDir(), "row.csv")
+		res := Run(context.Background(), Opts{
+			WorkloadID:   id,
+			WorkloadDir:  t.TempDir(),
+			OutCSV:       out,
+			BaselineName: "manual_ssh",
+		}, stubImpl{name: "manual_ssh"}, io.Discard)
+		if res.ExitCode != 2 {
+			t.Errorf("id=%q: want exit 2, got %d; err=%v", id, res.ExitCode, res.Err)
+		}
 	}
 }
 

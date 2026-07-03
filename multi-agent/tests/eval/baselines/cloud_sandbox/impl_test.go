@@ -298,18 +298,16 @@ func TestCloudSandbox_UnscannedBinary_NotUploaded(t *testing.T) {
 	// Track which paths get uploaded. Use a client that records the URL
 	// of every request that looks like an upload.
 	recordingC := &recordingClient{}
-	// Add binary-fixture-test to cloudPlans so the impl doesn't fail
-	// with ErrCloudSandboxWorkloadUnknown.
-	cloudPlans["binary-fixture-test"] = remoteExecPlan{
-		ExecScript: "echo ok > out.txt",
-		FetchFiles: []string{"out.txt"},
-	}
-	defer delete(cloudPlans, "binary-fixture-test")
-
+	// Use planOverride instead of mutating the package-level cloudPlans
+	// map — avoids a race if this test is ever run under t.Parallel().
 	impl := &CloudSandboxE2BImpl{
 		workloadID: "binary-fixture-test",
 		client:     recordingC,
 		forwardE2B: false,
+		planOverride: &remoteExecPlan{
+			ExecScript: "echo ok > out.txt",
+			FetchFiles: []string{"out.txt"},
+		},
 	}
 	out := filepath.Join(t.TempDir(), "row.csv")
 	res := harness.Run(context.Background(), harness.Opts{

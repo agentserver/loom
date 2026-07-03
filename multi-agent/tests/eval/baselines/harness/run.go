@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -83,10 +85,21 @@ type Result struct {
 // Run is the shared orchestrator. Per spec §4 it walks steps 1–10 with
 // the two BaselineImpl seams (Prepare + ExecuteAgent) filling in the
 // per-baseline behaviour.
-func Run(ctx context.Context, opts Opts, impl BaselineImpl, stderr io.Writer) Result {
+func Run(ctx context.Context, opts Opts, impl BaselineImpl, stderr io.Writer) (result Result) {
 	if stderr == nil {
 		stderr = os.Stderr
 	}
+	// Spec §7(f) contract: a real E2B client that a bug reaches with
+	// dryRun=true panics ("dry-run mode reached real E2B client Do");
+	// the harness catches that panic and maps it to exit 3 so the
+	// smoke matrix + CI fail loudly rather than dumping a stack.
+	// Applies to any unexpected panic inside an impl too.
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(stderr, "harness: panic recovered in impl: %v\n", r)
+			result = Result{Row: result.Row, ExitCode: 3, Err: fmt.Errorf("harness: panic in impl: %v", r)}
+		}
+	}()
 	if opts.BaselineName == "" {
 		opts.BaselineName = impl.Name()
 	}
@@ -172,7 +185,20 @@ func Run(ctx context.Context, opts Opts, impl BaselineImpl, stderr io.Writer) Re
 		// Best-effort: still write CSV so a partial row lands (exit 1,
 		// not 2 — the baseline itself decided this was a runtime not
 		// pre-flight failure).
-		row.OracleDetailsJSON = fmt.Sprintf(`{"agent_error":%q}`, err.Error())
+		//
+		// Use json.Marshal (NOT fmt.Sprintf %q) so control bytes / ANSI
+		// escapes / non-ASCII runes in the subprocess stderr survive as
+		// valid JSON — %q emits Go-quoted strings (`\x1b`, `\a`), which
+		// json.Unmarshal rejects with "invalid character in string
+		// escape code", silently corrupting the downstream D1 fold-in
+		// (spec §5 promises oracle_details_json is valid JSON).
+		if payload, jerr := json.Marshal(map[string]string{"agent_error": err.Error()}); jerr == nil {
+			row.OracleDetailsJSON = string(payload)
+		} else {
+			// Very unlikely (map[string]string always marshals) — fall
+			// back to a fixed-shape sentinel so the column stays valid.
+			row.OracleDetailsJSON = `{"agent_error":"<unencodable>"}`
+		}
 		row.OracleMetricsJSON = "{}"
 		_ = WriteCSV(opts.OutCSV, row)
 		return Result{Row: row, ExitCode: 1, Err: err}
@@ -238,11 +264,29 @@ func Run(ctx context.Context, opts Opts, impl BaselineImpl, stderr io.Writer) Re
 	return Result{Row: row, ExitCode: 1}
 }
 
+// ErrWorkloadIDPathTraversal is returned by loadWorkloadSpec when the
+// caller passed an id containing a path separator or `..`. The id
+// segment must be a bare directory name — accepting arbitrary paths
+// would let `--workload ../../etc/whatever` read files outside the
+// intended workloads root, exposing existence oracles on the host
+// (the spec.id equality check downstream would catch the mismatch,
+// but the stat has already happened).
+var ErrWorkloadIDPathTraversal = errors.New("harness: workload id must be a bare directory name (no path separators, no ..)")
+
 // loadWorkloadSpec parses <workloadDir>/<id>/spec.yaml into a
 // WorkloadSpec plus the fully-resolved spec path.
 func loadWorkloadSpec(dir, id string) (*WorkloadSpec, error) {
 	if id == "" {
 		return nil, errors.New("harness: workload id is empty")
+	}
+	// Path-traversal guard: `..`, `/`, `\`, or a `Clean` that changes
+	// the id (e.g. `.`, empty segments) is rejected. This runs BEFORE
+	// filepath.Join so we never read a file outside the workloads root.
+	if id == "." || id == ".." ||
+		strings.ContainsAny(id, `/\`) ||
+		strings.Contains(id, "..") ||
+		filepath.Clean(id) != id {
+		return nil, fmt.Errorf("%w: %q", ErrWorkloadIDPathTraversal, id)
 	}
 	specPath := filepath.Join(dir, id, "spec.yaml")
 	abs, err := filepath.Abs(specPath)
