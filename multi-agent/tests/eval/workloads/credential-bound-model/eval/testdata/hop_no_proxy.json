@@ -1,0 +1,8 @@
+{
+  "model_alias": "acme-bound-model-v1",
+  "proxy_context_id": "ctx-modelproxy-001",
+  "hops": [
+    {"role": "driver"},
+    {"role": "upstream", "endpoint": "https://code.ai.cs.ac.cn/v1"}
+  ]
+}

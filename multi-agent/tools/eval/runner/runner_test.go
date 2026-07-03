@@ -537,3 +537,35 @@ func hashTreeForTest(t *testing.T, root string) string {
 	t.Helper()
 	return hashTree(t, root)
 }
+
+// TestRunPreflightRejectsConfigMismatch — WT-2 integration test.
+// Wire --codex-config-mode=a with a config that carries env_key and
+// confirm the runner returns exit=2 without spawning the stub or
+// writing the CSV (§7.a).
+func TestRunPreflightRejectsConfigMismatch(t *testing.T) {
+	t.Parallel()
+	cfg := filepath.Join(t.TempDir(), "config.toml")
+	body := "[model_providers.bad]\nenv_key = \"OPENAI_API_KEY\"\n"
+	if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
+		t.Fatalf("write cfg: %v", err)
+	}
+	outCSV := filepath.Join(t.TempDir(), "run.csv")
+	res := Run(context.Background(), Opts{
+		WorkloadID:      "cross-device-code-mod",
+		WorkloadDir:     "tests/eval/workloads",
+		StubListen:      pickFreePort(t),
+		OutCSV:          outCSV,
+		CodexConfigPath: cfg,
+		CodexConfigMode: "a", // mismatch: mode=a but env_key set
+		Stderr:          discardStderr(t),
+	})
+	if res.ExitCode != 2 {
+		t.Fatalf("exit = %d, want 2 (err=%v)", res.ExitCode, res.Err)
+	}
+	if !errors.Is(res.Err, ErrCodexConfigMismatch) {
+		t.Fatalf("err = %v, want ErrCodexConfigMismatch", res.Err)
+	}
+	if _, err := os.Stat(outCSV); err == nil {
+		t.Errorf("CSV was written despite preflight failure: %s", outCSV)
+	}
+}
