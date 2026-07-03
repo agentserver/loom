@@ -164,41 +164,89 @@ func (e *Emitter) Warn(msg string) {
 // warn is the unexported alias kept for existing internal call sites.
 func (e *Emitter) warn(msg string) { e.Warn(msg) }
 
-// Close stops the flusher and returns accumulated records in emission
-// order. Idempotent.
+// Close stops the record-collector goroutine and returns accumulated
+// records in emission order. Idempotent: the first call returns the
+// drained slice; subsequent calls return nil, nil (spec §3.1
+// "subsequent calls return an empty slice + nil error").
+//
+// Close MUST NOT block on stderr I/O — the warn-writer goroutine is
+// separate from the record-collector; a wedged stderr wedges the warn
+// writer only, not Close. Spec §7(a).
 func (e *Emitter) Close() ([]Record, error) {
 	if e == nil {
 		return nil, nil
 	}
+	first := false
 	e.closeOnce.Do(func() {
+		first = true
 		close(e.done)
 		e.result = <-e.drained
 		e.closed.Store(true)
 	})
-	return e.result, nil
+	if first {
+		return e.result, nil
+	}
+	return nil, nil
 }
 
+// flusher runs two independent loops:
+//
+//   - the record collector drains e.ch into an in-memory slice and
+//     signals e.drained on Close — this is the ONLY thing Close waits
+//     on, so it must never do stderr I/O (spec §7(a)).
+//
+//   - the warn writer drains e.warnCh into stderr in a separate
+//     goroutine. Because it runs off the Close path, a wedged stderr
+//     wedges only this goroutine; the runner's main goroutine
+//     continues.
 func (e *Emitter) flusher() {
+	// Spin up the warn writer.
+	go e.warnWriter()
+
 	var buf []Record
 	for {
 		select {
 		case r := <-e.ch:
 			buf = append(buf, r)
-		case w := <-e.warnCh:
-			fmt.Fprintln(e.stderr, w) // off the hot path
 		case <-e.done:
-			// Drain remaining buffered records + warns before returning.
+			// Drain remaining buffered records — no stderr writes on
+			// this path so Close never blocks.
 			for {
 				select {
 				case r := <-e.ch:
 					buf = append(buf, r)
+				default:
+					e.drained <- buf
+					return
+				}
+			}
+		}
+	}
+}
+
+// warnWriter drains warnCh into stderr. Runs in a separate goroutine
+// so a slow stderr does NOT back-pressure Close. Exits when done is
+// signalled AND the warn queue is empty; a wedged stderr will keep
+// this goroutine alive until process teardown, which is acceptable —
+// the runner has already completed.
+func (e *Emitter) warnWriter() {
+	for {
+		select {
+		case w := <-e.warnCh:
+			fmt.Fprintln(e.stderr, w)
+		case <-e.done:
+			// Best-effort drain: try to write everything queued at
+			// the moment of Close, then emit the overflow summary and
+			// exit. If stderr blocks mid-drain this goroutine wedges
+			// but the runner has already returned via Close.
+			for {
+				select {
 				case w := <-e.warnCh:
 					fmt.Fprintln(e.stderr, w)
 				default:
 					if wd := atomic.LoadInt64(&e.warnDropped); wd > 0 {
 						fmt.Fprintf(e.stderr, "probes: %d warn(s) dropped due to warn-channel overflow\n", wd)
 					}
-					e.drained <- buf
 					return
 				}
 			}

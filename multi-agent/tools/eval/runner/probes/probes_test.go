@@ -139,3 +139,70 @@ func (s *synchronizedBuf) String() string {
 	defer s.mu.Unlock()
 	return s.buf.String()
 }
+
+// blockingWriter blocks forever on Write, simulating a wedged pipe
+// (e.g. `... 2>&1 | slow_consumer` where the reader stops draining).
+type blockingWriter struct {
+	blocked chan struct{}
+}
+
+func newBlockingWriter() *blockingWriter { return &blockingWriter{blocked: make(chan struct{})} }
+func (b *blockingWriter) Write(p []byte) (int, error) {
+	// First write blocks forever; subsequent writes never fire because
+	// Fprintln returns error the caller ignores.
+	<-b.blocked
+	return len(p), nil
+}
+
+// TestClose_DoesNotBlock_WhenStderrWedged is the P1 regression guard
+// for the fresh-review finding: a wedged stderr must NOT wedge Close.
+// The warn-writer goroutine may hang on the wedged writer, but Close
+// (called on the runner's main goroutine) must return promptly so the
+// runner completes.
+func TestClose_DoesNotBlock_WhenStderrWedged(t *testing.T) {
+	stderr := newBlockingWriter()
+	e := NewEmitter(0, stderr)
+	// Queue a warn so the flusher's warn goroutine picks it up and
+	// blocks on the wedged writer.
+	e.Warn("this write will block forever")
+	// Small yield so the warn goroutine picks up the message before
+	// Close fires — otherwise the drain loop empties warnCh cleanly.
+	time.Sleep(20 * time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = e.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+		// success: Close returned even though stderr is wedged
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close blocked on wedged stderr — P1 regression")
+	}
+	// Unblock the warn writer so the goroutine exits and -race is
+	// happy at test teardown.
+	close(stderr.blocked)
+}
+
+// TestClose_Idempotence_ReturnsEmptyOnSecondCall verifies spec §3.1
+// contract: subsequent Close calls return an empty slice + nil error,
+// not the cached record slice.
+func TestClose_Idempotence_ReturnsEmptyOnSecondCall(t *testing.T) {
+	e := NewEmitter(0, io.Discard)
+	_ = e.Emit(context.Background(), MetricTaskSuccessRate, true, nil)
+	first, err := e.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 {
+		t.Fatalf("first Close: want 1 record, got %d", len(first))
+	}
+	second, err := e.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != nil {
+		t.Fatalf("second Close: want nil slice per spec §3.1, got %v", second)
+	}
+}

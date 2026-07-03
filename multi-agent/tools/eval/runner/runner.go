@@ -244,7 +244,13 @@ func Run(ctx context.Context, opts Opts) Result {
 	// Labels live under `<workloadDir>/../labels/` (§F4 layout in
 	// tests/eval/labels/workloads/*.labels.json); derive that from the
 	// runner's --workload-dir flag rather than hard-coding.
-	labelsDir := filepath.Join(filepath.Dir(opts.WorkloadDir), "labels")
+	// filepath.Clean strips a trailing slash — without it,
+	// `--workload-dir=tests/eval/workloads/` would evaluate
+	// filepath.Dir to `tests/eval/workloads` and labelsDir to a
+	// nonexistent `tests/eval/workloads/labels`, silently disabling
+	// WrongContextFailureRate. Shell tab-completion frequently adds
+	// the slash, so this must be defended.
+	labelsDir := filepath.Join(filepath.Dir(filepath.Clean(opts.WorkloadDir)), "labels")
 	probes.EmitWrongContext(ctx, emitter, ws.Root, labelsDir, spec.ID,
 		oracleOutForProbes, opts.Stderr)
 
