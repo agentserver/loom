@@ -23,12 +23,17 @@ type Hit struct {
 	Detail  string  `json:"detail,omitempty"`
 }
 
-// PackageHit is a driver-side view of a userspace search result. See
-// spec §2 for the position-derived Rank rationale.
+// PackageHit is a driver-side view of a userspace search result.
+// Score is position-derived by the driver (packageHitsToHits below);
+// the userspace API doesn't expose a per-row bm25 today. If a future
+// userspace change adds a per-row score, add a `Rank` field HERE and
+// wire the adapter in cmd/driver-agent/main.go — the previous
+// PackageHit.Rank field was dead (never populated) and was removed
+// per PR #71 review P1-B4-1 to prevent a future caller from setting
+// it and having it silently ignored.
 type PackageHit struct {
 	Slug        string
 	Description string
-	Rank        float64
 }
 
 // UserspaceSearcher is the narrow surface Lookup needs from the
@@ -111,9 +116,19 @@ const lookupQueryMaxLen = 256
 const lookupResultCap = 20
 
 func sanitizeLookupQuery(raw string) string {
+	return sanitizeLookupQueryWithOptions(raw, true /*logTruncation*/)
+}
+
+// sanitizeLookupQueryWithOptions is the shared implementation. When
+// logTruncation is false the caller wants a silent sanitisation
+// (used by the ablation-log path so an ablated call still produces
+// exactly ONE log line — see PR #71 review P1-B4-2).
+func sanitizeLookupQueryWithOptions(raw string, logTruncation bool) string {
 	q := raw
 	if len(q) > lookupQueryMaxLen {
-		log.Printf("driver.Lookup: query truncated from %d to %d chars", len(q), lookupQueryMaxLen)
+		if logTruncation {
+			log.Printf("driver.Lookup: query truncated from %d to %d chars", len(q), lookupQueryMaxLen)
+		}
 		q = q[:lookupQueryMaxLen]
 	}
 	q = sanitizerRE.ReplaceAllString(q, "")
@@ -154,17 +169,14 @@ func Lookup(ctx context.Context, query string) []Hit {
 	// an ablated call is one log line and nothing else.
 	if IsNoRegistryLookup() {
 		hp := hashPrefix(query)
-		// Sanitize INLINE (without emitting the truncation log)
-		// purely so the ablation log line carries a stable, safe
-		// query rendering. Explicit inline avoids calling
-		// sanitizeLookupQuery which log-warns on truncation.
-		q := query
-		if len(q) > lookupQueryMaxLen {
-			q = q[:lookupQueryMaxLen]
-		}
-		q = sanitizerRE.ReplaceAllString(q, "")
-		q = whitespaceCollapseRE.ReplaceAllString(q, " ")
-		q = strings.TrimSpace(q)
+		// Use the SHARED sanitizer (silent-truncation mode) so the
+		// ablation log line renders exactly what a non-ablated call
+		// would send to FTS5 — including the AND/OR/NOT/NEAR
+		// lowercasing. Previously the ablation branch had its own
+		// inline sanitiser that skipped the operator-lowercase step,
+		// producing inconsistent log renderings between the two
+		// paths. Fixed per PR #71 review P1-B4-2.
+		q := sanitizeLookupQueryWithOptions(query, false /*logTruncation*/)
 		// §7 (h): cap the log-side render at 64 chars so an
 		// alphanumeric secret-shaped input (which the sanitizer
 		// cannot strip because letters/digits are legitimate query
@@ -184,31 +196,48 @@ func Lookup(ctx context.Context, query string) []Hit {
 	hp := hashPrefix(query)
 	bumpLookupQuery()
 
-	// Registry side — read the per-slave in-process view.
-	names, descHashFn := snapshotAll()
-	_ = descHashFn // reserved; not used for lookup matching yet
-	registryHits := searchRegistryView(sanitized, names)
-
-	// Userspace side — nil-safe.
-	deps := getLookupDeps()
-	var userspaceHits []Hit
-	if deps.UserspaceStore == nil {
-		userspaceStoreWarnOnce.Do(func() {
-			log.Printf("[warn] LookupDeps.UserspaceStore unwired — userspace search disabled for this process")
-		})
+	// Empty-sanitised-query guard. When the caller sends
+	// all-punctuation / emoji / meta chars, sanitized == "" and
+	// SearchPackagesForIdentity(q="") would fall into its
+	// "list-all-packages" branch (up to lookupResultCap unrelated
+	// rows), which the metric writer would count as HITS — a caller
+	// sending `""""""""` could artificially lift
+	// RegistryLookupHitRate. Short-circuit here and still write a
+	// 0-hit sample so per-run denominator stays correct.
+	var (
+		registryHits  []Hit
+		userspaceHits []Hit
+		merged        []Hit
+	)
+	if sanitized == "" {
+		log.Printf("driver.Lookup: sanitised query empty (raw len=%d); returning 0 hits", len(query))
 	} else {
-		rows, err := deps.UserspaceStore.SearchPackagesForIdentity(sanitized, deps.WorkspaceID, deps.UserID, "", lookupResultCap)
-		if err != nil {
-			log.Printf("driver.Lookup: userspace search error (registry-only degrade): %v", err)
+		// Registry side — read the per-slave in-process view.
+		names, descHashFn := snapshotAll()
+		_ = descHashFn // reserved; not used for lookup matching yet
+		registryHits = searchRegistryView(sanitized, names)
+
+		// Userspace side — nil-safe.
+		deps := getLookupDeps()
+		if deps.UserspaceStore == nil {
+			userspaceStoreWarnOnce.Do(func() {
+				log.Printf("[warn] LookupDeps.UserspaceStore unwired — userspace search disabled for this process")
+			})
 		} else {
-			userspaceHits = packageHitsToHits(rows)
+			rows, err := deps.UserspaceStore.SearchPackagesForIdentity(sanitized, deps.WorkspaceID, deps.UserID, "", lookupResultCap)
+			if err != nil {
+				log.Printf("driver.Lookup: userspace search error (registry-only degrade): %v", err)
+			} else {
+				userspaceHits = packageHitsToHits(rows)
+			}
+		}
+
+		merged = mergeAndCap(registryHits, userspaceHits, lookupResultCap)
+		if len(merged) > 0 {
+			bumpLookupHit()
 		}
 	}
-
-	merged := mergeAndCap(registryHits, userspaceHits, lookupResultCap)
-	if len(merged) > 0 {
-		bumpLookupHit()
-	}
+	deps := getLookupDeps()
 
 	// Sample-writer — nil-safe.
 	sample := RegistryLookupSample{

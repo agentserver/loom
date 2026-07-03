@@ -200,6 +200,68 @@ func TestLookup_SanitizerStripsQuotesAndCarets(t *testing.T) {
 	}
 }
 
+// TestLookup_AblationLogLowercasesFTS5Operators — PR #71 review
+// P1-B4-2: the ablation-log path must run the SAME sanitisation as
+// the FTS5-bound path, so a raw ablated call `foo AND bar` is
+// rendered `foo and bar` (not `foo AND bar`). Prevents subtle
+// operator-visibility drift between the two branches.
+func TestLookup_AblationLogLowercasesFTS5Operators(t *testing.T) {
+	buf := captureLogs(t)
+	setupLookup(t, &mockUserspace{}, &sampleCapture{})
+	noRegistryLookup = true
+	defer resetNoRegistryLookupForTest()
+
+	Lookup(context.Background(), "foo AND bar OR baz NEAR zap NOT quux")
+	got := buf.String()
+	for _, upper := range []string{"AND", "OR", "NEAR", "NOT"} {
+		// Whole-word check so we don't false-positive on a token
+		// that happens to embed the letters.
+		if strings.Contains(" "+got+" ", " "+upper+" ") {
+			t.Fatalf("ablation log left uppercase operator %q in %q — should be lowercased like the non-ablated path", upper, got)
+		}
+	}
+}
+
+// TestLookup_EmptySanitisedQueryReturnsZeroHits — P1 fresh-review
+// finding: when the caller's input sanitises to empty (all
+// punctuation / emoji / meta chars), Lookup must NOT call
+// SearchPackagesForIdentity(q="") (which falls into the
+// "list-all-packages" branch and would inflate
+// RegistryLookupHitRate). Assert: 0 hits, no userspace call, the
+// query counter still bumps (denominator), the hit counter does
+// NOT bump (numerator), sample still written with hit_count=0.
+func TestLookup_EmptySanitisedQueryReturnsZeroHits(t *testing.T) {
+	us := &mockUserspace{rows: []PackageHit{{Slug: "unrelated_a"}, {Slug: "unrelated_b"}}}
+	sc := &sampleCapture{}
+	setupLookup(t, us, sc)
+
+	beforeQ := lookupQueries.Load()
+	beforeH := lookupHits.Load()
+
+	// All punctuation. Sanitiser strips every char → "".
+	hits := Lookup(context.Background(), `!@#$%^&*()`)
+	if len(hits) != 0 {
+		t.Fatalf("empty-sanitised query must return 0 hits, got %d: %+v", len(hits), hits)
+	}
+	if len(us.callArgs) != 0 {
+		t.Fatalf("userspace MUST NOT be called for empty-sanitised query, got %d calls: %v", len(us.callArgs), us.callArgs)
+	}
+	if got := lookupQueries.Load(); got != beforeQ+1 {
+		t.Fatalf("queries counter should still bump (denominator), before=%d after=%d", beforeQ, got)
+	}
+	if got := lookupHits.Load(); got != beforeH {
+		t.Fatalf("hits counter must NOT bump, before=%d after=%d", beforeH, got)
+	}
+	// Sample still written with hit_count=0.
+	samples := sc.snapshot()
+	if len(samples) != 1 {
+		t.Fatalf("want 1 sample row, got %d", len(samples))
+	}
+	if samples[0].HitCount != 0 {
+		t.Fatalf("sample hit_count = %d, want 0", samples[0].HitCount)
+	}
+}
+
 // --- §7 (b) result caps ---
 
 func TestLookup_FTSResultCapAt20(t *testing.T) {
