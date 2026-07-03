@@ -118,9 +118,17 @@ trap {
 
 # --- constants ---------------------------------------------------------
 
+# Get-WhitelistedEnv + ALWAYS_ENV_KEYS + IFSET_ENV_KEYS all live in
+# deploy.internal.psm1 so Pester unit tests can Import-Module them
+# without dot-sourcing this whole CLI (fresh-review P1-4 fix, round 8).
+Import-Module -Force -Global (Join-Path $PSScriptRoot 'deploy.internal.psm1')
+
 $script:WELL_KNOWN_PORTS = @(22, 23, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995, 3389, 5432, 6379, 8080, 8443)
-$script:ALWAYS_ENV_KEYS = @('PATH', 'HOME', 'LANG', 'LC_ALL', 'TZ', 'USER', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'SystemRoot', 'SystemDrive', 'ComSpec')
-$script:IFSET_ENV_KEYS  = @('AGENTSERVER_ROOT', 'MODELSERVER_ROOT', 'APP_ROOT', 'MOCK_MODEL_URL')
+# Re-export the module's whitelist arrays into the script scope so
+# call sites (`emit_dry_run` planned_env_whitelist block) can still
+# reference $script:ALWAYS_ENV_KEYS / $script:IFSET_ENV_KEYS.
+$script:ALWAYS_ENV_KEYS = $ALWAYS_ENV_KEYS
+$script:IFSET_ENV_KEYS  = $IFSET_ENV_KEYS
 $script:READY_TIMEOUT_DEFAULT = 30
 
 # --- mode resolution ---------------------------------------------------
@@ -210,10 +218,15 @@ function Assert-Port {
 # Parse + validate → assign back as [int] so subsequent code paths
 # that use $ObserverPort in an integer context (Wait-TcpListen,
 # JSON emit) see a number, not the string parameter value.
+# Validate ALL four ports unconditionally — fresh-review P2-1 (round
+# 8) noted that skipping -StubPort in prod mode was asymmetric with
+# the Linux side and would silently allow a later regression to
+# accept a blacklisted stub port if the shared topology-emit codepath
+# ever consulted $StubPort in prod.
 $ObserverPort = Assert-Port -Name '-ObserverPort' -Value $ObserverPort
 $DriverPort   = Assert-Port -Name '-DriverPort'   -Value $DriverPort
 $SlavePort    = Assert-Port -Name '-SlavePort'    -Value $SlavePort
-if ($ResolvedMode -eq 'stub') { $StubPort = Assert-Port -Name '-StubPort' -Value $StubPort }
+$StubPort     = Assert-Port -Name '-StubPort'     -Value $StubPort
 
 # Pairwise distinct.
 $ports = @{
@@ -236,41 +249,10 @@ if ($ResolvedMode -eq 'stub' -and $AllowModelKeyPassthrough) {
     throw "-AllowModelKeyPassthrough is only valid with -Prod (spec §7(g); the stub has no model plane)"
 }
 
-# --- env whitelist (§7(g)) --------------------------------------------
-
-function Get-WhitelistedEnv {
-    param([string]$Mode, [switch]$AllowModelKey)
-    $out = @{}
-    foreach ($k in $script:ALWAYS_ENV_KEYS) {
-        $v = [Environment]::GetEnvironmentVariable($k)
-        if ($null -eq $v) { $v = '' }
-        $out[$k] = $v
-    }
-    foreach ($k in $script:IFSET_ENV_KEYS) {
-        $v = [Environment]::GetEnvironmentVariable($k)
-        if (-not [string]::IsNullOrEmpty($v)) {
-            $out[$k] = $v
-        }
-    }
-    # LOOM_* prefix (require ≥1 char after prefix).
-    foreach ($e in [Environment]::GetEnvironmentVariables().GetEnumerator()) {
-        $k = [string]$e.Key
-        if ($k.Length -gt 5 -and $k.StartsWith('LOOM_')) {
-            $out[$k] = [string]$e.Value
-        }
-    }
-    if ($Mode -eq 'prod' -and $AllowModelKey) {
-        foreach ($k in 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY') {
-            $v = [Environment]::GetEnvironmentVariable($k)
-            if (-not [string]::IsNullOrEmpty($v)) {
-                Write-Host "deploy.ps1: passing $k through to subprocesses" -InformationAction Ignore
-                [System.Console]::Error.WriteLine("deploy.ps1: passing $k through to subprocesses")
-                $out[$k] = $v
-            }
-        }
-    }
-    return $out
-}
+# Get-WhitelistedEnv is provided by deploy.internal.psm1 (imported at
+# top of file). Keeping it out of this CLI file means Pester unit
+# tests can Import-Module the .psm1 directly without any regex-strip
+# fragility. See deploy.internal.psm1 + fresh-review P1-4 (round 8).
 
 # --- dry-run branch ---------------------------------------------------
 
@@ -294,7 +276,17 @@ function Get-PlannedCommands {
     if ($ResolvedMode -eq 'stub') {
         return @(
             @((Join-Path $BinDir 'agentserver-stub.windows-amd64.exe'), '--listen', "127.0.0.1:$StubPort", '--workspace-id', 'auto'),
-            @('<observer-inline-render>', (Join-Path $LoomHome 'observer\observer.yaml'), '--api-key', '<REDACTED>'),
+            # <observer-inline-render> is a plan placeholder (spec §3.2
+            # clause 2): deploy.ps1 substitutes __LISTEN_ADDR__ / __LOOM_HOME__
+            # / __WS_APIKEY__ from windows/observer/config.yaml.template
+            # into $LoomHome\observer\observer.yaml. Mirrors the
+            # <yq-patch> shape used elsewhere in the argv list.
+            @('<observer-inline-render>',
+              (Join-Path $PSScriptRoot 'observer\config.yaml.template'),
+              (Join-Path $LoomHome 'observer\observer.yaml'),
+              '__LISTEN_ADDR__=127.0.0.1:' + $ObserverPort,
+              '__LOOM_HOME__=' + (Join-Path $LoomHome 'observer'),
+              '__WS_APIKEY__=<REDACTED>'),
             @((Join-Path $LoomHome 'observer\observer-server.exe'), '-config', (Join-Path $LoomHome 'observer\observer.yaml')),
             @((Join-Path $PSScriptRoot 'slave\install.ps1'), '-Name', 'eval-slave', '-ObserverUrl', "http://127.0.0.1:$ObserverPort", '-Workspace', 'ws-eval-auto', '-LoomHome', (Join-Path $LoomHome 'slave'), '-Bin', (Join-Path $BinDir 'slave-agent.windows-amd64.exe')),
             @('<yq-patch>', (Join-Path $LoomHome 'slave\config.yaml'), "server.url=http://127.0.0.1:$StubPort", 'credentials.*=<REDACTED>', 'daemon.auto_start=false', "daemon.listen=127.0.0.1:$SlavePort"),
@@ -413,7 +405,7 @@ function Test-ProdPreflight {
     }
     $slave_cfg = Get-Content -Raw -LiteralPath $slave_yaml
     foreach ($field in 'proxy_token', 'short_id', 'workspace_id') {
-        if (-not ($slave_cfg -match "(?m)^\s*${field}\s*:\s*[\`"']?\S+")) {
+        if (-not ($slave_cfg -match "(?m)^\s*${field}\s*:\s*[\`"']?[^`"'\s]+")) {
             $script:ExitCode = 2; throw "prod preflight failed: $slave_yaml credentials.$field is empty; see tests/prod_test/E2E_RUNBOOK.md:83-108"
         }
     }
@@ -445,7 +437,7 @@ function Test-ProdPreflight {
     }
     $driver_cfg = Get-Content -Raw -LiteralPath $driver_yaml
     foreach ($field in 'proxy_token', 'short_id') {
-        if (-not ($driver_cfg -match "(?m)^\s*${field}\s*:\s*[\`"']?\S+")) {
+        if (-not ($driver_cfg -match "(?m)^\s*${field}\s*:\s*[\`"']?[^`"'\s]+")) {
             $script:ExitCode = 2; throw "prod preflight failed: $driver_yaml credentials.$field is empty; see tests/prod_test/E2E_RUNBOOK.md:83-108"
         }
     }
@@ -522,29 +514,75 @@ function Invoke-Whitelisted {
 }
 
 function Start-Sub {
+    # Spawn a long-running background subprocess with (a) stdout+stderr
+    # redirected to a file so the process never wedges on a full pipe,
+    # and (b) an env that carries only the whitelisted keys per §7(g).
+    #
+    # PowerShell's Start-Process gives us (a) via -RedirectStandardOutput
+    # but no way to replace the child env (its -Environment merges into
+    # the current process env, and ProcessStartInfo.EnvironmentVariables
+    # is ignored when Start-Process is used). To get both, we swap the
+    # CURRENT PROCESS env for the whitelisted set just before the child
+    # inherits it, then restore. This is safe because deploy.ps1 is
+    # single-threaded and the swap window is bounded to a single Start-
+    # Process call.
+    #
+    # Previous implementation (round 1..6) used a raw ProcessStartInfo
+    # with RedirectStandardOutput=true and never read the resulting
+    # pipes; every long-running child wedged after ~4-64 KiB of stdout.
+    # Codex fresh-review P0-1 (round 8).
     param([string]$Role, [string]$LogPath, [string]$FilePath, [string[]]$ArgList)
     $null = New-Item -ItemType Directory -Force -Path (Split-Path $LogPath)
     $env_map = Get-WhitelistedEnv -Mode $ResolvedMode -AllowModelKey:$AllowModelKeyPassthrough
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $FilePath
-    foreach ($a in $ArgList) { $null = $psi.ArgumentList.Add($a) }
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError  = $true
-    $psi.UseShellExecute = $false
-    # Cleared env + explicit whitelist.
-    $psi.EnvironmentVariables.Clear()
-    foreach ($kv in $env_map.GetEnumerator()) {
-        $psi.EnvironmentVariables.Add($kv.Key, $kv.Value)
+
+    # Snapshot current env; then clear and repopulate from $env_map.
+    $saved = @{}
+    foreach ($e in [Environment]::GetEnvironmentVariables().GetEnumerator()) {
+        $saved[[string]$e.Key] = [string]$e.Value
     }
-    $proc = [System.Diagnostics.Process]::Start($psi)
+    try {
+        foreach ($k in @($saved.Keys)) {
+            [Environment]::SetEnvironmentVariable($k, $null, 'Process')
+        }
+        foreach ($kv in $env_map.GetEnumerator()) {
+            [Environment]::SetEnvironmentVariable([string]$kv.Key, [string]$kv.Value, 'Process')
+        }
+
+        # Start-Process gives us real file-redirected stdout/stderr
+        # (no pipe wedge risk) + a Process object for PID/PGID capture.
+        $spArgs = @{
+            FilePath              = $FilePath
+            ArgumentList          = $ArgList
+            RedirectStandardOutput = $LogPath
+            RedirectStandardError  = $LogPath + '.err'
+            PassThru              = $true
+            NoNewWindow           = $true
+            WindowStyle           = 'Hidden'
+        }
+        $proc = Start-Process @spArgs
+    } finally {
+        # Restore parent-process env — clear again first so an added
+        # key doesn't linger.
+        foreach ($k in @([Environment]::GetEnvironmentVariables().Keys)) {
+            [Environment]::SetEnvironmentVariable([string]$k, $null, 'Process')
+        }
+        foreach ($kv in $saved.GetEnumerator()) {
+            [Environment]::SetEnvironmentVariable([string]$kv.Key, [string]$kv.Value, 'Process')
+        }
+    }
+
     $script:SpawnedPids.Add($proc.Id) | Out-Null
     $pf = Join-Path $PidsDir "$Role.pid"
     Set-Content -LiteralPath $pf -Value $proc.Id
-    Write-Host "deploy.ps1: spawned $Role pid=$($proc.Id) (log: $LogPath)"
+    Write-Host "deploy.ps1: spawned $Role pid=$($proc.Id) (log: $LogPath, stderr: $LogPath.err)"
 }
 
 function Wait-TcpListen {
-    param([string]$Address = '127.0.0.1', [int]$Port, [int]$TimeoutSec = $script:READY_TIMEOUT_DEFAULT)
+    param(
+        [string]$Address = '127.0.0.1',
+        [int]$Port,
+        [int]$TimeoutSec = $(if ($env:LOOM_DEPLOY_READY_TIMEOUT_SEC) { [int]$env:LOOM_DEPLOY_READY_TIMEOUT_SEC } else { $script:READY_TIMEOUT_DEFAULT })
+    )
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     while ((Get-Date) -lt $deadline) {
         try {
@@ -563,7 +601,10 @@ function Wait-TcpListen {
 }
 
 function Wait-HttpAny {
-    param([string]$Url, [int]$TimeoutSec = 5)
+    param(
+        [string]$Url,
+        [int]$TimeoutSec = $(if ($env:LOOM_DEPLOY_READY_TIMEOUT_SEC) { [int]$env:LOOM_DEPLOY_READY_TIMEOUT_SEC } else { 5 })
+    )
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     while ((Get-Date) -lt $deadline) {
         try {
@@ -572,6 +613,25 @@ function Wait-HttpAny {
         } catch {
             if ($_.Exception.Response) { return $true }
         }
+        Start-Sleep -Milliseconds 200
+    }
+    return $false
+}
+
+function Wait-HttpOk {
+    # Poll a URL until it returns HTTP 200 (strict). Used for the stub
+    # /healthz gate — TCP LISTEN alone can win the race before the HTTP
+    # mux mounts (P1-1 fresh-review round 8).
+    param(
+        [string]$Url,
+        [int]$TimeoutSec = $(if ($env:LOOM_DEPLOY_READY_TIMEOUT_SEC) { [int]$env:LOOM_DEPLOY_READY_TIMEOUT_SEC } else { $script:READY_TIMEOUT_DEFAULT })
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $r = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
+            if ($r -and $r.StatusCode -eq 200) { return $true }
+        } catch {}
         Start-Sleep -Milliseconds 200
     }
     return $false
@@ -586,7 +646,13 @@ function Invoke-BringupStub {
     }
     Start-Sub -Role 'agentserver-stub' -LogPath (Join-Path $LoomHome 'logs\agentserver-stub.log') `
               -FilePath $stub_bin -ArgList @('--listen', "127.0.0.1:$StubPort", '--workspace-id', 'auto')
-    if (-not (Wait-TcpListen -Port $StubPort)) { $script:StageFailed = $true; $script:ExitCode = 4; throw "stub :$StubPort did not LISTEN" }
+    # Stub readiness: HTTP-200 on /healthz (matches spec §4.2 stub row 1
+    # and Linux `wait_http_ok`). TCP LISTEN alone races the mux mount on
+    # slow VMs — see fresh-review P1-1 round 8.
+    if (-not (Wait-HttpOk -Url "http://127.0.0.1:$StubPort/healthz")) {
+        $script:StageFailed = $true; $script:ExitCode = 4
+        throw "stub :$StubPort /healthz did not respond 200 within timeout"
+    }
 
     # observer inline-render (§3.2 clause 2).
     $obs_dir = Join-Path $LoomHome 'observer'
@@ -770,7 +836,11 @@ function Get-CredFromYaml {
 }
 
 function Wait-Whoami {
-    param([int]$Port, [string]$ProxyToken, [int]$TimeoutSec = $script:READY_TIMEOUT_DEFAULT)
+    param(
+        [int]$Port,
+        [string]$ProxyToken,
+        [int]$TimeoutSec = $(if ($env:LOOM_DEPLOY_READY_TIMEOUT_SEC) { [int]$env:LOOM_DEPLOY_READY_TIMEOUT_SEC } else { $script:READY_TIMEOUT_DEFAULT })
+    )
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     while ((Get-Date) -lt $deadline) {
         try {
@@ -812,26 +882,35 @@ try {
     }
     # Topology emit — the Bash helper is OS-agnostic in that it reads only
     # its CLI + /proc-style sources; on Windows we compute the payload in
-    # PowerShell natively to avoid a bash dependency.
-    $topo = [ordered]@{
-        schema_version         = 1
-        host                   = Get-RedactedHost
-        os                     = 'windows'
-        os_release             = [System.Environment]::OSVersion.VersionString
-        arch                   = if ($env:PROCESSOR_ARCHITECTURE -match 'ARM') { 'arm64' } else { 'amd64' }
-        kernel                 = [System.Environment]::OSVersion.Version.ToString()
-        cpu_count              = [Environment]::ProcessorCount
-        mem_bytes              = (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction SilentlyContinue).TotalPhysicalMemory
-        mode                   = $ResolvedMode
-        component_ports        = Get-ComponentPorts
-        collected_at_unix      = [int64][math]::Floor(([DateTime]::UtcNow - (Get-Date '1970-01-01Z').ToUniversalTime()).TotalSeconds)
-        deploy_script_version  = "wt2-deploy-scripts@0000000"
-    }
-    $topoJson = $topo | ConvertTo-Json -Compress -Depth 6
-    if (-not [string]::IsNullOrEmpty($TopologyOut)) {
-        Set-Content -LiteralPath $TopologyOut -Value $topoJson
-    } else {
-        Write-Output $topoJson
+    # PowerShell natively to avoid a bash dependency. Wrap in a nested
+    # try/catch that sets $script:ExitCode = 5 so a topology write
+    # failure (permission error on -TopologyOut, WMI hiccup, JSON
+    # serialisation edge) surfaces as the documented exit code, not the
+    # default preflight code (fresh-review P1-3 round 8).
+    try {
+        $topo = [ordered]@{
+            schema_version         = 1
+            host                   = Get-RedactedHost
+            os                     = 'windows'
+            os_release             = [System.Environment]::OSVersion.VersionString
+            arch                   = if ($env:PROCESSOR_ARCHITECTURE -match 'ARM') { 'arm64' } else { 'amd64' }
+            kernel                 = [System.Environment]::OSVersion.Version.ToString()
+            cpu_count              = [Environment]::ProcessorCount
+            mem_bytes              = (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction SilentlyContinue).TotalPhysicalMemory
+            mode                   = $ResolvedMode
+            component_ports        = Get-ComponentPorts
+            collected_at_unix      = [int64][math]::Floor(([DateTime]::UtcNow - (Get-Date '1970-01-01Z').ToUniversalTime()).TotalSeconds)
+            deploy_script_version  = "wt2-deploy-scripts@0000000"
+        }
+        $topoJson = $topo | ConvertTo-Json -Compress -Depth 6
+        if (-not [string]::IsNullOrEmpty($TopologyOut)) {
+            Set-Content -LiteralPath $TopologyOut -Value $topoJson
+        } else {
+            Write-Output $topoJson
+        }
+    } catch {
+        $script:ExitCode = 5
+        throw "topology emit failed: $_"
     }
     exit 0
 } catch {
