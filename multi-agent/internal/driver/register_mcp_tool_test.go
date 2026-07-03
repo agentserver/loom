@@ -305,6 +305,43 @@ func TestRegisterSlaveMCP_HappyPath_PublishesRegistryHash(t *testing.T) {
 	}
 }
 
+// TestRegisterSlaveMCP_RejectsHostileSourcePath — PR #71 round-2
+// review P2-A: register_slave_mcp tool-boundary must reject
+// absolute / traversal / null-byte / backslash paths the same way
+// the pipeline stage-3 does.
+func TestRegisterSlaveMCP_RejectsHostileSourcePath(t *testing.T) {
+	bad := []string{
+		"/etc/shadow",
+		"../../attacker.py",
+		"generated_mcp/../../etc/passwd",
+		"%2e%2e/x.js",
+		"foo\x00/evil.py",
+		"C:\\evil.py",
+		`\\server\share\evil.py`,
+	}
+	for _, bp := range bad {
+		t.Run(bp, func(t *testing.T) {
+			sdk := &fakeSDK{
+				delegateFunc: func(req agentsdk.DelegateTaskRequest) (*agentsdk.DelegateTaskResponse, error) {
+					t.Fatalf("must not delegate for hostile source_path %q", bp)
+					return nil, nil
+				},
+			}
+			tools := newTestTools(t, sdk)
+			tools.cfg.Observer.WorkspaceID = "ws-abc12345"
+			tool := toolByName(t, tools, "register_slave_mcp")
+			// Escape quotes / backslashes for the JSON string literal.
+			escaped, err := json.Marshal(bp)
+			require.NoError(t, err)
+			args := `{"target_display_name":"slave-x","spec":` + validTestSpecJSON() +
+				`,"source_path":` + string(escaped) + validAuditFieldsJSON + `}`
+			_, err = tool.Call(context.Background(), json.RawMessage(args))
+			require.Error(t, err, "expected rejection for %q", bp)
+			require.Contains(t, err.Error(), "source_path")
+		})
+	}
+}
+
 // TestRegisterCore_DoesNotWriteAudit — registerCore is the
 // stage-3 entry point for the B2 pipeline; it MUST NOT write an
 // audit row itself.

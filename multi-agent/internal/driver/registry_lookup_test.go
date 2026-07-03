@@ -206,19 +206,34 @@ func TestLookup_SanitizerStripsQuotesAndCarets(t *testing.T) {
 // rendered `foo and bar` (not `foo AND bar`). Prevents subtle
 // operator-visibility drift between the two branches.
 func TestLookup_AblationLogLowercasesFTS5Operators(t *testing.T) {
-	buf := captureLogs(t)
-	setupLookup(t, &mockUserspace{}, &sampleCapture{})
-	noRegistryLookup = true
-	defer resetNoRegistryLookupForTest()
+	// PR #71 round-2 review P2-E: exercise mixed case too, not just
+	// bare uppercase, so a partial toUpper regression would trip
+	// this test.
+	cases := []string{
+		"foo AND bar OR baz NEAR zap NOT quux", // all upper
+		"foo And bar oR baz Near zap NoT quux", // mixed
+		"AND OR NEAR NOT",                       // operators alone
+	}
+	for _, in := range cases {
+		t.Run(in, func(t *testing.T) {
+			buf := captureLogs(t)
+			setupLookup(t, &mockUserspace{}, &sampleCapture{})
+			noRegistryLookup = true
+			defer resetNoRegistryLookupForTest()
 
-	Lookup(context.Background(), "foo AND bar OR baz NEAR zap NOT quux")
-	got := buf.String()
-	for _, upper := range []string{"AND", "OR", "NEAR", "NOT"} {
-		// Whole-word check so we don't false-positive on a token
-		// that happens to embed the letters.
-		if strings.Contains(" "+got+" ", " "+upper+" ") {
-			t.Fatalf("ablation log left uppercase operator %q in %q — should be lowercased like the non-ablated path", upper, got)
-		}
+			Lookup(context.Background(), in)
+			got := buf.String()
+			// After sanitising, no FTS5-reserved token should appear
+			// in the ANY-case form that FTS5 would parse as an
+			// operator. FTS5 treats operator tokens case-insensitively
+			// when they are BARE and UPPER; the sanitiser only
+			// touches upper. So we assert no bare upper form.
+			for _, upper := range []string{"AND", "OR", "NEAR", "NOT"} {
+				if strings.Contains(" "+got+" ", " "+upper+" ") {
+					t.Fatalf("ablation log left uppercase operator %q in %q — should be lowercased like the non-ablated path", upper, got)
+				}
+			}
+		})
 	}
 }
 
@@ -252,13 +267,30 @@ func TestLookup_EmptySanitisedQueryReturnsZeroHits(t *testing.T) {
 	if got := lookupHits.Load(); got != beforeH {
 		t.Fatalf("hits counter must NOT bump, before=%d after=%d", beforeH, got)
 	}
-	// Sample still written with hit_count=0.
+	// Sample still written with all zero-hit fields — PR #71
+	// round-2 asked for tighter inspection here.
 	samples := sc.snapshot()
 	if len(samples) != 1 {
 		t.Fatalf("want 1 sample row, got %d", len(samples))
 	}
-	if samples[0].HitCount != 0 {
-		t.Fatalf("sample hit_count = %d, want 0", samples[0].HitCount)
+	s := samples[0]
+	if s.HitCount != 0 {
+		t.Fatalf("sample hit_count = %d, want 0", s.HitCount)
+	}
+	if s.RegistryHits != 0 {
+		t.Fatalf("sample registry_hits = %d, want 0", s.RegistryHits)
+	}
+	if s.UserspaceHits != 0 {
+		t.Fatalf("sample userspace_hits = %d, want 0", s.UserspaceHits)
+	}
+	if s.TopScore != 0 {
+		t.Fatalf("sample top_score = %v, want 0", s.TopScore)
+	}
+	if s.RunID != "run-testx001" {
+		t.Fatalf("sample run_id = %q, want run-testx001", s.RunID)
+	}
+	if s.QueryHashPrefix == "" || len(s.QueryHashPrefix) != 8 {
+		t.Fatalf("sample query_hash_prefix should still be 8 hex, got %q", s.QueryHashPrefix)
 	}
 }
 

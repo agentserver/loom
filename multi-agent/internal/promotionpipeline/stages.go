@@ -73,7 +73,19 @@ func validateScaffoldSourcePath(p string) error {
 	if p == "" {
 		return nil
 	}
+	// PR #71 round-2 review P2-D: also refuse control chars,
+	// backslash-shaped paths, and null bytes — matches the
+	// register_slave_mcp tool-boundary guard in
+	// driver.validateRegisterSourcePath.
+	for _, r := range p {
+		if r < 0x20 {
+			return ErrInvalidScaffoldSourcePath
+		}
+	}
 	if strings.HasPrefix(p, "/") {
+		return ErrInvalidScaffoldSourcePath
+	}
+	if strings.Contains(p, `\`) {
 		return ErrInvalidScaffoldSourcePath
 	}
 	decoded, err := url.PathUnescape(p)

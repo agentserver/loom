@@ -619,6 +619,12 @@ func TestPipeline_ScaffoldSourcePath_RejectsAbsoluteAndTraversal(t *testing.T) {
 		"../../evil.py",
 		"generated_mcp/../../etc/passwd",
 		"%2e%2e/x.py",
+		// PR #71 round-2 review P2-D: additional shapes.
+		"foo\x00/evil.py",           // null byte
+		"foo\n/etc/passwd",          // newline injection
+		"C:\\evil.py",               // windows drive
+		`\\server\share\evil.py`,    // UNC
+		"safe/..\\evil.py",          // mixed forward + back
 	}
 	for _, bp := range badPaths {
 		t.Run(bp, func(t *testing.T) {
@@ -663,43 +669,55 @@ func TestPipeline_ScaffoldSourcePath_RejectsAbsoluteAndTraversal(t *testing.T) {
 }
 
 // TestPipeline_AcceptanceMarkerInDebugStringDoesNotSpoof — regression
-// guard for the P1 fresh-review finding: a slave whose debug/log
-// field embeds the marker as substring inside another JSON string
-// (e.g. `{"debug":"acceptance_exit_code\":0 emitted"}`) must NOT be
-// mis-parsed as PASS. The parser is JSON-typed now, not
-// substring-based.
+// guard: a slave whose debug/log field embeds the marker as substring
+// inside another JSON string must NOT be mis-parsed as PASS. The
+// parser is JSON-typed now, not substring-based. PR #71 round-2
+// asked for wider attack-shape coverage (P2-D related).
 func TestPipeline_AcceptanceMarkerInDebugStringDoesNotSpoof(t *testing.T) {
-	aud := &recAudit{}
-	ev := &recEvents{}
-	registerCalled := false
-	p, err := New(Deps{
-		Delegate: func(_ context.Context, _, _, skill, _ string, _ int) (string, error) {
-			if skill == "mcp-acceptance" {
-				// No genuine acceptance_exit_code field, only substring
-				// nested inside a string value.
-				return `{"debug":"acceptance_exit_code\":0 was returned by helper"}`, nil
+	spoofs := []struct {
+		name string
+		body string
+	}{
+		{"nested_string_kv", `{"debug":"acceptance_exit_code\":0 was returned by helper"}`},
+		{"array_of_strings", `["acceptance_exit_code:0 in this string"]`},
+		{"unrelated_key", `{"other_field":"nothing here","logs":"acceptance_exit_code=0 message"}`},
+		{"non_json_text", `unparseable text acceptance_exit_code:0 xyz`},
+		{"empty_body", ``},
+		{"empty_object", `{}`},
+	}
+	for _, tc := range spoofs {
+		t.Run(tc.name, func(t *testing.T) {
+			aud := &recAudit{}
+			ev := &recEvents{}
+			registerCalled := false
+			p, err := New(Deps{
+				Delegate: func(_ context.Context, _, _, skill, _ string, _ int) (string, error) {
+					if skill == "mcp-acceptance" {
+						return tc.body, nil
+					}
+					return `{}`, nil
+				},
+				RegisterCall: func(_ context.Context, _ buildspec.Spec, _, _, _ string, _ int) (string, error) {
+					registerCalled = true
+					return "", nil
+				},
+				AuditWrite: aud.write,
+				EventEmit:  ev.emit,
+			})
+			if err != nil {
+				t.Fatal(err)
 			}
-			return `{}`, nil
-		},
-		RegisterCall: func(_ context.Context, _ buildspec.Spec, _, _, _ string, _ int) (string, error) {
-			registerCalled = true
-			return "", nil
-		},
-		AuditWrite: aud.write,
-		EventEmit:  ev.emit,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	outcomes, err := p.Run(context.Background(), validRequest())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if registerCalled {
-		t.Fatal("register MUST NOT run when marker is only a nested substring — §7 (a) C3 tool-poisoning surface")
-	}
-	if outcomes[1].Success {
-		t.Fatal("acceptance stage should be marked failed when marker is nested substring")
+			outcomes, err := p.Run(context.Background(), validRequest())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if registerCalled {
+				t.Fatalf("register MUST NOT run for spoof %q — §7 (a) C3 tool-poisoning surface", tc.name)
+			}
+			if outcomes[1].Success {
+				t.Fatalf("acceptance stage should be marked failed for spoof %q", tc.name)
+			}
+		})
 	}
 }
 

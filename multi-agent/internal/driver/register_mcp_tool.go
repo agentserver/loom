@@ -73,6 +73,15 @@ func (r *registerSlaveMCPTool) Call(ctx context.Context, raw json.RawMessage) (j
 	if args.SourcePath == "" {
 		return nil, &MCPToolError{Message: "source_path is required", Category: observerstore.FailContractViolation}
 	}
+	// PR #71 round-2 review P2-A: apply the same source_path
+	// traversal / absolute / control-char guard the pipeline stage-3
+	// register enforces (validateScaffoldSourcePath). Previously the
+	// tool boundary was UNGUARDED — an LLM-controlled register call
+	// could send `/etc/shadow` or `../../attacker.py` and the value
+	// flowed straight into the register_mcp delegate prompt.
+	if err := validateRegisterSourcePath(args.SourcePath); err != nil {
+		return nil, &MCPToolError{Message: err.Error(), Category: observerstore.FailContractViolation}
+	}
 	spec := buildspec.Normalize(args.Spec)
 	if err := buildspec.Validate(spec); err != nil {
 		return nil, &MCPToolError{Message: "invalid spec: " + err.Error(), Category: observerstore.FailContractViolation}
