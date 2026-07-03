@@ -8,7 +8,6 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -619,7 +618,3 @@ func TestExecutorResume_RejectsNilDeps(t *testing.T) {
 	}
 }
 
-// -------------------------------------------------------------------
-// unused: silence "declared but not used" for fmt if none imported
-// -------------------------------------------------------------------
-var _ = fmt.Sprintf

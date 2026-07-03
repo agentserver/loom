@@ -27,9 +27,22 @@ var (
 
 	// taskIDPattern enforces the §7(d) task_id regex. Compiled once
 	// at init so a later edit cannot loosen it accidentally without
-	// breaking tests.
+	// breaking tests. Consumers OUTSIDE observerstore must call
+	// ValidateTaskID rather than compiling their own regex, so the
+	// definition stays single-sourced (F8).
 	taskIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{8,128}$`)
 )
+
+// ValidateTaskID returns nil if taskID matches
+// ^[A-Za-z0-9_-]{8,128}$; ErrInvalidTaskIDForm otherwise. Single
+// source of truth for the §7(d) regex — driver.ResumeTask calls
+// this rather than compiling its own copy.
+func ValidateTaskID(taskID string) error {
+	if !taskIDPattern.MatchString(taskID) {
+		return ErrInvalidTaskIDForm
+	}
+	return nil
+}
 
 // ------------------------------------------------------------------
 // Sentinel errors (spec §9)
@@ -71,6 +84,17 @@ var ErrConcurrentLease = errors.New("observerstore: concurrent lease holder")
 // than silently succeeding.
 var ErrLeaseLost = errors.New("observerstore: lease lost to another worker")
 
+// ErrNoReservation is returned by Commit when no write_ids row
+// exists for the requested id at all (never Reserved, or purged
+// by Vacuum before Commit). Distinct from ErrLeaseLost, which
+// means the row exists but is held by another worker.
+var ErrNoReservation = errors.New("observerstore: no reservation for id")
+
+// ErrInvalidLeaseTTL is returned by Reserve when req.LeaseTTL <= 0.
+// Distinct from ErrEmptyReserveField so callers can classify
+// programmer bugs vs missing fields.
+var ErrInvalidLeaseTTL = errors.New("observerstore: LeaseTTL must be > 0")
+
 // ErrJournalChainBroken is a retained sentinel for a future
 // hardening worktree that adds per-record hash chaining to the
 // task journal. This worktree never raises it in normal operation.
@@ -95,8 +119,8 @@ func NewWriteID(taskID, conversationID, stepID, targetPath, contentHash string) 
 	if !contentHashPattern.MatchString(contentHash) {
 		return "", ErrInvalidContentHash
 	}
-	if !taskIDPattern.MatchString(taskID) {
-		return "", ErrInvalidTaskIDForm
+	if err := ValidateTaskID(taskID); err != nil {
+		return "", err
 	}
 	h := sha256.New()
 	writeLP(h, taskID)
@@ -175,7 +199,7 @@ func (r ReserveRequest) validate() error {
 		return ErrEmptyReserveField
 	}
 	if r.LeaseTTL <= 0 {
-		return fmt.Errorf("%w: LeaseTTL must be > 0", ErrEmptyReserveField)
+		return ErrInvalidLeaseTTL
 	}
 	return nil
 }
@@ -243,12 +267,12 @@ func (nopMetrics) IncCounter(string, map[string]string) {}
 // nowFn — overridable for lease-expiry tests
 // ------------------------------------------------------------------
 
-// nowFn returns the current UTC time. Tests may swap it via
-// WithClock; production callers get real wall clock. Package
-// variable is unused by store/stager methods — they read from
-// their own struct field so parallel tests with independent
-// clocks don't clobber each other. Kept here for external
-// callers who want the package default.
+// nowFn is the DEFAULT clock: each new SQLiteWriteIDStore /
+// SQLitePayloadStager copies it into its own `now` struct field, so
+// WithWriteIDClock / WithPayloadStagerClock swaps take effect on
+// individual instances without leaking across parallel tests. Kept
+// as a package-level var so external callers who want the same
+// default can reference it.
 var nowFn = func() time.Time { return time.Now().UTC() }
 
 // ------------------------------------------------------------------
@@ -328,6 +352,15 @@ UPDATE write_ids
  WHERE id = ?
    AND committed_at IS NULL
    AND lease_owner = ?;`
+
+	// sqlReserveExtend refreshes lease_expires_at when a worker
+	// re-Reserves its own live-lease row (F5).
+	sqlReserveExtend = `
+UPDATE write_ids
+   SET lease_expires_at = ?
+ WHERE id = ?
+   AND lease_owner = ?
+   AND committed_at IS NULL;`
 )
 
 // rfc3339Nano is the timestamp format used across every text column
@@ -396,14 +429,24 @@ func (s *SQLiteWriteIDStore) Reserve(ctx context.Context, req ReserveRequest) (R
 	case leaseOwner == req.WorkerID:
 		// This worker's own lease is still live — treat as
 		// uncommitted retry (spec §4.1 classifier case 4).
+		// F5: extend the lease. Without this, a slow same-worker
+		// retry after a partial TTL burn could see its own lease
+		// expire mid-write, allowing a foreign worker to steal
+		// and run WriteStep concurrently.
+		if _, err := tx.ExecContext(ctx, sqlReserveExtend,
+			leaseExp, string(req.ID), req.WorkerID); err != nil {
+			return 0, fmt.Errorf("observerstore: reserve extend: %w", err)
+		}
 		state = ReserveUncommitted
 	default:
 		state = ReserveInFlight
 	}
 
-	// 4. Emit audit row.
+	// 4. Emit audit row. run_id is included in the derivation so
+	// two runs Reserving the same id at the same fake-clock instant
+	// with the same outcome don't collide on the audit PK (F7).
 	outcome := state.String()
-	eventID := deriveEventID(req.ID, nowStr, outcome)
+	eventID := deriveEventID(req.ID, req.RunID, nowStr, outcome)
 	if _, err := tx.ExecContext(ctx, sqlReserveEvent,
 		eventID, string(req.ID), req.RunID, req.TaskID, outcome, nowStr); err != nil {
 		return 0, fmt.Errorf("observerstore: reserve audit: %w", err)
@@ -445,7 +488,9 @@ func (s *SQLiteWriteIDStore) Commit(ctx context.Context, req CommitRequest) erro
 		if err := tx.QueryRowContext(ctx, sqlReserveRead, string(req.ID)).
 			Scan(&committedAt, &leaseOwner, new(sql.NullString)); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("observerstore: commit: no reservation for id: %w", ErrLeaseLost)
+				// F6: distinct from ErrLeaseLost — no row ever
+				// existed OR Vacuum purged it before Commit ran.
+				return fmt.Errorf("observerstore: commit id=%s: %w", req.ID, ErrNoReservation)
 			}
 			return fmt.Errorf("observerstore: commit read: %w", err)
 		}
@@ -462,9 +507,9 @@ func (s *SQLiteWriteIDStore) Commit(ctx context.Context, req CommitRequest) erro
 		return ErrLeaseLost
 	}
 
-	// Emit audit row.
+	// Emit audit row. run_id included in derivation (F7).
 	outcome := "commit"
-	eventID := deriveEventID(req.ID, nowStr, outcome)
+	eventID := deriveEventID(req.ID, req.RunID, nowStr, outcome)
 	if _, err := tx.ExecContext(ctx, sqlReserveEvent,
 		eventID, string(req.ID), req.RunID, req.TaskID, outcome, nowStr); err != nil {
 		return fmt.Errorf("observerstore: commit audit: %w", err)
@@ -478,12 +523,22 @@ func (s *SQLiteWriteIDStore) Commit(ctx context.Context, req CommitRequest) erro
 	return nil
 }
 
-// deriveEventID computes event_id = hex(sha256(id || occurred_at || outcome)).
-// Deterministic under retries but PRIMARY KEY prevents double insert.
-func deriveEventID(id WriteID, occurredAt, outcome string) string {
+// deriveEventID computes event_id = hex(sha256(id || run_id ||
+// occurred_at || outcome)). Deterministic under retries but PRIMARY
+// KEY prevents accidental double insert. Includes run_id (F7) so
+// two runs Reserving the same id at the same wall-clock instant
+// with the same outcome don't collide on the audit PK — this
+// matters under fake-clock tests and is defence-in-depth in prod
+// where the sub-nanosecond clock resolution makes collisions
+// astronomically unlikely.
+func deriveEventID(id WriteID, runID, occurredAt, outcome string) string {
 	h := sha256.New()
 	_, _ = h.Write([]byte(id))
+	_, _ = h.Write([]byte("\x1e"))
+	_, _ = h.Write([]byte(runID))
+	_, _ = h.Write([]byte("\x1e"))
 	_, _ = h.Write([]byte(occurredAt))
+	_, _ = h.Write([]byte("\x1e"))
 	_, _ = h.Write([]byte(outcome))
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -629,12 +684,17 @@ func (p *SQLitePayloadStager) ListForStep(ctx context.Context,
 	if taskID == "" || stepID == "" {
 		return nil, ErrEmptyReserveField
 	}
+	// Secondary sort by wp.id (F10) so two rows staged in the same
+	// nanosecond (fake-clock tests, or a burst-write race in prod)
+	// produce a deterministic order — ReconstructSteps's
+	// "most-recent committed / uncommitted" pick becomes stable
+	// across shuffled test runs.
 	const sqlList = `
 SELECT wp.id, wp.sha256, wp.staged_at, wi.committed_at
   FROM write_id_payloads wp
   LEFT JOIN write_ids wi ON wi.id = wp.id
  WHERE wp.task_id = ? AND wp.step_id = ?
- ORDER BY wp.staged_at DESC;`
+ ORDER BY wp.staged_at DESC, wp.id DESC;`
 	rows, err := p.db.QueryContext(ctx, sqlList, taskID, stepID)
 	if err != nil {
 		return nil, fmt.Errorf("observerstore: list payloads: %w", err)

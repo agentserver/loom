@@ -456,15 +456,16 @@ func TestReserve_ExpiredLeaseCanBeStolenOnce(t *testing.T) {
 	}
 }
 
-// TestReserve_AllStatementsRollBackOnAuditFailure — proof that when
-// the audit INSERT fails the whole transaction rolls back.
-// Uses a hostile CHECK-constraint violation by injecting a bad
-// outcome via an out-of-band SQL to force the audit insert to fail.
-// Actually simpler: pass an invalid RunID that's already used
-// with a duplicate event_id. We rig this by pre-inserting a row
-// with the deterministic event_id that Reserve would compute.
-func TestReserve_AllStatementsRollBackOnAuditFailure(t *testing.T) {
-	t.Parallel()
+// checkAuditFailureRollsBackAll asserts spec §7(g): when the audit
+// INSERT inside Reserve's transaction fails (via pre-seeded PK
+// conflict on the deterministic event_id), the whole transaction
+// rolls back — no write_ids row appears, only the pre-seeded audit
+// row remains. Shared between TestReserve_AllStatementsRollBackOnAuditFailure
+// and TestReserveAndAuditRollBackTogetherOnDBError so both spec-named
+// tests exercise the invariant via their OWN testing.T (avoiding the
+// F3 anti-pattern of calling one Test* from another).
+func checkAuditFailureRollsBackAll(t *testing.T) {
+	t.Helper()
 	fixed := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
 	clk := newFakeClock(fixed)
 	store, _ := newTestStoreAt(t, clk)
@@ -472,29 +473,34 @@ func TestReserve_AllStatementsRollBackOnAuditFailure(t *testing.T) {
 	ctx := context.Background()
 	id := mustNewWriteID(t, validTaskID, validConvID, validStepID, validTargetPath, validHash)
 	nowStr := formatTS(fixed)
-	eventID := deriveEventID(id, nowStr, "fresh")
+	req := makeReq(id, "w1")
+	eventID := deriveEventID(id, req.RunID, nowStr, "fresh")
 
-	// Pre-seed the audit table with a row that will conflict.
+	// Pre-seed the audit table with a row that will PK-conflict on
+	// the exact event_id Reserve is about to compute.
 	if _, err := db.ExecContext(ctx, `
 INSERT INTO write_id_reserve_events (event_id, id, run_id, task_id, outcome, occurred_at)
-VALUES (?, ?, 'run-x', ?, 'fresh', ?);`,
-		eventID, string(id), validTaskID, nowStr); err != nil {
+VALUES (?, ?, ?, ?, 'fresh', ?);`,
+		eventID, string(id), req.RunID, validTaskID, nowStr); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
-	// Reserve should fail because of PK conflict on the audit insert.
-	_, err := store.Reserve(ctx, makeReq(id, "w1"))
+	_, err := store.Reserve(ctx, req)
 	if err == nil {
 		t.Fatal("expected error from audit insert PK conflict")
 	}
-	// write_ids should be empty (rolled back).
 	if got := countRows(t, db, "write_ids"); got != 0 {
 		t.Errorf("write_ids rows = %d; want 0 (rolled back)", got)
 	}
-	// The pre-seeded audit row must survive.
 	if got := countRows(t, db, "write_id_reserve_events"); got != 1 {
 		t.Errorf("write_id_reserve_events rows = %d; want 1 (the seed)", got)
 	}
+}
+
+// TestReserve_AllStatementsRollBackOnAuditFailure — plan-only wrapper.
+func TestReserve_AllStatementsRollBackOnAuditFailure(t *testing.T) {
+	t.Parallel()
+	checkAuditFailureRollsBackAll(t)
 }
 
 // TestReserve_SQLMetaCharactersRoundTrip.
@@ -655,7 +661,8 @@ func TestReserve_EventIDDeterministicallyDerived(t *testing.T) {
 		t.Fatal(err)
 	}
 	nowStr := formatTS(fixed)
-	wantEventID := deriveEventID(id, nowStr, "fresh")
+	req := makeReq(id, "w1")
+	wantEventID := deriveEventID(id, req.RunID, nowStr, "fresh")
 	var gotEventID string
 	if err := store.db.QueryRow(
 		"SELECT event_id FROM write_id_reserve_events WHERE id = ? AND outcome = 'fresh'",
@@ -765,10 +772,12 @@ func TestCommitEmitsAuditRow(t *testing.T) {
 	}
 }
 
-// TestReserveAndAuditRollBackTogetherOnDBError — spec-named alias
-// for the PK-conflict rollback test above.
+// TestReserveAndAuditRollBackTogetherOnDBError — spec-named.
+// Independent Test wrapper (not a function-call alias, per fresh-review
+// F3) so t.Run, t.Parallel, t.Cleanup scoping stays correct.
 func TestReserveAndAuditRollBackTogetherOnDBError(t *testing.T) {
-	TestReserve_AllStatementsRollBackOnAuditFailure(t)
+	t.Parallel()
+	checkAuditFailureRollsBackAll(t)
 }
 
 // -------------------------------------------------------------------

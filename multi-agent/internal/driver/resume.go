@@ -7,17 +7,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 
 	"github.com/yourorg/multi-agent/internal/contract"
 	"github.com/yourorg/multi-agent/internal/executor"
 	"github.com/yourorg/multi-agent/internal/observerstore"
 )
 
-// taskIDPattern enforces the §7(d) task_id regex. Compiled once at
-// init so a later edit cannot loosen it accidentally without
-// breaking tests.
-var taskIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{8,128}$`)
+// Task-id validation is single-sourced in observerstore.ValidateTaskID
+// (F8); this package intentionally does NOT compile its own regex
+// so a future edit can't diverge the two validators.
 
 // -----------------------------------------------------------------
 // Sentinel errors (spec §9)
@@ -71,8 +69,8 @@ func ResumeTask(ctx context.Context, deps ResumeDeps, runID, taskID string) erro
 	if runID == "" {
 		return ErrInvalidResumeDeps
 	}
-	if !taskIDPattern.MatchString(taskID) {
-		return ErrInvalidTaskID
+	if err := observerstore.ValidateTaskID(taskID); err != nil {
+		return err // ErrInvalidTaskIDForm; aliased as ErrInvalidTaskID
 	}
 
 	// Step 2: pre-dispatch audit row.
@@ -108,12 +106,21 @@ func ResumeTask(ctx context.Context, deps ResumeDeps, runID, taskID string) erro
 
 // classifyErr maps typed errors to the audit `error_kind` label.
 // Uses errors.Is so wrapped errors classify correctly.
+//
+// ORDER MATTERS: ErrStepPayloadUnrecoverable is wrapped alongside
+// ErrPayloadUnavailable (see ReconstructSteps), so we must check
+// the more specific sentinel first — otherwise D4 sees the wrong
+// bucket for "committed ref existed but Load lost the race with
+// Vacuum" (which is a diagnostic-worthy race, not a routine
+// missing-stage).
 func classifyErr(err error) string {
 	switch {
 	case errors.Is(err, ErrContractNotFound):
 		return "ErrContractNotFound"
 	case errors.Is(err, ErrJournalChainBroken):
 		return "ErrJournalChainBroken"
+	case errors.Is(err, ErrStepPayloadUnrecoverable):
+		return "ErrStepPayloadUnrecoverable"
 	case errors.Is(err, executor.ErrConcurrentLease):
 		return "ErrConcurrentLease"
 	case errors.Is(err, executor.ErrPayloadUnavailable):
