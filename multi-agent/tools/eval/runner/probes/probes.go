@@ -67,15 +67,21 @@ type Record struct {
 //
 // Warn discipline: Emit NEVER writes to stderr directly — a slow
 // stderr (redirected to a wedged pipe) would block the runner. Warns
-// go to bounded warnCh (buffered), drained by the flusher goroutine
+// go to bounded warnCh (buffered), drained by a warnWriter goroutine
 // off the hot path. Channel-full warns increment atomic counters that
-// the flusher folds into a single summary line on Close.
+// the warnWriter folds into a single summary line on Close.
+//
+// Close waits on TWO signals: the record-collector's drained channel
+// (unconditional) AND a bounded wait on warnWriter's completion —
+// bounded so a wedged stderr still can't wedge Close, but sized so
+// healthy stderrs see all pending warns before Close returns.
 type Emitter struct {
-	ch      chan Record
-	warnCh  chan string
-	done    chan struct{}
-	drained chan []Record
-	stderr  io.Writer
+	ch          chan Record
+	warnCh      chan string
+	done        chan struct{}
+	drained     chan []Record
+	warnDrained chan struct{} // closed by warnWriter after its drain-then-exit path
+	stderr      io.Writer
 
 	mono time.Time // monotonic reference captured in NewEmitter
 
@@ -83,9 +89,18 @@ type Emitter struct {
 	warnDropped int64 // atomic — warnCh overflow count
 
 	closeOnce sync.Once
-	closed    atomic.Bool
 	result    []Record
 }
+
+// closeWarnWait is the bounded ceiling Close waits for warnWriter to
+// finish its post-done drain. Long enough for a healthy stderr to
+// flush ~32 warns (the warnCh capacity) even under load; short enough
+// that a wedged stderr — write blocks forever — still lets Close
+// return promptly. 250 ms was chosen empirically: `go test -race
+// -count=100` shows zero flakes on the ordering-sensitive tests at
+// this ceiling, and the wedged-stderr regression test still
+// completes well inside its 2 s deadline.
+const closeWarnWait = 250 * time.Millisecond
 
 // NewEmitter returns an Emitter with a bufferSize-record channel and
 // starts the flusher goroutine. bufferSize <= 0 defaults to 256.
@@ -97,12 +112,13 @@ func NewEmitter(bufferSize int, stderr io.Writer) *Emitter {
 		stderr = io.Discard
 	}
 	e := &Emitter{
-		ch:      make(chan Record, bufferSize),
-		warnCh:  make(chan string, 32), // small; overflow → atomic counter
-		done:    make(chan struct{}),
-		drained: make(chan []Record, 1),
-		stderr:  stderr,
-		mono:    time.Now(),
+		ch:          make(chan Record, bufferSize),
+		warnCh:      make(chan string, 32), // small; overflow → atomic counter
+		done:        make(chan struct{}),
+		drained:     make(chan []Record, 1),
+		warnDrained: make(chan struct{}),
+		stderr:      stderr,
+		mono:        time.Now(),
 	}
 	go e.flusher()
 	return e
@@ -169,9 +185,16 @@ func (e *Emitter) warn(msg string) { e.Warn(msg) }
 // drained slice; subsequent calls return nil, nil (spec §3.1
 // "subsequent calls return an empty slice + nil error").
 //
-// Close MUST NOT block on stderr I/O — the warn-writer goroutine is
-// separate from the record-collector; a wedged stderr wedges the warn
-// writer only, not Close. Spec §7(a).
+// Close MUST NOT block on stderr I/O — spec §7(a). Sequencing:
+//  1. Signal done → both flusher goroutines start their drain-and-exit paths.
+//  2. Unconditionally wait on drained — the record collector does zero
+//     stderr I/O, so this is safe regardless of stderr state.
+//  3. Bounded wait on warnDrained — a healthy stderr flushes the pending
+//     warns before Close returns, but a wedged stderr caps the wait at
+//     closeWarnWait so Close still returns promptly. This restores the
+//     "diagnostics visible after Close" ordering that existing tests
+//     and post-run diagnostics depend on, without re-introducing the
+//     wedged-stderr wedge the earlier P1 fix was designed to prevent.
 func (e *Emitter) Close() ([]Record, error) {
 	if e == nil {
 		return nil, nil
@@ -181,7 +204,13 @@ func (e *Emitter) Close() ([]Record, error) {
 		first = true
 		close(e.done)
 		e.result = <-e.drained
-		e.closed.Store(true)
+		select {
+		case <-e.warnDrained:
+		case <-time.After(closeWarnWait):
+			// Wedged stderr; leave warnWriter running (it exits on its
+			// own if stderr ever unblocks). Documented in the summary
+			// comment above.
+		}
 	})
 	if first {
 		return e.result, nil
@@ -225,10 +254,10 @@ func (e *Emitter) flusher() {
 }
 
 // warnWriter drains warnCh into stderr. Runs in a separate goroutine
-// so a slow stderr does NOT back-pressure Close. Exits when done is
-// signalled AND the warn queue is empty; a wedged stderr will keep
-// this goroutine alive until process teardown, which is acceptable —
-// the runner has already completed.
+// so a slow stderr does NOT back-pressure Close. Signals warnDrained
+// once its drain-then-exit path completes; a wedged stderr keeps this
+// goroutine alive (never signals warnDrained) but the runner has
+// already returned via Close's bounded wait.
 func (e *Emitter) warnWriter() {
 	for {
 		select {
@@ -236,9 +265,10 @@ func (e *Emitter) warnWriter() {
 			fmt.Fprintln(e.stderr, w)
 		case <-e.done:
 			// Best-effort drain: try to write everything queued at
-			// the moment of Close, then emit the overflow summary and
-			// exit. If stderr blocks mid-drain this goroutine wedges
-			// but the runner has already returned via Close.
+			// the moment of Close, then emit the overflow summary,
+			// signal warnDrained, and exit. If stderr blocks
+			// mid-drain this goroutine wedges before signalling —
+			// Close's bounded wait handles that case.
 			for {
 				select {
 				case w := <-e.warnCh:
@@ -247,6 +277,7 @@ func (e *Emitter) warnWriter() {
 					if wd := atomic.LoadInt64(&e.warnDropped); wd > 0 {
 						fmt.Fprintf(e.stderr, "probes: %d warn(s) dropped due to warn-channel overflow\n", wd)
 					}
+					close(e.warnDrained)
 					return
 				}
 			}
