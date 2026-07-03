@@ -305,17 +305,22 @@ Guidance:
 When you notice the user repeatedly running similar ad-hoc scripts for
 the same family of task, surface a **promote-candidate** signal so
 they get a "want to fixate this into a proper MCP?" prompt. The driver
-side (`driver.RecordAdHocScriptTask` in the bash / powershell tool
-completion path) fires this automatically on the second same-family
-completion; you can also nudge the user explicitly.
+side (`driver.RecordAdHocScriptTask`, wired into the bash / powershell
+tool completion path) fires this automatically **once per (run,
+family) per session** — the transition from the first ad-hoc
+completion to the second one in the same family emits ONE
+`promote_candidates` row + one observer event. Subsequent unique
+tasks in the same family (3rd, 4th, ...) do NOT re-fire the driver-
+side signal; if a second prompt is warranted the model must decide
+that itself and nudge the user manually.
 
 When to prompt:
 
 - Two `run_slave_bash` / `run_slave_powershell` calls in the same
   session solve variants of the same task (same family, e.g. "csv
-  profiling" or "log parsing"). The B1 detector already surfaces a
-  candidate row; your job is to translate that into a user-facing
-  suggestion in your NEXT reply.
+  profiling" or "log parsing"). The B1 detector surfaces the
+  candidate row at that 1→2 transition; your job is to translate that
+  into a user-facing suggestion in your NEXT reply.
 - Present the choice concretely: "I've noticed you've done this twice
   now — would you like me to scaffold `<family>_mcp` and register it
   on <slave>? The `promotion_pipeline` MCP tool bundles
@@ -325,12 +330,17 @@ When to prompt:
   fields.
 - If the user says no → their decision is a `RecordCandidateDecision`
   driver-side call; the same candidate won't re-surface within its
-  24-hour TTL.
+  24-hour TTL and, because the detector fires only once per (run,
+  family), a decline effectively silences the prompt for the rest of
+  this run for that family.
 
-Do not surface the prompt more than once per candidate per session —
-the driver's `RecordAdHocScriptTask` dedup handles the DB side, but a
-noisy chat prompt is worse than a silent one. When in doubt, wait for
-the third same-family task before nudging a second time.
+**Do not** manually re-prompt every N tasks. The driver used to
+re-fire the detector on the 3rd, 4th, ... same-family task and this
+inflated the paper's `PromotionCandidateSurfacingRate`; the fire-
+once-per-session invariant is now enforced in the driver and the
+model should match it. If a user genuinely needs a second nudge
+(e.g., they said "not now" first time), reissue the prompt from your
+own reasoning rather than expecting a new detector event.
 
 Under `NoUserPromotionPath` ablation the surfacing is silenced at the
 driver layer (no candidate rows, no observer event, no

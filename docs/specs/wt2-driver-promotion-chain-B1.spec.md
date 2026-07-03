@@ -251,11 +251,17 @@ The counter is populated by a small hook in
 ```go
 // RecordAdHocScriptTask is called by the driver's task-completion
 // path whenever a slave task with skill=bash|powershell completes.
-// When a family has 2+ ad-hoc completions within 24h,
-// this call automatically fires SurfacePromoteCandidate with
-// SurfacedBy="similarity_signal". Second and subsequent calls
-// with the same (family, source_task_ids-set) are deduped by
-// candidate_id — the surfacer's insert uses INSERT OR IGNORE.
+// It fires SurfacePromoteCandidate EXACTLY ONCE per (run, family)
+// per session — the 1→2 transition on unique task_ids for a given
+// family. Subsequent unique observations (3rd, 4th, ...) in the
+// same family do NOT re-fire the detector; each session emits at
+// most one promote_candidates row + observer event per family.
+// PR #71 round-2 review P1-A: the original implementation fired
+// on every 2nd+ observation with a growing source_task_ids slice
+// (which produced a NEW candidate_id each time, defeating dedup)
+// and inflated PromotionCandidateSurfacingRate linearly with
+// per-family task count. The once-per-family invariant is now
+// enforced at the detector: `len(prior) == 2 && !dup`.
 func RecordAdHocScriptTask(ctx context.Context, family, taskID, workspaceID string)
 ```
 
@@ -269,9 +275,13 @@ processing" → family "csv"). A future WT refines this heuristic;
 the paper's E4 harness sets family explicitly via
 `LOOM_EVAL_TASK_FAMILY` env var.
 
-`INSERT OR IGNORE` on the `candidate_id` primary key makes
-double-firing idempotent. The `RecordAdHocScriptTask` path is
-also SILENCED by `NoUserPromotionPath` per §5.
+`INSERT OR IGNORE` on the `UNIQUE(run_id, candidate_id)` DDL
+constraint remains as defence-in-depth against duplicate insertion,
+but the detector's once-per-(run, family) invariant means it is not
+actually exercised in the happy path — the writer sees at most one
+INSERT per (run, family, task_ids-pair). The
+`RecordAdHocScriptTask` path is SILENCED by `NoUserPromotionPath`
+per §5.
 
 ### 4.3 24-hour expiry (spec §4 (d))
 
@@ -435,7 +445,8 @@ text. Two properties matter:
 | §7 (i)   | `TestCandidateID_DifferentRunsProduceDifferentIDs` — SetCurrentRunID("run-a") then compute candidate_id; SetCurrentRunID("run-b") then compute candidate_id for the SAME family + task_ids; assert the two candidate_ids differ. Closes the parallel-runs join ambiguity. |
 | Metric   | `TestSurfacePromoteCandidate_WritesRowAndEvent` — happy path emits both |
 | B2 link  | `TestPromotionPipeline_UsesLiveNoUserPromotionPathPredicate` — with the flag on, promotion_pipeline_tool refuses (integration test) |
-| Detector | `TestRecordAdHocScriptTask_FiresCandidateAfterSecondFamily` — call twice with same family + different task_ids → one candidate row appears (INSERT OR IGNORE handles the second attempt at same candidate_id). |
+| Detector | `TestRecordAdHocScriptTask_FiresCandidateAfterSecondFamily` — first two unique task_ids in a family fire exactly ONE candidate row; a duplicate task_id does not re-fire; a THIRD unique task in the same family does NOT re-fire either (once-per-(run, family) invariant, PR #71 round-2 P1-A). A different family in the same session gets its own once-per-family fire. |
+| Detector | `TestRecordAdHocScriptTask_FamilyCountsBounded` — streaming 100 unique task_ids into one family caps the internal slice at familyCountsPerFamilyCap (FIFO evict) so a long-running interactive session's memory stays bounded (PR #71 round-2 P1-D). |
 | Detector | `TestRecordAdHocScriptTask_UnderNoUserPromotionPath_NoCandidate` — ablation on: 5 calls → 0 candidate rows AND 5 suppression log lines. |
 | B6 link  | `TestRegisterSlaveMCP_UnderNoUserPromotionPath_RefusesAllExceptExplicitUser` — with the flag on, register_slave_mcp with promotion_reason ∈ {driver_agent_inferred, batch_import, ci_seed} each returns FailPolicyViolation; same call with promotion_reason=explicit_user_request succeeds. |
 | Init     | `TestSurfacePromoteCandidate_InitErrorSurfacedOnFirstCall` — inject noUserPromotionPathInitErr; call surfacePromotionInitErrorOnce (or a Lookup call route) twice; assert exactly one `[error] NoUserPromotionPath ablation wiring inert` log line. |
