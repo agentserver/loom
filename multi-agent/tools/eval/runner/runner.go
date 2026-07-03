@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/yourorg/multi-agent/tools/eval/runner/probes"
 )
 
 // --- Errors surfaced as exit 2 ---
@@ -87,6 +89,11 @@ func Run(ctx context.Context, opts Opts) Result {
 	// CSV write below.
 	startedAt := time.Now()
 
+	// WT-2-e1e6-probes Edit 1: construct the emitter. safety-net
+	// Close covers preflight-return paths; the primary Close is Edit 6.
+	emitter := probes.NewEmitter(0, opts.Stderr)
+	defer emitter.Close()
+
 	if opts.Stderr == nil {
 		opts.Stderr = os.Stderr
 	}
@@ -150,6 +157,12 @@ func Run(ctx context.Context, opts Opts) Result {
 	if err != nil {
 		return preflight(opts, err)
 	}
+
+	// WT-2-e1e6-probes Edit 2: emit setup metrics right after
+	// workspace exists (spec §5.1 Edit 2). D6c harness not landed →
+	// nil values + d6c_setup_harness_pending label (see spec §7(e)).
+	probes.EmitSetupMetrics(ctx, emitter, ws.Root, opts.Stderr)
+
 	defer func() {
 		// Cleanup is registered as an INNER defer so a panicking
 		// OnTempdir hook (test seam) doesn't leak the tempdir on
@@ -217,6 +230,22 @@ func Run(ctx context.Context, opts Opts) Result {
 	// Parse oracle output (best-effort; bad JSON → run fails, not exit 2).
 	oracleOut := parseOracleStdout(res.Stdout)
 	passed := oracleOut.Passed && oracleErr == nil && res.ExitCode == 0
+
+	// WT-2-e1e6-probes Edit 3: emit oracle-derived metrics +
+	// humanloop counter (spec §5.1 Edit 3). oracleOutput is unexported
+	// to package main, so lift its fields into probes.OracleOutput.
+	// `Passed` uses the runner's canonical value (oracle-json passed
+	// AND no subprocess error AND exit-code 0) — a JSON `passed:true`
+	// with a non-zero exit code is a runner-level failure, so
+	// TaskSuccessRate must reflect that, not the raw JSON field.
+	oracleOutForProbes := probes.OracleOutput{
+		Passed:      passed,
+		MetricsJSON: oracleOut.MetricsRaw,
+		ExitCode:    res.ExitCode,
+		StdoutBytes: len(res.Stdout),
+	}
+	probes.EmitOracleMetrics(ctx, emitter, oracleOutForProbes)
+	probes.EmitHumanCount(ctx, emitter, ws.Root, opts.Stderr)
 	if oracleErr != nil && !errors.Is(oracleErr, ErrSubprocessTimeout) {
 		fmt.Fprintf(opts.Stderr, "eval-runner: oracle subprocess error: %v\n", oracleErr)
 	}
@@ -224,6 +253,26 @@ func Run(ctx context.Context, opts Opts) Result {
 	// commit_meta + git emails.
 	commit := collectCommitMeta(ctx, opts, env, opts.Stderr)
 	author, committer := collectGitEmails(ctx, opts, env, opts.Stderr)
+
+	// WT-2-e1e6-probes Edit 4: emit WrongContextFailureRate after
+	// commit_meta + git emails. Reuses oracleOutForProbes from Edit 3.
+	// Labels live under `<workloadDir>/../labels/` (§F4 layout in
+	// tests/eval/labels/workloads/*.labels.json); derive that from the
+	// runner's --workload-dir flag rather than hard-coding.
+	// filepath.Clean strips a trailing slash — without it,
+	// `--workload-dir=tests/eval/workloads/` would evaluate
+	// filepath.Dir to `tests/eval/workloads` and labelsDir to a
+	// nonexistent `tests/eval/workloads/labels`, silently disabling
+	// WrongContextFailureRate. Shell tab-completion frequently adds
+	// the slash, so this must be defended.
+	labelsDir := filepath.Join(filepath.Dir(filepath.Clean(opts.WorkloadDir)), "labels")
+	probes.EmitWrongContext(ctx, emitter, ws.Root, labelsDir, spec.ID,
+		oracleOutForProbes, opts.Stderr)
+
+	// WT-2-e1e6-probes Edit 5: emit TimeToCompletion right before
+	// finishedAt so the monotonic delta is captured against the same
+	// wall-clock anchor point.
+	probes.EmitTimeToCompletion(ctx, emitter, startedAt)
 
 	// Spec §5 col 4 (`finished_at_unix`) is the wall clock at step 17
 	// (writeCSV). Capture right before Writer.Insert so
@@ -256,6 +305,12 @@ func Run(ctx context.Context, opts Opts) Result {
 		StubListen:         opts.StubListen,
 		TempdirKept:        opts.KeepTempdir,
 	}
+
+	// WT-2-e1e6-probes Edit 6: drain the emitter and merge probe
+	// records into the just-assembled row so persisted rows carry
+	// the probe fields (spec §5.1 Edit 6).
+	records, _ := emitter.Close()
+	probes.MergeIntoRow(&row, records)
 
 	// Persist + CSV.
 	if err := opts.Writer.Insert(ctx, row); err != nil {
