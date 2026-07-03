@@ -48,10 +48,12 @@ def test_field_whitelist_secret_col_reject() -> None:
 
 
 def test_field_whitelist_sqlite_master_reject() -> None:
-    # Denylist catches the leading SELECT first — either exception is
-    # correct here (both map to exit 2); we accept both classes so a
-    # future denylist relaxation does not break this test.
-    with pytest.raises((ErrRunsFilterDenylist, ErrRunsFilterFieldNotAllowed)):
+    # The denylist MUST catch the leading SELECT before the whitelist
+    # walker runs. Fresh-Claude PR-review round-3 P2: pin to
+    # ErrRunsFilterDenylist — a future denylist relaxation would be a
+    # spec change and should force this test to be updated (rather than
+    # silently succeeding via the whitelist fallback).
+    with pytest.raises(ErrRunsFilterDenylist):
         compile_runs_filter("run_id IN (SELECT name FROM sqlite_master)")
 
 
@@ -334,3 +336,75 @@ def test_empty_in_list_reject() -> None:
     from eval_metrics.filter import ErrRunsFilterColumnCompare
     with pytest.raises(ErrRunsFilterColumnCompare):
         compile_runs_filter("run_id IN ()")
+
+
+# --- Round-3 fresh-Claude PR-review regressions ----------------------------
+
+
+def test_boolean_literal_rhs_reject() -> None:
+    """`run_id = TRUE` — Boolean RHS is a spec §3.1 grammar violation."""
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterColumnCompare
+    with pytest.raises(ErrRunsFilterColumnCompare):
+        compile_runs_filter("run_id = TRUE")
+
+
+def test_boolean_false_literal_rhs_reject() -> None:
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterColumnCompare
+    with pytest.raises(ErrRunsFilterColumnCompare):
+        compile_runs_filter("run_id = FALSE")
+
+
+def test_null_literal_rhs_reject() -> None:
+    """`run_id = NULL` — NULL RHS is a spec §3.1 grammar violation.
+
+    Note: SQLite semantics say `col = NULL` is always NULL (never
+    matches), so this filter was silently a "select nothing" clause
+    if accepted. Rejecting it forces operators to use `IS NULL` —
+    which itself is banned by the IS-predicate rule (round-2 P0), so
+    NULL-checking filters are entirely out of scope for --runs-filter.
+    """
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterColumnCompare
+    with pytest.raises(ErrRunsFilterColumnCompare):
+        compile_runs_filter("run_id = NULL")
+
+
+def test_null_in_in_list_reject() -> None:
+    """`run_id IN (NULL)` — NULL element in IN list rejected."""
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterColumnCompare
+    with pytest.raises(ErrRunsFilterColumnCompare):
+        compile_runs_filter("run_id IN (NULL)")
+
+
+def test_qualified_column_reject() -> None:
+    """`runs.run_id = 'x'` — table-qualified name rejected.
+
+    The FROM list is hardcoded to `runs`; any qualifier is either
+    redundant (`runs.run_id`) or references a table not in FROM
+    (`route_reasons.run_id`, which would then fail at SQLite
+    execute-time with `no such column`). Fresh-Claude PR-review
+    round-3 P2 tripwire.
+    """
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterFieldNotAllowed
+    with pytest.raises(ErrRunsFilterFieldNotAllowed):
+        compile_runs_filter("runs.run_id = 'x'")
+
+
+def test_cross_table_qualified_column_reject() -> None:
+    """`route_reasons.run_id = 'x'` — non-`runs` qualifier rejected."""
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterFieldNotAllowed
+    with pytest.raises(ErrRunsFilterFieldNotAllowed):
+        compile_runs_filter("route_reasons.run_id = 'x'")
+
+
+def test_db_qualified_column_reject() -> None:
+    """`main.runs.run_id = 'x'` — database-qualified reference rejected."""
+    import pytest
+    from eval_metrics.filter import ErrRunsFilterFieldNotAllowed
+    with pytest.raises(ErrRunsFilterFieldNotAllowed):
+        compile_runs_filter("main.runs.run_id = 'x'")

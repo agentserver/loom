@@ -267,11 +267,18 @@ def _reject_non_predicate_leaves(node: exp.Expression, depth: int = 0) -> None:
 # user writes `-1` in the fragment — but even then, the `-` is a Neg
 # wrapper around a Literal, and we route that through `_is_bare_rhs`
 # below which recognises Neg-of-Literal but NOT Neg-of-Column.
+# Only bare literals (numeric or string) and the extractor's internally-
+# generated `?` placeholders are allowed on the RHS of a predicate.
+# NULL / TRUE / FALSE are DELIBERATELY absent even though sqlglot models
+# them as leaf nodes: `col = NULL` is always NULL in SQLite (never
+# matches), and `col = TRUE / FALSE` returns 0 rows against text
+# columns. Both are semantically null-effect filters that a paper
+# operator would only write by mistake, and accepting them widens the
+# grammar beyond what spec §3.1 documents. Fresh-Claude PR-review
+# round-3 P2.
 _RHS_ATOMIC_TYPES: tuple[type, ...] = (
     exp.Literal,      # numeric or string literal (post extract, string → Placeholder)
     exp.Placeholder,  # `?` from parametric extraction
-    exp.Null,         # explicit NULL literal (rare in WHERE fragments)
-    exp.Boolean,      # TRUE/FALSE — the tree-shape walker rejects it at boolean position, but a value context is fine
 )
 
 
@@ -390,6 +397,26 @@ def _ast_walk(tree: exp.Expression) -> None:
     # Whitelist scan first — even a single unknown Column is a hard
     # reject and gives the clearest error.
     for col in tree.find_all(exp.Column):
+        # Reject qualified names (`route_reasons.run_id`, `main.runs.run_id`,
+        # `runs.run_id`). Fresh-Claude PR-review round-3 P2: without this,
+        # `route_reasons.run_id = 'x'` passed whitelist (leaf name = `run_id`)
+        # and was re-emitted into the WHERE clause, then failed at SQLite
+        # execute-time with `no such column: route_reasons.run_id`. The
+        # filter should reject at compile-time — the FROM list is
+        # hardcoded to `runs`, so any table qualifier is either redundant
+        # (`runs.run_id`) or attempts to reference a table not in FROM.
+        if col.table:
+            raise ErrRunsFilterFieldNotAllowed(
+                f"--runs-filter references qualified column {col.sql()!r}; "
+                f"only bare column names in whitelist {sorted(ALLOWED_COLUMNS)} are allowed"
+            )
+        # Reject database-qualified names too (`main.runs.run_id`) —
+        # `col.table` is the middle segment there.
+        if col.db:
+            raise ErrRunsFilterFieldNotAllowed(
+                f"--runs-filter references db-qualified column {col.sql()!r}; "
+                f"only bare column names in whitelist {sorted(ALLOWED_COLUMNS)} are allowed"
+            )
         name = col.name
         # sqlglot may parse a bare identifier as either exp.Column or
         # exp.Identifier depending on dialect; .name normalises both.

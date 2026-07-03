@@ -270,8 +270,8 @@ right — no function calls, no concatenation, no column-to-column
 comparisons, no bind markers supplied by the user. The extractor is the ONLY source of `?` placeholders —
 the placeholder-substitution step below replaces literals with `?`
 internally; users cannot supply `?` on the CLI. `;`, comments (`--`,
-`/*`), subqueries (`SELECT`, `WITH`), and DDL/DML keywords
-(`UPDATE`/`DELETE`/`INSERT`/`DROP`/`ALTER`/`ATTACH`/`PRAGMA`) trigger
+`/*`), subqueries (`SELECT`, `WITH`), and DDL/DML/transaction keywords
+(the full 20-keyword list at §7 (c) below) trigger
 rejection before parse — belt-and-suspenders against sqlparse edge
 cases.
 
@@ -1244,3 +1244,20 @@ reject the diff.
     should avoid the 20 keywords when naming rows they'll later
     filter on. Documents the belt-role decision instead of
     changing behavior.
+- 2026-07-03 (round 18, fresh-Claude PR-review round-3 P2 fixes):
+  - Drop `exp.Boolean` and `exp.Null` from `_RHS_ATOMIC_TYPES` —
+    spec §3.1 grammar never enumerated them; `col = TRUE/FALSE`
+    silently returned 0 rows on text columns (implementation
+    drift). `col = NULL` now rejected too (IS-predicate ban made
+    NULL-checks unreachable anyway).
+  - Reject qualified column references (`runs.run_id`,
+    `route_reasons.run_id`, `main.runs.run_id`) at compile-time
+    instead of letting them fail at sqlite3 execute-time — the
+    FROM list is hardcoded to `runs`, so any qualifier is
+    redundant or wrong.
+  - §3.1 denylist paragraph aligned with §7 (c) full 20-token
+    list (the earlier short list drifted).
+  - `test_field_whitelist_sqlite_master_reject` pinned to
+    `ErrRunsFilterDenylist` (was accepting either denylist or
+    whitelist rejection).
+  - 7 new regression tests. 136 pass, 1 skipped.
