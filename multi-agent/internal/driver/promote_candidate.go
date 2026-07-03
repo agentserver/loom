@@ -244,6 +244,16 @@ func ExpireCandidatesOlderThan(ctx context.Context, cutoff time.Time) (int, erro
 
 // --- Detector (spec §4.2) -------------------------------------------
 
+// familyCountsPerFamilyCap bounds the per-family task_ids slice.
+// Under the once-per-family-per-session invariant (P1-A) only the
+// first ~2 unique observations matter for the fire-decision; the
+// remainder of the slice is retained only for diagnostic /
+// downstream-observation completeness. Cap prevents an
+// interactive session that runs thousands of unique bash tasks in
+// the same family from growing the slice unboundedly (PR #71
+// round-2 review P1-D).
+const familyCountsPerFamilyCap = 32
+
 var (
 	familyCountsMu sync.Mutex
 	familyCounts   = map[string][]string{} // family → observed task_ids
@@ -278,9 +288,27 @@ func RecordAdHocScriptTask(ctx context.Context, family, taskID, workspaceID stri
 	}
 	if !dup {
 		prior = append(prior, taskID)
+		if len(prior) > familyCountsPerFamilyCap {
+			// Drop the oldest (FIFO) to bound memory. Doesn't
+			// affect the fire-decision (which is len==2) once
+			// past the initial transition — PR #71 round-2 P1-D.
+			prior = prior[len(prior)-familyCountsPerFamilyCap:]
+		}
 		familyCounts[family] = prior
 	}
-	shouldFire := len(prior) >= 2 && !dup
+	// PR #71 round-2 review P1-A: fire EXACTLY ONCE per (run, family)
+	// — the transition from 1 unique task to 2 unique tasks. On the
+	// 3rd, 4th, ... observation the (family, source_task_ids-set)
+	// changes because task_ids accumulate, so computeCandidateID
+	// returns a DIFFERENT candidate_id each time and INSERT OR IGNORE
+	// no longer dedups. Previously `len(prior) >= 2 && !dup` would
+	// fire again for every new unique task, inflating
+	// PromotionCandidateSurfacingRate linearly with per-family task
+	// count. Now: len == 2 AND we just appended → the 2nd unique
+	// task exactly triggered the surface. B1 spec §4.2 "Second and
+	// subsequent calls with the same … are deduped by candidate_id"
+	// stays honest — we don't SEND subsequent calls at all.
+	shouldFire := len(prior) == 2 && !dup
 	// Copy the slice so we can release the lock before firing.
 	obs := make([]string, len(prior))
 	copy(obs, prior)
@@ -316,7 +344,12 @@ func FamilyOfTaskSummary(summary string) string {
 	// Strip anything outside the family regex character class.
 	fam = strings.Map(func(r rune) rune {
 		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_':
+		// PR #71 round-2 review P2-C: keep hyphens too — the family
+		// regex `^[a-z][a-z0-9_-]{0,63}$` allows them; the previous
+		// strings.Map only kept letters/digits/underscore, silently
+		// stripping the `-` in a summary like "csv-profiler run" so
+		// the derived family was "csvprofiler" not "csv-profiler".
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_', r == '-':
 			return r
 		default:
 			return -1

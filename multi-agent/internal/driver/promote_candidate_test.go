@@ -334,10 +334,52 @@ func TestRecordAdHocScriptTask_FiresCandidateAfterSecondFamily(t *testing.T) {
 	if len(w.snapshot()) != 1 {
 		t.Fatalf("dup task should not re-fire, got %d rows", len(w.snapshot()))
 	}
-	// Third UNIQUE task fires again with the growing observed set.
+	// PR #71 round-2 review P1-A: THIRD unique task must NOT
+	// re-fire — we want ONE candidate per (run, family) per session,
+	// not one per unique task in the family. Earlier code inflated
+	// PromotionCandidateSurfacingRate linearly with per-family task
+	// count.
 	RecordAdHocScriptTask(context.Background(), "csvfam", "task_33333333", "ws-abc12345")
+	if len(w.snapshot()) != 1 {
+		t.Fatalf("third unique task must NOT re-fire (once-per-family-per-session invariant); got %d rows", len(w.snapshot()))
+	}
+	// Fourth unique task: same.
+	RecordAdHocScriptTask(context.Background(), "csvfam", "task_44444444", "ws-abc12345")
+	if len(w.snapshot()) != 1 {
+		t.Fatalf("fourth unique task must NOT re-fire; got %d rows", len(w.snapshot()))
+	}
+	// A DIFFERENT family does fire (its own once-per-session).
+	RecordAdHocScriptTask(context.Background(), "logfam", "task_55555555", "ws-abc12345")
+	RecordAdHocScriptTask(context.Background(), "logfam", "task_66666666", "ws-abc12345")
 	if len(w.snapshot()) != 2 {
-		t.Fatalf("new task should fire, got %d rows", len(w.snapshot()))
+		t.Fatalf("second family should fire once; got %d rows", len(w.snapshot()))
+	}
+}
+
+// TestRecordAdHocScriptTask_FamilyCountsBounded — PR #71 round-2
+// review P1-D. Streaming 100 unique task_ids in the same family
+// must not grow the internal slice unbounded; it caps at
+// familyCountsPerFamilyCap (FIFO evict).
+func TestRecordAdHocScriptTask_FamilyCountsBounded(t *testing.T) {
+	w := &recPromoWriter{}
+	setupPromo(t, w, nil)
+	// Wire an env override to force the family so the
+	// FamilyOfTaskSummary path doesn't affect this test.
+	for i := 0; i < 100; i++ {
+		// Pad each task_id to satisfy the >=8 char regex.
+		tid := "task_bnd"
+		if i < 10 {
+			tid = tid + "00" + string(rune('0'+i))
+		} else if i < 100 {
+			tid = tid + "0" + string(rune('0'+i/10)) + string(rune('0'+i%10))
+		}
+		RecordAdHocScriptTask(context.Background(), "boundfam", tid, "ws-abc12345")
+	}
+	familyCountsMu.Lock()
+	size := len(familyCounts["boundfam"])
+	familyCountsMu.Unlock()
+	if size > familyCountsPerFamilyCap {
+		t.Fatalf("familyCounts[boundfam] len %d > cap %d — bound not enforced", size, familyCountsPerFamilyCap)
 	}
 }
 
@@ -355,11 +397,14 @@ func TestRecordAdHocScriptTask_UnderNoUserPromotionPath_NoCandidate(t *testing.T
 	if len(w.snapshot()) != 0 {
 		t.Fatalf("ablated detector must not fire rows, got %d", len(w.snapshot()))
 	}
-	// One suppression log per Surface* call that would have fired
-	// (calls 2, 3, 4, 5 — call 1 doesn't reach Surface).
+	// Exactly one suppression log — the 2→3-unique-tasks transition
+	// is the ONLY call that reaches SurfacePromoteCandidate under the
+	// once-per-family invariant (round-2 review P1-A). Subsequent
+	// unique tasks (3, 4, 5) don't reach Surface at all, so they
+	// don't produce ablation logs either.
 	suppressions := strings.Count(buf.String(), "[ablation] NoUserPromotionPath: candidate suppressed")
-	if suppressions != 4 {
-		t.Fatalf("want 4 suppression logs, got %d in:\n%s", suppressions, buf.String())
+	if suppressions != 1 {
+		t.Fatalf("want 1 suppression log (once-per-family), got %d in:\n%s", suppressions, buf.String())
 	}
 }
 
@@ -382,7 +427,10 @@ func TestRecordAdHocScriptTask_LOOMEvalTaskFamilyEnvOverride(t *testing.T) {
 func TestFamilyOfTaskSummary(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"csv profile a file", "csv"},
-		{"CSV-PROFILER", "csvprofiler"},
+		// PR #71 round-2 review P2-C: hyphens must survive the map
+		// since the family regex allows them.
+		{"CSV-PROFILER", "csv-profiler"},
+		{"csv-profile run", "csv-profile"},
 		{"", ""},
 		{"1csv", ""}, // starts with digit → regex rejects
 		{"csv_1", "csv_1"},
