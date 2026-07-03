@@ -210,7 +210,7 @@ def _reject_non_predicate_leaves(node: exp.Expression) -> None:
     # expression sqlglot parsed for us.
     raise ErrRunsFilterTautology(
         f"--runs-filter contains non-predicate expression at boolean position: {node.sql()} "
-        f"(type={type(node).__name__}); every leaf must be a comparison, IN, LIKE, BETWEEN, or IS"
+        f"(type={type(node).__name__}); every leaf must be a comparison, IN, LIKE, or BETWEEN"
     )
 
 

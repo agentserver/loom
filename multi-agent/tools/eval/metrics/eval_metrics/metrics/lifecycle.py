@@ -22,6 +22,7 @@ Metric-set cross-listings per spec §2.1 membership table:
 from __future__ import annotations
 
 from datetime import datetime
+from fractions import Fraction
 from typing import Iterable
 
 from eval_metrics.db import runs_column_present
@@ -58,8 +59,7 @@ def linear_percentile(sorted_data: list[float], q: float) -> float:
     # exact binary representation). Fraction gives 3700000 exactly. The
     # emitted JSON/CSV values then equal the spec §4 hand-computed decimals
     # exactly (`76.5` not `76.49999999999997`). Codex round-1 code review
-    # P1 tripwire.
-    from fractions import Fraction
+    # P1 tripwire. Fraction imported at module scope.
     q_frac = Fraction(q).limit_denominator(10 ** 6)  # 0.95 -> 19/20 exactly
     idx = (n - 1) * q_frac
     lo = int(idx)

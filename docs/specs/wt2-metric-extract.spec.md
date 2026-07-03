@@ -257,13 +257,30 @@ Whitelist (5 columns, matching 12号 §D2 filter axes):
 - `run_id`, `workload_id`, `claim_id`, `experiment_id`, `baseline_or_ablation`
 
 The parser accepts equality (`col = 'lit'`), `IN (lit, ...)`,
-`LIKE 'pat'`, and their `AND`/`OR` combinations. The extractor is
-the ONLY source of `?` placeholders — the placeholder-substitution
-step below replaces literals with `?` internally; users cannot supply
-`?` on the CLI. `;`, comments (`--`, `/*`), subqueries (`SELECT`,
-`WITH`), and DDL/DML keywords (`UPDATE`/`DELETE`/`INSERT`/`DROP`/
-`ALTER`/`ATTACH`/`PRAGMA`) trigger rejection before parse —
-belt-and-suspenders against sqlparse edge cases.
+`LIKE 'pat'`, `NOT <predicate>`, and their `AND`/`OR`/parenthesised
+combinations. The extractor is the ONLY source of `?` placeholders —
+the placeholder-substitution step below replaces literals with `?`
+internally; users cannot supply `?` on the CLI. `;`, comments (`--`,
+`/*`), subqueries (`SELECT`, `WITH`), and DDL/DML keywords
+(`UPDATE`/`DELETE`/`INSERT`/`DROP`/`ALTER`/`ATTACH`/`PRAGMA`) trigger
+rejection before parse — belt-and-suspenders against sqlparse edge
+cases.
+
+**Denylist-inside-literal trade-off**: the denylist runs pre-parse
+against the raw fragment, so a literal that happens to contain a
+denylisted keyword — `workload_id = 'db-create-index'` (contains
+`CREATE`), `experiment_id = 'commit-baseline'` (contains `COMMIT`),
+`workload_id = 'refactor--legacy'` (contains `--`) — is rejected too.
+This is a deliberate over-approximation: the alternative (run the
+denylist only on structural SQL after literal extraction) would
+require trusting sqlglot to correctly identify every literal-vs-token
+edge case, which conflicts with the "belt" role the denylist plays.
+Operators authoring workload / experiment / claim IDs SHOULD avoid
+the 20 SQL keywords in the denylist (`SELECT WITH UPDATE DELETE
+INSERT DROP ALTER ATTACH DETACH PRAGMA CREATE REPLACE TRIGGER INDEX
+TRANSACTION BEGIN COMMIT ROLLBACK VACUUM LOAD_EXTENSION`) and the
+four comment / terminator substrings (`;`, `--`, `/*`, `*/`) when
+naming rows that will later be filtered on.
 
 ### 3.2 `--metric-set` selection
 
@@ -1179,3 +1196,13 @@ reject the diff.
     under `multi-agent/tools/eval/metrics/` and `docs/specs/`
     (the sibling `wt1-*.spec.md` precedent already places spec /
     plan docs in `docs/specs/`).
+- 2026-07-03 (round 16, fresh-Claude PR-review P2 fixes):
+  - §3.1 grammar acknowledges `NOT <predicate>` and
+    parenthesised combinations (implementation already accepted
+    them; spec just caught up).
+  - §3.1 adds a "Denylist-inside-literal trade-off" paragraph:
+    filter fragments containing SQL keywords or comment tokens as
+    substrings inside literals are rejected too, and operators
+    should avoid the 20 keywords when naming rows they'll later
+    filter on. Documents the belt-role decision instead of
+    changing behavior.
