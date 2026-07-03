@@ -67,7 +67,32 @@ func ReconstructRegistryViewFromAudit(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	rows, err := db.QueryContext(ctx, `SELECT row_id, workspace_id, mcp_name, action FROM promotion_audit ORDER BY ts ASC`)
+	// PR #71 round-3 review P1-α: filter out failed pipeline
+	// scaffold/acceptance rows. The B2 pipeline writes ONE
+	// promotion_audit row per stage (scaffold / acceptance / register)
+	// with action='register' throughout — only the register STAGE row
+	// on a successful pipeline actually corresponds to a real
+	// registration on the slave. Failed scaffold/acceptance rows have
+	// action='register' too (the pipeline's base audit template
+	// uses ActionRegister), but they represent bookkeeping, not a
+	// registered MCP.
+	//
+	// SELECT filter:
+	//   stage=''                        → B6 direct-tool register/unregister flow
+	//                                     (always a real state change)
+	//   stage='register' AND
+	//   stage_result='ok'               → B2 pipeline stage-3 register
+	//                                     that succeeded
+	// Rows with stage IN ('scaffold','acceptance') OR
+	// stage_result='fail' are IGNORED — they never affected the
+	// slave's registry state and must not appear in the reconstructed
+	// view.
+	rows, err := db.QueryContext(ctx, `
+		SELECT row_id, workspace_id, mcp_name, action
+		  FROM promotion_audit
+		 WHERE stage = ''
+		    OR (stage = 'register' AND stage_result = 'ok')
+		 ORDER BY ts ASC`)
 	if err != nil {
 		return err
 	}
@@ -87,25 +112,34 @@ func ReconstructRegistryViewFromAudit(ctx context.Context, db *sql.DB) error {
 		case "register":
 			// Use row_id as a stable per-row spec-hash surrogate.
 			noteRegister(slaveBucket, mcp, "reconstructed:"+rowID)
+			replayed++
+			workspaces[workspace] = struct{}{}
 		case "unregister":
 			noteUnregister(slaveBucket, mcp)
+			replayed++
+			workspaces[workspace] = struct{}{}
 		case "install":
 			// install has no registry-view effect (offline install).
+			// Don't count in replayed — round-3 P2-δ: the summary log
+			// line's rows=N should reflect view-affecting rows only.
 		default:
 			// Unknown action — skip; the DB CHECK should have rejected
 			// but we're defensive.
 		}
-		replayed++
-		workspaces[workspace] = struct{}{}
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
 	if replayed > 0 {
 		// Update LastRegistryHash to reflect the reconstructed view.
+		// Uses SetLastRegistryHash (which itself takes registryHashMu)
+		// under publisherMu — matches the canonical
+		// PublishRegisterAndCompute lock ordering so a future
+		// refactor that calls reconstruct off-startup won't race
+		// with LastRegistryHash readers (round-3 P2-α).
 		publisherMu.Lock()
 		names, desc := snapshotAll()
-		lastRegistryHash = ComputeRegistryHash(names, desc)
+		SetLastRegistryHash(ComputeRegistryHash(names, desc))
 		publisherMu.Unlock()
 		log.Printf("[reconstruct] promotion_audit replayed rows=%d workspaces=%d",
 			replayed, len(workspaces))
