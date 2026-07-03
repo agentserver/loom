@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"net/url"
@@ -288,4 +289,42 @@ func TestPostgresStoreObjectMetadataMethods(t *testing.T) {
 	require.Equal(t, int64(456), writes[0].Bytes)
 	require.Equal(t, "sha-write", writes[0].SHA256)
 	require.Equal(t, writeObjectKey, writes[0].ObjectKey)
+}
+
+// TestStoreSatisfiesDryRunBlockWriter is a compile-time assertion that
+// the Postgres Store implements observerstore.DryRunBlockWriter. Runs
+// zero SQL — the point is that observerweb's runtime type-assertion
+// (server.go dryRunBlocks handler) picks the pg native path over the
+// SQLite writer, and this test guarantees the interface stays wired
+// even if a future refactor renames/reshapes the method.
+func TestStoreSatisfiesDryRunBlockWriter(t *testing.T) {
+	var _ observerstore.DryRunBlockWriter = (*Store)(nil)
+}
+
+// TestWriteDryRunBlock_Postgres exercises the pg-native writer path
+// against a real Postgres DB (skipped unless OBSERVER_POSTGRES_TEST_DSN
+// is set). Confirms $N placeholders + ON CONFLICT DO NOTHING work
+// against the pg schema DDL added by this WT.
+func TestWriteDryRunBlock_Postgres(t *testing.T) {
+	st, err := Open(Config{DSN: testDSN(t)})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	row := observerstore.DryRunBlockRow{
+		BlockID: "blk-pg-1", AttemptID: "att-pg-1", ConversationID: "conv-pg-1",
+		ContractHash: "h1", CapabilitySnapshotHash: "s1",
+		BlockKind: "missing_file",
+		Field:     "data_contract.read_artifacts[0].name",
+		Expected:  "config.yaml",
+		Actual:    "no snapshot file resource matches",
+		Detail:    "data_contract.read_artifacts[0].name: expected config.yaml, actual no snapshot file resource matches",
+		BlockedAt: time.Now().UTC(),
+	}
+	require.NoError(t, st.WriteDryRunBlock(context.Background(), row))
+	// Idempotent under ON CONFLICT.
+	require.NoError(t, st.WriteDryRunBlock(context.Background(), row))
+
+	var n int
+	require.NoError(t, st.db.QueryRow(`SELECT COUNT(*) FROM dry_run_blocks WHERE block_id=$1`, row.BlockID).Scan(&n))
+	require.Equal(t, 1, n)
 }

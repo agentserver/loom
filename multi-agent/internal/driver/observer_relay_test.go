@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/yourorg/multi-agent/internal/observerstore"
 )
 
 // TestServePendingOnce_ContinuesPastSingleFailure verifies that when one
@@ -365,5 +368,109 @@ func TestSyncWrites_OverwriteTrue_ReplacesExisting(t *testing.T) {
 	on, _ := os.ReadFile(target)
 	if string(on) != "NEW" {
 		t.Fatalf("expected NEW, got %q", on)
+	}
+}
+
+// TestObserverRelay_WriteDryRunBlock exercises the driver→observer HTTP
+// path end-to-end (WT-2-dry-run-validator §4.3). Confirms:
+//   - POST /api/dry-run-blocks with correct wire body
+//   - bearer-token header attached
+//   - success on 2xx status; error on non-2xx
+//   - nil relay is a silent no-op
+func TestObserverRelay_WriteDryRunBlock(t *testing.T) {
+	var lastMethod, lastPath, lastAuth string
+	var lastBody []byte
+	status := http.StatusCreated
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lastMethod, lastPath = r.Method, r.URL.Path
+		lastAuth = r.Header.Get("Authorization")
+		lastBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(status)
+	}))
+	defer server.Close()
+
+	cfg := &Config{}
+	cfg.Observer.Enabled = true
+	cfg.Observer.URL = server.URL
+	relay := NewObserverRelay(cfg, stubTokenSource("bearer-xyz"))
+	if relay == nil {
+		t.Fatal("relay must be constructable")
+	}
+
+	row := observerstore.DryRunBlockRow{
+		BlockID: "blk-relay-1", AttemptID: "att-relay-1", ConversationID: "conv-relay-1",
+		ExperimentID: "exp-1", ContractHash: "h1", CapabilitySnapshotHash: "s1",
+		BlockKind: "policy_violation",
+		Field:     "execution_policy.required_reach",
+		Expected:  "internet",
+		Actual:    "intranet",
+		Detail:    "execution_policy.required_reach: expected internet, actual intranet",
+		BlockedAt: time.Date(2026, 7, 3, 0, 0, 0, 0, time.UTC),
+	}
+	if err := relay.WriteDryRunBlock(context.Background(), row); err != nil {
+		t.Fatalf("WriteDryRunBlock: %v", err)
+	}
+	if lastMethod != http.MethodPost || lastPath != "/api/dry-run-blocks" {
+		t.Errorf("wire method+path: got %s %s want POST /api/dry-run-blocks", lastMethod, lastPath)
+	}
+	if lastAuth != "Bearer bearer-xyz" {
+		t.Errorf("Authorization header: got %q want %q", lastAuth, "Bearer bearer-xyz")
+	}
+	// Validate the JSON body carries all row fields.
+	var got observerDryRunBlockSave
+	if err := json.Unmarshal(lastBody, &got); err != nil {
+		t.Fatalf("body unmarshal: %v; body=%s", err, string(lastBody))
+	}
+	// Assert every field carried across the wire — a silent drop of
+	// (e.g.) contract_hash would defeat the §6.1 consumer SELECT
+	// without any test noticing.
+	if got.BlockID != row.BlockID {
+		t.Errorf("BlockID: got %q want %q", got.BlockID, row.BlockID)
+	}
+	if got.AttemptID != row.AttemptID {
+		t.Errorf("AttemptID: got %q want %q", got.AttemptID, row.AttemptID)
+	}
+	if got.ConversationID != row.ConversationID {
+		t.Errorf("ConversationID: got %q want %q", got.ConversationID, row.ConversationID)
+	}
+	if got.ExperimentID != row.ExperimentID {
+		t.Errorf("ExperimentID: got %q want %q", got.ExperimentID, row.ExperimentID)
+	}
+	if got.ContractHash != row.ContractHash {
+		t.Errorf("ContractHash: got %q want %q", got.ContractHash, row.ContractHash)
+	}
+	if got.CapabilitySnapshotHash != row.CapabilitySnapshotHash {
+		t.Errorf("CapabilitySnapshotHash: got %q want %q", got.CapabilitySnapshotHash, row.CapabilitySnapshotHash)
+	}
+	if got.BlockKind != row.BlockKind {
+		t.Errorf("BlockKind: got %q want %q", got.BlockKind, row.BlockKind)
+	}
+	if got.Field != row.Field {
+		t.Errorf("Field: got %q want %q", got.Field, row.Field)
+	}
+	if got.Expected != row.Expected {
+		t.Errorf("Expected: got %q want %q", got.Expected, row.Expected)
+	}
+	if got.Actual != row.Actual {
+		t.Errorf("Actual: got %q want %q", got.Actual, row.Actual)
+	}
+	if got.Detail != row.Detail {
+		t.Errorf("Detail: got %q want %q", got.Detail, row.Detail)
+	}
+	if got.BlockedAt != row.BlockedAt.UTC().Format(time.RFC3339Nano) {
+		t.Errorf("BlockedAt: got %q want %q", got.BlockedAt, row.BlockedAt.UTC().Format(time.RFC3339Nano))
+	}
+
+	// Non-2xx surfaces as an error.
+	status = http.StatusInternalServerError
+	if err := relay.WriteDryRunBlock(context.Background(), row); err == nil {
+		t.Error("expected error on 500 response; got nil")
+	}
+
+	// nil relay is a silent no-op.
+	var nilRelay *ObserverRelay
+	if err := nilRelay.WriteDryRunBlock(context.Background(), row); err != nil {
+		t.Errorf("nil relay must be a silent no-op; got %v", err)
 	}
 }

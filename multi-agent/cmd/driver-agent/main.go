@@ -190,6 +190,17 @@ func runServe(args []string) {
 	sdkClient := driver.NewAgentSDKClient(cli, cfg.Server.URL, cfg.Credentials.ProxyToken)
 	tools := driver.NewTools(reg, audit, sdkClient, cfg, obs)
 	tools.SetTaskJournal(taskJournal)
+	// WT-2-dry-run-validator §4.3: wire the dry_run_blocks writer
+	// through the observer HTTP relay. Warn-loud (not fail-loud) when
+	// the observer is disabled — the driver still boots for demo /
+	// smoke-test flows that intentionally run without observer, but
+	// operators see a clear WARN in the log so a misconfigured
+	// production driver doesn't silently drop persistence.
+	if relay := driver.NewObserverRelay(cfg, obs); relay != nil {
+		tools.SetDryRunBlockWriter(relay)
+	} else {
+		log.Printf("[WARN] dry_run_blocks writer not configured — spec §4.3 persistence degraded (check cfg.Observer.Enabled/URL)")
+	}
 	backend, err := newAgentBackend(cfg)
 	if err != nil {
 		log.Fatalf("agentbackend: %v", err)

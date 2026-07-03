@@ -49,6 +49,11 @@ type Tools struct {
 	relay          *ObserverRelay
 	contractRunner ContractRunner
 	parentThread   atomic.Pointer[string] // nil = not yet bound; set by BindThread
+	// dryRunWriter persists validator.Block rows to the
+	// dry_run_blocks table (WT-2-dry-run-validator §6). Nil in tests
+	// that don't need persistence; production main.go must wire this
+	// (see plan §Task 13 step 3).
+	dryRunWriter observerstore.DryRunBlockWriter
 }
 
 // NewTools constructs a Tools bundle.
@@ -58,6 +63,15 @@ func NewTools(reg *FileRegistry, audit *AuditLog, sdk SDKClient, cfg *Config, ob
 
 func (t *Tools) SetTaskJournal(j *TaskJournal) {
 	t.taskJournal = j
+}
+
+// SetDryRunBlockWriter installs the observerstore writer used to
+// persist validator.Block rows to dry_run_blocks. Production main.go
+// wires this once at startup — see wt2-dry-run-validator.plan.md
+// §Task 13 step 3. Nil is tolerated (persistence is best-effort;
+// the metric events still fire).
+func (t *Tools) SetDryRunBlockWriter(w observerstore.DryRunBlockWriter) {
+	t.dryRunWriter = w
 }
 
 func (t *Tools) SetContractRunner(r ContractRunner) {

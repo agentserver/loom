@@ -1809,3 +1809,116 @@ func TestRegister_RejectsAfterRecentIngest(t *testing.T) {
 	require.Contains(t, body, "force")
 	require.Contains(t, body, "recently")
 }
+
+// TestDryRunBlocksAPIRestrictsRoles asserts:
+//   - slave role → 403
+//   - driver role → 201 + row persisted to dry_run_blocks
+//   - master role → 201
+// This is the WT-2-dry-run-validator §4.3 production wire test —
+// exercises the httpDryRunBlockWriter path end-to-end.
+func TestDryRunBlocksAPIRestrictsRoles(t *testing.T) {
+	h, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
+
+	body := `{"block_id":"blk-1","attempt_id":"att-1","conversation_id":"conv-1","experiment_id":"exp-1","contract_hash":"h1","capability_snapshot_hash":"s1","block_kind":"policy_violation","field":"execution_policy.required_reach","expected":"internet","actual":"intranet","detail":"execution_policy.required_reach: expected internet, actual intranet","blocked_at":"2026-07-03T00:00:00Z"}`
+
+	req := httptest.NewRequest(http.MethodPost, "/api/dry-run-blocks", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer slave-token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code)
+
+	req = httptest.NewRequest(http.MethodPost, "/api/dry-run-blocks", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer driver-token")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+
+	// Verify persistence.
+	var n int
+	require.NoError(t, st.DB().QueryRow(`SELECT COUNT(*) FROM dry_run_blocks WHERE block_id=?`, "blk-1").Scan(&n))
+	require.Equal(t, 1, n, "row should be persisted after driver POST")
+
+	// Master role also allowed (WT-2 semantics: masters can produce
+	// their own dry-run blocks; the endpoint's role gate mirrors the
+	// resource-snapshots endpoint).
+	body2 := `{"block_id":"blk-2","attempt_id":"att-2","conversation_id":"conv-2","contract_hash":"h1","capability_snapshot_hash":"s1","block_kind":"missing_file"}`
+	req = httptest.NewRequest(http.MethodPost, "/api/dry-run-blocks", strings.NewReader(body2))
+	req.Header.Set("Authorization", "Bearer master-token")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+}
+
+// TestDryRunBlocksAPIValidatesRequiredFields — round-5 fresh review P1:
+// endpoint used to accept empty block_id / block_kind / *_hash and
+// return raw SQL error text through http.Error. Assert:
+//   - empty required fields → 400 with synthesised message (no SQL text)
+//   - invalid block_kind → 400 with enum-list message
+//   - invalid blocked_at → 400 (was silent default to now())
+func TestDryRunBlocksAPIValidatesRequiredFields(t *testing.T) {
+	h, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
+
+	cases := []struct {
+		name, body, wantSubstr string
+	}{
+		{
+			name:       "empty_block_id",
+			body:       `{"block_id":"","attempt_id":"a","conversation_id":"c","contract_hash":"h","capability_snapshot_hash":"s","block_kind":"missing_file"}`,
+			wantSubstr: "required",
+		},
+		{
+			name:       "empty_block_kind",
+			body:       `{"block_id":"b","attempt_id":"a","conversation_id":"c","contract_hash":"h","capability_snapshot_hash":"s","block_kind":""}`,
+			wantSubstr: "block_kind",
+		},
+		{
+			name:       "invalid_block_kind",
+			body:       `{"block_id":"b","attempt_id":"a","conversation_id":"c","contract_hash":"h","capability_snapshot_hash":"s","block_kind":"nope"}`,
+			wantSubstr: "block_kind",
+		},
+		{
+			name:       "invalid_blocked_at",
+			body:       `{"block_id":"b","attempt_id":"a","conversation_id":"c","contract_hash":"h","capability_snapshot_hash":"s","block_kind":"missing_file","blocked_at":"not-a-time"}`,
+			wantSubstr: "blocked_at",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/dry-run-blocks", strings.NewReader(tc.body))
+			req.Header.Set("Authorization", "Bearer driver-token")
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+			require.Equal(t, http.StatusBadRequest, rr.Code, "body=%s", rr.Body.String())
+			require.Contains(t, rr.Body.String(), tc.wantSubstr)
+			// Response body MUST NOT contain SQL driver internals.
+			require.NotContains(t, rr.Body.String(), "CHECK")
+			require.NotContains(t, rr.Body.String(), "constraint")
+			require.NotContains(t, rr.Body.String(), "SQLITE")
+		})
+	}
+}
+
+// TestDryRunBlocksAPIRejectsOversizedBody — round-5 fresh review P1:
+// endpoint was decoding without a MaxBytesReader; every other ingest
+// path has one. Confirm 413 on body > cap.
+func TestDryRunBlocksAPIRejectsOversizedBody(t *testing.T) {
+	h, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
+
+	// Build a body larger than the default MaxEventBodyBytes cap.
+	// newTestHandler uses defaults (256 KiB — see
+	// defaultMaxEventBodyBytes at server.go:28); a 2 MiB detail
+	// overshoots by ~8x.
+	huge := make([]byte, 2*1024*1024)
+	for i := range huge {
+		huge[i] = 'x'
+	}
+	body := `{"block_id":"blk-big","attempt_id":"a","conversation_id":"c","contract_hash":"h","capability_snapshot_hash":"s","block_kind":"missing_file","detail":"` + string(huge) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/dry-run-blocks", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer driver-token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusRequestEntityTooLarge, rr.Code, "body=%s", rr.Body.String())
+}

@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/observerstore"
+	"github.com/yourorg/multi-agent/internal/secretscrub"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -664,6 +666,44 @@ func (s *Store) SaveResourceSnapshot(record observerstore.ResourceSnapshotRecord
 	now := observerstore.NowUTC()
 	_, err := s.db.Exec(`INSERT INTO resource_snapshots(workspace_id, snapshot_id, owner_agent_id, body, created_at)
 		VALUES($1, $2, $3, $4::jsonb, $5)`, record.WorkspaceID, record.SnapshotID, record.OwnerAgentID, string(record.Body), now)
+	return err
+}
+
+// WriteDryRunBlock is the Postgres-native implementation of
+// observerstore.DryRunBlockWriter. Uses $N placeholders and
+// timestamptz; ON CONFLICT DO NOTHING for idempotent retries. See
+// wt2-dry-run-validator.spec.md §6 + postgres/schema.sql
+// dry_run_blocks DDL.
+func (s *Store) WriteDryRunBlock(ctx context.Context, r observerstore.DryRunBlockRow) error {
+	// Defense-in-depth: truncate detail at the writer boundary
+	// (validator.newBlock caps it too; this is the last line). Uses
+	// the shared observerstore.DryRunBlockMaxDetailBytes / Sentinel
+	// constants so the SQLite and pg paths can't drift.
+	if len(r.Detail) > observerstore.DryRunBlockMaxDetailBytes {
+		cut := observerstore.DryRunBlockMaxDetailBytes - len(observerstore.DryRunBlockDetailTruncSentinel)
+		if cut < 0 {
+			cut = 0
+		}
+		r.Detail = r.Detail[:cut] + observerstore.DryRunBlockDetailTruncSentinel
+	}
+	r.Field = secretscrub.Sanitize(r.Field)
+	r.Expected = secretscrub.Sanitize(r.Expected)
+	r.Actual = secretscrub.Sanitize(r.Actual)
+	r.Detail = secretscrub.Sanitize(r.Detail)
+	r.ConversationID = secretscrub.Sanitize(r.ConversationID)
+
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO dry_run_blocks(
+    block_id, attempt_id, conversation_id, experiment_id,
+    contract_hash, capability_snapshot_hash, block_kind,
+    field, expected, actual, detail, blocked_at)
+VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+ON CONFLICT(block_id) DO NOTHING`,
+		r.BlockID, r.AttemptID, r.ConversationID, r.ExperimentID,
+		r.ContractHash, r.CapabilitySnapshotHash, r.BlockKind,
+		r.Field, r.Expected, r.Actual, r.Detail,
+		r.BlockedAt.UTC(),
+	)
 	return err
 }
 
