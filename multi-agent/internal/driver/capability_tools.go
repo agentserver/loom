@@ -4,15 +4,21 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"log"
 	"math/big"
 	"reflect"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/contract"
+	"github.com/yourorg/multi-agent/internal/contract/validator"
+	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/observerstore"
 )
 
@@ -182,9 +188,15 @@ func (d *draftTaskContractTool) Call(ctx context.Context, raw json.RawMessage) (
 	}
 	tc.ApplyDefaults()
 	questions := clarificationQuestions(tc)
+	// WT-2 B4: run Lookup on the user's goal to surface reusable MCPs
+	// before the LLM commits to scaffolding a new one. Nil / empty is
+	// the safe default under NoRegistryLookup (Lookup returns nil
+	// itself).
+	registryHits := Lookup(ctx, args.Goal)
 	return json.Marshal(map[string]interface{}{
 		"contract":                tc,
 		"clarification_questions": questions,
+		"registry_hits":           registryHits,
 	})
 }
 
@@ -204,12 +216,20 @@ func (d *dryRunContractTool) Description() string {
 }
 
 func (d *dryRunContractTool) InputSchema() json.RawMessage {
-	return json.RawMessage(`{"type":"object","properties":{"contract":{"type":"object"}},"required":["contract"]}`)
+	return json.RawMessage(`{
+		"type":"object",
+		"properties":{
+			"contract":{"type":"object"},
+			"capability_snapshot":{"type":"object"}
+		},
+		"required":["contract"]
+	}`)
 }
 
 func (d *dryRunContractTool) Call(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
 	var args struct {
-		Contract contract.TaskContract `json:"contract"`
+		Contract           contract.TaskContract `json:"contract"`
+		CapabilitySnapshot json.RawMessage       `json:"capability_snapshot"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return nil, &MCPToolError{Message: "invalid args: " + err.Error(), Category: observerstore.FailContractViolation}
@@ -224,20 +244,200 @@ func (d *dryRunContractTool) Call(ctx context.Context, raw json.RawMessage) (jso
 		return nil, &MCPToolError{Message: "discover agents: " + err.Error(), Category: observerstore.FailUnknown}
 	}
 	report := analyzeContractCapabilities(cards, d.t.cfg.Credentials.SandboxID, tc)
+	report.AttemptID = randomHex(16)
+
+	// §7(d) — ablation short-circuit. Route recommendation remains;
+	// only the four §A3 pre-exec checks + their side-effects are gated.
+	//
+	// Use %q (Go-quoted, escapes \n / \r / control chars) instead of
+	// %s to defeat log-injection via an attacker-controlled
+	// conversation_id containing newlines: a literal newline would
+	// otherwise let the operator forge a second "[ablation] ..." line
+	// in the audit trail. Mirrors internal/contract/validate.go:348
+	// (NoTypedContracts) and PR #52 round-3 review P1-2.
+	if validator.IsDryRunDisabled() {
+		log.Printf("[ablation] NoDryRun: skipped conversation=%q", tc.ConversationID)
+		return json.Marshal(report)
+	}
+
+	var blocks []validator.Block
+	var snapHash string
+	if len(args.CapabilitySnapshot) > 0 {
+		var snapSpec capability.Snapshot
+		if err := json.Unmarshal(args.CapabilitySnapshot, &snapSpec); err != nil {
+			return nil, &MCPToolError{Message: "invalid capability_snapshot: " + err.Error(), Category: observerstore.FailContractViolation}
+		}
+		snap, err := capability.NewSnapshot(snapSpec)
+		if err != nil {
+			return nil, &MCPToolError{Message: "capability_snapshot: " + err.Error(), Category: observerstore.FailContractViolation}
+		}
+		blocks = validator.New().Check(ctx, tc, snap)
+		snapHash = capability.ComputeHash(snap)
+	}
+	report.Blocks = blocks
+	if len(blocks) > 0 {
+		report.Runnable = false
+	}
+
+	ch := dryRunContractHash(tc)
+	experimentID := extractExperimentID(tc)
+
+	// Persist blocks (best-effort — failure warns via audit but does
+	// not fail the tool call; matches SaveResourceSnapshot pattern).
+	if writer := d.t.dryRunWriter; writer != nil && len(blocks) > 0 {
+		blockedAt := time.Now().UTC()
+		for i, b := range blocks {
+			row := observerstore.DryRunBlockRow{
+				BlockID:                report.AttemptID + "-" + strconv.Itoa(i),
+				AttemptID:              report.AttemptID,
+				ConversationID:         tc.ConversationID,
+				ExperimentID:           experimentID,
+				ContractHash:           ch,
+				CapabilitySnapshotHash: snapHash,
+				BlockKind:              string(b.Kind),
+				Field:                  b.Field,
+				Expected:               b.Expected,
+				Actual:                 b.Actual,
+				Detail:                 b.Detail,
+				BlockedAt:              blockedAt,
+			}
+			if werr := writer.WriteDryRunBlock(ctx, row); werr != nil {
+				d.t.logHelperErr("dry_run_blocks", "write_block", werr)
+			}
+		}
+	}
+
+	// Emit 3 metric events (§5) — always, even for clean runs, so the
+	// denominator is well-defined.
+	preExec := 0
+	if len(blocks) > 0 {
+		preExec = 1
+	}
+	missingFiles := countBlocksOfKind(blocks, validator.KindMissingFile)
+	policyViolations := countBlocksOfKind(blocks, validator.KindPolicyViolation)
+
+	missingNum, policyNum := 0, 0
+	if missingFiles > 0 {
+		missingNum = 1
+	}
+	if policyViolations > 0 {
+		policyNum = 1
+	}
+	d.t.emitDryRunMetric("PreExecutionFaultCatchRate", "blocks_total", report.AttemptID, ch, experimentID, preExec, len(blocks))
+	d.t.emitDryRunMetric("MissingArtifactDetectionRate", "missing_files", report.AttemptID, ch, experimentID, missingNum, missingFiles)
+	d.t.emitDryRunMetric("PolicyViolationPreventionRate", "policy_violations", report.AttemptID, ch, experimentID, policyNum, policyViolations)
+
 	return json.Marshal(report)
 }
 
+// countBlocksOfKind returns the number of blocks whose Kind matches.
+func countBlocksOfKind(blocks []validator.Block, kind validator.Kind) int {
+	n := 0
+	for _, b := range blocks {
+		if b.Kind == kind {
+			n++
+		}
+	}
+	return n
+}
+
+// dryRunContractHash returns a stable identifier for the contract.
+// json.Marshal is deterministic here — TaskContract's fields are
+// declared in a fixed order, so two byte-identical contracts hash
+// identically.
+func dryRunContractHash(tc contract.TaskContract) string {
+	body, err := json.Marshal(tc)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+
+// extractExperimentID pulls an experiment_id off the contract's
+// Intent.BusinessContext (convention: `experiment_id=<id>` marker).
+// Empty string when absent — dry-runs outside an experiment run fine
+// with an empty experiment_id column.
+//
+// The marker MUST appear at start-of-string or immediately after a
+// whitespace / punctuation delimiter — otherwise a benign
+// BusinessContext like "my_experiment_id=exp-alpha" (an operator's
+// free-form note) would tag the dry-run with a bogus experiment,
+// contaminating the §6.1 per-experiment denominator with unrelated
+// attempts. Round-5 fresh review P2.
+func extractExperimentID(tc contract.TaskContract) string {
+	const marker = "experiment_id="
+	c := tc.Intent.BusinessContext
+	// Scan for the marker at a valid boundary: start-of-string, or
+	// preceded by a delimiter character (whitespace / punctuation).
+	for i := 0; i+len(marker) <= len(c); i++ {
+		if c[i:i+len(marker)] != marker {
+			continue
+		}
+		// Boundary check: must be at position 0 or preceded by an
+		// obvious separator. This rejects `foo_experiment_id=...`
+		// (part of a longer identifier). Include \r so Windows-authored
+		// BusinessContext ("line1\rexperiment_id=x") isn't a false
+		// negative. UTF-8 caveat: this compares one byte; a multi-byte
+		// rune preceding the marker (e.g. Chinese `任务:experiment_id=`)
+		// reads the trailing continuation byte, which fails the switch
+		// and rejects the match — safe direction (nothing extracted,
+		// no denominator contamination) but strict.
+		if i > 0 {
+			prev := c[i-1]
+			switch prev {
+			case ' ', '\t', '\n', '\r', ',', ';', '.':
+				// ok — legitimate delimiter.
+			default:
+				continue
+			}
+		}
+		rest := c[i+len(marker):]
+		end := strings.IndexAny(rest, " \t\n\r,;")
+		if end < 0 {
+			return rest
+		}
+		return rest[:end]
+	}
+	return ""
+}
+
+// emitDryRunMetric emits one metric event of `kind` with a payload
+// keyed on `countKey` (per-metric-class count field). See spec §5.
+func (t *Tools) emitDryRunMetric(kind, countKey, attemptID, contractHash, experimentID string, numerator, count int) {
+	payload := map[string]interface{}{
+		"numerator":     numerator,
+		countKey:        count,
+		"attempt_id":    attemptID,
+		"contract_hash": contractHash,
+		"experiment_id": experimentID,
+	}
+	body, _ := json.Marshal(payload)
+	t.emit(observer.Event{
+		WorkspaceID: t.cfg.Observer.WorkspaceID,
+		AgentID:     t.cfg.Credentials.ShortID,
+		AgentRole:   observer.RoleDriver,
+		Type:        kind,
+		TaskID:      "",
+		Payload:     json.RawMessage(body),
+	})
+}
+
 type dryRunReport struct {
-	Runnable              bool            `json:"runnable"`
-	RecommendedRoute      string          `json:"recommended_route"`
-	RecommendedTargetID   string          `json:"recommended_target_id,omitempty"`
-	RecommendedTargetName string          `json:"recommended_target_display_name,omitempty"`
-	RecommendedSkill      string          `json:"recommended_skill,omitempty"`
-	SatisfiedTools        []string        `json:"satisfied_tools"`
-	MissingTools          []string        `json:"missing_tools"`
-	MissingSkills         []string        `json:"missing_skills"`
-	MissingResources      json.RawMessage `json:"missing_resources,omitempty"`
-	Reasons               []string        `json:"reasons"`
+	Runnable              bool              `json:"runnable"`
+	RecommendedRoute      string            `json:"recommended_route"`
+	RecommendedTargetID   string            `json:"recommended_target_id,omitempty"`
+	RecommendedTargetName string            `json:"recommended_target_display_name,omitempty"`
+	RecommendedSkill      string            `json:"recommended_skill,omitempty"`
+	SatisfiedTools        []string          `json:"satisfied_tools"`
+	MissingTools          []string          `json:"missing_tools"`
+	MissingSkills         []string          `json:"missing_skills"`
+	MissingResources      json.RawMessage   `json:"missing_resources,omitempty"`
+	Reasons               []string          `json:"reasons"`
+	// WT-2-dry-run-validator §4.2: per-invocation attempt id + validator
+	// blocks. Runnable is AND-ed with len(Blocks)==0.
+	Blocks    []validator.Block `json:"blocks"`
+	AttemptID string            `json:"attempt_id"`
 }
 
 func analyzeContractCapabilities(cards []agentsdk.AgentCard, selfID string, tc contract.TaskContract) dryRunReport {

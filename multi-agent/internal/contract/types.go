@@ -3,6 +3,7 @@ package contract
 import (
 	"encoding/json"
 
+	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/commandiface"
 )
 
@@ -81,12 +82,34 @@ type ExecutionPolicy struct {
 	RequirePlanApproval              bool     `json:"require_plan_approval"`
 	RequireUserApprovalForRepoWrites bool     `json:"require_user_approval_for_repo_writes"`
 	AllowedTargets                   []string `json:"allowed_targets,omitempty"`
+	// RequiredReach is the WT-2 §A3 minimum outbound network reach the
+	// executing host must have. Empty ⇒ no constraint. Semantic ladder:
+	// none < loopback-only < intranet < internet. Enforced by
+	// internal/contract/validator.checkPolicyViolation.
+	RequiredReach capability.NetworkReach `json:"required_reach,omitempty"`
 }
 
 type CapabilityRequirements struct {
 	Skills    []string        `json:"skills"`
 	Tools     []string        `json:"tools"`
 	Resources json.RawMessage `json:"resources,omitempty"`
+	// ForbiddenAliases lists capability.CredentialAlias values that
+	// MUST NOT be present on the executing host. Compared with exact
+	// case-sensitive string equality against Snapshot.Credentials —
+	// see wt2-dry-run-validator.spec.md §7(e).
+	ForbiddenAliases []string `json:"forbidden_aliases,omitempty"`
+	// ToolRequirements carries version predicates. Presence-only
+	// requirements can still use Tools []string; ToolRequirements
+	// upgrades a tool to "must be present AND >= MinVersion" (semver).
+	ToolRequirements []ToolRequirement `json:"tool_requirements,omitempty"`
+}
+
+// ToolRequirement pairs a tool name with a semver minimum version.
+// Empty MinVersion ⇒ presence-only (same semantics as the legacy
+// Tools []string entry).
+type ToolRequirement struct {
+	Name       string `json:"name"`
+	MinVersion string `json:"min_version,omitempty"`
 }
 
 type ResourceSnapshot struct {

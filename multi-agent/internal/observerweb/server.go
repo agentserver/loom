@@ -130,6 +130,7 @@ func mountRoutes(mux *http.ServeMux, h *handler, usHandler *userspace.Handler) {
 	mux.HandleFunc("/api/task-contracts/", h.taskContractByID)
 	mux.HandleFunc("/api/resource-snapshots", h.resourceSnapshots)
 	mux.HandleFunc("/api/resource-snapshots/latest", h.latestResourceSnapshot)
+	mux.HandleFunc("/api/dry-run-blocks", h.dryRunBlocks)
 	mux.HandleFunc("/api/workspaces", h.guardWebToken(h.listWorkspaces))
 	if usHandler != nil {
 		userspace.MountRoutes(mux, usHandler)
@@ -1006,6 +1007,131 @@ func (h *handler) resourceSnapshots(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(record)
+}
+
+// dryRunBlocks POSTs one row to observerstore.dry_run_blocks.
+// WT-2-dry-run-validator §4.3 production persistence path — see
+// docs/specs/wt2-dry-run-validator.plan.md §Task 13 step 3.
+func (h *handler) dryRunBlocks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	agent, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	if agent.Role != observer.RoleDriver && agent.Role != observer.RoleMaster {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	// Two acceptable backends: a Postgres store that natively
+	// implements DryRunBlockWriter, or a SQLite ManagedStore we wrap
+	// with observerstore.NewDryRunBlockWriter around ManagedStore.DB().
+	// The Store interface intentionally stays ingest-only — this
+	// endpoint discriminates via runtime type assertion instead of
+	// adding another method every mock/postgres/sqlite backend has to
+	// implement. See wt2-dry-run-validator.spec.md §6.
+	var writer observerstore.DryRunBlockWriter
+	if pgw, ok := h.s.(observerstore.DryRunBlockWriter); ok {
+		writer = pgw
+	} else if managed, ok := h.s.(observerstore.ManagedStore); ok {
+		writer = observerstore.NewDryRunBlockWriter(managed.DB())
+	} else {
+		http.Error(w, "dry_run_blocks endpoint requires ManagedStore or DryRunBlockWriter-backed store", http.StatusServiceUnavailable)
+		return
+	}
+	// Body cap: mirror postEvent's MaxBytesReader guard so an
+	// authenticated but malicious driver cannot OOM the observer with
+	// a giant `detail` field. h.maxEventBodyBytes applies uniformly to
+	// every ingest endpoint (default 256 KiB — see
+	// defaultMaxEventBodyBytes at line 28; configurable via Options).
+	r.Body = http.MaxBytesReader(w, r.Body, h.maxEventBodyBytes)
+
+	var req struct {
+		BlockID                string `json:"block_id"`
+		AttemptID              string `json:"attempt_id"`
+		ConversationID         string `json:"conversation_id"`
+		ExperimentID           string `json:"experiment_id"`
+		ContractHash           string `json:"contract_hash"`
+		CapabilitySnapshotHash string `json:"capability_snapshot_hash"`
+		BlockKind              string `json:"block_kind"`
+		Field                  string `json:"field"`
+		Expected               string `json:"expected"`
+		Actual                 string `json:"actual"`
+		Detail                 string `json:"detail"`
+		BlockedAt              string `json:"blocked_at"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+
+	// Required-field validation. Empty block_id would poison the PK
+	// space (every subsequent legit empty-id row silently no-ops via
+	// ON CONFLICT DO NOTHING); empty block_kind would trip the SQL
+	// CHECK constraint and leak schema internals through err.Error();
+	// empty contract_hash / capability_snapshot_hash / attempt_id /
+	// conversation_id break the §6.1 consumer SELECT joins. Reject
+	// with a synthesized diagnostic that never surfaces raw driver
+	// error text.
+	if req.BlockID == "" || req.AttemptID == "" || req.ConversationID == "" ||
+		req.ContractHash == "" || req.CapabilitySnapshotHash == "" {
+		http.Error(w, "block_id, attempt_id, conversation_id, contract_hash, and capability_snapshot_hash are required", http.StatusBadRequest)
+		return
+	}
+	switch req.BlockKind {
+	case "missing_file", "wrong_version", "forbidden_cred", "policy_violation":
+		// ok — matches the schema CHECK constraint.
+	default:
+		http.Error(w, "block_kind must be one of missing_file|wrong_version|forbidden_cred|policy_violation", http.StatusBadRequest)
+		return
+	}
+
+	blockedAt := time.Time{}
+	if req.BlockedAt != "" {
+		t, err := time.Parse(time.RFC3339Nano, req.BlockedAt)
+		if err != nil {
+			// Silent default to now would land wrong-time rows.
+			// Distinguish "empty → default" from "invalid → reject".
+			http.Error(w, "blocked_at must be RFC3339Nano (or omitted for now)", http.StatusBadRequest)
+			return
+		}
+		blockedAt = t
+	}
+	if blockedAt.IsZero() {
+		blockedAt = time.Now().UTC()
+	}
+	row := observerstore.DryRunBlockRow{
+		BlockID:                req.BlockID,
+		AttemptID:              req.AttemptID,
+		ConversationID:         req.ConversationID,
+		ExperimentID:           req.ExperimentID,
+		ContractHash:           req.ContractHash,
+		CapabilitySnapshotHash: req.CapabilitySnapshotHash,
+		BlockKind:              req.BlockKind,
+		Field:                  req.Field,
+		Expected:               req.Expected,
+		Actual:                 req.Actual,
+		Detail:                 req.Detail,
+		BlockedAt:              blockedAt,
+	}
+	if err := writer.WriteDryRunBlock(r.Context(), row); err != nil {
+		// Never leak raw driver / constraint text — return a
+		// synthesized diagnostic. The real error is available to
+		// operators via server logs.
+		log.Printf("[dry_run_blocks] write failed: %v", err)
+		http.Error(w, "failed to persist dry_run_block", http.StatusInternalServerError)
+		return
+	}
+	// Bump agents.last_seen_at to match other tokened endpoints.
+	_ = agent
+	w.WriteHeader(http.StatusCreated)
 }
 
 func (h *handler) latestResourceSnapshot(w http.ResponseWriter, r *http.Request) {

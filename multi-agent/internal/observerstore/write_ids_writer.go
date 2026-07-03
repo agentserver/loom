@@ -504,7 +504,7 @@ func (s *SQLiteWriteIDStore) Reserve(ctx context.Context, req ReserveRequest) (R
 	// fake-clock instant with the same outcome don't collide on
 	// the audit PK (F7 + round-4 P1 #5).
 	outcome := state.String()
-	eventID := deriveEventID(req.ID, req.RunID, req.WorkerID, nowStr, outcome)
+	eventID := deriveWriteIDEventID(req.ID, req.RunID, req.WorkerID, nowStr, outcome)
 	if _, err := tx.ExecContext(ctx, sqlReserveEvent,
 		eventID, string(req.ID), req.RunID, req.TaskID, outcome, nowStr, req.WorkerID); err != nil {
 		return 0, fmt.Errorf("observerstore: reserve audit: %w", err)
@@ -606,7 +606,7 @@ func (s *SQLiteWriteIDStore) Commit(ctx context.Context, req CommitRequest) erro
 	// Emit audit row. run_id + worker_id included in derivation
 	// (F7 + round-4 P1 #5).
 	outcome := "commit"
-	eventID := deriveEventID(req.ID, req.RunID, req.WorkerID, nowStr, outcome)
+	eventID := deriveWriteIDEventID(req.ID, req.RunID, req.WorkerID, nowStr, outcome)
 	if _, err := tx.ExecContext(ctx, sqlReserveEvent,
 		eventID, string(req.ID), req.RunID, req.TaskID, outcome, nowStr, req.WorkerID); err != nil {
 		return fmt.Errorf("observerstore: commit audit: %w", err)
@@ -620,9 +620,12 @@ func (s *SQLiteWriteIDStore) Commit(ctx context.Context, req CommitRequest) erro
 	return nil
 }
 
-// deriveEventID computes event_id = hex(sha256(LP(id) || LP(run_id) ||
-// LP(worker_id) || LP(occurred_at) || LP(outcome))) where LP is the
-// length-prefixed encoding from writeLP. Includes run_id (F7) so
+// deriveWriteIDEventID computes event_id = hex(sha256(LP(id) ||
+// LP(run_id) || LP(worker_id) || LP(occurred_at) || LP(outcome)))
+// where LP is the length-prefixed encoding from writeLP. Named
+// with the WriteID prefix to avoid colliding with the probe-events
+// writer's own deriveEventID in the same package. Includes run_id
+// (F7) so
 // two runs Reserving the same id at the same wall-clock instant
 // with the same outcome don't collide on the audit PK, and includes
 // worker_id (round-4 P1 #5) so two DIFFERENT workers Reserving the
@@ -637,7 +640,7 @@ func (s *SQLiteWriteIDStore) Commit(ctx context.Context, req CommitRequest) erro
 // unvalidated field containing \x1e byte would collide with a
 // different tuple; uvarint LEB128 length prefixes make the
 // derivation injective regardless of input bytes.
-func deriveEventID(id WriteID, runID, workerID, occurredAt, outcome string) string {
+func deriveWriteIDEventID(id WriteID, runID, workerID, occurredAt, outcome string) string {
 	h := sha256.New()
 	writeLP(h, string(id))
 	writeLP(h, runID)

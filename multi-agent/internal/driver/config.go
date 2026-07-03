@@ -101,6 +101,17 @@ type Observer struct {
 	// a within-5-min restart. Defaults to false so accidental takeovers of
 	// a still-live sibling driver remain blocked. See §1.3 #11.
 	ForceRegister bool `yaml:"force_register,omitempty"`
+	// PromotionAuditDBPath is the local file path to the observer store
+	// SQLite file the driver should open for direct promotion_audit
+	// writes (WT-2-driver-promotion-chain B6 spec §3.4). Set in
+	// co-located / stub-mode deployments where the driver and observer
+	// share a filesystem; leave empty when the observer is remote —
+	// register/unregister tools then log a helper-error line but the
+	// underlying slave register still succeeds (degrade pattern
+	// matching journal-append failures). A future WT that pipes
+	// audit rows via the observerclient HTTP surface will make this
+	// optional even in remote-observer mode.
+	PromotionAuditDBPath string `yaml:"promotion_audit_db_path,omitempty"`
 }
 
 // DaemonConfig configures optional long-lived `driver-agent serve-daemon` mode.

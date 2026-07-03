@@ -37,11 +37,13 @@ func runMain(args []string) int {
 		workloadDir = fs.String("workload-dir", "multi-agent/tests/eval/workloads", "directory containing <workload>/spec.yaml")
 		stubListen  = fs.String("stub-listen", "127.0.0.1:18080", "agentserver-stub --listen address; MUST be loopback")
 		observerDB  = fs.String("observer-db", "", "SQLite DB for run schema; empty = NoopWriter")
-		codexConfig = fs.String("codex-config", "", "path to codex config.toml (passed through; recorded only)")
-		runID       = fs.String("run-id", "", "explicit run id; default = derived")
-		timeout     = fs.Duration("timeout", 0, "override spec.timeout_seconds")
-		outCSV      = fs.String("out", "", "output CSV path; required")
-		keep        = fs.Bool("keep-tempdir", false, "do not delete tempdir at exit (debug)")
+		codexConfig     = fs.String("codex-config", "", "path to codex config.toml (passed through; recorded only)")
+		codexConfigPath = fs.String("codex-config-path", "", "WT-2: filesystem path to a codex config.toml; validated against --codex-config-mode; must resolve under the repo or /tmp")
+		codexConfigMode = fs.String("codex-config-mode", "", "WT-2: \"a\" = local-proxy (experimental_bearer_token) or \"b\" = upstream-direct (env_key=OPENAI_API_KEY); enforces the auth-field / env-var preconditions")
+		runID           = fs.String("run-id", "", "explicit run id; default = derived")
+		timeout         = fs.Duration("timeout", 0, "override spec.timeout_seconds")
+		outCSV          = fs.String("out", "", "output CSV path; required")
+		keep            = fs.Bool("keep-tempdir", false, "do not delete tempdir at exit (debug)")
 	)
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
@@ -60,12 +62,21 @@ func runMain(args []string) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	// --codex-config-path wins over --codex-config for the recorded
+	// path when both are supplied (WT-2 spec §2.2). Callers that only
+	// pass --codex-config keep PR #53 semantics.
+	recordedCodexPath := *codexConfig
+	if *codexConfigPath != "" {
+		recordedCodexPath = *codexConfigPath
+	}
+
 	res := Run(ctx, Opts{
 		WorkloadID:      *workload,
 		WorkloadDir:     *workloadDir,
 		StubListen:      *stubListen,
 		ObserverDB:      *observerDB,
-		CodexConfigPath: *codexConfig,
+		CodexConfigPath: recordedCodexPath,
+		CodexConfigMode: *codexConfigMode,
 		RunID:           *runID,
 		Timeout:         *timeout,
 		OutCSV:          *outCSV,

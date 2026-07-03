@@ -1,0 +1,19 @@
+{
+  "ArtifactCorrectnessRate": 1.0,
+  "HumanContextSelectionCount": 3,
+  "LifecycleClosureRate": 0.0,
+  "RoutingAccuracy": 0.75,
+  "RoutingLatencyP50P95": {
+    "count": 4,
+    "p50_ns": 1500000.0,
+    "p95_ns": 3700000.0
+  },
+  "TaskSuccessRate": 0.6,
+  "TimeToCompletion": {
+    "count": 5,
+    "mean_seconds": 22.0,
+    "p50_seconds": 20.0,
+    "p95_seconds": 37.0
+  },
+  "WrongContextFailureRate": 0.4
+}

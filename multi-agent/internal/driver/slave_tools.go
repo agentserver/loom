@@ -190,7 +190,18 @@ func (t *Tools) delegateShellTask(ctx context.Context, card agentsdk.AgentCard, 
 			"status":              resp.Status,
 		})
 	}
-	return t.waitDelegatedTask(ctx, resp.TaskID, args.TimeoutSec)
+	out, err := t.waitDelegatedTask(ctx, resp.TaskID, args.TimeoutSec)
+	if err == nil {
+		// WT-2 B1 detector: record the completed ad-hoc script. Family
+		// is derived from the first token of the script; a smarter
+		// classifier is future work (LOOM_EVAL_TASK_FAMILY env
+		// override is honoured inside RecordAdHocScriptTask). Missing
+		// / non-ablation-relevant tasks are skipped by the helper's
+		// own regex + ablation guards.
+		family := FamilyOfTaskSummary(args.Script)
+		RecordAdHocScriptTask(ctx, family, resp.TaskID, t.workspaceID())
+	}
+	return out, err
 }
 
 type getSlaveClaudePermissionsTool struct{ t *Tools }

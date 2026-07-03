@@ -1,0 +1,16 @@
+{
+  "ArtifactCorrectnessRate": 1.0,
+  "ConfigTouchCount": null,
+  "HumanContextSelectionCount": 8,
+  "LifecycleClosureRate": 0.6,
+  "ManualSetupStepCount": null,
+  "StateContinuityRate": null,
+  "TaskSuccessRate": 0.6,
+  "TimeToCompletion": {
+    "count": 10,
+    "mean_seconds": 29.2,
+    "p50_seconds": 19.0,
+    "p95_seconds": 76.5
+  },
+  "WrongContextFailureRate": 0.3
+}

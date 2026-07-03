@@ -273,6 +273,81 @@ Do not call `register_slave_mcp` directly from a one-shot Claude generation: `re
 > There is no automatic master build path, and adding one is out of scope
 > for the current paper v3 cycle.
 
+## Registry Lookup Before Prompting
+
+Before you propose scaffolding a new MCP or ad-hoc script for the user's
+goal, call `driver.Lookup(ctx, query)` (surfaced through
+`draft_task_contract`'s `registry_hits` field) to check for existing
+work that matches. Reusing an already-registered MCP or a userspace
+skill costs nothing and often lands in the top three hits by score.
+
+Guidance:
+
+- Send the user's **goal text** (or a distilled keyword form) as the
+  `query` — the sanitiser will strip FTS5 meta chars and lowercase the
+  operator words `AND` / `OR` / `NOT` / `NEAR`.
+- Trust the merged result set: `source="registry"` entries are MCPs
+  already registered on some slave; `source="userspace"` entries are
+  packages the user (or their teammates) previously published.
+- If the top hit's `Score` is `1.0` (exact-name match) or `0.7`
+  (case-insensitive substring), present it to the user AS the answer,
+  not as a hint — say "there's already `<mcp_name>` registered on
+  `<slave_id>`, want to use it?" rather than "here's some options".
+- Only proceed to scaffold-new when the lookup returns no hits or all
+  hits are clearly unrelated.
+- The lookup is silenced under the `NoRegistryLookup` ablation; if
+  `registry_hits` is empty in a run that you'd expect matches for,
+  check whether the ablation is on before assuming there's nothing to
+  reuse.
+
+## Promote Candidates (Fixate Repeated Work)
+
+When you notice the user repeatedly running similar ad-hoc scripts for
+the same family of task, surface a **promote-candidate** signal so
+they get a "want to fixate this into a proper MCP?" prompt. The driver
+side (`driver.RecordAdHocScriptTask`, wired into the bash / powershell
+tool completion path) fires this automatically **once per (run,
+family) per session** — the transition from the first ad-hoc
+completion to the second one in the same family emits ONE
+`promote_candidates` row + one observer event. Subsequent unique
+tasks in the same family (3rd, 4th, ...) do NOT re-fire the driver-
+side signal; if a second prompt is warranted the model must decide
+that itself and nudge the user manually.
+
+When to prompt:
+
+- Two `run_slave_bash` / `run_slave_powershell` calls in the same
+  session solve variants of the same task (same family, e.g. "csv
+  profiling" or "log parsing"). The B1 detector surfaces the
+  candidate row at that 1→2 transition; your job is to translate that
+  into a user-facing suggestion in your NEXT reply.
+- Present the choice concretely: "I've noticed you've done this twice
+  now — would you like me to scaffold `<family>_mcp` and register it
+  on <slave>? The `promotion_pipeline` MCP tool bundles
+  scaffold → acceptance → register in one call."
+- If the user says yes → call `promotion_pipeline` with
+  `promotion_reason=explicit_user_request` and the four B6 audit
+  fields.
+- If the user says no → their decision is a `RecordCandidateDecision`
+  driver-side call; the same candidate won't re-surface within its
+  24-hour TTL and, because the detector fires only once per (run,
+  family), a decline effectively silences the prompt for the rest of
+  this run for that family.
+
+**Do not** manually re-prompt every N tasks. The driver used to
+re-fire the detector on the 3rd, 4th, ... same-family task and this
+inflated the paper's `PromotionCandidateSurfacingRate`; the fire-
+once-per-session invariant is now enforced in the driver and the
+model should match it. If a user genuinely needs a second nudge
+(e.g., they said "not now" first time), reissue the prompt from your
+own reasoning rather than expecting a new detector event.
+
+Under `NoUserPromotionPath` ablation the surfacing is silenced at the
+driver layer (no candidate rows, no observer event, no
+`promotion_pipeline` tool availability); you should not manually
+suggest promotion in that mode — the paper's E4 baseline measures
+what the driver looks like WITHOUT the promotion path.
+
 ## Common Mistakes
 
 - Skipping clarification and jumping straight to `draft_task_contract` / `scaffold-mcp-server` because "the intent seems obvious".

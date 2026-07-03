@@ -474,7 +474,7 @@ func checkAuditFailureRollsBackAll(t *testing.T) {
 	id := mustNewWriteID(t, validTaskID, validConvID, validStepID, validTargetPath, validHash)
 	nowStr := formatTS(fixed)
 	req := makeReq(id, "w1")
-	eventID := deriveEventID(id, req.RunID, req.WorkerID, nowStr, "fresh")
+	eventID := deriveWriteIDEventID(id, req.RunID, req.WorkerID, nowStr, "fresh")
 
 	// Pre-seed the audit table with a row that will PK-conflict on
 	// the exact event_id Reserve is about to compute. Include the
@@ -665,7 +665,7 @@ func TestReserve_EventIDDeterministicallyDerived(t *testing.T) {
 	}
 	nowStr := formatTS(fixed)
 	req := makeReq(id, "w1")
-	wantEventID := deriveEventID(id, req.RunID, req.WorkerID, nowStr, "fresh")
+	wantEventID := deriveWriteIDEventID(id, req.RunID, req.WorkerID, nowStr, "fresh")
 	var gotEventID string
 	if err := store.db.QueryRow(
 		"SELECT event_id FROM write_id_reserve_events WHERE id = ? AND outcome = 'fresh'",
@@ -1768,18 +1768,18 @@ func TestDeriveEventID_DifferentWorkersDoNotCollide(t *testing.T) {
 	t.Parallel()
 	id := mustNewWriteID(t, validTaskID, validConvID, validStepID, validTargetPath, validHash)
 	nowStr := formatTS(time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC))
-	eA := deriveEventID(id, "run-1", "wA", nowStr, "inflight")
-	eB := deriveEventID(id, "run-1", "wB", nowStr, "inflight")
+	eA := deriveWriteIDEventID(id, "run-1", "wA", nowStr, "inflight")
+	eB := deriveWriteIDEventID(id, "run-1", "wB", nowStr, "inflight")
 	if eA == eB {
 		t.Errorf("event_ids collide across workers: A=%s B=%s (round-4 P1 #5 regression)", eA, eB)
 	}
 	// Same worker + same everything = same id (deterministic).
-	eA2 := deriveEventID(id, "run-1", "wA", nowStr, "inflight")
+	eA2 := deriveWriteIDEventID(id, "run-1", "wA", nowStr, "inflight")
 	if eA != eA2 {
-		t.Errorf("deriveEventID non-deterministic: %s vs %s", eA, eA2)
+		t.Errorf("deriveWriteIDEventID non-deterministic: %s vs %s", eA, eA2)
 	}
 	// Same worker but different run_id = distinct.
-	eAr2 := deriveEventID(id, "run-2", "wA", nowStr, "inflight")
+	eAr2 := deriveWriteIDEventID(id, "run-2", "wA", nowStr, "inflight")
 	if eA == eAr2 {
 		t.Errorf("event_ids collide across runs: %s vs %s", eA, eAr2)
 	}

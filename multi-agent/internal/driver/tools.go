@@ -18,6 +18,7 @@ import (
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/observerstore"
 	"github.com/yourorg/multi-agent/internal/orchestration"
+	"github.com/yourorg/multi-agent/internal/promotionaudit"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 )
 
@@ -49,6 +50,17 @@ type Tools struct {
 	relay          *ObserverRelay
 	contractRunner ContractRunner
 	parentThread   atomic.Pointer[string] // nil = not yet bound; set by BindThread
+	// promoAudit is the promotion-audit sink (spec
+	// docs/specs/wt2-driver-promotion-chain-B6.spec.md). nil means
+	// "no observer store wired" — the register/unregister tools log
+	// a helper-error line and still succeed the underlying task
+	// (matches the existing journal-append degrade pattern).
+	promoAudit promotionaudit.Writer
+	// dryRunWriter persists validator.Block rows to the
+	// dry_run_blocks table (WT-2-dry-run-validator §6). Nil in tests
+	// that don't need persistence; production main.go must wire this
+	// (see plan §Task 13 step 3).
+	dryRunWriter observerstore.DryRunBlockWriter
 }
 
 // NewTools constructs a Tools bundle.
@@ -56,8 +68,41 @@ func NewTools(reg *FileRegistry, audit *AuditLog, sdk SDKClient, cfg *Config, ob
 	return &Tools{reg: reg, audit: audit, sdk: sdk, cfg: cfg, observer: obs, relay: NewObserverRelay(cfg, toTokenSource(obs))}
 }
 
+// SetPromotionAuditWriter wires the promotion-audit sink. nil disables
+// the writer path — the register/unregister tools then log a
+// helper-error line noting "no promotion_audit sink" but the delegate
+// task still runs.
+func (t *Tools) SetPromotionAuditWriter(w promotionaudit.Writer) {
+	t.promoAudit = w
+}
+
+// workspaceID returns the driver's workspace id — the value threaded
+// through Config from either observer.workspace_id or the credentials
+// block. Empty return means "no workspace configured"; callers wanting
+// register/unregister audit rows must ensure a workspace is set (the
+// promotionaudit.Validate check rejects an empty workspace_id for
+// register/unregister actions).
+func (t *Tools) workspaceID() string {
+	if t == nil || t.cfg == nil {
+		return ""
+	}
+	if t.cfg.Observer.WorkspaceID != "" {
+		return t.cfg.Observer.WorkspaceID
+	}
+	return t.cfg.Credentials.WorkspaceID
+}
+
 func (t *Tools) SetTaskJournal(j *TaskJournal) {
 	t.taskJournal = j
+}
+
+// SetDryRunBlockWriter installs the observerstore writer used to
+// persist validator.Block rows to dry_run_blocks. Production main.go
+// wires this once at startup — see wt2-dry-run-validator.plan.md
+// §Task 13 step 3. Nil is tolerated (persistence is best-effort;
+// the metric events still fire).
+func (t *Tools) SetDryRunBlockWriter(w observerstore.DryRunBlockWriter) {
+	t.dryRunWriter = w
 }
 
 func (t *Tools) SetContractRunner(r ContractRunner) {
@@ -246,6 +291,7 @@ func (t *Tools) All() []Tool {
 		&runSlaveShellTool{t},
 		&registerSlaveMCPTool{t},
 		&unregisterSlaveMCPTool{t},
+		&promotionPipelineTool{t: t}, // WT-2 B2 §2.1
 		// Permission tools use task delegation until agentserver exposes a dedicated control channel.
 		&getSlaveClaudePermissionsTool{t},
 		&updateSlaveClaudePermissionsTool{t},

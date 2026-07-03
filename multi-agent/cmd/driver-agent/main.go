@@ -1,5 +1,10 @@
 package main
 
+// WT-2 B4: driverUserspaceAdapter bridges *userspace.Store to the
+// narrow driver.UserspaceSearcher interface Lookup depends on. The
+// two types are structurally different because internal/driver stays
+// free of the internal/userspace import.
+
 import (
 	"bytes"
 	"context"
@@ -20,10 +25,14 @@ import (
 	"github.com/agentserver/agentserver/pkg/agentsdk"
 	"github.com/yourorg/multi-agent/internal/commander"
 	"github.com/yourorg/multi-agent/internal/driver"
+	"github.com/yourorg/multi-agent/internal/evalrun"
 	"github.com/yourorg/multi-agent/internal/observer"
 	"github.com/yourorg/multi-agent/internal/observerclient"
+	"github.com/yourorg/multi-agent/internal/observerstore"
 	"github.com/yourorg/multi-agent/internal/orchestration"
 	"github.com/yourorg/multi-agent/internal/planner"
+	"github.com/yourorg/multi-agent/internal/promotionaudit"
+	"github.com/yourorg/multi-agent/internal/userspace"
 	"github.com/yourorg/multi-agent/internal/webui"
 	"github.com/yourorg/multi-agent/pkg/agentbackend"
 	_ "github.com/yourorg/multi-agent/pkg/agentbackend/claude"
@@ -190,6 +199,103 @@ func runServe(args []string) {
 	sdkClient := driver.NewAgentSDKClient(cli, cfg.Server.URL, cfg.Credentials.ProxyToken)
 	tools := driver.NewTools(reg, audit, sdkClient, cfg, obs)
 	tools.SetTaskJournal(taskJournal)
+	// WT-2 B4: propagate the eval-runner's run_id (spawner sets
+	// LOOM_EVAL_RUN_ID before exec'ing driver-agent). Empty is fine
+	// for interactive/ad-hoc driver sessions; registry_lookup_samples
+	// rows land with run_id='' in that case.
+	if runID := os.Getenv("LOOM_EVAL_RUN_ID"); runID != "" {
+		driver.SetCurrentRunID(runID)
+	}
+	// WT-2-dry-run-validator §4.3: wire the dry_run_blocks writer
+	// through the observer HTTP relay. Warn-loud (not fail-loud) when
+	// the observer is disabled — the driver still boots for demo /
+	// smoke-test flows that intentionally run without observer, but
+	// operators see a clear WARN in the log so a misconfigured
+	// production driver doesn't silently drop persistence.
+	if relay := driver.NewObserverRelay(cfg, obs); relay != nil {
+		tools.SetDryRunBlockWriter(relay)
+	} else {
+		log.Printf("[WARN] dry_run_blocks writer not configured — spec §4.3 persistence degraded (check cfg.Observer.Enabled/URL)")
+	}
+	// WT-2 B6: wire the promotion-audit writer if a local observer.db
+	// path is configured. Empty path leaves the writer nil — the
+	// register / unregister tools then degrade to a helper-error log
+	// per §3.4 step 6 while the slave register itself still succeeds.
+	if cfg.Observer.PromotionAuditDBPath != "" {
+		promoStore, err := observerstore.OpenSQLite(cfg.Observer.PromotionAuditDBPath)
+		if err != nil {
+			log.Printf("promotion_audit: OpenSQLite(%q): %v — audit writer disabled",
+				cfg.Observer.PromotionAuditDBPath, err)
+		} else {
+			// PR #71 round-2 review P1-C: replay promotion_audit
+			// history into the in-process slaveRegistryView so a
+			// driver-agent sharing this observer.db with another
+			// process sees the same starting registry hash. Best-
+			// effort — see docstring for the trade-offs.
+			if err := driver.ReconstructRegistryViewFromAudit(context.Background(), promoStore.DB()); err != nil {
+				log.Printf("promote_candidate: registry view reconstruct failed: %v — continuing with empty view", err)
+			}
+			tools.SetPromotionAuditWriter(promotionaudit.NewSQLiteWriter(promoStore.DB()))
+			// WT-2 B4: same local observer store handle powers the
+			// registry_lookup_samples writer AND the userspace search
+			// backing driver.Lookup. Remote-observer prod deployments
+			// (which leave PromotionAuditDBPath empty) don't get
+			// Lookup samples yet — future HTTP-piped variant handles
+			// that; for now Lookup runs registry-only with a WARN
+			// per §7 (d).
+			// PR #71 round-2 review P1-B: both writers now honour the
+			// shared NoObserver ablation (via evalrun.DisableTelemetry)
+			// so all three observer-store writers (promotion_audit +
+			// promote_candidates + registry_lookup_samples) behave
+			// symmetrically under `--ablation NoObserver`.
+			isNoObserver := func() bool { return evalrun.DisableTelemetry }
+			lookupSampleWriter := observerstore.NewRegistryLookupSamplesWriterWithAblation(promoStore.DB(), isNoObserver)
+			usStore := userspace.NewStore(promoStore.DB())
+			// WT-2 B1: promote-candidate deps + expiry goroutine.
+			promoWriter := observerstore.NewPromoteCandidatesWriterWithAblation(promoStore.DB(), isNoObserver)
+			driver.SetPromoteCandidateDeps(driver.PromoteCandidateDeps{
+				Writer: &driverPromoWriterAdapter{w: promoWriter},
+				Events: obs,
+				Now:    time.Now,
+			})
+			// 5-minute sweep; 24h cutoff. The goroutine uses
+			// context.Background() because it starts before the
+			// signal-cancellable ctx is declared below; on process
+			// exit the goroutine dies with the process. A future
+			// refactor can hoist ctx creation earlier.
+			go func() {
+				sweepCtx := context.Background()
+				tick := time.NewTicker(5 * time.Minute)
+				defer tick.Stop()
+				for range tick.C {
+					cutoff := time.Now().Add(-24 * time.Hour)
+					if _, err := driver.ExpireCandidatesOlderThan(sweepCtx, cutoff); err != nil {
+						log.Printf("promote_candidate: expiry sweep: %v", err)
+					}
+				}
+			}()
+
+			driver.SetLookupDeps(driver.LookupDeps{
+				UserspaceStore: &driverUserspaceAdapter{store: usStore},
+				WorkspaceID:    cfg.Observer.WorkspaceID,
+				UserID:         "", // driver-agent does not carry a user identity
+				CurrentRunID:   driver.CurrentRunID,
+				SampleWrite: func(ctx context.Context, s driver.RegistryLookupSample) error {
+					return lookupSampleWriter.WriteRegistryLookupSample(ctx, observerstore.RegistryLookupSampleRow{
+						TS:              s.Queried,
+						RunID:           s.RunID,
+						WorkspaceID:     s.WorkspaceID,
+						QueryHashPrefix: s.QueryHashPrefix,
+						HitCount:        s.HitCount,
+						RegistryHits:    s.RegistryHits,
+						UserspaceHits:   s.UserspaceHits,
+						TopScore:        s.TopScore,
+					})
+				},
+			})
+			defer promoStore.Close()
+		}
+	}
 	backend, err := newAgentBackend(cfg)
 	if err != nil {
 		log.Fatalf("agentbackend: %v", err)
@@ -415,4 +521,49 @@ func daemonWSURL(observerURL, wsPath string) (string, bool) {
 func die(msg string) {
 	fmt.Fprintln(os.Stderr, "driver-agent:", msg)
 	os.Exit(1)
+}
+
+// driverUserspaceAdapter bridges *userspace.Store to
+// driver.UserspaceSearcher. Kept in the driver-agent binary so the
+// internal/driver package stays free of the internal/userspace import.
+type driverUserspaceAdapter struct{ store *userspace.Store }
+
+func (a *driverUserspaceAdapter) SearchPackagesForIdentity(q, workspaceID, userID, kindFilter string, limit int) ([]driver.PackageHit, error) {
+	rows, err := a.store.SearchPackagesForIdentity(q, workspaceID, userID, kindFilter, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]driver.PackageHit, len(rows))
+	for i, r := range rows {
+		out[i] = driver.PackageHit{
+			Slug:        r.Slug,
+			Description: r.Description,
+			// Rank derived by position in the driver layer.
+		}
+	}
+	return out, nil
+}
+
+// driverPromoWriterAdapter bridges observerstore.PromoteCandidatesWriter
+// to driver.PromoteCandidatesWriter. The two types are structurally
+// identical but live in different packages so internal/driver stays
+// free of the internal/observerstore import.
+type driverPromoWriterAdapter struct{ w observerstore.PromoteCandidatesWriter }
+
+func (a *driverPromoWriterAdapter) InsertPromoteCandidate(ctx context.Context, row driver.PromoteCandidateRow) error {
+	return a.w.InsertPromoteCandidate(ctx, observerstore.PromoteCandidateRow{
+		CandidateID:   row.CandidateID,
+		Family:        row.Family,
+		SourceTaskIDs: row.SourceTaskIDs,
+		SurfacedAt:    row.SurfacedAt,
+		SurfacedBy:    row.SurfacedBy,
+		WorkspaceID:   row.WorkspaceID,
+		RunID:         row.RunID,
+	})
+}
+func (a *driverPromoWriterAdapter) UpdatePromoteCandidateDecision(ctx context.Context, cid, dec, at string) error {
+	return a.w.UpdatePromoteCandidateDecision(ctx, cid, dec, at)
+}
+func (a *driverPromoWriterAdapter) ExpirePromoteCandidates(ctx context.Context, cutoff string) (int, error) {
+	return a.w.ExpirePromoteCandidates(ctx, cutoff)
 }
