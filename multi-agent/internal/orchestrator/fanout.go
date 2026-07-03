@@ -247,7 +247,9 @@ func (o *Orchestrator) runFanout(ctx context.Context, t executor.Task) (executor
 			}),
 		})
 	}
-	plan, err := planWithProgress(ctx, t.Prompt, agents)
+	plan, err := MeasurePlanning(ctx, t.ID, func() ([]planner.Node, error) {
+		return planWithProgress(ctx, t.Prompt, agents)
+	})
 	if err != nil {
 		return executor.Result{}, fmt.Errorf("planner.Plan: %w", err)
 	}
