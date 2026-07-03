@@ -451,9 +451,21 @@ function Test-ProdPreflight {
 
 $script:SpawnedPids = New-Object System.Collections.Generic.List[int]
 $script:StageFailed = $false
+# Set to $true after Invoke-BringupStub/Invoke-BringupProd returns
+# without throwing. Round-9 P1-B fix: once bring-up succeeded, a
+# topology-emit or other post-bring-up failure is a warning, not a
+# reason to reap the healthy stack.
+$script:BringupComplete = $false
 
 function Invoke-Cleanup-OnFailure {
     if (-not $script:StageFailed) { return }
+    if ($script:BringupComplete) {
+        # Post-bring-up failure (topology emit, etc.) — daemons are
+        # healthy; leave them running. Operator can `deploy.ps1
+        # -Shutdown` when done.
+        [System.Console]::Error.WriteLine("deploy.ps1: post-bring-up failure; daemons LEFT RUNNING (use -Shutdown to reap).")
+        return
+    }
     # Write-Warning (not Write-Error) — Write-Error under
     # $ErrorActionPreference='Stop' would throw here and cut cleanup
     # short before we reap PIDs (P1-1 fix, Codex round 2).
@@ -550,6 +562,8 @@ function Start-Sub {
 
         # Start-Process gives us real file-redirected stdout/stderr
         # (no pipe wedge risk) + a Process object for PID/PGID capture.
+        # NoNewWindow implies -WindowStyle is ignored (Round-9 P2-D:
+        # dropped -WindowStyle Hidden that was silently no-oping).
         $spArgs = @{
             FilePath              = $FilePath
             ArgumentList          = $ArgList
@@ -557,7 +571,6 @@ function Start-Sub {
             RedirectStandardError  = $LogPath + '.err'
             PassThru              = $true
             NoNewWindow           = $true
-            WindowStyle           = 'Hidden'
         }
         $proc = Start-Process @spArgs
     } finally {
@@ -827,6 +840,16 @@ function Update-YamlLeaf {
 }
 
 function Get-CredFromYaml {
+    # PRECONDITION: the value at `Field` is a single-token scalar
+    # (no embedded whitespace, no embedded `"`). All fields we call
+    # this with — sandbox_id, tunnel_token, proxy_token, workspace_id,
+    # short_id — are stub-issued base64/hex-shaped strings that
+    # satisfy this. If a future stub emits tokens with spaces or `"`,
+    # this returns a silently-truncated value and downstream whoami
+    # fails with a mysterious 401. Round-9 P2-B: precondition
+    # documented; a stricter parser (ConvertFrom-Yaml via
+    # powershell-yaml module) would remove this footgun at the cost
+    # of a new dependency.
     param([string]$Path, [string]$Field)
     $raw = Get-Content -Raw -LiteralPath $Path
     if ($raw -match "(?m)^\s*${Field}\s*:\s*`"?([^`"\s]+)`"?") {
@@ -880,6 +903,11 @@ try {
         'stub' { Invoke-BringupStub }
         'prod' { Invoke-BringupProd }
     }
+    # Bring-up returned without throwing; healthy daemons in .pids/.
+    # Round-9 P1-B: from here on, any exception is post-bring-up and
+    # Invoke-Cleanup-OnFailure will only warn, not reap.
+    $script:BringupComplete = $true
+
     # Topology emit — the Bash helper is OS-agnostic in that it reads only
     # its CLI + /proc-style sources; on Windows we compute the payload in
     # PowerShell natively to avoid a bash dependency. Wrap in a nested

@@ -399,6 +399,31 @@ setup_shim_bindir() {
     [ ! -d "$LOOM_HOME/.pids" ]
 }
 
+@test "T-P1B-runtime: topology emit failure (exit 5) does NOT reap healthy daemons" {
+    # Round-9 P1-B regression guard. --topology-out targeting a
+    # non-existent directory forces machine_topology.sh's atomic
+    # rename to fail, which surfaces as exit 5. Before the P1-B fix
+    # the EXIT trap would reap every healthy daemon; after, the
+    # daemons stay up and the operator can --shutdown them.
+    command -v python3 >/dev/null || skip "python3 needed for shim server"
+    command -v yq >/dev/null || skip "yq needed for stub-mode yaml patching"
+    setup_shim_bindir; bin="$SHIM_BIN"
+    LOOM_TEST_HOSTNAME=h1 run bash "$DEPLOY" --stub \
+        --loom-home "$LOOM_HOME" --bin-dir "$bin" \
+        --topology-out /nonexistent-dir-$$/topology.json
+    [ "$status" -eq 5 ]
+    # Daemons must STILL be running — the four PID files still exist
+    # AND each PID is alive.
+    for role in agentserver-stub observer slave driver; do
+        pf="$LOOM_HOME/.pids/${role}.pid"
+        [ -f "$pf" ]
+        pid=$(cat "$pf")
+        kill -0 "$pid" 2>/dev/null
+    done
+    # Now reap them ourselves.
+    bash "$DEPLOY" --shutdown --loom-home "$LOOM_HOME" >/dev/null 2>&1
+}
+
 @test "T18c-runtime: readiness timeout on stalled stub → exit 4 with cleanup" {
     command -v python3 >/dev/null || skip "python3 needed for shim server"
     command -v yq >/dev/null || skip "yq needed for stub-mode yaml patching"

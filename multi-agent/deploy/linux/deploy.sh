@@ -510,10 +510,24 @@ prod_preflight() {
 
 declare -a SPAWNED_PIDS=()
 FAILED=0
+# BRINGUP_COMPLETE flips to 1 after the switch on $MODE returns without
+# throwing. Round-9 P1-B fix: previously any exit != 0 (including exit
+# 5 = topology emit failure per spec §3.3) reaped the entire healthy
+# daemon set, giving the operator the WORST possible outcome ("stack
+# gone AND no topology JSON"). Once bring-up succeeded, a topology
+# failure is a warning, not a stack teardown.
+BRINGUP_COMPLETE=0
 
 cleanup_on_failure() {
     local ec=$?
     (( ec == 0 )) && return 0
+    if (( BRINGUP_COMPLETE == 1 )); then
+        # Bring-up completed; failure is post-bring-up (topology emit
+        # or similar). Do NOT reap the healthy daemons — the operator
+        # can still `deploy.sh --shutdown` when done.
+        echo "deploy.sh: post-bring-up failure (exit $ec); daemons LEFT RUNNING (use --shutdown to reap)." >&2
+        exit "$ec"
+    fi
     echo "deploy.sh: failure (exit $ec) — reaping spawned processes" >&2
     for pid in "${SPAWNED_PIDS[@]:-}"; do
         [[ -z "$pid" ]] && continue
@@ -773,6 +787,11 @@ case "$MODE" in
     stub) bringup_stub ;;
     prod) bringup_prod ;;
 esac
+
+# Bring-up completed without throwing. From here on the daemons are
+# healthy and any failure (topology emit, minor post-processing) must
+# NOT cascade into a full stack teardown (round-9 P1-B).
+BRINGUP_COMPLETE=1
 
 # --- topology emit -----------------------------------------------------
 
