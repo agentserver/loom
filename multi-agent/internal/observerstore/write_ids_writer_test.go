@@ -1435,6 +1435,137 @@ func TestOpenSQLite_LoadsNewTables(t *testing.T) {
 }
 
 // -------------------------------------------------------------------
+// Fresh-review round 2 regression tests
+// -------------------------------------------------------------------
+// These tests exist so that reverting any of the F4/F5/F6 fixes from
+// the round-1 fresh review cycle fails a named test. Reviewer round 2
+// pointed out those fixes had landed without regression coverage.
+
+// TestReserve_InvalidLeaseTTLRejected — F4 regression guard.
+// Distinct sentinel for LeaseTTL<=0 so callers can classify
+// programmer bugs vs missing fields; reverting to
+// ErrEmptyReserveField silently passes without this test.
+func TestReserve_InvalidLeaseTTLRejected(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+	id := mustNewWriteID(t, validTaskID, validConvID, validStepID, validTargetPath, validHash)
+	cases := []struct {
+		name string
+		ttl  time.Duration
+	}{
+		{"zero", 0},
+		{"negative", -1 * time.Second},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req := makeReq(id, "w1")
+			req.LeaseTTL = tc.ttl
+			_, err := store.Reserve(ctx, req)
+			if !errors.Is(err, ErrInvalidLeaseTTL) {
+				t.Errorf("err = %v; want ErrInvalidLeaseTTL", err)
+			}
+			if errors.Is(err, ErrEmptyReserveField) {
+				t.Errorf("err = %v; must NOT be classified as ErrEmptyReserveField", err)
+			}
+		})
+	}
+}
+
+// TestReserve_SameWorkerRefreshesLeaseExpiry — F5 regression guard.
+// Two Reserves at t=0 and t=+5s with the same WorkerID must produce
+// a lease_expires_at that moved forward. Without the sqlReserveExtend
+// UPDATE this test fails.
+func TestReserve_SameWorkerRefreshesLeaseExpiry(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	clk := newFakeClock(base)
+	store, _ := newTestStoreAt(t, clk)
+	ctx := context.Background()
+	id := mustNewWriteID(t, validTaskID, validConvID, validStepID, validTargetPath, validHash)
+
+	if _, err := store.Reserve(ctx, makeReq(id, "w1")); err != nil {
+		t.Fatal(err)
+	}
+	var firstExpires string
+	if err := store.db.QueryRow(
+		`SELECT lease_expires_at FROM write_ids WHERE id = ?`, string(id)).Scan(&firstExpires); err != nil {
+		t.Fatal(err)
+	}
+
+	// Advance 5s and re-reserve as the SAME worker.
+	clk.Advance(5 * time.Second)
+	if _, err := store.Reserve(ctx, makeReq(id, "w1")); err != nil {
+		t.Fatal(err)
+	}
+	var secondExpires string
+	if err := store.db.QueryRow(
+		`SELECT lease_expires_at FROM write_ids WHERE id = ?`, string(id)).Scan(&secondExpires); err != nil {
+		t.Fatal(err)
+	}
+	if secondExpires <= firstExpires {
+		t.Errorf("lease_expires_at did not move forward: first=%s second=%s (F5 sqlReserveExtend regression)",
+			firstExpires, secondExpires)
+	}
+	// Numeric sanity: should be roughly +5s from first_expires.
+	firstT, _ := time.Parse(rfc3339NanoFmt, firstExpires)
+	secondT, _ := time.Parse(rfc3339NanoFmt, secondExpires)
+	if delta := secondT.Sub(firstT); delta < 4*time.Second || delta > 6*time.Second {
+		t.Errorf("lease refresh delta = %v; want ~5s", delta)
+	}
+}
+
+// TestCommit_ErrNoReservation — F6 regression guard. When no row
+// exists at all (either never Reserved or Vacuum'd), Commit returns
+// ErrNoReservation (distinct from ErrLeaseLost).
+func TestCommit_ErrNoReservation(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx := context.Background()
+	id := mustNewWriteID(t, validTaskID, validConvID, validStepID, validTargetPath, validHash)
+	// No prior Reserve. Commit MUST error with ErrNoReservation,
+	// NOT ErrLeaseLost.
+	err := store.Commit(ctx, CommitRequest{
+		ID: id, RunID: "run-1", TaskID: validTaskID, WorkerID: "wnew",
+	})
+	if !errors.Is(err, ErrNoReservation) {
+		t.Errorf("err = %v; want ErrNoReservation", err)
+	}
+	if errors.Is(err, ErrLeaseLost) {
+		t.Errorf("err = %v; must NOT be classified as ErrLeaseLost (row never existed, not stolen)", err)
+	}
+
+	// Also cover the "row was Vacuumed" path: Reserve + Commit +
+	// Vacuum + Commit-again → ErrNoReservation on the third call.
+	base := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	clk := newFakeClock(base.Add(-60 * 24 * time.Hour))
+	store2, _ := newTestStoreAt(t, clk)
+	id2 := mustNewWriteID(t, validTaskID, validConvID, "step-purge", validTargetPath, altHash)
+	if _, err := store2.Reserve(ctx, req(t, id2, "w1", "step-purge")); err != nil {
+		t.Fatal(err)
+	}
+	cr := CommitRequest{ID: id2, RunID: "run-1", TaskID: validTaskID, WorkerID: "w1"}
+	if err := store2.Commit(ctx, cr); err != nil {
+		t.Fatal(err)
+	}
+	// Purge and try to Commit again with a DIFFERENT worker so the
+	// row-lookup catches ErrNoReservation rather than the idempotent
+	// no-op path.
+	clk.Advance(60 * 24 * time.Hour) // now at base
+	if _, err := store2.Vacuum(ctx, base.Add(-30*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	err = store2.Commit(ctx, CommitRequest{
+		ID: id2, RunID: "run-1", TaskID: validTaskID, WorkerID: "w-post-purge",
+	})
+	if !errors.Is(err, ErrNoReservation) {
+		t.Errorf("Commit after Vacuum: err = %v; want ErrNoReservation", err)
+	}
+}
+
+// -------------------------------------------------------------------
 // Helpers
 // -------------------------------------------------------------------
 // (fakeClock and newTestStoreAt live near the top of the file.)

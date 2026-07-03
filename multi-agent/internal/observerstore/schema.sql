@@ -286,7 +286,11 @@ CREATE INDEX IF NOT EXISTS idx_write_ids_committed_at
 -- Per-attempt audit trail for §7(g). One row per Reserve invocation
 -- (fresh, uncommitted, inflight, or committed outcome) and one row
 -- per Commit invocation ('commit' outcome). Keyed by
--- (event_id = hex(sha256(id || occurred_at || outcome))).
+-- (event_id = hex(sha256(id || run_id || occurred_at || outcome))
+-- with each field length-prefixed uvarint-style — see deriveEventID
+-- in write_ids_writer.go). run_id is included so two runs Reserving
+-- the same id at the same instant with the same outcome do NOT
+-- collide on the PK.
 --   DuplicateSideEffectRate =
 --       count(outcome IN ('uncommitted','committed'))
 --     / count(outcome IN ('fresh','uncommitted','inflight','committed'))

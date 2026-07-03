@@ -495,7 +495,19 @@ func (s *SQLiteWriteIDStore) Commit(ctx context.Context, req CommitRequest) erro
 			return fmt.Errorf("observerstore: commit read: %w", err)
 		}
 		if committedAt.Valid {
-			// Idempotent no-op. No audit row.
+			// The row is already committed. Two possibilities:
+			//   1. This caller called Commit twice (idempotent
+			//      no-op — the caller's write did happen).
+			//   2. This caller lost the lease to another worker,
+			//      the stealer already Committed, and this
+			//      caller's own write may or may not have happened.
+			// Both surface as `outcome=noop` because from D4's
+			// perspective a durably-committed WriteID is FINAL
+			// (spec §7(g)) — a "committed is committed" invariant.
+			// Callers that need to distinguish "was I the winner?"
+			// must compare the lease_owner column separately
+			// BEFORE calling Commit; there is no way to recover
+			// that information after this branch.
 			if err := tx.Commit(); err != nil {
 				return fmt.Errorf("observerstore: commit tx (noop): %w", err)
 			}
@@ -523,23 +535,24 @@ func (s *SQLiteWriteIDStore) Commit(ctx context.Context, req CommitRequest) erro
 	return nil
 }
 
-// deriveEventID computes event_id = hex(sha256(id || run_id ||
-// occurred_at || outcome)). Deterministic under retries but PRIMARY
-// KEY prevents accidental double insert. Includes run_id (F7) so
-// two runs Reserving the same id at the same wall-clock instant
-// with the same outcome don't collide on the audit PK — this
-// matters under fake-clock tests and is defence-in-depth in prod
-// where the sub-nanosecond clock resolution makes collisions
-// astronomically unlikely.
+// deriveEventID computes event_id = hex(sha256(LP(id) || LP(run_id) ||
+// LP(occurred_at) || LP(outcome))) where LP is the length-prefixed
+// encoding from writeLP. Includes run_id (F7) so two runs Reserving
+// the same id at the same wall-clock instant with the same outcome
+// don't collide on the audit PK — this matters under fake-clock
+// tests and is defence-in-depth in prod where sub-nanosecond clock
+// resolution makes collisions astronomically unlikely.
+//
+// Length-prefixed rather than \x1e-separated (round-2 review): an
+// unvalidated run_id containing \x1e byte would collide with a
+// different (run_id, occurred_at) tuple; uvarint LEB128 length
+// prefixes make the derivation injective regardless of input bytes.
 func deriveEventID(id WriteID, runID, occurredAt, outcome string) string {
 	h := sha256.New()
-	_, _ = h.Write([]byte(id))
-	_, _ = h.Write([]byte("\x1e"))
-	_, _ = h.Write([]byte(runID))
-	_, _ = h.Write([]byte("\x1e"))
-	_, _ = h.Write([]byte(occurredAt))
-	_, _ = h.Write([]byte("\x1e"))
-	_, _ = h.Write([]byte(outcome))
+	writeLP(h, string(id))
+	writeLP(h, runID)
+	writeLP(h, occurredAt)
+	writeLP(h, outcome)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
