@@ -303,12 +303,57 @@ func TestDryRunContractTool_NoDryRunAblation_ShortCircuits(t *testing.T) {
 		t.Errorf("ablation-on: expected 0 dry_run_blocks rows; got %d", n)
 	}
 	logText := logBuf.String()
-	want := "[ablation] NoDryRun: skipped conversation=conv-ablation-42"
+	// %q quoting: conv-ablation-42 → "conv-ablation-42" (with quotes).
+	want := `[ablation] NoDryRun: skipped conversation="conv-ablation-42"`
 	if !strings.Contains(logText, want) {
 		t.Errorf("missing ablation log line %q; got:\n%s", want, logText)
 	}
 	if strings.Count(logText, want) != 1 {
 		t.Errorf("expected 1 log line matching %q; got %d in:\n%s", want, strings.Count(logText, want), logText)
+	}
+}
+
+// §7(d) log-injection defense: an attacker-controlled conversation_id
+// carrying a newline + spoofed ablation prefix MUST NOT split the log
+// line. %q Go-quoting escapes \n / \r / control chars so the forged
+// second line cannot appear. Mirrors
+// contract/ablation_test.go:TestNoTypedContracts_LogIsInjectionResistant
+// pattern.
+func TestDryRunContractTool_NoDryRunLogIsInjectionResistant(t *testing.T) {
+	tools, _ := newTestToolsWithSink(t)
+	prev := validator.IsDryRunDisabled()
+	t.Cleanup(func() { validator.SetDryRunDisabled(prev) })
+	validator.SetDryRunDisabled(true)
+
+	var logBuf bytes.Buffer
+	origOut := log.Writer()
+	log.SetOutput(&logBuf)
+	t.Cleanup(func() { log.SetOutput(origOut) })
+
+	tc := makeMinimalValidContract(t)
+	// conversation_id containing an injected newline + spoofed
+	// [ablation] prefix. If the tool used %s, this would produce a
+	// second real "[ablation] FAKE: ..." line in the audit trail.
+	tc.ConversationID = "conv-x\n[ablation] FAKE: spoofed conversation=evil"
+	snap := makeSnapshot(t, capability.NetworkInternet, nil, nil)
+	args, _ := json.Marshal(map[string]interface{}{"contract": tc, "capability_snapshot": snap})
+	// If the contract's Validate rejects newline-carrying conversation_id,
+	// this test still confirms the log path is safe when the call
+	// reaches it — many contract-side sanitizers exist independently.
+	_, err := (&dryRunContractTool{t: tools}).Call(context.Background(), args)
+	if err != nil {
+		// Contract validation rejected the crafted id. That's a
+		// stronger defence — but we still assert the log path
+		// doesn't emit a forged line.
+	}
+
+	logText := logBuf.String()
+	// The word "FAKE" must NOT appear at column 0 on any line — that
+	// would prove the newline was interpreted rather than escaped.
+	for _, line := range strings.Split(logText, "\n") {
+		if strings.HasPrefix(line, "[ablation] FAKE:") {
+			t.Errorf("log injection succeeded: forged line %q at column 0", line)
+		}
 	}
 }
 
@@ -439,4 +484,39 @@ type failingDryRunWriter struct{}
 
 func (failingDryRunWriter) WriteDryRunBlock(context.Context, observerstore.DryRunBlockRow) error {
 	return errors.New("simulated writer failure")
+}
+
+// TestExtractExperimentID_BoundaryMatching — round-5 fresh review P2:
+// marker MUST be at start-of-string or preceded by whitespace /
+// punctuation. A benign "my_experiment_id=..." must NOT contaminate
+// the per-experiment denominator.
+func TestExtractExperimentID_BoundaryMatching(t *testing.T) {
+	cases := []struct {
+		ctx  string
+		want string
+	}{
+		// Legitimate markers.
+		{"experiment_id=exp-alpha", "exp-alpha"},
+		{"note: experiment_id=exp-alpha", "exp-alpha"},
+		{"tag,experiment_id=exp-alpha", "exp-alpha"},
+		{"line1\nexperiment_id=exp-alpha", "exp-alpha"},
+		{"foo. experiment_id=exp-alpha rest", "exp-alpha"},
+		// Partial-word bypasses — must NOT match.
+		{"my_experiment_id=leak", ""},
+		{"badexperiment_id=leak", ""},
+		{"prefixed_experiment_id=leak", ""},
+		// No marker.
+		{"", ""},
+		{"nothing here", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.ctx, func(t *testing.T) {
+			got := extractExperimentID(contract.TaskContract{
+				Intent: contract.IntentSpec{BusinessContext: tc.ctx},
+			})
+			if got != tc.want {
+				t.Errorf("extractExperimentID(%q) = %q, want %q", tc.ctx, got, tc.want)
+			}
+		})
+	}
 }

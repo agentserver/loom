@@ -1041,6 +1041,12 @@ func (h *handler) dryRunBlocks(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "dry_run_blocks endpoint requires ManagedStore or DryRunBlockWriter-backed store", http.StatusServiceUnavailable)
 		return
 	}
+	// Body cap: mirror postEvent's MaxBytesReader guard so an
+	// authenticated but malicious driver cannot OOM the observer with
+	// a giant `detail` field. h.maxEventBodyBytes applies uniformly to
+	// every ingest endpoint (default 1 MiB, configurable via Options).
+	r.Body = http.MaxBytesReader(w, r.Body, h.maxEventBodyBytes)
+
 	var req struct {
 		BlockID                string `json:"block_id"`
 		AttemptID              string `json:"attempt_id"`
@@ -1056,14 +1062,46 @@ func (h *handler) dryRunBlocks(w http.ResponseWriter, r *http.Request) {
 		BlockedAt              string `json:"blocked_at"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}
+
+	// Required-field validation. Empty block_id would poison the PK
+	// space (every subsequent legit empty-id row silently no-ops via
+	// ON CONFLICT DO NOTHING); empty block_kind would trip the SQL
+	// CHECK constraint and leak schema internals through err.Error();
+	// empty contract_hash / capability_snapshot_hash / attempt_id /
+	// conversation_id break the §6.1 consumer SELECT joins. Reject
+	// with a synthesized diagnostic that never surfaces raw driver
+	// error text.
+	if req.BlockID == "" || req.AttemptID == "" || req.ConversationID == "" ||
+		req.ContractHash == "" || req.CapabilitySnapshotHash == "" {
+		http.Error(w, "block_id, attempt_id, conversation_id, contract_hash, and capability_snapshot_hash are required", http.StatusBadRequest)
+		return
+	}
+	switch req.BlockKind {
+	case "missing_file", "wrong_version", "forbidden_cred", "policy_violation":
+		// ok — matches the schema CHECK constraint.
+	default:
+		http.Error(w, "block_kind must be one of missing_file|wrong_version|forbidden_cred|policy_violation", http.StatusBadRequest)
+		return
+	}
+
 	blockedAt := time.Time{}
 	if req.BlockedAt != "" {
-		if t, err := time.Parse(time.RFC3339Nano, req.BlockedAt); err == nil {
-			blockedAt = t
+		t, err := time.Parse(time.RFC3339Nano, req.BlockedAt)
+		if err != nil {
+			// Silent default to now would land wrong-time rows.
+			// Distinguish "empty → default" from "invalid → reject".
+			http.Error(w, "blocked_at must be RFC3339Nano (or omitted for now)", http.StatusBadRequest)
+			return
 		}
+		blockedAt = t
 	}
 	if blockedAt.IsZero() {
 		blockedAt = time.Now().UTC()
@@ -1083,7 +1121,11 @@ func (h *handler) dryRunBlocks(w http.ResponseWriter, r *http.Request) {
 		BlockedAt:              blockedAt,
 	}
 	if err := writer.WriteDryRunBlock(r.Context(), row); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		// Never leak raw driver / constraint text — return a
+		// synthesized diagnostic. The real error is available to
+		// operators via server logs.
+		log.Printf("[dry_run_blocks] write failed: %v", err)
+		http.Error(w, "failed to persist dry_run_block", http.StatusInternalServerError)
 		return
 	}
 	// Bump agents.last_seen_at to match other tokened endpoints.

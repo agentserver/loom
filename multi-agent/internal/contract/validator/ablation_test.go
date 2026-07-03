@@ -22,9 +22,11 @@ func TestNoDryRun_RegisteredAtInit(t *testing.T) {
 	}
 }
 
-// SetByName("NoDryRun", true) must flip IsDryRunDisabled() to true; and
-// SetByName back to false must flip it back. Serial-only test — no
-// t.Parallel — the ablation contract requires pre-run-only mutation.
+// SetByName("NoDryRun", true) writes through the raw *bool. To keep
+// IsDryRunDisabled() (atomic reader) in sync, the CLI binder MUST
+// call SyncDisableDryRun after each SetByName batch — this test
+// pins that contract. Serial-only — no t.Parallel — matches the
+// ablation "pre-run-only mutation" invariant.
 func TestNoDryRun_ToggleReflectsInAccessor(t *testing.T) {
 	prev := IsDryRunDisabled()
 	t.Cleanup(func() { SetDryRunDisabled(prev) })
@@ -32,14 +34,16 @@ func TestNoDryRun_ToggleReflectsInAccessor(t *testing.T) {
 	if err := ablation.Default.SetByName(string(ablation.NoDryRun), true); err != nil {
 		t.Fatalf("SetByName(true): %v", err)
 	}
+	SyncDisableDryRun()
 	if !IsDryRunDisabled() {
-		t.Errorf("IsDryRunDisabled() = false after SetByName(true)")
+		t.Errorf("IsDryRunDisabled() = false after SetByName(true)+Sync")
 	}
 	if err := ablation.Default.SetByName(string(ablation.NoDryRun), false); err != nil {
 		t.Fatalf("SetByName(false): %v", err)
 	}
+	SyncDisableDryRun()
 	if IsDryRunDisabled() {
-		t.Errorf("IsDryRunDisabled() = true after SetByName(false)")
+		t.Errorf("IsDryRunDisabled() = true after SetByName(false)+Sync")
 	}
 }
 

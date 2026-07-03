@@ -20,6 +20,7 @@ var allowedImports = map[string]struct{}{
 	`"path"`:                                                {},
 	`"sort"`:                                                {},
 	`"strings"`:                                             {},
+	`"sync/atomic"`:                                         {},
 	`"golang.org/x/mod/semver"`:                             {},
 	`"github.com/yourorg/multi-agent/internal/ablation"`:   {},
 	`"github.com/yourorg/multi-agent/internal/capability"`: {},

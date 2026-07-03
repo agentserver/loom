@@ -242,8 +242,15 @@ func (d *dryRunContractTool) Call(ctx context.Context, raw json.RawMessage) (jso
 
 	// §7(d) — ablation short-circuit. Route recommendation remains;
 	// only the four §A3 pre-exec checks + their side-effects are gated.
+	//
+	// Use %q (Go-quoted, escapes \n / \r / control chars) instead of
+	// %s to defeat log-injection via an attacker-controlled
+	// conversation_id containing newlines: a literal newline would
+	// otherwise let the operator forge a second "[ablation] ..." line
+	// in the audit trail. Mirrors internal/contract/validate.go:348
+	// (NoTypedContracts) and PR #52 round-3 review P1-2.
 	if validator.IsDryRunDisabled() {
-		log.Printf("[ablation] NoDryRun: skipped conversation=%s", tc.ConversationID)
+		log.Printf("[ablation] NoDryRun: skipped conversation=%q", tc.ConversationID)
 		return json.Marshal(report)
 	}
 
@@ -345,19 +352,42 @@ func dryRunContractHash(tc contract.TaskContract) string {
 // Intent.BusinessContext (convention: `experiment_id=<id>` marker).
 // Empty string when absent — dry-runs outside an experiment run fine
 // with an empty experiment_id column.
+//
+// The marker MUST appear at start-of-string or immediately after a
+// whitespace / punctuation delimiter — otherwise a benign
+// BusinessContext like "my_experiment_id=exp-alpha" (an operator's
+// free-form note) would tag the dry-run with a bogus experiment,
+// contaminating the §6.1 per-experiment denominator with unrelated
+// attempts. Round-5 fresh review P2.
 func extractExperimentID(tc contract.TaskContract) string {
 	const marker = "experiment_id="
 	c := tc.Intent.BusinessContext
-	i := strings.Index(c, marker)
-	if i < 0 {
-		return ""
+	// Scan for the marker at a valid boundary: start-of-string, or
+	// preceded by a delimiter character (whitespace / punctuation).
+	for i := 0; i+len(marker) <= len(c); i++ {
+		if c[i:i+len(marker)] != marker {
+			continue
+		}
+		// Boundary check: must be at position 0 or preceded by an
+		// obvious separator. This rejects `foo_experiment_id=...`
+		// (part of a longer identifier).
+		if i > 0 {
+			prev := c[i-1]
+			switch prev {
+			case ' ', '\t', '\n', ',', ';', '.':
+				// ok — legitimate delimiter.
+			default:
+				continue
+			}
+		}
+		rest := c[i+len(marker):]
+		end := strings.IndexAny(rest, " \t\n,;")
+		if end < 0 {
+			return rest
+		}
+		return rest[:end]
 	}
-	rest := c[i+len(marker):]
-	end := strings.IndexAny(rest, " \t\n,")
-	if end < 0 {
-		return rest
-	}
-	return rest[:end]
+	return ""
 }
 
 // emitDryRunMetric emits one metric event of `kind` with a payload

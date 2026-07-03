@@ -1849,3 +1849,74 @@ func TestDryRunBlocksAPIRestrictsRoles(t *testing.T) {
 	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
 }
+
+// TestDryRunBlocksAPIValidatesRequiredFields — round-5 fresh review P1:
+// endpoint used to accept empty block_id / block_kind / *_hash and
+// return raw SQL error text through http.Error. Assert:
+//   - empty required fields → 400 with synthesised message (no SQL text)
+//   - invalid block_kind → 400 with enum-list message
+//   - invalid blocked_at → 400 (was silent default to now())
+func TestDryRunBlocksAPIValidatesRequiredFields(t *testing.T) {
+	h, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
+
+	cases := []struct {
+		name, body, wantSubstr string
+	}{
+		{
+			name:       "empty_block_id",
+			body:       `{"block_id":"","attempt_id":"a","conversation_id":"c","contract_hash":"h","capability_snapshot_hash":"s","block_kind":"missing_file"}`,
+			wantSubstr: "required",
+		},
+		{
+			name:       "empty_block_kind",
+			body:       `{"block_id":"b","attempt_id":"a","conversation_id":"c","contract_hash":"h","capability_snapshot_hash":"s","block_kind":""}`,
+			wantSubstr: "block_kind",
+		},
+		{
+			name:       "invalid_block_kind",
+			body:       `{"block_id":"b","attempt_id":"a","conversation_id":"c","contract_hash":"h","capability_snapshot_hash":"s","block_kind":"nope"}`,
+			wantSubstr: "block_kind",
+		},
+		{
+			name:       "invalid_blocked_at",
+			body:       `{"block_id":"b","attempt_id":"a","conversation_id":"c","contract_hash":"h","capability_snapshot_hash":"s","block_kind":"missing_file","blocked_at":"not-a-time"}`,
+			wantSubstr: "blocked_at",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/dry-run-blocks", strings.NewReader(tc.body))
+			req.Header.Set("Authorization", "Bearer driver-token")
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+			require.Equal(t, http.StatusBadRequest, rr.Code, "body=%s", rr.Body.String())
+			require.Contains(t, rr.Body.String(), tc.wantSubstr)
+			// Response body MUST NOT contain SQL driver internals.
+			require.NotContains(t, rr.Body.String(), "CHECK")
+			require.NotContains(t, rr.Body.String(), "constraint")
+			require.NotContains(t, rr.Body.String(), "SQLITE")
+		})
+	}
+}
+
+// TestDryRunBlocksAPIRejectsOversizedBody — round-5 fresh review P1:
+// endpoint was decoding without a MaxBytesReader; every other ingest
+// path has one. Confirm 413 on body > cap.
+func TestDryRunBlocksAPIRejectsOversizedBody(t *testing.T) {
+	h, st := newTestHandler(t)
+	seedWorkspaceAndAgents(t, st)
+
+	// Build a body larger than the default MaxEventBodyBytes cap.
+	// newTestHandler uses defaults (1 MiB); a 2 MiB detail overshoots.
+	huge := make([]byte, 2*1024*1024)
+	for i := range huge {
+		huge[i] = 'x'
+	}
+	body := `{"block_id":"blk-big","attempt_id":"a","conversation_id":"c","contract_hash":"h","capability_snapshot_hash":"s","block_kind":"missing_file","detail":"` + string(huge) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/dry-run-blocks", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer driver-token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusRequestEntityTooLarge, rr.Code, "body=%s", rr.Body.String())
+}

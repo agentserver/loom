@@ -214,6 +214,35 @@ func TestCheckWrongVersion_UnparseableSnapshotVersion(t *testing.T) {
 	}
 }
 
+// Round-5 fresh review P2: when both legacy Tools []string and
+// versioned ToolRequirements name the same tool, only ONE block
+// should surface (the versioned one) — otherwise blocks_total inflates
+// and human triage sees noise.
+func TestCheckWrongVersion_LegacyAndVersioned_NoDoubleBlock(t *testing.T) {
+	tc := contract.TaskContract{
+		CapabilityRequirements: contract.CapabilityRequirements{
+			Tools:            []string{"go"},
+			ToolRequirements: []contract.ToolRequirement{{Name: "go", MinVersion: "1.22.0"}},
+		},
+	}
+	got := New().Check(context.Background(), tc, capability.Snapshot{}) // snapshot has no "go"
+	var wv int
+	for _, b := range got {
+		if b.Kind == KindWrongVersion {
+			wv++
+		}
+	}
+	if wv != 1 {
+		t.Fatalf("expected 1 wrong_version block (versioned wins); got %d: %+v", wv, got)
+	}
+	// The surviving block must be the versioned one (with >= prefix).
+	for _, b := range got {
+		if b.Kind == KindWrongVersion && !strings.Contains(b.Field, "tool_requirements") {
+			t.Errorf("expected the ToolRequirements-side block to survive; got %+v", b)
+		}
+	}
+}
+
 // §3.2 contract-side programmer error: unparseable MinVersion must
 // surface as a block whose Actual identifies the operator-facing
 // diagnostic. Silent pass would let a mis-typed contract deploy.

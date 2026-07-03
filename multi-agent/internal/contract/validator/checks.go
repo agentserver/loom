@@ -86,8 +86,23 @@ func matchAnyFile(files []capability.FileResource, name string) bool {
 func checkWrongVersion(tc contract.TaskContract, snap capability.Snapshot) []Block {
 	var out []Block
 
+	// Build a set of tool names that already appear in
+	// ToolRequirements so the legacy Tools pass can skip them —
+	// otherwise a contract that lists the same name in both slices
+	// would emit two blocks for one missing binary, inflating
+	// blocks_total and confusing human review. Round-5 fresh review P2.
+	versioned := make(map[string]struct{}, len(tc.CapabilityRequirements.ToolRequirements))
+	for _, req := range tc.CapabilityRequirements.ToolRequirements {
+		versioned[req.Name] = struct{}{}
+	}
+
 	// Presence-only pass over legacy Tools []string.
 	for i, name := range tc.CapabilityRequirements.Tools {
+		if _, dup := versioned[name]; dup {
+			// The ToolRequirements pass below will emit a more
+			// informative block for this name.
+			continue
+		}
 		if _, ok := lookupTool(snap.Tools, name); ok {
 			continue
 		}
