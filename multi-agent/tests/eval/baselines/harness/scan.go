@@ -30,6 +30,66 @@ const (
 	scanBinaryProbeAdmission = scanBinarySniffBytes
 )
 
+// Chunking parameters for scanChunked. Sanitize truncates output to 256
+// runes (see internal/secretscrub/scrub.go maxRunes); running Sanitize
+// on windows of scanChunkRunes < 256 guarantees the `[REDACTED]` marker
+// survives, so a count-differential detects redactions reliably.
+// scanChunkOverlap is the rune-length of the largest plausible secret
+// (`-----BEGIN … PRIVATE KEY-----` is ~40 runes; other patterns bounded
+// by their `{n,}` tails). Chosen well above every pattern's max to
+// guarantee a straddling secret lands entirely inside at least one
+// non-truncated window.
+const (
+	scanChunkRunes   = 200
+	scanChunkOverlap = 128
+)
+
+// redactedMarker is what secretscrub.Sanitize substitutes for a matched
+// secret. Counting occurrences of this literal in a Sanitize output vs.
+// its input tells us whether the regex fired.
+const redactedMarker = "[REDACTED]"
+
+// scanChunked returns true iff any window of scanChunkRunes runes in
+// `src`, run through secretscrub.Sanitize, gained at least one
+// `[REDACTED]` marker over what the same window's input already
+// contained. Because every window is ≤ scanChunkRunes < the Sanitize
+// truncation cap, the marker is never truncated away — the P0 defect
+// where a secret past rune 256 slipped through as SafeToUpload is
+// closed. Windows overlap by scanChunkOverlap runes so a secret that
+// straddles a boundary still lands entirely inside at least one window.
+func scanChunked(src string) bool {
+	runes := []rune(src)
+	if len(runes) == 0 {
+		return false
+	}
+	if len(runes) <= scanChunkRunes {
+		return sanitizeAddedMarker(string(runes))
+	}
+	stride := scanChunkRunes - scanChunkOverlap // must be > 0; enforced by consts
+	for start := 0; start < len(runes); start += stride {
+		end := start + scanChunkRunes
+		if end > len(runes) {
+			end = len(runes)
+		}
+		if sanitizeAddedMarker(string(runes[start:end])) {
+			return true
+		}
+		if end == len(runes) {
+			break
+		}
+	}
+	return false
+}
+
+// sanitizeAddedMarker returns true iff Sanitize(window) contains more
+// `[REDACTED]` markers than `window` itself did — i.e. Sanitize added
+// at least one. Handles the false-positive from a fixture that
+// legitimately contains the literal `[REDACTED]`.
+func sanitizeAddedMarker(window string) bool {
+	return strings.Count(secretscrub.Sanitize(window), redactedMarker) >
+		strings.Count(window, redactedMarker)
+}
+
 // ScanReport is the full outcome of a workspace scan: files that
 // matched a secretscrub pattern (Flagged), files that were admitted as
 // safe to upload (SafeToUpload), and files the scanner deliberately did
@@ -114,19 +174,23 @@ func ScanTreeForSecrets(root string) (ScanReport, error) {
 		}
 		body = append(body, rest...)
 
-		// Distinguish "regex-matched a secret" from "Sanitize truncated
-		// a long string" by looking for the `[REDACTED]` literal in the
-		// output that was NOT already present in the input. Sanitize
-		// replaces every match with exactly this literal (see
-		// internal/secretscrub/scrub.go); truncation appends
-		// `...[truncated]` instead. Using a per-call byte check rather
-		// than the process-global RedactedTotal counter avoids a race
-		// if the harness is ever embedded alongside a background
-		// Sanitize caller.
-		src := string(body)
-		out := secretscrub.Sanitize(src)
-		const redactedMarker = "[REDACTED]"
-		if strings.Count(out, redactedMarker) > strings.Count(src, redactedMarker) {
+		// Detect secrets via chunked Sanitize. The naive `Sanitize(src)
+		// != src` check fails on two axes:
+		//   (1) Sanitize truncates output to 256 runes, so a secret past
+		//       rune 256 has its `[REDACTED]` marker lopped off — the
+		//       output looks like "prefix...[truncated]" with no
+		//       `[REDACTED]`, and a file that IS leaky reads as safe.
+		//   (2) A workload fixture that legitimately contains the
+		//       string `[REDACTED]` (e.g. a doc explaining redaction)
+		//       would false-positive a plain output-vs-input diff.
+		//
+		// Fix: split `src` into rune-bounded windows of scanChunkRunes
+		// with an overlap of scanChunkOverlap so no single window ever
+		// hits the truncation cap AND any secret straddling a boundary
+		// still lands entirely inside at least one window. For each
+		// window we compare `[REDACTED]` counts before/after — if any
+		// window sees a marker Sanitize added, the file is flagged.
+		if scanChunked(string(body)) {
 			report.Flagged = append(report.Flagged, rel)
 			return nil
 		}

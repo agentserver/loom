@@ -179,6 +179,12 @@ func TestRun_AgentErrorJSON_ParsesWithControlBytes(t *testing.T) {
 // `<dir>/../../etc/passwd/spec.yaml` and stat outside the workloads
 // root, exposing an existence oracle. loadWorkloadSpec must reject
 // any id containing a path separator or `..` BEFORE touching disk.
+//
+// Assertion is `errors.Is(res.Err, ErrWorkloadIDPathTraversal)` —
+// NOT just `res.ExitCode == 2`. Every case in the table also points at
+// a non-existent path, so a "file not found" would ALSO give exit 2;
+// the errors.Is check is what proves the traversal guard fired and
+// not the downstream ReadFile.
 func TestRun_RejectsWorkloadPathTraversal(t *testing.T) {
 	cases := []string{
 		"../../etc/passwd",
@@ -199,6 +205,9 @@ func TestRun_RejectsWorkloadPathTraversal(t *testing.T) {
 		}, stubImpl{name: "manual_ssh"}, io.Discard)
 		if res.ExitCode != 2 {
 			t.Errorf("id=%q: want exit 2, got %d; err=%v", id, res.ExitCode, res.Err)
+		}
+		if !errors.Is(res.Err, ErrWorkloadIDPathTraversal) {
+			t.Errorf("id=%q: want ErrWorkloadIDPathTraversal, got %v", id, res.Err)
 		}
 	}
 }

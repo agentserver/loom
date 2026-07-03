@@ -97,7 +97,13 @@ func Run(ctx context.Context, opts Opts, impl BaselineImpl, stderr io.Writer) (r
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(stderr, "harness: panic recovered in impl: %v\n", r)
-			result = Result{Row: result.Row, ExitCode: 3, Err: fmt.Errorf("harness: panic in impl: %v", r)}
+			// Row is deliberately zero-valued: the named return `result`
+			// is never assigned before a panic (all non-panic exit
+			// points build a fresh Result{...} and rely on the assign-
+			// at-return semantics). Setting Row would just re-echo the
+			// zero value and mislead a maintainer into thinking a
+			// partial row was preserved.
+			result = Result{ExitCode: 3, Err: fmt.Errorf("harness: panic in impl: %v", r)}
 		}
 	}()
 	if opts.BaselineName == "" {

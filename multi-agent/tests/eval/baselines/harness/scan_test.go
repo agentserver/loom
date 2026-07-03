@@ -95,6 +95,85 @@ func TestScanTreeForSecrets_SkipsLargeFile(t *testing.T) {
 	}
 }
 
+// TestScanTreeForSecrets_DetectsSecretPastRune256 — regression for the
+// P0 fresh-review finding: secretscrub.Sanitize truncates its output
+// at 256 runes, so a naive `strings.Count(out, "[REDACTED]") -
+// strings.Count(src, "[REDACTED]")` misses any secret located past
+// rune 256 (the marker gets lopped off, the count differential is 0,
+// and the file is classified SafeToUpload — uploaded to E2B with the
+// leak intact). The chunked scan fixes this by running Sanitize on
+// overlapping windows small enough that truncation never fires.
+func TestScanTreeForSecrets_DetectsSecretPastRune256(t *testing.T) {
+	dir := t.TempDir()
+	// 300 runes of filler + a real sk-shaped token past rune 256.
+	body := make([]byte, 300)
+	for i := range body {
+		body[i] = 'A'
+	}
+	body = append(body, []byte(" sk-testonly-secret-1234567890AB")...)
+	if err := os.WriteFile(filepath.Join(dir, "leaky.txt"), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := ScanTreeForSecrets(dir)
+	if err != nil {
+		t.Fatalf("ScanTreeForSecrets: %v", err)
+	}
+	if !slices.Contains(rep.Flagged, "leaky.txt") {
+		t.Fatalf("secret past rune 256 not flagged (P0 leak); report=%+v", rep)
+	}
+	if slices.Contains(rep.SafeToUpload, "leaky.txt") {
+		t.Fatalf("secret past rune 256 marked SafeToUpload (P0 leak); report=%+v", rep)
+	}
+}
+
+// TestScanTreeForSecrets_LiteralRedactedInFixture_NoFalsePositive —
+// a workload fixture (docs, README) that legitimately contains the
+// literal `[REDACTED]` string must not be false-flagged.
+func TestScanTreeForSecrets_LiteralRedactedInFixture_NoFalsePositive(t *testing.T) {
+	dir := t.TempDir()
+	body := "This doc explains redaction. Values like [REDACTED] appear in outputs."
+	if err := os.WriteFile(filepath.Join(dir, "doc.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := ScanTreeForSecrets(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(rep.Flagged, "doc.md") {
+		t.Errorf("literal [REDACTED] in fixture should not be Flagged; got %+v", rep)
+	}
+	if !slices.Contains(rep.SafeToUpload, "doc.md") {
+		t.Errorf("clean doc should be SafeToUpload; got %+v", rep)
+	}
+}
+
+// TestScanTreeForSecrets_SecretAtChunkBoundary — a secret that
+// straddles a window boundary must still be caught thanks to overlap.
+func TestScanTreeForSecrets_SecretAtChunkBoundary(t *testing.T) {
+	dir := t.TempDir()
+	// Position the secret so it straddles the first window boundary.
+	// scanChunkRunes=200; center a 32-byte token at rune ~180.
+	body := make([]byte, 180)
+	for i := range body {
+		body[i] = 'a'
+	}
+	body = append(body, []byte("sk-testonly-secret-1234567890AB")...)
+	// Padding after so the total is > 200 (ensures chunking triggers).
+	for i := 0; i < 100; i++ {
+		body = append(body, 'a')
+	}
+	if err := os.WriteFile(filepath.Join(dir, "boundary.txt"), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := ScanTreeForSecrets(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(rep.Flagged, "boundary.txt") {
+		t.Errorf("secret at chunk boundary must be flagged (overlap contract); got %+v", rep)
+	}
+}
+
 // TestScanTreeForSecrets_CleanFixtureIsSafeToUpload — sanity: clean
 // text files land in SafeToUpload, empty Flagged / Skipped.
 func TestScanTreeForSecrets_CleanFixtureIsSafeToUpload(t *testing.T) {
