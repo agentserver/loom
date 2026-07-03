@@ -931,10 +931,15 @@ an unrelated third party.
 
 **Mitigation**:
 - deploy.sh spawns all four subprocesses with an explicit env whitelist.
-  We copy the actual list from
+  Linux mirrors, and Windows EXTENDS,
   `tools/eval/runner/subprocess.go:AlwaysAllowedEnvKeys` (line 223) +
-  `AlwaysAllowedIfSetEnvKeys` (line 235) verbatim, so the two harnesses
-  can't drift out of sync:
+  `AlwaysAllowedIfSetEnvKeys` (line 235). "Extends" for Windows because
+  pwsh + Codex/Claude CLIs cannot start without SystemRoot / ComSpec /
+  USERPROFILE / APPDATA / LOCALAPPDATA / SystemDrive — these are added
+  to `deploy/windows/deploy.internal.psm1` `$script:ALWAYS_ENV_KEYS`
+  with a comment explaining the OS-required nature. Round-9 P2-A
+  clarification: the extra 6 keys carry no credentials and are not a
+  security-relevant divergence from the Linux/subprocess.go baseline.
   - **Always** (emit even when absent from parent — empty value
     passes through, matching bash `emit_whitelisted_env` behaviour;
     empty PATH etc. are semantically distinct from unset only on a

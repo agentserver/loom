@@ -15,6 +15,15 @@
 
 Set-StrictMode -Version Latest
 
+# Windows ALWAYS_ENV_KEYS EXTENDS (not "mirrors") tools/eval/runner/
+# subprocess.go:AlwaysAllowedEnvKeys. The first 6 are the exact Linux
+# set. The extra 6 (USERPROFILE / APPDATA / LOCALAPPDATA / SystemRoot
+# / SystemDrive / ComSpec) are Windows-required — pwsh and other
+# child processes cannot start without SystemRoot/ComSpec, and any
+# installer or Codex/Claude CLI that resolves user paths needs
+# USERPROFILE + APPDATA + LOCALAPPDATA. Not a security-relevant
+# divergence: none of the added keys carry credentials. Round-9 P2-A
+# clarification (spec §7(g) uses "extends" for this list).
 $script:ALWAYS_ENV_KEYS = @('PATH', 'HOME', 'LANG', 'LC_ALL', 'TZ', 'USER',
                             'USERPROFILE', 'APPDATA', 'LOCALAPPDATA',
                             'SystemRoot', 'SystemDrive', 'ComSpec')

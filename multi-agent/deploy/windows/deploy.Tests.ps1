@@ -351,10 +351,15 @@ api_keys:
             # so preflight passes and the real bring-up path (which
             # would be where a config-clobber regression would land)
             # is exercised.
+            # Round-9 P1-A fix: `-Encoding Byte` was removed in
+            # PowerShell 6+ (the file's own header requires 7.4+) —
+            # the replacement is `-AsByteStream` with a `[byte[]]`
+            # value. Test-Path -PathType Leaf doesn't require any
+            # specific content; two-byte MZ prefix is symbolic only.
             foreach ($p in @('observer\observer-server.exe',
                              'slave\slave-agent.exe',
                              'driver\driver-agent.exe')) {
-                Set-Content -LiteralPath (Join-Path $tmp $p) -Value 'MZ' -Encoding Byte
+                [System.IO.File]::WriteAllBytes((Join-Path $tmp $p), [byte[]]@(0x4D, 0x5A))
             }
 
             Set-Content -LiteralPath (Join-Path $tmp 'slave\config.yaml') `
@@ -456,15 +461,36 @@ credentials:
             Remove-Item -Recurse -Force -Path $tmp -ErrorAction SilentlyContinue
         }
     }
-    It 'T18c-ps: readiness timeout exits 4 with cleanup' {
-        if (-not $IsWindows) { Set-ItResult -Skipped -Because 'requires Windows'; return }
-        # This one needs a shim stub that never responds to /healthz —
-        # deferred to fresh-host smoke per plan §6.3 (needs a shim exe
-        # or a mock server we don't own on Windows CI yet). Static
-        # source assertion: the timeout branch throws with the exit-4
-        # marker set — same class of check as T6-ps/T6c-ps above.
+    It 'T18c-ps: readiness timeout exits 4 with cleanup (source invariants)' {
+        # Round-9 P2-C hardening: the previous single-line regex was
+        # fragile — reordering `$script:StageFailed=$true` and
+        # `$script:ExitCode=4` broke the grep even though behaviour
+        # was unchanged. We now assert three independent invariants
+        # that together mean "readiness timeout on stub /healthz →
+        # exit 4 → cleanup runs":
+        #   (i) `Wait-HttpOk` is what gates the stub (not TCP-only),
+        #  (ii) somewhere in Invoke-BringupStub, a readiness-fail
+        #       path sets `$script:ExitCode = 4`,
+        # (iii) the outer catch block calls `Invoke-Cleanup-OnFailure`
+        #       (which we know from Get-Cleanup-OnFailure static test
+        #       reaps SpawnedPids + removes .pids/).
+        # A regression that removes any one of these breaks a test.
         $src = Get-Content -Raw -LiteralPath $script:DEPLOY
-        $src | Should -Match "Wait-TcpListen -Port \`$StubPort[\s\S]*?script:StageFailed = \`$true; \`$script:ExitCode = 4"
+        # (i) Wait-HttpOk gates the stub.
+        $src | Should -Match "Wait-HttpOk -Url\s+`"http://127\.0\.0\.1:\`$StubPort/healthz`""
+        # (ii) `$script:ExitCode = 4` appears at least once inside
+        # Invoke-BringupStub's body.
+        $bringupBody = ($src -split '(?m)^function Invoke-BringupStub\s*\{')[1]
+        if ($bringupBody) {
+            $bringupBody = ($bringupBody -split '(?m)^\}\s*$')[0]
+        }
+        $bringupBody | Should -Match '\$script:ExitCode\s*=\s*4'
+        # (iii) The outer catch calls Invoke-Cleanup-OnFailure.
+        $src | Should -Match "catch\s*\{[\s\S]*?Invoke-Cleanup-OnFailure[\s\S]*?exit \`$script:ExitCode"
+        # NOTE: a full runtime test needs a stalled-stub .exe that
+        # binds $StubPort but never responds to /healthz. plan §6.3
+        # fresh-host smoke covers this end-to-end on a real Windows
+        # runner with a real agentserver-stub.exe.
     }
 }
 
