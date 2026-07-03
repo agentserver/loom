@@ -12,6 +12,10 @@ setup() {
 
 teardown() {
     # Best-effort: reap anything deploy.sh might have spawned in a test.
+    # Also match any lingering python shim (fake-*-agent) whose stub
+    # or observer bound our fixed ports (18080/18091/18092) — a
+    # subsequent test spawning a new stub on :18080 would fail to bind
+    # if the previous run's process wasn't fully reaped.
     if [[ -d "$LOOM_HOME/.pids" ]]; then
         for pf in "$LOOM_HOME"/.pids/*.pid; do
             [[ -f "$pf" ]] || continue
@@ -19,6 +23,14 @@ teardown() {
             [[ -n "$pid" ]] && kill -KILL "$pid" 2>/dev/null || true
         done
     fi
+    # Belt-and-braces: kill any child python HTTP server binding our
+    # fixed test ports. Under bats shim these leaks accumulate across
+    # tests and break port binding on the next stub spawn.
+    for port in 18080 18091 18092 18093; do
+        pid=$(ss -tlnp 2>/dev/null | awk -v p=":$port" '$4~p{print $NF}' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2 || true)
+        [[ -n "$pid" ]] && kill -KILL "$pid" 2>/dev/null || true
+    done
+    sleep 0.3
     rm -rf "$TMP"
 }
 
@@ -292,11 +304,126 @@ teardown() {
     [ ! -e "$fresh" ]
 }
 
+# ----- T6/T17/T18 runtime rows: full-stack shim-driven bring-up -----
+#
+# Fresh-review P1-9/P1-10/P1-11 (round 8): the previous suite only
+# unit-tested emit_whitelisted_env in isolation; spawn_bg /
+# run_whitelisted whitelisting was never exercised end-to-end, and
+# the readiness-timeout / spawn-then-exit / -shutdown contracts were
+# not runtime-tested. These rows drive `deploy.sh --stub` against a
+# fake --bin-dir populated with our shims.
+
+setup_shim_bindir() {
+    # Populate the SHIM_BIN var and export LOOM_SHIM_LOG for the caller.
+    # Invoked directly (`setup_shim_bindir`, NOT `$(setup_shim_bindir)`)
+    # so the export propagates into the current test's shell.
+    export LOOM_SHIM_LOG="$TMP/shim.log"
+    SHIM_BIN="$TMP/bin"
+    mkdir -p "$SHIM_BIN"
+    local arch
+    arch=$(uname -m | sed -e s/x86_64/amd64/ -e s/aarch64/arm64/)
+    install -m 0755 "$BATS_TEST_DIRNAME/testdata/fake-agentserver-stub.sh" "$SHIM_BIN/agentserver-stub"
+    install -m 0755 "$BATS_TEST_DIRNAME/testdata/fake-observer-server.sh"  "$SHIM_BIN/observer-server.linux-${arch}"
+    install -m 0755 "$BATS_TEST_DIRNAME/testdata/fake-slave-agent.sh"      "$SHIM_BIN/slave-agent.linux-${arch}"
+    install -m 0755 "$BATS_TEST_DIRNAME/testdata/fake-driver-agent.sh"     "$SHIM_BIN/driver-agent.linux-${arch}"
+}
+
+@test "T6-runtime: stub bring-up passes 127.0.0.1:PORT to agentserver-stub argv" {
+    command -v python3 >/dev/null || skip "python3 needed for shim server"
+    command -v yq >/dev/null || skip "yq needed for stub-mode yaml patching"
+    setup_shim_bindir; bin="$SHIM_BIN"
+    LOOM_TEST_HOSTNAME=h1 run bash "$DEPLOY" --stub --loom-home "$LOOM_HOME" --bin-dir "$bin"
+    [ "$status" -eq 0 ]
+    # Assert stub was invoked with --listen 127.0.0.1:18080
+    grep -q "argv:.*\[--listen\] \[127\.0\.0\.1:18080\]" "$LOOM_SHIM_LOG"
+    # Reap.
+    bash "$DEPLOY" --shutdown --loom-home "$LOOM_HOME" >/dev/null 2>&1 || true
+}
+
+@test "T6c-runtime: slave config has server.url=http://127.0.0.1:STUB and daemon.auto_start=false" {
+    command -v python3 >/dev/null || skip "python3 needed for shim server"
+    command -v yq >/dev/null || skip "yq needed for stub-mode yaml patching"
+    setup_shim_bindir; bin="$SHIM_BIN"
+    LOOM_TEST_HOSTNAME=h1 run bash "$DEPLOY" --stub --loom-home "$LOOM_HOME" --bin-dir "$bin"
+    [ "$status" -eq 0 ]
+    grep -q 'server\.url\|server.url' "$LOOM_HOME/slave/config.yaml"
+    yq eval '.server.url' "$LOOM_HOME/slave/config.yaml" | grep -q '127\.0\.0\.1:18080'
+    [ "$(yq eval '.daemon.auto_start' "$LOOM_HOME/slave/config.yaml")" = "false" ]
+    bash "$DEPLOY" --shutdown --loom-home "$LOOM_HOME" >/dev/null 2>&1 || true
+}
+
+@test "T15-runtime: subprocess env excludes AWS_/GITHUB_TOKEN/NPM_TOKEN even in end-to-end run" {
+    command -v python3 >/dev/null || skip "python3 needed for shim server"
+    command -v yq >/dev/null || skip "yq needed for stub-mode yaml patching"
+    setup_shim_bindir; bin="$SHIM_BIN"
+    AWS_ACCESS_KEY_ID=SHOULD_NOT_LEAK_AWS \
+    GITHUB_TOKEN=SHOULD_NOT_LEAK_GH \
+    NPM_TOKEN=SHOULD_NOT_LEAK_NPM \
+    LOOM_TEST_HOSTNAME=h1 \
+        run bash "$DEPLOY" --stub --loom-home "$LOOM_HOME" --bin-dir "$bin"
+    [ "$status" -eq 0 ]
+    # Shim log captures env of every shim invocation (stub, observer,
+    # slave, driver, stub-issue, yq). None should carry the sentinels.
+    ! grep -q 'SHOULD_NOT_LEAK_AWS' "$LOOM_SHIM_LOG"
+    ! grep -q 'SHOULD_NOT_LEAK_GH'  "$LOOM_SHIM_LOG"
+    ! grep -q 'SHOULD_NOT_LEAK_NPM' "$LOOM_SHIM_LOG"
+    bash "$DEPLOY" --shutdown --loom-home "$LOOM_HOME" >/dev/null 2>&1 || true
+}
+
+@test "T18-runtime: spawn-then-exit writes .pids/*.pid with live PIDs" {
+    command -v python3 >/dev/null || skip "python3 needed for shim server"
+    command -v yq >/dev/null || skip "yq needed for stub-mode yaml patching"
+    setup_shim_bindir; bin="$SHIM_BIN"
+    LOOM_TEST_HOSTNAME=h1 run bash "$DEPLOY" --stub --loom-home "$LOOM_HOME" --bin-dir "$bin"
+    [ "$status" -eq 0 ]
+    for role in agentserver-stub observer slave driver; do
+        pf="$LOOM_HOME/.pids/${role}.pid"
+        [ -f "$pf" ]
+        pid=$(cat "$pf")
+        kill -0 "$pid" 2>/dev/null
+    done
+    bash "$DEPLOY" --shutdown --loom-home "$LOOM_HOME" >/dev/null 2>&1
+}
+
+@test "T18b-runtime: --shutdown reaps every PID and removes .pids/" {
+    command -v python3 >/dev/null || skip "python3 needed for shim server"
+    command -v yq >/dev/null || skip "yq needed for stub-mode yaml patching"
+    setup_shim_bindir; bin="$SHIM_BIN"
+    bash "$DEPLOY" --stub --loom-home "$LOOM_HOME" --bin-dir "$bin" >/dev/null
+    pids=$(cat "$LOOM_HOME"/.pids/*.pid)
+    bash "$DEPLOY" --shutdown --loom-home "$LOOM_HOME"
+    sleep 1
+    for p in $pids; do
+        ! kill -0 "$p" 2>/dev/null
+    done
+    [ ! -d "$LOOM_HOME/.pids" ]
+}
+
+@test "T18c-runtime: readiness timeout on stalled stub → exit 4 with cleanup" {
+    command -v python3 >/dev/null || skip "python3 needed for shim server"
+    command -v yq >/dev/null || skip "yq needed for stub-mode yaml patching"
+    setup_shim_bindir; bin="$SHIM_BIN"
+    LOOM_TEST_HOSTNAME=h1 LOOM_SHIM_MODE=stalled LOOM_DEPLOY_READY_TIMEOUT_SEC=2 \
+        run bash "$DEPLOY" --stub --loom-home "$LOOM_HOME" --bin-dir "$bin"
+    [ "$status" -eq 4 ]
+    # Trap should have removed .pids and killed the stub subprocess.
+    [ ! -d "$LOOM_HOME/.pids" ]
+}
+
 # ----- T16: install.ps1 boundary (spec §0) ---------------------------
 @test "T16: deploy/windows/slave/install.ps1 is unchanged vs origin" {
+    # Fresh-review P1-7 (round 8): the previous test used `skip` when
+    # origin/paper/v3-integration was absent. On GitHub Actions with
+    # the default shallow fetch, `origin/paper/v3-integration` isn't
+    # present unless the workflow explicitly fetches it — so T16
+    # silently skipped (indistinguishable from PASS) on CI that would
+    # miss a WT-0 boundary violation. We now fetch the ref on demand
+    # (depth 1) and FAIL the test if fetch fails, so the boundary is
+    # actually enforced.
     if ! git -C "$ROOT/.." rev-parse --verify origin/paper/v3-integration >/dev/null 2>&1; then
-        skip "origin/paper/v3-integration not available"
+        git -C "$ROOT/.." fetch --depth=1 origin paper/v3-integration >/dev/null 2>&1 \
+            || fail "T16: could not fetch origin/paper/v3-integration; the WT-0 install.ps1 boundary CANNOT be enforced without it. Run 'git fetch origin paper/v3-integration' or configure CI with fetch-depth: 0."
     fi
-    d=$(git -C "$ROOT/.." diff origin/paper/v3-integration -- multi-agent/deploy/windows/slave/install.ps1 || true)
+    d=$(git -C "$ROOT/.." diff origin/paper/v3-integration -- multi-agent/deploy/windows/slave/install.ps1)
     [ -z "$d" ]
 }

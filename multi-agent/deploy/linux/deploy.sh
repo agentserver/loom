@@ -231,13 +231,15 @@ emit_whitelisted_env() {
         fi
     done
     # LOOM_* prefix passthrough (require ≥1 char after prefix; matches
-    # subprocess.go:275-282).
+    # subprocess.go:275-282). Use `/usr/bin/env` explicitly — a `env`
+    # rc-shim on the user's PATH (e.g. ~/.local/bin/env) would
+    # otherwise mutate output and drop LOOM_* keys.
     while IFS='=' read -r k v; do
         [[ -z "$k" ]] && continue
         if [[ "$k" == LOOM_* && ${#k} -gt 5 ]]; then
             printf '%s=%s\n' "$k" "$v"
         fi
-    done < <(env)
+    done < <(/usr/bin/env)
     # Model-key passthrough (prod + explicit flag).
     if [[ "$MODE" == prod && "$ALLOW_MODEL_KEY" -eq 1 ]]; then
         for k in OPENAI_API_KEY ANTHROPIC_API_KEY; do
@@ -412,16 +414,12 @@ emit_dry_run() {
         "$(env_whitelist_json)" \
         "$(json_string "$LOOM_HOME")" \
         "$(json_string "$BIN_DIR")")
-    if ! printf '%s\n' "$raw" | jq . 2>/dev/null; then
-        # Fall back to minified emit so a downstream consumer at least gets a parseable-attempt.
-        echo "deploy.sh: dry-run pretty-print failed; emitting minified JSON (may be malformed)" >&2
-        printf '%s\n' "$raw"
-        # And dump the raw pre-jq to stderr for triage:
-        echo "--- raw for triage ---" >&2
-        printf '%s\n' "$raw" | head -c 800 >&2
-        echo "" >&2
-        return 1
-    fi
+    # Pretty-print via jq. Any failure is a bug in our JSON assembly
+    # (every scalar goes through json_string() escaping); propagate as
+    # exit 5 through set -e + pipefail rather than swallow with a
+    # fallback that would drop the exit-5 contract from spec §3.3
+    # (fresh-review P2-2 round 8).
+    printf '%s\n' "$raw" | jq .
 }
 
 # --- dry-run branch (§4.1 step 4) --------------------------------------
@@ -549,7 +547,7 @@ run_whitelisted() {
     while IFS= read -r kv; do
         [[ -n "$kv" ]] && env_argv+=("$kv")
     done <<< "$env_lines"
-    env -i "${env_argv[@]}" "$@"
+    /usr/bin/env -i "${env_argv[@]}" "$@"
 }
 
 # spawn_bg <role> <log-path> <cmd...>
@@ -565,7 +563,7 @@ spawn_bg() {
     done <<< "$env_lines"
 
     # nohup+background, redirect stderr+stdout to log, write pid file.
-    nohup env -i "${env_argv[@]}" "$@" >"$log" 2>&1 &
+    nohup /usr/bin/env -i "${env_argv[@]}" "$@" >"$log" 2>&1 &
     local pid=$!
     SPAWNED_PIDS+=("$pid")
     local pf="$PIDS_DIR/$role.pid"
