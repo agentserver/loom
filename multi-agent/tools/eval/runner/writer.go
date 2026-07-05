@@ -45,6 +45,14 @@ type RunRow struct {
 	StubListen         string
 	TempdirKept        bool
 
+	// BaselineOrAblation is the D1 runs.baseline_or_ablation label
+	// (08 号 line 260) derived by Run via
+	// ComputeBaselineOrAblation(opts.AblationFlags, opts.BaselineName).
+	// Callers MUST NOT set this directly — Run always overwrites it
+	// with the derived value to prevent label forgery (WT-2-flag-integration
+	// spec §7(a.3)).
+	BaselineOrAblation string
+
 	// Probe fields (WT-2-e1e6-probes spec §4). Pointer types encode
 	// "unavailable" as nil; the CSV serialiser emits "" for nil.
 	ProbeTaskSuccessRate            *bool
@@ -108,6 +116,8 @@ func CSVColumns() []string {
 		"probe_manual_setup_step_count",
 		"probe_config_touch_count",
 		"probe_notes_json",
+		// WT-2-flag-integration §2.4 (append-only):
+		"baseline_or_ablation",
 	}
 }
 
@@ -146,6 +156,7 @@ func rowAsCSVRecord(r RunRow) []string {
 		nilOrInt(r.ProbeManualSetupStepCount),
 		nilOrInt(r.ProbeConfigTouchCount),
 		probeNotesOrDefault(r.ProbeNotesJSON),
+		r.BaselineOrAblation,
 	}
 }
 

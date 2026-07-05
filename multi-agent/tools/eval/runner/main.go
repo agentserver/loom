@@ -18,11 +18,30 @@ const usage = `eval-runner — Phase 1 evaluation harness skeleton.
 
 Usage:
   eval-runner run --workload <id> --stub-listen <host:port> --out <csv> [flags]
+  eval-runner --list-ablations
 
 Run "eval-runner run -h" for the full flag list.`
 
 func main() {
-	if len(os.Args) < 2 || os.Args[1] != "run" {
+	// WT-2-flag-integration §2.3 + §7(a.2): scrub any inherited
+	// LOOM_ABLATION_* env vars FIRST, before flag parsing, so a
+	// parent process's stray value cannot silently activate an
+	// ablation the operator did not request. Idempotent no-op
+	// when no bridge vars are present.
+	ScrubAmbientAblationEnv()
+
+	if len(os.Args) < 2 {
+		fmt.Fprintln(os.Stderr, usage)
+		os.Exit(2)
+	}
+	// --list-ablations is a top-level verb: print the registered
+	// flag names + one-line descriptions, exit 0. Mutually
+	// exclusive with `run`.
+	if os.Args[1] == "--list-ablations" {
+		fmt.Print(ListAblationsText())
+		os.Exit(0)
+	}
+	if os.Args[1] != "run" {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
 	}
@@ -44,7 +63,13 @@ func runMain(args []string) int {
 		timeout         = fs.Duration("timeout", 0, "override spec.timeout_seconds")
 		outCSV          = fs.String("out", "", "output CSV path; required")
 		keep            = fs.Bool("keep-tempdir", false, "do not delete tempdir at exit (debug)")
+		baselineName    = fs.String("baseline-name", DefaultBaselineName, "value stamped into runs.baseline_or_ablation when no --ablation is passed; must match ^[a-z][a-z0-9_-]{2,63}$")
 	)
+	// WT-2-flag-integration §2.3: --ablation is a repeatable
+	// flag.Value; each --ablation value may be one name or a
+	// comma-joined list. Rejects unknown names at parse time.
+	var ablationList AblationList
+	fs.Var(&ablationList, "ablation", "ablation flag name; repeat or comma-join for multiple; see --list-ablations")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -81,6 +106,8 @@ func runMain(args []string) int {
 		Timeout:         *timeout,
 		OutCSV:          *outCSV,
 		KeepTempdir:     *keep,
+		AblationFlags:   ablationList.Values(),
+		BaselineName:    *baselineName,
 	})
 	return res.ExitCode
 }

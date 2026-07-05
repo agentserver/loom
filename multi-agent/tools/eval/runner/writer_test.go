@@ -31,6 +31,8 @@ func TestCSVColumns_FrozenOrder(t *testing.T) {
 		"probe_wrong_context_failure_rate", "probe_artifact_correctness_rate",
 		"probe_manual_setup_step_count", "probe_config_touch_count",
 		"probe_notes_json",
+		// WT-2-flag-integration §2.4:
+		"baseline_or_ablation",
 	}, ",")
 	if got != want {
 		t.Fatalf("CSV columns drifted:\n got  %s\n want %s", got, want)
@@ -116,8 +118,8 @@ func TestNoopWriter_InsertIsNoop(t *testing.T) {
 func TestCSVColumns_AppendOnly_WithProbes(t *testing.T) {
 	t.Parallel()
 	cols := CSVColumns()
-	if len(cols) != 31 {
-		t.Fatalf("column count = %d, want 31", len(cols))
+	if len(cols) != 32 {
+		t.Fatalf("column count = %d, want 32", len(cols))
 	}
 	wantProbes := []string{
 		"probe_task_success_rate",
