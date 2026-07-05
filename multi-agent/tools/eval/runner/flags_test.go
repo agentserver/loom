@@ -425,6 +425,56 @@ func TestApplyAblationFlagsTo_PhaseThreeSetsBoolsAndSyncsAtomic(t *testing.T) {
 	}
 }
 
+// TestApplyAblationFlags_SyncsCapabilityAtomic — companion to
+// TestApplyAblationFlagsTo_PhaseThreeSetsBoolsAndSyncsAtomic. The
+// syncHooks slice must include capability.SyncDisableUpload; without
+// it, capability.IsUploadDisabled() (which reads a mirroring
+// atomic.Bool) stays stale after ApplyAblationFlags(NoCapabilityDiscovery)
+// even though the raw *bool was flipped. The two owner packages that
+// ship atomic mirrors (`capability`, `validator`) each need their own
+// end-to-end test — a single test on validator would mask a
+// regression where capability.SyncDisableUpload is dropped from
+// syncHooks.
+func TestApplyAblationFlags_SyncsCapabilityAtomic(t *testing.T) {
+	resetGlobalAblationState(t)
+	if err := ApplyAblationFlags([]ablation.FlagName{ablation.FlagName("NoCapabilityDiscovery")}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if !capability.IsUploadDisabled() {
+		t.Errorf("IsUploadDisabled false after ApplyAblationFlags(NoCapabilityDiscovery); capability.SyncDisableUpload not in syncHooks")
+	}
+	// Reset via ApplyAblationFlags(nil) MUST also mirror to the atomic
+	// (Phase 2 runs the sync hooks after clearing the raw bools).
+	if err := ApplyAblationFlags(nil); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	if capability.IsUploadDisabled() {
+		t.Errorf("IsUploadDisabled still true after ApplyAblationFlags(nil); reset-phase sync did not mirror")
+	}
+}
+
+// TestApplyAblationFlags_SyncsValidatorAtomicOnReset — mirror of
+// TestApplyAblationFlags_SyncsCapabilityAtomic for validator. The
+// existing TestApplyAblationFlagsTo_PhaseThreeSetsBoolsAndSyncsAtomic
+// asserts sync-after-apply but NOT sync-after-reset for validator.
+// Together they cover both directions for both atomic-mirror owner
+// packages so a regression in either sync hook is caught immediately.
+func TestApplyAblationFlags_SyncsValidatorAtomicOnReset(t *testing.T) {
+	resetGlobalAblationState(t)
+	if err := ApplyAblationFlags([]ablation.FlagName{ablation.FlagName("NoDryRun")}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if !validator.IsDryRunDisabled() {
+		t.Fatalf("pre-reset: IsDryRunDisabled false; sync hook not wired")
+	}
+	if err := ApplyAblationFlags(nil); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	if validator.IsDryRunDisabled() {
+		t.Errorf("IsDryRunDisabled still true after ApplyAblationFlags(nil); reset-phase sync did not mirror")
+	}
+}
+
 // -----------------------------------------------------------------------------
 // ScrubAmbientAblationEnv + Python bridge
 // -----------------------------------------------------------------------------
