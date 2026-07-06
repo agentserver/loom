@@ -1,0 +1,29 @@
+# WT-3-stub-fulltable — ablation flag → 难点 → target metrics.
+# Source of truth: spec §3.3 (mirrors paper_outputs/evaluation_v3.md §6.5.1
+# line 233–244). All target_metrics names ∈ eval_metrics.metrics.ALL_METRICS.
+- flag: NoCapabilityDiscovery
+  difficulty: 难点一
+  target_metrics: [RoutingAccuracy, WrongContextFailureRate, PreExecutionFaultCatchRate]
+- flag: NoObserver
+  difficulty: 难点一
+  target_metrics: [PromotionCandidateSurfacingRate, ContractViolationRate]
+- flag: NoTypedContracts
+  difficulty: 难点二
+  target_metrics: [ContractCompleteness, ContractViolationRate, PolicyViolationPreventionRate]
+- flag: NoContractFormalization
+  difficulty: 难点二
+  target_metrics: [MissingArtifactDetectionRate, DuplicateSideEffectRate]
+- flag: NoDryRun
+  difficulty: 难点二
+  # Spec §3.3 line 229: "下游 side-effect ↑" proxied by
+  # DuplicateSideEffectRate + PolicyViolationPreventionRate.
+  target_metrics: [PreExecutionFaultCatchRate, DuplicateSideEffectRate, PolicyViolationPreventionRate]
+- flag: NoUserPromotionPath
+  difficulty: 难点三
+  target_metrics: [CapabilityReuseRate, RepeatedGenerationRate, ReuseSpeedup]
+- flag: NoAcceptanceGate
+  difficulty: 难点三
+  target_metrics: [ValidationFalseAcceptRate]
+- flag: NoRegistryLookup
+  difficulty: 难点三
+  target_metrics: [RegistryLookupHitRate, RepeatedGenerationRate]
