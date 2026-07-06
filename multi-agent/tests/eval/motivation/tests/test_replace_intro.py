@@ -376,6 +376,77 @@ def test_motivation_placeholder_coverage(
     assert "ErrMotivationPlaceholderMissing" in r.stderr
 
 
+def test_motivation_placeholder_duplicate_rejected(
+    ma_root: Path, fake_main_dir: Path, paper_outputs: Path, tmp_path: Path,
+):
+    """spec §4.2 exact-8 rule: even a DUPLICATE of a valid placeholder is
+    rejected (total count assertion, not just presence)."""
+    scratch = _mirror_paper(tmp_path, paper_outputs)
+    motiv = scratch / "paper_outputs" / "motivation_v3.md"
+    motiv.write_text(
+        motiv.read_text(encoding="utf-8") + "\n{{contexts_count_median}}\n",
+        encoding="utf-8",
+    )
+    r = _run([
+        RI,
+        "--target", str(scratch / "paper_outputs" / "introduction_v3.md"),
+        "--target", str(motiv),
+        "--numbers", str(fake_main_dir),
+        "--provenance-path", "/tmp/pv.md",
+        "--paper-worktree", str(scratch),
+        "--dry-run",
+    ], cwd=ma_root)
+    assert r.returncode == 2
+    assert "ErrMotivationPlaceholderMissing" in r.stderr
+    assert "Duplicates" in r.stderr or "duplicate" in r.stderr.lower()
+
+
+def test_target_duplicate_basename_different_paths(
+    ma_root: Path, fake_main_dir: Path, paper_outputs: Path, tmp_path: Path,
+):
+    """gate3: two --target flags with the same basename but different
+    resolved paths (each in a `paper_outputs` subdirectory) must be
+    rejected as ErrDuplicateTarget — protects against a
+    `--target foo/paper_outputs/introduction_v3.md
+     --target bar/paper_outputs/introduction_v3.md` combo silently
+    overwriting each other in the basename map."""
+    scratch = _mirror_paper(tmp_path, paper_outputs)
+    # Build a second paper_outputs/ dir inside the same worktree.
+    second = scratch / "extra"
+    (second / "paper_outputs").mkdir(parents=True)
+    (second / "paper_outputs" / "introduction_v3.md").write_text("x", encoding="utf-8")
+    r = _run([
+        RI,
+        "--target", str(scratch / "paper_outputs" / "introduction_v3.md"),
+        "--target", str(second / "paper_outputs" / "introduction_v3.md"),
+        "--numbers", str(fake_main_dir),
+        "--provenance-path", "/tmp/pv.md",
+        "--paper-worktree", str(scratch),
+        "--dry-run",
+    ], cwd=ma_root)
+    assert r.returncode == 2
+    assert "ErrDuplicateTarget" in r.stderr
+
+
+def test_target_more_than_two_rejected(
+    ma_root: Path, fake_main_dir: Path, paper_outputs: Path, tmp_path: Path,
+):
+    """gate3: exactly-2 rule — 3 --target flags → ErrTargetMissing (count)."""
+    scratch = _mirror_paper(tmp_path, paper_outputs)
+    r = _run([
+        RI,
+        "--target", str(scratch / "paper_outputs" / "introduction_v3.md"),
+        "--target", str(scratch / "paper_outputs" / "motivation_v3.md"),
+        "--target", str(scratch / "paper_outputs" / "motivation_v3.md"),
+        "--numbers", str(fake_main_dir),
+        "--provenance-path", "/tmp/pv.md",
+        "--paper-worktree", str(scratch),
+        "--dry-run",
+    ], cwd=ma_root)
+    assert r.returncode == 2
+    assert "ErrTargetMissing" in r.stderr
+
+
 def test_motivation_placeholder_extra_rejected(
     ma_root: Path, fake_main_dir: Path, paper_outputs: Path, tmp_path: Path,
 ):

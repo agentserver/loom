@@ -34,15 +34,28 @@ def test_provenance_template_warning_lines(paper_worktree: Path):
 
 
 def test_provenance_template_placeholder_inventory(paper_worktree: Path):
+    """Exact sorted inventory — no duplicates allowed either.
+
+    Compare the LIST (not set) of found tokens with the expected list; a
+    duplicate placeholder would fail here even though its set form
+    matches the expected inventory.
+    """
     text = _template_text(paper_worktree)
-    found = set(re.findall(r"\{\{([a-zA-Z0-9_]+)\}\}", text))
-    expected = set(SHARED)
+    found_list = re.findall(r"\{\{([a-zA-Z0-9_]+)\}\}", text)
+    expected_list = list(SHARED)
     for key in CANONICAL_KEYS:
         for suffix in PER_KEY_SUFFIXES:
-            expected.add(f"{key}_{suffix}")
-    assert found == expected, (
-        f"missing: {sorted(expected - found)}; extra: {sorted(found - expected)}"
+            expected_list.append(f"{key}_{suffix}")
+    assert sorted(found_list) == sorted(expected_list), (
+        f"template placeholder inventory drift.\n"
+        f"expected (sorted): {sorted(expected_list)}\n"
+        f"found (sorted):    {sorted(found_list)}"
     )
+    # Additionally: no placeholder may appear more than once.
+    from collections import Counter
+    counts = Counter(found_list)
+    dups = {tok: n for tok, n in counts.items() if n > 1}
+    assert not dups, f"template has duplicated placeholders: {dups}"
 
 
 def test_provenance_template_cli_bash_valid(paper_worktree: Path):

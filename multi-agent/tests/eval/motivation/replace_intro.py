@@ -130,11 +130,34 @@ def _validate_targets(targets: list[str], paper_worktree: Path) -> dict[str, Pat
         print(f"error: {ERR_TARGET_MISSING}: expected two --target flags",
               file=sys.stderr)
         sys.exit(2)
+    # Reject BEFORE resolve: two --target strings that share the same
+    # basename (regardless of resolved path) — protects against the case
+    # `--target foo/introduction_v3.md --target bar/introduction_v3.md`
+    # where different `paper_outputs` dirs would silently overwrite in
+    # the basename map.
+    if len(targets) != 2:
+        print(
+            f"error: {ERR_TARGET_MISSING}: exactly 2 --target flags required, "
+            f"got {len(targets)}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     resolved = [Path(t).resolve() for t in targets]
     if len(resolved) != len(set(resolved)):
         print(f"error: {ERR_DUP_TARGET}: same --target passed twice",
               file=sys.stderr)
         sys.exit(2)
+    seen_basenames: set[str] = set()
+    for p in resolved:
+        if p.name in seen_basenames:
+            print(
+                f"error: {ERR_DUP_TARGET}: two --target flags share basename "
+                f"{p.name!r} (dual-target rule: exactly one target per "
+                "whitelisted basename)",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        seen_basenames.add(p.name)
     by_basename: dict[str, Path] = {}
     pw_resolved = paper_worktree.resolve()
     for p in resolved:
@@ -367,22 +390,38 @@ def _patch_motivation(
     for key in CANONICAL_KEYS:
         required.add(f"{key}_median")
         required.add(f"{key}_iqr")
-    tokens_present = set(_PLACEHOLDER_RE.findall(original_text))
-    missing = required - tokens_present
+    tokens_present = _PLACEHOLDER_RE.findall(original_text)  # list, preserves multiplicity
+    tokens_present_set = set(tokens_present)
+    missing = required - tokens_present_set
     if missing:
         print(
             f"error: {ERR_MOTIV_MISSING}: missing placeholders {sorted(missing)}",
             file=sys.stderr,
         )
         sys.exit(2)
-    # Also reject any unknown `{{...}}` token — spec §4.2 requires *exactly*
+    # Reject any unknown `{{...}}` token — spec §4.2 requires *exactly*
     # 8 placeholders, no extras. An unknown extra token cannot be
     # substituted and would silently survive to the paper.
-    extra = tokens_present - required
-    if extra:
+    extra_unknown = tokens_present_set - required
+    if extra_unknown:
         print(
-            f"error: {ERR_MOTIV_MISSING}: unknown placeholders {sorted(extra)} "
+            f"error: {ERR_MOTIV_MISSING}: unknown placeholders {sorted(extra_unknown)} "
             "present in motivation_v3.md (spec §4.2 requires exactly 8)",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    # And reject any DUPLICATE of a known placeholder — the exact-8 rule
+    # is a total count assertion, not just "each present at least once".
+    # A copy-paste that produced e.g. two {{contexts_count_median}} tokens
+    # would otherwise silently allow 9+ placeholders through.
+    if len(tokens_present) != len(required):
+        from collections import Counter
+        counts = Counter(tokens_present)
+        dups = {tok: n for tok, n in counts.items() if n > 1}
+        print(
+            f"error: {ERR_MOTIV_MISSING}: motivation_v3.md has "
+            f"{len(tokens_present)} placeholders; spec §4.2 requires exactly "
+            f"{len(required)}. Duplicates: {dups}",
             file=sys.stderr,
         )
         sys.exit(2)

@@ -112,7 +112,14 @@ def test_wcf_happy_path(ma_root: Path, trace_dir: Path, workload_dir: Path, tmp_
     # 10 rows for (motivation-e2e, manual_ssh), 3 True → 0.3
     assert rec["canonical_key"] == "wrong_context_failure_manual_baseline"
     assert abs(rec["raw_value"] - 0.3) < 1e-9
-    assert rec["seed"] == 20260706  # from spec.yaml
+    # Seed must come from spec.yaml — read the truth-source, don't hardcode
+    # the constant here (spec §7 (c) source-of-truth rule).
+    import re
+    spec_text = (workload_dir / "spec.yaml").read_text(encoding="utf-8")
+    m = re.search(r"^\s*wrong_ctx_seed\s*:\s*(-?\d+)\s*$", spec_text, re.MULTILINE)
+    assert m, "wrong_ctx_seed missing from spec.yaml"
+    expected_seed = int(m.group(1))
+    assert rec["seed"] == expected_seed
 
 
 def test_wcf_no_matching_rows(ma_root: Path, trace_dir: Path, workload_dir: Path, tmp_path: Path):
