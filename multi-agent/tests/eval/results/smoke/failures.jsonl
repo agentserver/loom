@@ -1,0 +1,1 @@
+{"configuration": "full_loom", "exit_code": 1, "run_id": "d75d678b-208f-427a-bcff-df4b989edf69", "tail_stderr": ["ERROR: token=[REDACTED]", "boom"], "workload_id": "windows-only-artifact"}

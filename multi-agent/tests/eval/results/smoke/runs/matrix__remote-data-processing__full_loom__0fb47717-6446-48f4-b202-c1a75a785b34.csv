@@ -1,0 +1,2 @@
+run_id,workload_id,baseline_or_ablation,loom_commit,passed,exit_code
+0fb47717-6446-48f4-b202-c1a75a785b34,remote-data-processing,full_loom,954b655cb60ebf0cff056f5c6b0fe1feb6bd3b1c,true,0
