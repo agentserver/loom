@@ -159,6 +159,21 @@ var expectedWorkloads = []string{
 	"credential-bound-model",
 }
 
+// scaffoldOnlyWorkloads is a separate allowlist for workloads that live
+// under tests/eval/workloads/ but are **not** part of the §6.3 main
+// experiment 5-workload table (expectedWorkloads above). They exist so a
+// scaffold self-check harness can drive its collectors end-to-end without
+// polluting the main-table contract. Each entry's spec.yaml first line
+// MUST declare "scaffold self-check only" (see the
+// TestScaffoldOnlyWorkloadsAreScoped test below).
+//
+// This list is intentionally short — do not use it as a dumping ground.
+// If a workload belongs to the main table, put it in expectedWorkloads
+// so all the other loops in this file exercise it.
+var scaffoldOnlyWorkloads = []string{
+	"motivation-e2e",
+}
+
 type contextSpec struct {
 	Role     string   `yaml:"role"`
 	Platform string   `yaml:"platform"`
@@ -205,32 +220,45 @@ func loadSpec(t *testing.T, dir string) workloadSpec {
 }
 
 // TestWorkloadDirectoryMatchesExpectedSet enforces the canonical list in
-// both directions: every expected workload has a directory, and every
-// entry under workloads/ — directory OR file — is in the expected list.
-// The "every entry" form catches stray files (orphaned README, .DS_Store,
-// rename-leftover dropped as a file, debug dump) that the
-// directories-only form silently skipped.  Without the reverse check, a
-// half-finished or renamed workload would be invisible to CI.
+// both directions: every expected workload (main-table or scaffold-only)
+// has a directory, and every entry under workloads/ — directory OR file
+// — is in one of the two allowlists.  The "every entry" form catches
+// stray files (orphaned README, .DS_Store, rename-leftover dropped as a
+// file, debug dump) that the directories-only form silently skipped.
+// Without the reverse check, a half-finished or renamed workload would
+// be invisible to CI.
+//
+// scaffoldOnlyWorkloads is treated separately so a scaffold self-check
+// harness can drive its collectors without polluting the 5-workload
+// main-table contract; a companion test (TestScaffoldOnlyWorkloadsAreScoped)
+// asserts each scaffold workload's spec.yaml first line explicitly says
+// so.
 func TestWorkloadDirectoryMatchesExpectedSet(t *testing.T) {
 	entries, err := os.ReadDir("workloads")
 	require.NoError(t, err)
 	gotDirs := map[string]struct{}{}
+	scaffoldDirs := map[string]struct{}{}
 	var extra []string
+	want := map[string]struct{}{}
+	for _, id := range expectedWorkloads {
+		want[id] = struct{}{}
+	}
+	scaffoldWant := map[string]struct{}{}
+	for _, id := range scaffoldOnlyWorkloads {
+		scaffoldWant[id] = struct{}{}
+	}
 	for _, e := range entries {
-		// Every entry at the workloads root must be one of the
-		// canonical workload directories.  Files (stray READMEs,
-		// .DS_Store, leftover debug dumps) and non-canonical
-		// directories both count as `extra`.
-		want := map[string]struct{}{}
-		for _, id := range expectedWorkloads {
-			want[id] = struct{}{}
-		}
-		if _, ok := want[e.Name()]; !ok {
-			extra = append(extra, e.Name())
+		if _, ok := want[e.Name()]; ok {
+			require.True(t, e.IsDir(), "%s under workloads/ must be a directory (was a file)", e.Name())
+			gotDirs[e.Name()] = struct{}{}
 			continue
 		}
-		require.True(t, e.IsDir(), "%s under workloads/ must be a directory (was a file)", e.Name())
-		gotDirs[e.Name()] = struct{}{}
+		if _, ok := scaffoldWant[e.Name()]; ok {
+			require.True(t, e.IsDir(), "%s under workloads/ must be a directory (was a file)", e.Name())
+			scaffoldDirs[e.Name()] = struct{}{}
+			continue
+		}
+		extra = append(extra, e.Name())
 	}
 	var missing []string
 	for _, id := range expectedWorkloads {
@@ -238,10 +266,40 @@ func TestWorkloadDirectoryMatchesExpectedSet(t *testing.T) {
 			missing = append(missing, id)
 		}
 	}
+	var scaffoldMissing []string
+	for _, id := range scaffoldOnlyWorkloads {
+		if _, ok := scaffoldDirs[id]; !ok {
+			scaffoldMissing = append(scaffoldMissing, id)
+		}
+	}
 	sort.Strings(extra)
 	sort.Strings(missing)
+	sort.Strings(scaffoldMissing)
 	require.Empty(t, extra, "unexpected entries under workloads/ (rename leftover? typo? stray file?): %v", extra)
 	require.Empty(t, missing, "expected workload directories are missing: %v", missing)
+	require.Empty(t, scaffoldMissing, "scaffold-only workload directories are missing: %v", scaffoldMissing)
+}
+
+// TestScaffoldOnlyWorkloadsAreScoped enforces that every scaffold-only
+// workload's spec.yaml begins with a verbatim declaration that pins it
+// out of the §6.3 main experiment 5-workload table.  A future
+// contributor who tried to promote a scaffold workload into the main
+// table by editing expectedWorkloads would have to also remove the
+// declaration comment first, which surfaces the change in code review.
+func TestScaffoldOnlyWorkloadsAreScoped(t *testing.T) {
+	const wantFirstLine = "# scaffold self-check only; NOT part of §6.3 main experiment 5-workload set"
+	for _, id := range scaffoldOnlyWorkloads {
+		id := id
+		t.Run(id, func(t *testing.T) {
+			path := filepath.Join("workloads", id, "spec.yaml")
+			data, err := os.ReadFile(path)
+			require.NoError(t, err, "read %s", path)
+			lines := bytes.SplitN(data, []byte("\n"), 2)
+			require.NotEmpty(t, lines, "spec.yaml empty: %s", path)
+			require.Equal(t, wantFirstLine, string(lines[0]),
+				"%s first line must be verbatim scope declaration", path)
+		})
+	}
 }
 
 func TestWorkloadSpecsExistAndValidate(t *testing.T) {

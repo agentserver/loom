@@ -97,7 +97,18 @@ def test_motivation_e2e_not_in_stub_fulltable(ma_root: Path):
         "tests/eval/motivation/",
         "tests/eval/workloads/motivation-e2e/",
     )
-    forbidden = [h for h in hits if not h.startswith(allowed_prefixes)]
+    # tests/eval/spec_validate_test.go is allowed to name `motivation-e2e`
+    # inside the scaffoldOnlyWorkloads allowlist + the paired scope-check
+    # test. That reference is what proves the workload is registered as
+    # scaffold-only (not main-table). Any OTHER file under tests/eval/ is
+    # forbidden.
+    allowed_exact = {
+        "tests/eval/spec_validate_test.go",
+    }
+    forbidden = [
+        h for h in hits
+        if not h.startswith(allowed_prefixes) and h not in allowed_exact
+    ]
     assert not forbidden, (
         f"motivation-e2e leaked into non-scaffold files: {forbidden}"
     )
