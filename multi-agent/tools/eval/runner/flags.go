@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/yourorg/multi-agent/internal/ablation"
 	"github.com/yourorg/multi-agent/internal/capability"
@@ -114,6 +115,24 @@ var syncHooks = []func(){
 	capability.SyncDisableUpload,
 	validator.SyncDisableDryRun,
 }
+
+// defaultMu serialises every applyAblationFlagsTo(ablation.Default, …)
+// call so two Runs in the same process (parallel `go test`, a
+// wrapping bash script that shells out repeatedly) cannot race on
+// the raw *bool targets or on the SetByName/Sync-hook sequence.
+//
+// Necessary because the pre-run-only mutation contract is a
+// documented invariant, not an enforced one — `go test -race`
+// happily runs sibling package tests in parallel goroutines while
+// each one Run()s and defers a reset. Without this mutex, the
+// deferred reset in one Run's goroutine writes DisableTelemetry
+// while a Sync* in another Run's goroutine reads the mirror.
+//
+// Only Default is protected; the reg *ablation.Registry parameter
+// exists so tests can drive a private registry (see
+// TestApplyAblationFlagsTo_*_reg tests), and those tests own their
+// own registry — no serialisation needed there.
+var defaultMu sync.Mutex
 
 // -----------------------------------------------------------------------------
 // AblationList — flag.Value implementation for --ablation
@@ -227,7 +246,18 @@ func ApplyAblationFlags(flags []ablation.FlagName) error {
 // Called with reg == ablation.Default in production; tests inject
 // a fresh Registry to exercise ErrUnknownFlag / ErrNotRegistered
 // negative paths without touching global state.
+//
+// Concurrency: when reg is ablation.Default, defaultMu is held for
+// the entire three-phase mutation + sync-hook invocation so a
+// concurrent caller cannot observe a torn (target-written /
+// mirror-stale) state. Tests that pass a private Registry via
+// ablation.NewRegistry own their own registry and do not need this
+// serialisation.
 func applyAblationFlagsTo(reg *ablation.Registry, flags []ablation.FlagName) error {
+	if reg == ablation.Default {
+		defaultMu.Lock()
+		defer defaultMu.Unlock()
+	}
 	// -------- Phase 1: validate (no mutation) --------
 	//
 	// Bail on the FIRST invalid entry before any write. reg.List()
