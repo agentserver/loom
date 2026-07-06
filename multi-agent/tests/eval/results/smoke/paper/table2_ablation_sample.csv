@@ -1,0 +1,9 @@
+ablation_flag,difficulty_group,RoutingAccuracy,WrongContextFailureRate,PreExecutionFaultCatchRate,PromotionCandidateSurfacingRate,ContractViolationRate,ContractCompleteness,PolicyViolationPreventionRate,MissingArtifactDetectionRate,DuplicateSideEffectRate,CapabilityReuseRate,RepeatedGenerationRate,ReuseSpeedup,ValidationFalseAcceptRate,RegistryLookupHitRate
+NoCapabilityDiscovery,难点一,,,,,,,,,,,,,,
+NoObserver,难点一,,,,,,,,,,,,,,
+NoTypedContracts,难点二,,,,,,,,,,,,,,
+NoContractFormalization,难点二,,,,,,,,,,,,,,
+NoDryRun,难点二,,,,,,,,,,,,,,
+NoUserPromotionPath,难点三,,,,,,,,,,,,,,
+NoAcceptanceGate,难点三,,,,,,,,,,,,,,
+NoRegistryLookup,难点三,,,,,,,,,,,,,,

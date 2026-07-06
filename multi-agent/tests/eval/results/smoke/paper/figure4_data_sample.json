@@ -1,0 +1,59 @@
+{
+  "components": [
+    "DriverPlanningOverhead",
+    "TaskDispatchLatency",
+    "TunnelOverhead",
+    "ObserverOverhead",
+    "ModelProxyOverhead"
+  ],
+  "series": {
+    "p50_ms": {
+      "DriverPlanningOverhead": 0.0,
+      "TaskDispatchLatency": 0.0,
+      "TunnelOverhead": 0.0,
+      "ObserverOverhead": 0.0,
+      "ModelProxyOverhead": 0.0
+    },
+    "p95_ms": {
+      "DriverPlanningOverhead": 0.0,
+      "TaskDispatchLatency": 0.0,
+      "TunnelOverhead": 0.0,
+      "ObserverOverhead": 0.0,
+      "ModelProxyOverhead": 0.0
+    }
+  },
+  "extras": {
+    "ArtifactTransferThroughput": {
+      "MiBps_p50": 0.0,
+      "MiBps_p95": 0.0,
+      "artifact_size_bytes": [
+        1024,
+        1048576,
+        104857600
+      ]
+    },
+    "RoutingLatencyP50P95": {
+      "p50_ms": 0.0,
+      "p95_ms": 0.0,
+      "scale_points": {
+        "contexts": [
+          1,
+          2,
+          4,
+          8,
+          16
+        ],
+        "tools_per_context": [
+          10,
+          50,
+          100
+        ],
+        "artifact_size_bytes": [
+          1024,
+          1048576,
+          104857600
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "families": [
+    "api-wrapper-for-local-service",
+    "csv-profiler",
+    "image-metadata-extractor",
+    "log-parser",
+    "refund-policy-checker"
+  ],
+  "stage_A": {
+    "metric": "TimeToCompletion",
+    "subkey": "p50_seconds",
+    "unit": "seconds",
+    "values": {
+      "api-wrapper-for-local-service": 0.46125,
+      "csv-profiler": 0.51125,
+      "image-metadata-extractor": 0.51275,
+      "log-parser": 0.65525,
+      "refund-policy-checker": 0.70175
+    }
+  },
+  "stage_B": {
+    "metric": "TimeFromUserDecisionToRegisteredMCP",
+    "subkey": "p50_seconds",
+    "unit": "seconds",
+    "values": {
+      "api-wrapper-for-local-service": 0.52725,
+      "csv-profiler": 0.55225,
+      "image-metadata-extractor": 0.496,
+      "log-parser": 0.649,
+      "refund-policy-checker": 0.54625
+    }
+  },
+  "stage_C": {
+    "metric": "ReuseSpeedup",
+    "subkey": "ratio",
+    "unit": "ratio (Stage A p50_seconds / Stage C p50_seconds)",
+    "values": {
+      "api-wrapper-for-local-service": 0.596,
+      "csv-profiler": 0.58525,
+      "image-metadata-extractor": 0.2215,
+      "log-parser": 0.445,
+      "refund-policy-checker": 0.785
+    }
+  },
+  "AdHocScriptTaskShare": {
+    "subkey": "share_0_to_1",
+    "values": {
+      "api-wrapper-for-local-service": 0.514,
+      "csv-profiler": 0.51025,
+      "image-metadata-extractor": 0.4335,
+      "log-parser": 0.42925,
+      "refund-policy-checker": 0.5215
+    }
+  }
+}

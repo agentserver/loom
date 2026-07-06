@@ -1,0 +1,4 @@
+run_id,TaskSuccessRate,TimeToCompletion,HumanContextSelectionCount,WrongContextFailureRate,LifecycleClosureRate,RoutingAccuracy
+1a434e20-273c-45a0-8f4b-07d3a3616c04,1.0,45.0,1,0.0,1.0,0.9
+0fb47717-6446-48f4-b202-c1a75a785b34,1.0,45.0,1,0.0,1.0,0.9
+d75d678b-208f-427a-bcff-df4b989edf69,0.0,60.0,3,0.4,0.0,0.7

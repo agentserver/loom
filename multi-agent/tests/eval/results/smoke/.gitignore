@@ -1,0 +1,8 @@
+# Ignore smoke outputs by default; force-add via `git add -f`
+# after generation (see WT-3-stub-fulltable plan §Step 11.6 + 12.3).
+/runs.csv
+/metrics.csv
+/failures.jsonl
+/dbs/
+/runs/
+/paper/

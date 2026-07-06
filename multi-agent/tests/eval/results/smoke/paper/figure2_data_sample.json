@@ -1,0 +1,34 @@
+{
+  "fault_types": [
+    "missing_file",
+    "stale_capability",
+    "wrong_os_version",
+    "forbidden_cred",
+    "slave_disconnect",
+    "driver_restart",
+    "model_route_failure",
+    "duplicate_pickup"
+  ],
+  "series": {
+    "PreExecutionFaultCatchRate": {
+      "missing_file": null,
+      "stale_capability": null,
+      "wrong_os_version": null,
+      "forbidden_cred": null,
+      "slave_disconnect": null,
+      "driver_restart": null,
+      "model_route_failure": null,
+      "duplicate_pickup": null
+    },
+    "ContractViolationRate": {
+      "missing_file": null,
+      "stale_capability": null,
+      "wrong_os_version": null,
+      "forbidden_cred": null,
+      "slave_disconnect": null,
+      "driver_restart": null,
+      "model_route_failure": null,
+      "duplicate_pickup": null
+    }
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "configurations": [
+    "full_loom",
+    "NoCapabilityDiscovery",
+    "NoTypedContracts",
+    "NoDryRun",
+    "NoContractFormalization",
+    "NoUserPromotionPath",
+    "NoAcceptanceGate",
+    "NoRegistryLookup",
+    "NoObserver"
+  ],
+  "series": {
+    "RoutingAccuracy": {
+      "full_loom": 0.7,
+      "NoCapabilityDiscovery": null,
+      "NoTypedContracts": null,
+      "NoDryRun": null,
+      "NoContractFormalization": null,
+      "NoUserPromotionPath": null,
+      "NoAcceptanceGate": null,
+      "NoRegistryLookup": null,
+      "NoObserver": null
+    },
+    "WrongContextFailureRate": {
+      "full_loom": 0.4,
+      "NoCapabilityDiscovery": null,
+      "NoTypedContracts": null,
+      "NoDryRun": null,
+      "NoContractFormalization": null,
+      "NoUserPromotionPath": null,
+      "NoAcceptanceGate": null,
+      "NoRegistryLookup": null,
+      "NoObserver": null
+    }
+  }
+}

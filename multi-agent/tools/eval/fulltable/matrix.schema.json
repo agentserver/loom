@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loom.local/schemas/fulltable/matrix.schema.json",
+  "title": "fulltable/matrix",
+  "type": "array",
+  "minItems": 60,
+  "maxItems": 60,
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["workload_id", "baseline_or_ablation"],
+    "properties": {
+      "workload_id": {
+        "type": "string",
+        "enum": [
+          "cross-device-code-mod",
+          "remote-data-processing",
+          "windows-only-artifact",
+          "missing-parser-converter",
+          "credential-bound-model"
+        ]
+      },
+      "baseline_or_ablation": {
+        "type": "string",
+        "enum": [
+          "full_loom",
+          "NoCapabilityDiscovery",
+          "NoTypedContracts",
+          "NoDryRun",
+          "NoContractFormalization",
+          "NoUserPromotionPath",
+          "NoAcceptanceGate",
+          "NoRegistryLookup",
+          "NoObserver",
+          "manual_ssh",
+          "single_machine_claude_code",
+          "cloud_sandbox_e2b"
+        ]
+      },
+      "dry_run": {
+        "type": "boolean"
+      }
+    },
+    "allOf": [
+      {
+        "if": {
+          "properties": {"baseline_or_ablation": {"const": "cloud_sandbox_e2b"}},
+          "required": ["baseline_or_ablation"]
+        },
+        "then": {
+          "required": ["dry_run"],
+          "properties": {"dry_run": {"const": true}}
+        }
+      }
+    ]
+  }
+}
