@@ -85,6 +85,7 @@ python "$motivation_dir/replace_intro.py" \
   --allow-scaffold-smoke-input \
   --numbers "$agg_dir" \
   --provenance-path /tmp/motivation_data_provenance.md.smoke \
+  --paper-worktree "$paper_worktree" \
   --target "$paper_worktree/paper_outputs/introduction_v3.md" \
   --target "$paper_worktree/paper_outputs/motivation_v3.md" \
   > /tmp/replace_intro.diff

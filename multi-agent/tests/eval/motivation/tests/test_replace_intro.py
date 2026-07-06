@@ -202,6 +202,62 @@ def test_target_parent_not_paper_outputs(
     assert "ErrTargetPathRejected" in r.stderr
 
 
+def test_paper_worktree_flag_required(
+    ma_root: Path, fake_main_dir: Path, paper_outputs: Path, tmp_path: Path,
+):
+    """gate3 rule 3 defense — --paper-worktree must be explicit; inferring
+    it from --target defeats the resolve-under-worktree guard. Argparse
+    must reject the invocation with a non-zero exit."""
+    scratch = _mirror_paper(tmp_path, paper_outputs)
+    r = _run([
+        RI,
+        "--target", str(scratch / "paper_outputs" / "introduction_v3.md"),
+        "--target", str(scratch / "paper_outputs" / "motivation_v3.md"),
+        "--numbers", str(fake_main_dir),
+        "--provenance-path", "/tmp/pv.md",
+        "--dry-run",
+    ], cwd=ma_root)
+    assert r.returncode != 0
+    assert "--paper-worktree" in r.stderr, r.stderr
+
+
+def test_smoke_numbers_dir_rejects_subdirectories(
+    ma_root: Path, paper_outputs: Path, tmp_path: Path,
+):
+    """Spec §4.3: smoke-mode --numbers dir must contain EXACTLY the 4
+    canonical JSON basenames. A stray subdirectory (e.g., a `backup/`
+    left by a previous experiment) must trip the extras check just like
+    a stray file would; otherwise reviewers reading the dir would see
+    clutter that the scaffold silently ignored.
+    """
+    scratch = _mirror_paper(tmp_path, paper_outputs)
+    numdir = tmp_path / "smoke_subdir"
+    numdir.mkdir()
+    good = {
+        "contexts_count":                        {"median": 3, "iqr_low": 3, "iqr_high": 3},
+        "wrong_context_failure_manual_baseline": {"median": 0.5, "iqr_low": 0.4, "iqr_high": 0.6},
+        "manual_steps_ssh":                      {"median": 10, "iqr_low": 10, "iqr_high": 10},
+        "reuse_time_savings":                    {"median": 50.0, "iqr_low": 40.0, "iqr_high": 60.0},
+    }
+    for k, rec in good.items():
+        rec.update({"canonical_key": k, "n_samples": 3})
+        (numdir / f"{k}.json").write_text(json.dumps(rec), encoding="utf-8")
+    (numdir / "backup").mkdir()  # stray subdirectory — must trip the check
+    r = _run([
+        RI,
+        "--target", str(scratch / "paper_outputs" / "introduction_v3.md"),
+        "--target", str(scratch / "paper_outputs" / "motivation_v3.md"),
+        "--numbers", str(numdir),
+        "--provenance-path", "/tmp/pv.md",
+        "--paper-worktree", str(scratch),
+        "--allow-scaffold-smoke-input",
+        "--dry-run",
+    ], cwd=ma_root)
+    assert r.returncode == 2
+    assert "ErrNumbersDirNotFromMainExperiment" in r.stderr
+    assert "backup" in r.stderr
+
+
 def test_target_outside_paper_worktree(
     ma_root: Path, fake_main_dir: Path, paper_outputs: Path, tmp_path: Path,
 ):

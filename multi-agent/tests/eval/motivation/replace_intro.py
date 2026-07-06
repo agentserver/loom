@@ -92,25 +92,30 @@ def _check_numbers_dir(numbers_dir: Path, allow_smoke: bool) -> None:
         print(f"error: {ERR_NUMBERS_DIR}: not a directory: {numbers_dir}",
               file=sys.stderr)
         sys.exit(2)
-    present = {p.name for p in numbers_dir.iterdir() if p.is_file()}
+    # Include ALL entries (files + subdirs + symlinks). Subdirs in a
+    # smoke-mode dir mean stray artifacts from an old run — they must not
+    # slip past the "exactly 4 basenames" contract just because they are
+    # not regular files. Missing-check still needs file-only presence
+    # (a subdir named `contexts_count.json` cannot be read as JSON).
+    file_present = {p.name for p in numbers_dir.iterdir() if p.is_file()}
+    all_present = {p.name for p in numbers_dir.iterdir()}
     if allow_smoke:
-        missing = SMOKE_INPUT_SIGNATURE - present
+        missing = SMOKE_INPUT_SIGNATURE - file_present
         if missing:
             print(f"error: {ERR_NUMBERS_DIR} (smoke): missing {sorted(missing)}",
                   file=sys.stderr)
             sys.exit(2)
-        # Spec §4.3 smoke branch: exactly the 4 canonical JSON basenames.
-        # Anything else in the dir would let a stray file drift into the
-        # scaffold input path and confuse reviewers.
-        extra = present - SMOKE_INPUT_SIGNATURE
+        # Spec §4.3 smoke branch: exactly the 4 canonical JSON basenames,
+        # nothing else — including no stray subdirectories.
+        extra = all_present - SMOKE_INPUT_SIGNATURE
         if extra:
-            print(f"error: {ERR_NUMBERS_DIR} (smoke): unexpected extra files "
+            print(f"error: {ERR_NUMBERS_DIR} (smoke): unexpected extra entries "
                   f"{sorted(extra)}; smoke-mode dir must contain exactly the "
-                  f"4 canonical JSON basenames",
+                  f"4 canonical JSON basenames (no subdirs, no stray files)",
                   file=sys.stderr)
             sys.exit(2)
     else:
-        missing = MAIN_EXP_SIGNATURE - present
+        missing = MAIN_EXP_SIGNATURE - file_present
         if missing:
             print(
                 f"error: {ERR_NUMBERS_DIR}: main-experiment signature files "
@@ -484,8 +489,10 @@ def _cli() -> None:
     p.add_argument("--provenance-path", required=True, type=Path,
                    help="Path to the (generated or template) provenance MD; "
                         "recorded in diff header as attribution.")
-    p.add_argument("--paper-worktree", type=Path, default=None,
-                   help="Paper_writing worktree root (default: inferred from targets).")
+    p.add_argument("--paper-worktree", type=Path, required=True,
+                   help="Paper_writing worktree root; the resolve-under-worktree "
+                        "guard in gate3 rule 3 is meaningless if this can be "
+                        "inferred from --target itself, so it is explicit.")
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--execute", action="store_true")
@@ -506,12 +513,6 @@ def _cli() -> None:
     _check_numbers_dir(args.numbers, allow_smoke=args.allow_scaffold_smoke_input)
 
     # ------------------------------------------------------------------ gate3
-    if args.paper_worktree is None:
-        # Try to infer from the first target's parent.parent.
-        if not args.target:
-            print(f"error: {ERR_TARGET_MISSING}: no --target", file=sys.stderr)
-            sys.exit(2)
-        args.paper_worktree = Path(args.target[0]).resolve().parent.parent
     targets = _validate_targets(args.target, args.paper_worktree)
 
     # ------------------------------------------------------------------ gate4
