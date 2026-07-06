@@ -147,20 +147,37 @@ def test_gen_provenance_unresolved_placeholder_rejected(ma_root: Path, tmp_path:
     assert "ErrUnresolvedPlaceholder" in r.stderr
 
 
-@pytest.mark.parametrize("case", ["unstaged", "staged", "untracked"])
-def test_gen_provenance_dirty_tree_rejected(ma_root: Path, tmp_path: Path, case: str):
-    """spec §5 test_gen_provenance_dirty_tree_rejected — 3 cases."""
+@pytest.mark.parametrize("case,side", [
+    ("unstaged", "paper"),
+    ("staged", "paper"),
+    ("untracked", "paper"),
+    ("unstaged", "ma"),
+    ("staged", "ma"),
+    ("untracked", "ma"),
+])
+def test_gen_provenance_dirty_tree_rejected(
+    ma_root: Path, tmp_path: Path, case: str, side: str,
+):
+    """spec §5 test_gen_provenance_dirty_tree_rejected — 3 dirty cases × 2 worktrees.
+
+    Parametrising over BOTH paper and ma sides proves gen_provenance's
+    clean-tree assertion actually runs on both — an implementation that
+    forgot to check the multi-agent side would pass the paper-only rows
+    but fail here.
+    """
     paper, ma, agg, raw, spec, template = _setup(tmp_path)
 
+    target_worktree = paper if side == "paper" else ma
+    seed_file = "paper-seed.txt" if side == "paper" else "ma-seed.txt"
+
     if case == "unstaged":
-        # Edit an existing tracked file, do NOT stage.
-        (paper / "paper-seed.txt").write_text("modified", encoding="utf-8")
+        (target_worktree / seed_file).write_text("modified", encoding="utf-8")
     elif case == "staged":
-        new_file = paper / "new-tracked.txt"
+        new_file = target_worktree / "new-tracked.txt"
         new_file.write_text("new", encoding="utf-8")
-        subprocess.check_call(["git", "-C", str(paper), "add", str(new_file)])
+        subprocess.check_call(["git", "-C", str(target_worktree), "add", str(new_file)])
     elif case == "untracked":
-        (paper / "leftover.txt").write_text("leftover", encoding="utf-8")
+        (target_worktree / "leftover.txt").write_text("leftover", encoding="utf-8")
 
     r = _run([
         GEN,
@@ -175,3 +192,6 @@ def test_gen_provenance_dirty_tree_rejected(ma_root: Path, tmp_path: Path, case:
     ], cwd=ma_root)
     assert r.returncode == 2
     assert "ErrDirtyTree" in r.stderr
+    assert str(target_worktree) in r.stderr, (
+        f"error message must name the dirty worktree {target_worktree}; got: {r.stderr}"
+    )

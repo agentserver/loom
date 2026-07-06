@@ -99,6 +99,16 @@ def _check_numbers_dir(numbers_dir: Path, allow_smoke: bool) -> None:
             print(f"error: {ERR_NUMBERS_DIR} (smoke): missing {sorted(missing)}",
                   file=sys.stderr)
             sys.exit(2)
+        # Spec §4.3 smoke branch: exactly the 4 canonical JSON basenames.
+        # Anything else in the dir would let a stray file drift into the
+        # scaffold input path and confuse reviewers.
+        extra = present - SMOKE_INPUT_SIGNATURE
+        if extra:
+            print(f"error: {ERR_NUMBERS_DIR} (smoke): unexpected extra files "
+                  f"{sorted(extra)}; smoke-mode dir must contain exactly the "
+                  f"4 canonical JSON basenames",
+                  file=sys.stderr)
+            sys.exit(2)
     else:
         missing = MAIN_EXP_SIGNATURE - present
         if missing:
@@ -310,18 +320,32 @@ def _patch_intro(
             count=1,
         )
 
-    new_lines = lines[:start_idx] + [new_segment] + lines[end_idx:]
+    # Post-condition: no changes outside the anchored [start, end) segment.
+    # Compare on a *per-line* basis: rebuild the full-file line list from
+    # `new_segment.splitlines(keepends=True)` so an insertion that spans a
+    # newline is visible as an extra line inserted in the middle. Any drift
+    # from `lines[:start_idx]` or `lines[end_idx:]` at the same slice
+    # indices → guard tripped.
+    new_segment_lines = new_segment.splitlines(keepends=True)
+    new_lines = lines[:start_idx] + new_segment_lines + lines[end_idx:]
     new_text = "".join(new_lines)
 
-    # Post-condition: no changes outside the anchored [start, end) segment.
-    orig_before = "".join(lines[:start_idx])
-    orig_after = "".join(lines[end_idx:])
-    new_before = "".join(new_lines[:start_idx])
-    # After edit, before-segment length is unchanged (we didn't touch that
-    # region), so slice with the same index.
-    new_after = "".join(new_lines[start_idx + 1:])
-    if orig_before != new_before or orig_after != new_after:
-        print(f"error: {ERR_INTRO_OUTSIDE}: intro anchor segment guard tripped",
+    orig_before = lines[:start_idx]
+    orig_after = lines[end_idx:]
+    new_before = new_lines[:start_idx]
+    new_after = new_lines[start_idx + len(new_segment_lines):]
+    if (orig_before != new_before) or (orig_after != new_after):
+        print(f"error: {ERR_INTRO_OUTSIDE}: intro anchor segment guard tripped "
+              f"(anchor_lines={end_idx - start_idx}, "
+              f"segment_lines_after_patch={len(new_segment_lines)})",
+              file=sys.stderr)
+        sys.exit(2)
+    # And: an insertion that spans a newline would change the total line
+    # count within the anchor segment. Reject that too (spec §4.5: intro
+    # segment length must be preserved).
+    if len(new_segment_lines) != (end_idx - start_idx):
+        print(f"error: {ERR_INTRO_OUTSIDE}: intro anchor segment line count "
+              f"changed: {end_idx - start_idx} → {len(new_segment_lines)}",
               file=sys.stderr)
         sys.exit(2)
 
@@ -348,6 +372,17 @@ def _patch_motivation(
     if missing:
         print(
             f"error: {ERR_MOTIV_MISSING}: missing placeholders {sorted(missing)}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    # Also reject any unknown `{{...}}` token — spec §4.2 requires *exactly*
+    # 8 placeholders, no extras. An unknown extra token cannot be
+    # substituted and would silently survive to the paper.
+    extra = tokens_present - required
+    if extra:
+        print(
+            f"error: {ERR_MOTIV_MISSING}: unknown placeholders {sorted(extra)} "
+            "present in motivation_v3.md (spec §4.2 requires exactly 8)",
             file=sys.stderr,
         )
         sys.exit(2)

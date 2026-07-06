@@ -202,36 +202,75 @@ def test_target_parent_not_paper_outputs(
     assert "ErrTargetPathRejected" in r.stderr
 
 
+def test_target_outside_paper_worktree(
+    ma_root: Path, fake_main_dir: Path, paper_outputs: Path, tmp_path: Path,
+):
+    """gate3 (spec §4.0 rule 3): resolved --target path must be inside the
+    paper_writing worktree root. Otherwise a `paper_outputs/introduction_v3.md`
+    outside the sanctioned worktree could sneak past the basename/parent
+    check.
+    """
+    scratch = _mirror_paper(tmp_path, paper_outputs)
+    # Build an evil paper_outputs/introduction_v3.md OUTSIDE the scratch root.
+    evil_root = tmp_path / "evil"
+    (evil_root / "paper_outputs").mkdir(parents=True)
+    (evil_root / "paper_outputs" / "introduction_v3.md").write_text("x", encoding="utf-8")
+    r = _run([
+        RI,
+        "--target", str(evil_root / "paper_outputs" / "introduction_v3.md"),
+        "--target", str(scratch / "paper_outputs" / "motivation_v3.md"),
+        "--numbers", str(fake_main_dir),
+        "--provenance-path", "/tmp/pv.md",
+        "--paper-worktree", str(scratch),
+        "--dry-run",
+    ], cwd=ma_root)
+    assert r.returncode == 2
+    assert "ErrTargetPathRejected" in r.stderr
+
+
 # ---------------------------------------------------------------------------
 # gate4 — range + IQR ordering
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("key,median,iqr_low,iqr_high", [
-    ("contexts_count", 0, 0, 0),
-    ("manual_steps_ssh", 0, 0, 0),
-    ("wrong_context_failure_manual_baseline", -0.1, -0.1, -0.1),
-    ("wrong_context_failure_manual_baseline", 1.5, 1.5, 1.5),
-    ("reuse_time_savings", -101.0, -101.0, -101.0),
-    ("reuse_time_savings", 200.0, 200.0, 200.0),
+@pytest.mark.parametrize("key,bad_value", [
+    ("contexts_count", 0),
+    ("manual_steps_ssh", 0),
+    ("wrong_context_failure_manual_baseline", -0.1),
+    ("wrong_context_failure_manual_baseline", 1.5),
+    ("reuse_time_savings", -101.0),
+    ("reuse_time_savings", 200.0),
 ])
+@pytest.mark.parametrize("bad_field", ["median", "iqr_low", "iqr_high"])
 def test_number_range_sanity(
     ma_root: Path, paper_outputs: Path, tmp_path: Path,
-    key: str, median: float, iqr_low: float, iqr_high: float,
+    key: str, bad_value: float, bad_field: str,
 ):
+    """spec §5 test_number_range_sanity — parametrised over each of
+    median/iqr_low/iqr_high independently. An implementation that only
+    range-checked median would pass a bad iqr_low row here.
+    """
     scratch = _mirror_paper(tmp_path, paper_outputs)
-    numdir = tmp_path / "bad_numbers"
+    numdir = tmp_path / f"bad_{key}_{bad_field}"
     numdir.mkdir()
-    # Fill 4 canonical files; only `key` gets bad values.
+    # Start from all-good baselines.
     good = {
         "contexts_count":                        {"median": 3, "iqr_low": 3, "iqr_high": 3},
         "wrong_context_failure_manual_baseline": {"median": 0.5, "iqr_low": 0.4, "iqr_high": 0.6},
         "manual_steps_ssh":                      {"median": 10, "iqr_low": 10, "iqr_high": 10},
         "reuse_time_savings":                    {"median": 50.0, "iqr_low": 40.0, "iqr_high": 60.0},
     }
-    good[key] = {"median": median, "iqr_low": iqr_low, "iqr_high": iqr_high}
-    for k, r in good.items():
-        r.update({"canonical_key": k, "n_samples": 3})
-        (numdir / f"{k}.json").write_text(json.dumps(r), encoding="utf-8")
+    # Set the specific field to the bad value; leave other two in-range so
+    # the ordering invariant doesn't trip (that would mask the range error).
+    # For fields where out-of-order would incidentally happen, still assert
+    # the failure token is ErrNumberOutOfRange (range check runs BEFORE the
+    # order check per spec §4.4).
+    target = dict(good[key])
+    target[bad_field] = bad_value
+    good[key] = target
+    for k, rec in good.items():
+        rec = dict(rec)
+        rec.update({"canonical_key": k, "n_samples": 3})
+        (numdir / f"{k}.json").write_text(json.dumps(rec), encoding="utf-8")
     r = _run([
         RI,
         "--target", str(scratch / "paper_outputs" / "introduction_v3.md"),
@@ -242,8 +281,15 @@ def test_number_range_sanity(
         "--allow-scaffold-smoke-input",
         "--dry-run",
     ], cwd=ma_root)
-    assert r.returncode == 2
+    assert r.returncode == 2, r.stderr
     assert "ErrNumberOutOfRange" in r.stderr
+    # Also verify the error message names the specific field so a future
+    # implementer can't collapse the three checks into one.
+    assert bad_field in r.stderr, (
+        f"error message must name the offending field {bad_field!r}; got: {r.stderr}"
+    )
+    # And no diff must have been printed (spec §4.4).
+    assert r.stdout == "", f"unexpected stdout on range error: {r.stdout!r}"
 
 
 def test_iqr_order_invariant(
@@ -330,9 +376,163 @@ def test_motivation_placeholder_coverage(
     assert "ErrMotivationPlaceholderMissing" in r.stderr
 
 
+def test_motivation_placeholder_extra_rejected(
+    ma_root: Path, fake_main_dir: Path, paper_outputs: Path, tmp_path: Path,
+):
+    """spec §4.2 exact-8 rule: an unknown extra `{{...}}` token is P0."""
+    scratch = _mirror_paper(tmp_path, paper_outputs)
+    motiv = scratch / "paper_outputs" / "motivation_v3.md"
+    motiv.write_text(
+        motiv.read_text(encoding="utf-8") + "\n{{unexpected_token}}\n",
+        encoding="utf-8",
+    )
+    r = _run([
+        RI,
+        "--target", str(scratch / "paper_outputs" / "introduction_v3.md"),
+        "--target", str(motiv),
+        "--numbers", str(fake_main_dir),
+        "--provenance-path", "/tmp/pv.md",
+        "--paper-worktree", str(scratch),
+        "--dry-run",
+    ], cwd=ma_root)
+    assert r.returncode == 2
+    assert "ErrMotivationPlaceholderMissing" in r.stderr
+    assert "unexpected_token" in r.stderr
+
+
+def test_smoke_numbers_dir_rejects_extras(
+    ma_root: Path, paper_outputs: Path, tmp_path: Path,
+):
+    """spec §4.3 smoke-mode: exactly 4 canonical JSON basenames; any
+    extra file in the smoke dir → ErrNumbersDirNotFromMainExperiment.
+    """
+    scratch = _mirror_paper(tmp_path, paper_outputs)
+    numdir = tmp_path / "smoke_extras"
+    numdir.mkdir()
+    good = {
+        "contexts_count":                        {"median": 3, "iqr_low": 3, "iqr_high": 3},
+        "wrong_context_failure_manual_baseline": {"median": 0.5, "iqr_low": 0.4, "iqr_high": 0.6},
+        "manual_steps_ssh":                      {"median": 10, "iqr_low": 10, "iqr_high": 10},
+        "reuse_time_savings":                    {"median": 50.0, "iqr_low": 40.0, "iqr_high": 60.0},
+    }
+    for k, r in good.items():
+        r.update({"canonical_key": k, "n_samples": 3})
+        (numdir / f"{k}.json").write_text(json.dumps(r), encoding="utf-8")
+    (numdir / "stray.txt").write_text("noise", encoding="utf-8")
+    r = _run([
+        RI,
+        "--target", str(scratch / "paper_outputs" / "introduction_v3.md"),
+        "--target", str(scratch / "paper_outputs" / "motivation_v3.md"),
+        "--numbers", str(numdir),
+        "--provenance-path", "/tmp/pv.md",
+        "--paper-worktree", str(scratch),
+        "--allow-scaffold-smoke-input",
+        "--dry-run",
+    ], cwd=ma_root)
+    assert r.returncode == 2
+    assert "ErrNumbersDirNotFromMainExperiment" in r.stderr
+    assert "stray.txt" in r.stderr
+
+
 # ---------------------------------------------------------------------------
 # happy path — dry-run outputs diff for both targets
 # ---------------------------------------------------------------------------
+
+_GUARD_TESTER_MOTIV = r"""
+import sys, types
+from pathlib import Path
+spec_path = Path(sys.argv[1])
+src = spec_path.read_text(encoding="utf-8")
+mod = types.ModuleType("_ri")
+mod.__file__ = str(spec_path)
+sys.modules["_ri"] = mod
+# Ensure any dataclass decorator can look the class up in the module's
+# __dict__ during evaluation of ClassVar annotations (Python 3.14 change).
+exec(compile(src, str(spec_path), "exec"), mod.__dict__)
+
+class R:
+    median = 5
+    iqr_low = 5
+    iqr_high = 5
+records = {k: R() for k in mod.CANONICAL_KEYS}
+
+lines = ["Prelude line with no placeholder\n"]
+for key in mod.CANONICAL_KEYS:
+    lines.append(f"line {{{{{key}_median}}}} continues\n")
+    lines.append(f"line {{{{{key}_iqr}}}} continues\n")
+text = "".join(lines)
+
+mod._format_scalar = lambda v, k: "X\nY"
+try:
+    mod._patch_motivation(text, records)
+except SystemExit as e:
+    print(f"__SYSEXIT__{e.code}")
+    sys.exit(0)
+print("__NO_EXIT__")
+"""
+
+
+_GUARD_TESTER_INTRO = r"""
+import sys, types
+from pathlib import Path
+spec_path = Path(sys.argv[1])
+src = spec_path.read_text(encoding="utf-8")
+mod = types.ModuleType("_ri")
+mod.__file__ = str(spec_path)
+sys.modules["_ri"] = mod
+# Ensure any dataclass decorator can look the class up in the module's
+# __dict__ during evaluation of ClassVar annotations (Python 3.14 change).
+exec(compile(src, str(spec_path), "exec"), mod.__dict__)
+
+class R:
+    median = 5
+    iqr_low = 5
+    iqr_high = 5
+records = {k: R() for k in mod.CANONICAL_KEYS}
+
+text = (
+    "现代 AI agents 它们仍然是割裂的 raw contexts。系统缺少一种机制来回答：哪个 context 后续\n"
+    "agent 仍可能选错机器 且 不需要复用的能力可继续以 one-off script 形态存在。\n"
+    "因此，personal compute space 下段\n"
+)
+
+mod._format_scalar = lambda v, k: "X\nY"
+try:
+    mod._patch_intro(text, records)
+except SystemExit as e:
+    print(f"__SYSEXIT__{e.code}")
+    sys.exit(0)
+print("__NO_EXIT__")
+"""
+
+
+def _run_guard_tester(script_text: str, spec_path: Path):
+    return subprocess.run(
+        [sys.executable, "-c", script_text, str(spec_path)],
+        capture_output=True, text=True,
+    )
+
+
+def test_motivation_outside_placeholder_guard(ma_root: Path):
+    """spec §5 test_replace_intro_outside_region_rejected (motivation half).
+
+    Defensive post-condition: an insertion whose text contains a newline
+    would cross into an adjacent line. Run in a subprocess to avoid
+    dataclass-import interactions with pytest's importlib.
+    """
+    spec_path = ma_root / "tests" / "eval" / "motivation" / "replace_intro.py"
+    r = _run_guard_tester(_GUARD_TESTER_MOTIV, spec_path)
+    assert r.returncode == 0, r.stderr
+    assert "__SYSEXIT__2" in r.stdout, r.stdout
+
+
+def test_intro_outside_anchor_guard(ma_root: Path):
+    """spec §5 test_replace_intro_outside_region_rejected (intro half)."""
+    spec_path = ma_root / "tests" / "eval" / "motivation" / "replace_intro.py"
+    r = _run_guard_tester(_GUARD_TESTER_INTRO, spec_path)
+    assert r.returncode == 0, r.stderr
+    assert "__SYSEXIT__2" in r.stdout, r.stdout
+
 
 def test_dry_run_produces_dual_diff(
     ma_root: Path, fake_main_dir: Path, paper_outputs: Path, tmp_path: Path,
