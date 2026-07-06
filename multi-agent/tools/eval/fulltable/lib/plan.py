@@ -365,6 +365,46 @@ def plan_command_for_e4_row(
 # ---------------------------------------------------------------------------
 
 
+def enumerate_e4_argvs(
+    e4_path: Path,
+    *,
+    smoke_root: Path,
+    starting_port: int = 18100,
+    sample_n: int | None = None,
+    module_root_prefix: str = "",
+    timeout: str = SMOKE_ROW_TIMEOUT,
+    use_port_pool: bool = False,
+) -> list[RunPlan]:
+    """Build the ordered plan list for the 240-row E4 manifest.
+
+    Same shape as `enumerate_matrix_argvs`. `sample_n` truncates from
+    the top of the manifest — E4 is only ever exercised end-to-end by
+    the follow-up run worktree, but `--resume` in this worktree still
+    needs to enumerate it so completed E4 sidecars skip correctly.
+    """
+    manifest = parse_e4_stages(e4_path)
+    if sample_n is not None:
+        manifest = manifest[:sample_n]
+    plans: list[RunPlan] = []
+    pool = None
+    port = starting_port
+    if use_port_pool:
+        from lib.portpool import PortPool
+        pool = PortPool(start=starting_port)
+    for row in manifest:
+        row_port = pool.assign_port() if pool is not None else port
+        plan = plan_command_for_e4_row(
+            row,
+            port=row_port,
+            smoke_root=smoke_root,
+            timeout=timeout,
+            module_root_prefix=module_root_prefix,
+        )
+        plans.append(plan)
+        port += 1
+    return plans
+
+
 def enumerate_matrix_argvs(
     matrix_path: Path,
     *,
@@ -460,6 +500,22 @@ def _cmd_dry_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _emit_plan_line(plan: RunPlan) -> None:
+    payload = {
+        "kind": plan.kind,
+        "resume_key": plan.resume_key,
+        "argv": plan.argv,
+        "run_id": plan.run_id,
+        "workload_id": plan.workload_id,
+        "configuration": plan.configuration,
+        "out_csv": plan.out_csv,
+        "observer_db": plan.observer_db,
+        "baseline_dir": plan.baseline_dir,
+        "dry_run": plan.dry_run,
+    }
+    print(json.dumps(payload))
+
+
 def _cmd_sample(args: argparse.Namespace) -> int:
     smoke_root = Path(args.smoke_root)
     plans = enumerate_matrix_argvs(
@@ -471,22 +527,20 @@ def _cmd_sample(args: argparse.Namespace) -> int:
         timeout=args.timeout,
         use_port_pool=True,   # spec §7 (b): real dispatch retries on EADDRINUSE
     )
+    if getattr(args, "include_e4", False) and args.e4:
+        plans += enumerate_e4_argvs(
+            Path(args.e4),
+            smoke_root=smoke_root,
+            starting_port=args.starting_port + max(args.n, 1),
+            sample_n=args.n,
+            module_root_prefix=args.module_root_prefix,
+            timeout=args.timeout,
+            use_port_pool=True,
+        )
     # Emit a JSON list so run.sh can iterate. One plan per line
     # (JSON-per-line) to keep bash parsing trivial.
     for plan in plans:
-        payload = {
-            "kind": plan.kind,
-            "resume_key": plan.resume_key,
-            "argv": plan.argv,
-            "run_id": plan.run_id,
-            "workload_id": plan.workload_id,
-            "configuration": plan.configuration,
-            "out_csv": plan.out_csv,
-            "observer_db": plan.observer_db,
-            "baseline_dir": plan.baseline_dir,
-            "dry_run": plan.dry_run,
-        }
-        print(json.dumps(payload))
+        _emit_plan_line(plan)
     return 0
 
 
@@ -525,6 +579,10 @@ def main(argv: list[str] | None = None) -> int:
 
     sp_sample = sub.add_parser("sample")
     sp_sample.add_argument("--n", type=int, required=True)
+    sp_sample.add_argument("--include-e4", action="store_true",
+                           help="also enumerate first N rows of --e4 manifest")
+    sp_sample.add_argument("--e4", default="",
+                           help="path to e4_stages.yaml (required with --include-e4)")
     sp_sample.set_defaults(fn=_cmd_sample)
 
     # print-planned-stub-listen: test seam for spec §7 (b). Runs the

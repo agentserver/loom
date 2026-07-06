@@ -40,10 +40,15 @@ usage() {
 Usage:
   run.sh --dry-run
   run.sh --sample N               (N ≤ 3; > 3 requires ALLOW_FULL_RUN=1)
-  run.sh --resume
+  run.sh --resume [--sample N]    (defaults to --sample 3; skips rows with a
+                                   completed sidecar; deletes stale per-row CSVs)
   run.sh --parallel N
   run.sh --inject-fake-failure-on-row N   (smoke path only; injects
                                           sk-abc… into that row's stderr)
+
+--resume enumerates BOTH the matrix (5×12) and the E4 manifest
+(5×3×4×4) — completed rows in either scope short-circuit uniformly
+via smoke/runs/*.done sidecars (spec §4.5).
 
 Env:
   ALLOW_FULL_RUN=1                allow --sample N > 3
@@ -77,12 +82,15 @@ done
 if (( sample_n == 0 && resume == 0 )); then
   dry_flag=1
 fi
+# --resume without --sample defaults to N=3 (spec §4.5 read: resume the
+# first-N subset, keeping the hard-cap fuse honest in this worktree).
+if (( resume )) && (( sample_n == 0 )); then
+  sample_n=3
+fi
 if (( dry_flag )) && (( sample_n == 0 )); then
   mode="dry"
 elif (( sample_n > 0 )); then
   mode="sample"
-elif (( resume )); then
-  mode="resume"
 fi
 
 # --- Hard cap gate (must fire BEFORE --dry-run short-circuit) --------------
@@ -133,12 +141,37 @@ head=$(printf '%s\n' "$head" | tail -1)
 mkdir -p "$smoke_root_abs/dbs" "$smoke_root_abs/runs" "$smoke_root_abs/paper"
 
 plans_file="$(mktemp)"
-python3 -m lib.plan \
-  --matrix "$fulltable_dir/matrix.yaml" \
-  --smoke-root "$smoke_root_rel" \
-  --module-root-prefix "" \
-  --timeout 60s \
-  sample --n "$sample_n" > "$plans_file"
+plan_args=(
+  --matrix "$fulltable_dir/matrix.yaml"
+  --smoke-root "$smoke_root_rel"
+  --module-root-prefix ""
+  --timeout 60s
+  sample --n "$sample_n"
+)
+if (( resume )); then
+  # spec §4.5: --resume enumerates matrix AND e4, both scopes' completed
+  # sidecars short-circuit uniformly below.
+  plan_args+=(--include-e4 --e4 "$fulltable_dir/e4_stages.yaml")
+fi
+python3 -m lib.plan "${plan_args[@]}" > "$plans_file"
+
+# Pre-filter plans against completed sidecars + stale-CSV cleanup.
+# Done here (not inside the dispatch loop) so `SHIM: would dispatch N
+# rows` reflects the ACTUAL remaining work.
+if (( resume )); then
+  filtered_file="$(mktemp)"
+  while IFS= read -r plan_json; do
+    rk=$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["resume_key"])' "$plan_json")
+    if compgen -G "$smoke_root_abs/runs/${rk}__*.done" > /dev/null; then
+      echo "resume: skip $rk" >&2
+      continue
+    fi
+    # stale .csv from a failed prior attempt → remove before retry
+    rm -f "$smoke_root_abs/runs/${rk}__"*.csv 2>/dev/null || true
+    printf '%s\n' "$plan_json" >> "$filtered_file"
+  done < "$plans_file"
+  mv "$filtered_file" "$plans_file"
+fi
 
 n_planned=$(wc -l < "$plans_file")
 
