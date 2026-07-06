@@ -21,6 +21,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/yourorg/multi-agent/internal/ablation"
 	"github.com/yourorg/multi-agent/tools/eval/runner/probes"
 )
 
@@ -52,6 +53,23 @@ type Opts struct {
 	Timeout         time.Duration
 	OutCSV          string
 	KeepTempdir     bool
+
+	// AblationFlags is the list of ablation flags to activate for this
+	// run (WT-2-flag-integration spec §2.3). nil / empty leaves every
+	// canonical ablation flag at false. Populated from --ablation on
+	// the CLI. Direct API callers must NOT populate BaselineOrAblation
+	// on RunRow — Run derives that label from this list via
+	// ComputeBaselineOrAblation (spec §7(a.3) anti-forgery).
+	AblationFlags []ablation.FlagName
+
+	// BaselineName is the label the run stamps into
+	// runs.baseline_or_ablation when AblationFlags is empty. Populated
+	// from --baseline-name on the CLI (default "full_loom" per spec
+	// §2.1 DefaultBaselineName). Empty is treated as the default
+	// inside Run. Must satisfy ^[a-z][a-z0-9_-]{2,63}$ and must not
+	// collide with a canonical ablation flag name (spec §5.3 error
+	// table).
+	BaselineName string
 
 	// Writer is the persistence seam (RunWriter). When nil, the runner
 	// defaults to NoopWriter and the CSV is the only output.
@@ -89,6 +107,27 @@ func Run(ctx context.Context, opts Opts) Result {
 	// CSV write below.
 	startedAt := time.Now()
 
+	// WT-2-flag-integration §2.3 + §7(a.2): scrub every
+	// ablation-bridge env var FIRST inside Run so a direct API
+	// caller cannot inherit a parent process's
+	// LOOM_ABLATION_NOACCEPTANCEGATE=1 and silently activate the
+	// Python acceptance-gate bypass. The scrub in main.go covers
+	// the CLI entry; this mirror-call closes the direct-caller
+	// loophole. Idempotent (os.Unsetenv on unset is no-op).
+	ScrubAmbientAblationEnv()
+
+	// WT-2-flag-integration §7(a.4): defer the registry reset
+	// FIRST inside Run so EVERY exit path — happy, preflight
+	// exit-2, oracle failure, panic recovery — leaves the
+	// process-global ablation state at zero. Placed BEFORE any
+	// preflight so a prior `Run(...NoObserver)` leaking state
+	// into a subsequent `Run(ctx, Opts{})` cannot survive even
+	// a rejected preflight in the second run. applyAblationFlagsTo
+	// with a nil flag list runs only Phase 2 (reset every
+	// registered canonical flag to false + clear every
+	// Python-bridge env var).
+	defer func() { _ = applyAblationFlagsTo(ablation.Default, nil) }()
+
 	// WT-2-e1e6-probes Edit 1: construct the emitter. safety-net
 	// Close covers preflight-return paths; the primary Close is Edit 6.
 	emitter := probes.NewEmitter(0, opts.Stderr)
@@ -100,6 +139,18 @@ func Run(ctx context.Context, opts Opts) Result {
 	if opts.Stdout == nil {
 		opts.Stdout = os.Stdout
 	}
+	// Substitute the default baseline name when the caller didn't
+	// set one. Existing direct Run(ctx, Opts{}) callers get
+	// "full_loom" without any per-caller Opts change.
+	if opts.BaselineName == "" {
+		opts.BaselineName = DefaultBaselineName
+	}
+
+	// (Label derivation happens AFTER the origin-established
+	// validators — see below — so exit-2 precedence with a bad
+	// --stub-listen / --observer-db / --codex-config value matches
+	// origin behaviour. Purely functional — no ablation-registry
+	// mutation happens here or there.)
 	// Whether the caller supplied a real writer; used below to decide
 	// whether to emit the "WT-1-run-schema pending" diagnostic.
 	writerSupplied := opts.Writer != nil
@@ -122,6 +173,21 @@ func Run(ctx context.Context, opts Opts) Result {
 		Mode:     opts.CodexConfigMode,
 		RepoRoot: findCodexRepoRoot(),
 	}); err != nil {
+		return preflight(opts, err)
+	}
+	// WT-2-flag-integration §7(a.3) + §7(c): derive + validate the
+	// label AFTER the origin-established validators (stub-listen,
+	// observer-db, codex-config) so a bad flag value there still
+	// wins exit-2 precedence as it did before this worktree.
+	// Purely functional — no ablation-registry mutation. Placed
+	// BEFORE LoadWorkloadSpec / SetupWorkspace / startStub so a
+	// `--baseline-name` typo still exits 2 without paying the
+	// stub-build cost.
+	derivedLabel, err := ComputeBaselineOrAblation(opts.AblationFlags, opts.BaselineName)
+	if err != nil {
+		return preflight(opts, err)
+	}
+	if err := ValidateBaselineOrAblation(derivedLabel); err != nil {
 		return preflight(opts, err)
 	}
 	if opts.ObserverDB != "" && !writerSupplied {
@@ -186,6 +252,28 @@ func Run(ctx context.Context, opts Opts) Result {
 
 	if err := waitStubReady(ctx, stubURL, 5*time.Second); err != nil {
 		return preflight(opts, fmt.Errorf("%w: stub /healthz: %v", ErrStubFailedToStart, err))
+	}
+
+	// WT-2-flag-integration §2.3: flip the requested ablation flags
+	// AFTER every existing preflight has passed, so no rejected
+	// invocation ever mutates the process-global ablation state.
+	// Phase 1 of ApplyAblationFlags validates all names first, so
+	// this never partially-mutates on error.
+	if err := ApplyAblationFlags(opts.AblationFlags); err != nil {
+		return preflight(opts, err)
+	}
+	// (The registry reset defer was already registered right after
+	// ScrubAmbientAblationEnv at the top of Run; see spec §7(a.4).)
+
+	// Belt-and-braces re-validation at the row-assembly seam. The
+	// AST audit TestRun_CallsValidateBaselineOrAblation asserts a
+	// second ValidateBaselineOrAblation call exists between the
+	// earlier ComputeBaselineOrAblation call and the RunRow literal
+	// (spec §7(c) dual enforcement). derivedLabel was computed
+	// pre-preflight above; re-validating here catches a future
+	// refactor that lets a bad string reach the row-assembly seam.
+	if err := ValidateBaselineOrAblation(derivedLabel); err != nil {
+		return preflight(opts, err)
 	}
 
 	// Agent stage — skeleton copies mock_workspace; real fanout is a
@@ -304,6 +392,7 @@ func Run(ctx context.Context, opts Opts) Result {
 		CodexConfigPath:    opts.CodexConfigPath,
 		StubListen:         opts.StubListen,
 		TempdirKept:        opts.KeepTempdir,
+		BaselineOrAblation: derivedLabel,
 	}
 
 	// WT-2-e1e6-probes Edit 6: drain the emitter and merge probe
