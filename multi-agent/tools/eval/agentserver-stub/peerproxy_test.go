@@ -99,7 +99,10 @@ func peerProxyReq(t *testing.T, srv *httptest.Server, callerToken, targetShortID
 func TestPeerProxy_MissingBearer_401(t *testing.T) {
 	srv := newTestServer(t)
 	req, _ := http.NewRequest("GET", srv.URL+"/api/agent/peer/slv-x/proxy/state", nil)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("want 401 got %d", resp.StatusCode)
