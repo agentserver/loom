@@ -1,0 +1,51 @@
+# scaffold self-check only; NOT part of §6.3 main experiment 5-workload set
+#
+# Purpose: end-to-end fixture used by the p3-mini-case worktree to prove
+# the aggregate/gen_provenance/replace_intro chain wires up correctly.
+# The 4 motivation numbers backfilled into paper_outputs/{introduction_v3.md,
+# motivation_v3.md} come from p3-stub-fulltable-run main experiment, NOT
+# from this workload. See docs/specs/wt3-mini-case.spec.md §1.
+
+id: motivation-e2e
+description: >-
+  Modify a python source file on laptop -> push to headless server ->
+  server runs a training/data step -> parse remote logs -> write metric
+  back to laptop. Subscription model reached via .codex/config.toml path
+  (a) local proxy. This workload is a scaffold self-check fixture only;
+  it does NOT participate in the p3-stub-fulltable 5-workload main table.
+
+required_contexts:
+  - role: driver
+    platform: linux
+    tools: ["git", "python"]
+  - role: slave
+    platform: linux
+    tools: ["python", "bash"]
+  - role: model_gateway
+    platform: any
+    tools: ["modelserver"]
+
+allowed_contexts: ["*"]
+
+# Fixed seed for the wrong-context selection path in
+# collect_wrong_context_failure.py. Published here (spec.yaml) so reviewers
+# can reproduce identical numbers. Never read from env / CLI. See spec §7 (c).
+wrong_ctx_seed: 20260706
+
+inputs:
+  read_artifacts:
+    - kind: repo
+      path: fixtures/repo
+
+outputs:
+  write_targets:
+    - kind: sqlite
+      path: ${workspace}/route_reasons.sqlite
+    - kind: log
+      path: ${workspace}/steps.log
+    - kind: csv
+      path: ${workspace}/e4_stages.csv
+
+success_oracle: ./oracle.sh
+recovery_hint: "route_reasons.sqlite, steps.log, e4_stages.csv must all exist; oracle reports their sizes."
+timeout_seconds: 300
