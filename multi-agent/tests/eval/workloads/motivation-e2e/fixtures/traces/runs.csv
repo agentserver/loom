@@ -1,0 +1,13 @@
+workload_id,baseline_or_ablation,wrong_ctx,ManualSetupStepCount
+motivation-e2e,manual_ssh,False,10
+motivation-e2e,manual_ssh,True,10
+motivation-e2e,manual_ssh,False,10
+motivation-e2e,manual_ssh,True,10
+motivation-e2e,manual_ssh,False,10
+motivation-e2e,manual_ssh,False,10
+motivation-e2e,manual_ssh,False,10
+motivation-e2e,manual_ssh,True,10
+motivation-e2e,manual_ssh,False,10
+motivation-e2e,manual_ssh,False,10
+motivation-e2e,full_loom,False,0
+other-workload,manual_ssh,False,7

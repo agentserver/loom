@@ -1,0 +1,15 @@
+# Transcript: NOT an executable script. See fixtures/traces/README.md.
+# Recorded would-have-been-typed manual_ssh baseline steps.
+# Line count of ^(ssh|scp|rsync|mkdir|cd) MUST equal
+# ManualSetupStepCount for row (motivation-e2e, manual_ssh) in runs.csv.
+
+ssh user@laptop echo ready
+scp user@laptop:~/repo/hello.py .
+ssh user@server mkdir -p ~/work/motivation-e2e
+scp hello.py user@server:~/work/motivation-e2e/
+ssh user@server python3 ~/work/motivation-e2e/hello.py
+mkdir -p logs
+scp user@server:~/work/motivation-e2e/run.log logs/
+cd logs
+ssh user@windows-desktop 'pwsh -c Invoke-Tool'
+scp user@windows-desktop:~/artifact.bin .
