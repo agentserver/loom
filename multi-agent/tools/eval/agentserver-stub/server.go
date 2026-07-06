@@ -137,6 +137,11 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc(prefix+"/whoami", s.handleWhoami)
 		mux.HandleFunc(prefix+"/heartbeat", s.handleHeartbeat)
 	}
+
+	// Discovery (spec §4.1 §4.2)
+	mux.HandleFunc("/api/agent/discovery/cards", s.handleDiscoveryCards)
+	mux.HandleFunc("/api/agent/discovery/agents", s.handleDiscoveryAgents)
+
 	return mux
 }
 
