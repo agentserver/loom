@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Credentials is the five-tuple returned by register/issue. Field order matches
@@ -40,15 +41,54 @@ type registerRequest struct {
 	WorkspaceID string `json:"workspace_id,omitempty"`
 }
 
+// agentCard is what handleDiscoveryCards stores and handleDiscoveryAgents returns.
+// Full definition owned by discovery.go.
+type agentCard struct {
+	SandboxID   string          `json:"-"`
+	WorkspaceID string          `json:"-"`
+	ShortID     string          `json:"-"`
+	DisplayName string          `json:"display_name"`
+	Description string          `json:"description"`
+	AgentType   string          `json:"agent_type"`
+	Card        json.RawMessage `json:"card"`
+}
+
+// stubTask holds one delegated task.  Full definition owned by tasks.go.
+type stubTask struct {
+	ID            string          `json:"task_id"`
+	WorkspaceID   string          `json:"workspace_id"`
+	RequesterID   string          `json:"requester_id"`
+	TargetID      string          `json:"target_id"`
+	Skill         string          `json:"skill,omitempty"`
+	Prompt        string          `json:"prompt"`
+	SystemContext string          `json:"system_context,omitempty"`
+	SessionID     string          `json:"session_id,omitempty"`
+	MaxTurns      int             `json:"max_turns,omitempty"`
+	MaxBudgetUSD  float64         `json:"max_budget_usd,omitempty"`
+	Timeout       int             `json:"timeout_seconds,omitempty"`
+	Status        string          `json:"status"`
+	Result        json.RawMessage `json:"result,omitempty"`
+	Output        string          `json:"output,omitempty"`
+	FailureReason string          `json:"failure_reason,omitempty"`
+	TotalCostUSD  float64         `json:"total_cost_usd,omitempty"`
+	NumTurns      int             `json:"num_turns,omitempty"`
+	CreatedAt     time.Time       `json:"-"`
+	CompletedAt   time.Time       `json:"-"`
+}
+
 // Server is the stripped-down agentserver. It is single-process, in-memory,
 // and ⚠️  NOT FOR PRODUCTION — see README.md.
 type Server struct {
 	secret           string
 	defaultWorkspace string
 
-	mu       sync.RWMutex
-	byProxy  map[string]whoamiResponse // proxy_token -> identity
-	byTunnel map[string]whoamiResponse // tunnel_token -> identity (unused by handlers today; kept for future)
+	mu             sync.RWMutex
+	byProxy        map[string]whoamiResponse // proxy_token -> identity
+	byTunnel       map[string]whoamiResponse // tunnel_token -> identity
+	cards          map[string]agentCard      // sandbox_id -> agentCard (discovery.go)
+	tunnels        map[string]*stubTunnel    // sandbox_id -> active tunnel (tunnel.go)
+	tasks          map[string]*stubTask      // task_id -> task (tasks.go)
+	tasksBySandbox map[string][]string       // target sandbox_id -> pending task_ids
 }
 
 // NewServer creates a fresh stub server with a freshly generated HMAC secret.
@@ -63,7 +103,26 @@ func NewServer(workspaceDefault string) *Server {
 		defaultWorkspace: workspaceDefault,
 		byProxy:          map[string]whoamiResponse{},
 		byTunnel:         map[string]whoamiResponse{},
+		cards:            map[string]agentCard{},
+		tunnels:          map[string]*stubTunnel{},
+		tasks:            map[string]*stubTask{},
+		tasksBySandbox:   map[string][]string{},
 	}
+}
+
+// Close shuts down every open tunnel; safe to call multiple times but Server
+// is single-use after Close. Tests defer Close().
+func (s *Server) Close() error {
+	s.mu.Lock()
+	tunnels := make([]*stubTunnel, 0, len(s.tunnels))
+	for _, t := range s.tunnels {
+		tunnels = append(tunnels, t)
+	}
+	s.mu.Unlock()
+	for _, t := range tunnels {
+		t.Close()
+	}
+	return nil
 }
 
 // Handler returns the HTTP handler mounting every endpoint on both the spec
