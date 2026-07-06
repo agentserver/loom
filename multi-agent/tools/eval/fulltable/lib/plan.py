@@ -110,6 +110,17 @@ class ErrUnknownAblation(RuntimeError):
     """Matrix row baseline_or_ablation is not a known name."""
 
 
+class ErrObserverDBCollision(RuntimeError):
+    """Two planned rows target the same observer_db path (spec §7 (d)).
+
+    SQLite serialises writers on a per-file basis and holds a fcntl
+    lock; two parallel dispatches against one file get SQLITE_BUSY at
+    random, which corrupts audit trails. Raised BEFORE dispatch so the
+    operator sees the collision as a fatal at plan time, not as
+    intermittent SQLITE_BUSY at write time.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Loopback + port helpers
 # ---------------------------------------------------------------------------
@@ -500,6 +511,25 @@ def _cmd_dry_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def assert_no_observer_db_collision(plans: list["RunPlan"]) -> None:
+    """Fatal guard: refuse a plan list where two rows share an observer_db
+    path (spec §7 (d)). Baseline rows have an empty observer_db (they
+    don't use the runner's observer) — skip those in the collision check.
+    """
+    seen: dict[str, str] = {}
+    for plan in plans:
+        db = plan.observer_db
+        if not db:
+            continue
+        prev = seen.get(db)
+        if prev is not None:
+            raise ErrObserverDBCollision(
+                f"observer_db collision on {db!r}: "
+                f"resume_keys {prev!r} and {plan.resume_key!r}"
+            )
+        seen[db] = plan.resume_key
+
+
 def _emit_plan_line(plan: RunPlan) -> None:
     payload = {
         "kind": plan.kind,
@@ -537,6 +567,9 @@ def _cmd_sample(args: argparse.Namespace) -> int:
             timeout=args.timeout,
             use_port_pool=True,
         )
+    # Spec §7 (d): refuse to emit a plan where two rows would race for
+    # the same observer sqlite file. Raise BEFORE any dispatch runs.
+    assert_no_observer_db_collision(plans)
     # Emit a JSON list so run.sh can iterate. One plan per line
     # (JSON-per-line) to keep bash parsing trivial.
     for plan in plans:
@@ -593,7 +626,11 @@ def main(argv: list[str] | None = None) -> int:
     sp_print.set_defaults(fn=_cmd_print_stub_listen)
 
     args = p.parse_args(argv)
-    return args.fn(args)
+    try:
+        return args.fn(args)
+    except ErrObserverDBCollision as e:
+        print(f"ErrObserverDBCollision: {e}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
