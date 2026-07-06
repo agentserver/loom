@@ -385,6 +385,7 @@ def enumerate_e4_argvs(
     module_root_prefix: str = "",
     timeout: str = SMOKE_ROW_TIMEOUT,
     use_port_pool: bool = False,
+    port_pool=None,
 ) -> list[RunPlan]:
     """Build the ordered plan list for the 240-row E4 manifest.
 
@@ -392,14 +393,19 @@ def enumerate_e4_argvs(
     the top of the manifest — E4 is only ever exercised end-to-end by
     the follow-up run worktree, but `--resume` in this worktree still
     needs to enumerate it so completed E4 sidecars skip correctly.
+
+    Pass an already-constructed `port_pool` to share allocation state
+    with a preceding matrix enumeration (spec §7 (b)): if matrix used
+    ports 18100-18102, E4 must NOT re-hand out those same ports.
+    `starting_port` is ignored when `port_pool` is supplied.
     """
     manifest = parse_e4_stages(e4_path)
     if sample_n is not None:
         manifest = manifest[:sample_n]
     plans: list[RunPlan] = []
-    pool = None
+    pool = port_pool
     port = starting_port
-    if use_port_pool:
+    if pool is None and use_port_pool:
         from lib.portpool import PortPool
         pool = PortPool(start=starting_port)
     for row in manifest:
@@ -426,6 +432,7 @@ def enumerate_matrix_argvs(
     timeout: str = SMOKE_ROW_TIMEOUT,
     deterministic_run_ids: bool = False,
     use_port_pool: bool = False,
+    port_pool=None,
 ) -> list[RunPlan]:
     """Build the ordered plan list for `run.sh --sample N`/`--dry-run`.
 
@@ -443,9 +450,9 @@ def enumerate_matrix_argvs(
     if sample_n is not None:
         matrix = matrix[:sample_n]
     plans: list[RunPlan] = []
-    pool = None
+    pool = port_pool
     port = starting_port
-    if use_port_pool:
+    if pool is None and use_port_pool:
         # Import inline so the loopback-guard tests don't have to drag
         # in the portpool socket dependency.
         from lib.portpool import PortPool
@@ -548,24 +555,28 @@ def _emit_plan_line(plan: RunPlan) -> None:
 
 def _cmd_sample(args: argparse.Namespace) -> int:
     smoke_root = Path(args.smoke_root)
+    # spec §7 (b) + S057: matrix and E4 planning MUST share one PortPool so
+    # a port skipped for one manifest isn't re-handed to the other.
+    from lib.portpool import PortPool
+    shared_pool = PortPool(start=args.starting_port)
     plans = enumerate_matrix_argvs(
         Path(args.matrix),
         smoke_root=smoke_root,
-        starting_port=args.starting_port,
         sample_n=args.n,
         module_root_prefix=args.module_root_prefix,
         timeout=args.timeout,
-        use_port_pool=True,   # spec §7 (b): real dispatch retries on EADDRINUSE
+        use_port_pool=True,
+        port_pool=shared_pool,
     )
     if getattr(args, "include_e4", False) and args.e4:
         plans += enumerate_e4_argvs(
             Path(args.e4),
             smoke_root=smoke_root,
-            starting_port=args.starting_port + max(args.n, 1),
             sample_n=args.n,
             module_root_prefix=args.module_root_prefix,
             timeout=args.timeout,
             use_port_pool=True,
+            port_pool=shared_pool,
         )
     # Spec §7 (d): refuse to emit a plan where two rows would race for
     # the same observer sqlite file. Raise BEFORE any dispatch runs.
