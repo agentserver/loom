@@ -1,0 +1,18 @@
+# WT-3-prod-multidevice — Linux headless server device template.
+#
+# This device runs the observer (:18091) + slave-A daemon (:18093).
+# Same shape as the prod-runbook host-mode observer/slave-A, but
+# now on a distinct physical device from the driver.
+#
+# HARNESS-ONLY: oauth_placeholder MUST stay literal.
+
+kind: device
+role: observer,slave-a
+device_kind: headless
+listen: 127.0.0.1:18091
+oauth_placeholder: <OAUTH_TOKEN_HERE_DO_NOT_COMMIT>
+notes: |
+  Runs two daemons: observer on :18091, slave-A on :18093. Both
+  bind loopback only — cross-device traffic goes through agentserver
+  -signed tunnels (never hardcoded here). Same OAuth token as driver
+  is used for daemon-link WS handshake with observer via workspace_id.

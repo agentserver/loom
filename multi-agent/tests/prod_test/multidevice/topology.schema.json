@@ -1,0 +1,120 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "loom://wt3-prod-multidevice/topology.schema.json",
+    "title": "WT-3-prod-multidevice topology + per-device config schema",
+    "description": "Harness-only. Validates per-device YAML templates AND topology sample YAMLs. Real-device work (real OAuth, real cloud droplet) is deferred to the follow-up worktree paper/v3/p3-prod-multidevice-run.",
+    "type": "object",
+    "required": ["kind"],
+    "properties": {
+        "kind": {
+            "description": "Discriminator so per-device and topology docs share this file.",
+            "type": "string",
+            "enum": ["device", "topology"]
+        }
+    },
+    "oneOf": [
+        {
+            "properties": {
+                "kind": {"const": "device"},
+                "role": {
+                    "type": "string",
+                    "enum": ["driver", "observer,slave-a", "slave-b", "slave-c"],
+                    "description": "Device role in the 4-device topology."
+                },
+                "device_kind": {
+                    "type": "string",
+                    "enum": ["laptop", "headless", "windows", "cloud"]
+                },
+                "listen": {
+                    "type": "string",
+                    "description": "Local bind endpoint. Must be a loopback form (127.0.0.1, ::1, localhost). Wildcard forms rejected by test_bind_endpoints.py (spec §7(b))."
+                },
+                "oauth_placeholder": {
+                    "type": "string",
+                    "const": "<OAUTH_TOKEN_HERE_DO_NOT_COMMIT>",
+                    "description": "Literal placeholder only. Real OAuth token values fail validation (spec §7(a))."
+                },
+                "vendor": {
+                    "type": "string",
+                    "enum": ["digitalocean", "e2b", "vps"],
+                    "description": "Only present on device_kind=cloud (spec §7(h))."
+                },
+                "windows_execpolicy_scope": {
+                    "type": "string",
+                    "const": "Process",
+                    "description": "Only present on device_kind=windows. Must be Process (spec §7(c))."
+                },
+                "notes": {"type": "string"}
+            },
+            "required": ["kind", "role", "device_kind", "listen", "oauth_placeholder"],
+            "additionalProperties": false,
+            "allOf": [
+                {
+                    "if": {"properties": {"device_kind": {"const": "cloud"}}, "required": ["device_kind"]},
+                    "then": {"required": ["vendor"]}
+                },
+                {
+                    "if": {"properties": {"device_kind": {"const": "windows"}}, "required": ["device_kind"]},
+                    "then": {"required": ["windows_execpolicy_scope"]}
+                }
+            ]
+        },
+        {
+            "properties": {
+                "kind": {"const": "topology"},
+                "topology_enum": {
+                    "type": "string",
+                    "enum": ["4-device", "3-device-nowin", "3-device-nocloud", "2-device-min"]
+                },
+                "devices": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["device_kind", "role"],
+                        "properties": {
+                            "device_kind": {
+                                "type": "string",
+                                "enum": ["laptop", "headless", "windows", "cloud"]
+                            },
+                            "role": {
+                                "type": "string",
+                                "enum": ["driver", "observer,slave-a", "slave-b", "slave-c"]
+                            },
+                            "listen": {"type": "string"},
+                            "vendor": {
+                                "type": "string",
+                                "enum": ["digitalocean", "e2b", "vps"]
+                            },
+                            "fallback_label": {
+                                "type": "string",
+                                "description": "Only set when topology_enum != 4-device."
+                            }
+                        }
+                    },
+                    "minItems": 2,
+                    "maxItems": 4
+                },
+                "workloads": {
+                    "type": "array",
+                    "description": "Hard cap: only cross-device-code-mod + windows-only-artifact. Any other name or list length > 2 is rejected (spec §3.3).",
+                    "items": {
+                        "type": "string",
+                        "enum": ["cross-device-code-mod", "windows-only-artifact"]
+                    },
+                    "uniqueItems": true,
+                    "minItems": 1,
+                    "maxItems": 2
+                },
+                "per_workload_reps": {
+                    "type": "integer",
+                    "const": 3,
+                    "description": "N=3 rep convention (spec §3.2). Locked so the real-run worktree cannot silently change N."
+                },
+                "notes": {"type": "string"}
+            },
+            "required": ["kind", "topology_enum", "devices", "workloads", "per_workload_reps"],
+            "additionalProperties": false
+        }
+    ]
+}

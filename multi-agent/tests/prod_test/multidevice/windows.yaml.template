@@ -1,0 +1,23 @@
+# WT-3-prod-multidevice — Windows desktop device template.
+#
+# This device runs slave-B (:18094) with the PowerShell executor.
+# It provides windows-only-artifact workload capabilities
+# (e.g. producing `.ps1` / `.msi` / `.exe` bundles) that the Linux
+# stub cannot generate.
+#
+# HARNESS-ONLY: oauth_placeholder MUST stay literal.
+# ExecutionPolicy scope MUST equal Process (spec §7(c)) — LocalMachine
+# / CurrentUser scope changes are banned to protect the operator's
+# machine state.
+
+kind: device
+role: slave-b
+device_kind: windows
+listen: 127.0.0.1:18094
+oauth_placeholder: <OAUTH_TOKEN_HERE_DO_NOT_COMMIT>
+windows_execpolicy_scope: Process
+notes: |
+  PowerShell 7+ required. install-slave.ps1 (Phase 0) already lives
+  under deploy/windows/slave/ — this wrapper does NOT modify it; it
+  calls it with `Set-ExecutionPolicy -Scope Process Bypass` so only
+  the wrapper's forked pwsh gets the relaxed policy.

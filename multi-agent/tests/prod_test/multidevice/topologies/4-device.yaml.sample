@@ -1,0 +1,39 @@
+# Full 4-device topology (spec §2.1). No fallback labels — every axis
+# is exercised. This is the canonical target configuration for §C5.
+#
+# ASCII topology (for reference; the RUNBOOK section has the
+# full port/tunnel diagram):
+#
+#      laptop (:18092 driver)
+#            |
+#            +-- daemon-link WS via agentserver tunnel
+#            |
+#      headless (:18091 observer / :18093 slave-A)
+#            |
+#            +-- cross-machine
+#            |
+#      windows (:18094 slave-B)  cloud (:18093 slave-C, cross-internet)
+
+kind: topology
+topology_enum: 4-device
+devices:
+  - device_kind: laptop
+    role: driver
+    listen: 127.0.0.1:18092
+  - device_kind: headless
+    role: observer,slave-a
+    listen: 127.0.0.1:18091
+  - device_kind: windows
+    role: slave-b
+    listen: 127.0.0.1:18094
+  - device_kind: cloud
+    role: slave-c
+    listen: 127.0.0.1:18093
+    vendor: digitalocean
+workloads:
+  - cross-device-code-mod
+  - windows-only-artifact
+per_workload_reps: 3
+notes: |
+  Canonical 4-device topology. Coverage axes: (1) driver-observer
+  separation, (2) cross-OS (Windows), (3) cross-internet (cloud).

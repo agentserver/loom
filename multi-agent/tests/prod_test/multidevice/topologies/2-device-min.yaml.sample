@@ -1,0 +1,27 @@
+# 2-device minimum (spec §2.2; todo_list §"如时间紧" 允许).
+# Only Linux laptop + headless server; NO Windows, NO cloud. The
+# analysis_template.md `## 降级 2 设备 影响段` section is REQUIRED
+# in this config's downstream analysis so reviewers know two coverage
+# axes are missing entirely.
+
+kind: topology
+topology_enum: 2-device-min
+devices:
+  - device_kind: laptop
+    role: driver
+    listen: 127.0.0.1:18092
+    fallback_label: "降级 2 设备-min (laptop only; 无 slave-B, 无 slave-C)"
+  - device_kind: headless
+    role: observer,slave-a
+    listen: 127.0.0.1:18091
+    fallback_label: "降级 2 设备-min (headless only; observer + slave-A)"
+workloads:
+  - cross-device-code-mod
+per_workload_reps: 3
+notes: |
+  Dropped coverage (both must be flagged in analysis_template.md
+  `## 降级 2 设备 影响段` section):
+    - 无 cross-OS coverage: windows-only-artifact workload is
+      unavailable in this config (removed from workloads list).
+    - 无 cross-internet tunnel coverage: cloud sandbox absent, so
+      agentserver real-tunnel cost is unmeasured.

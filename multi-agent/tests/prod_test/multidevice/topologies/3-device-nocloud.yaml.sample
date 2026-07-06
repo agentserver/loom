@@ -1,0 +1,27 @@
+# 3-device fallback — cloud vendor unavailable (spec §2.2).
+# A tailscale/wireguard 家用 Linux host takes the slave-C role, labeled
+# "降级 3 设备-noCloud 伪云" so downstream analysis knows this run has
+# no true cross-internet tunnel path.
+
+kind: topology
+topology_enum: 3-device-nocloud
+devices:
+  - device_kind: laptop
+    role: driver
+    listen: 127.0.0.1:18092
+  - device_kind: headless
+    role: observer,slave-a
+    listen: 127.0.0.1:18091
+  - device_kind: windows
+    role: slave-b
+    listen: 127.0.0.1:18094
+    fallback_label: "降级 3 设备-noCloud 伪云 (tailscale/wireguard 家用 Linux 顶 slave-C)"
+workloads:
+  - cross-device-code-mod
+  - windows-only-artifact
+per_workload_reps: 3
+notes: |
+  Dropped coverage: cross-internet tunnel (cloud sandbox). Tailscale/
+  wireguard hop looks LAN-shaped, so this run does NOT measure
+  agentserver real-tunnel round-trip cost — flag any
+  TimeToCompletion consistency claim accordingly.
