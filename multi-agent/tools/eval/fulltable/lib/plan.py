@@ -373,18 +373,31 @@ def enumerate_matrix_argvs(
     sample_n: int | None = None,
     module_root_prefix: str = "",
     timeout: str = SMOKE_ROW_TIMEOUT,
+    deterministic_run_ids: bool = False,
 ) -> list[RunPlan]:
-    """Build the ordered plan list for `run.sh --sample N`/`--dry-run`."""
+    """Build the ordered plan list for `run.sh --sample N`/`--dry-run`.
+
+    `deterministic_run_ids=True` swaps UUIDv4 for a stable per-row id
+    derived from the resume key — required for `--dry-run` snapshot
+    tests where the golden file must not churn.
+    """
     matrix = parse_matrix(matrix_path)
     if sample_n is not None:
         matrix = matrix[:sample_n]
     plans: list[RunPlan] = []
     port = starting_port
     for row in matrix:
+        run_id = None
+        if deterministic_run_ids:
+            # Namespace UUID from resume_key so ids stay stable across
+            # dry-run snapshots yet remain UUID-shaped.
+            resume_key = resume_key_for_matrix_row(row)
+            run_id = str(uuid.uuid5(uuid.NAMESPACE_URL, resume_key))
         plan = plan_command_for_matrix_row(
             row,
             port=port,
             smoke_root=smoke_root,
+            run_id=run_id,
             timeout=timeout,
             module_root_prefix=module_root_prefix,
         )
@@ -425,6 +438,7 @@ def _cmd_dry_run(args: argparse.Namespace) -> int:
         starting_port=args.starting_port,
         module_root_prefix=args.module_root_prefix,
         timeout=args.timeout,
+        deterministic_run_ids=True,
     )
     for plan in plans:
         _print_plan(plan)
