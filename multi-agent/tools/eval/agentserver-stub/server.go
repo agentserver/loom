@@ -145,6 +145,9 @@ func (s *Server) Handler() http.Handler {
 	// Tunnel WS (spec §4.3) — path is /api/tunnel/<sandboxID>
 	mux.HandleFunc("/api/tunnel/", s.handleTunnelUpgrade)
 
+	// Peer proxy (spec §4.4)
+	mux.HandleFunc("/api/agent/peer/", s.handlePeerProxy)
+
 	return mux
 }
 
