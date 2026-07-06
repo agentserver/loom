@@ -200,6 +200,22 @@ CREATE INDEX IF NOT EXISTS idx_resource_snapshots_latest ON resource_snapshots(w
 -- traces via `[route-trace] write failed: syntax error at or near "?"`.
 -- See round-5 review on PR #55.
 
+-- WT-2-task-resume note (same pattern as WT-1-routing-trace above):
+-- the SQLite DDL for write_ids / write_id_reserve_events /
+-- resume_task_attempts / task_run_bindings / write_id_payloads
+-- lives in ../schema.sql. The writer (SQLiteWriteIDStore) uses `?`
+-- placeholders + INSERT OR IGNORE + BLOB payload — none of which
+-- port trivially to pgx/v5/stdlib ($N placeholders, INSERT ... ON
+-- CONFLICT DO NOTHING, BYTEA). Adding pg support is a follow-up WT
+-- that must ship a pg-native store alongside the DDL. Until that
+-- lands, the resume primitives are SQLite-only; the eval-runner
+-- (D3) uses the SQLite backend so this ships production-safe.
+-- The follow-up worktrees wt2-contract-tools-run-binding and
+-- wt2-executor-writes-through-gate must NOT wire the primitives
+-- into an observer-server code path served against postgres
+-- without first landing the pg schema + pg writer here.
+-- See round-3 review on PR #73.
+
 -- WT-2-dry-run-validator: §A3 four-class pre-execution block audit.
 -- Postgres-native DDL — column types differ from the SQLite version:
 -- timestamptz for blocked_at (vs TEXT), text CHECK for block_kind
