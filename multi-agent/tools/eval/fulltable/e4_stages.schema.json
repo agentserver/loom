@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loom.local/schemas/fulltable/e4_stages.schema.json",
+  "title": "fulltable/e4_stages",
+  "type": "array",
+  "minItems": 240,
+  "maxItems": 240,
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["family", "stage", "task_id", "configuration"],
+    "properties": {
+      "family": {
+        "type": "string",
+        "enum": [
+          "api-wrapper-for-local-service",
+          "csv-profiler",
+          "image-metadata-extractor",
+          "log-parser",
+          "refund-policy-checker"
+        ]
+      },
+      "stage": {"type": "string", "enum": ["A", "B", "C"]},
+      "task_id": {
+        "type": "string",
+        "enum": ["first-task", "reuse-1", "reuse-2", "reuse-3"]
+      },
+      "configuration": {
+        "type": "string",
+        "enum": [
+          "full_loom",
+          "NoUserPromotionPath",
+          "NoAcceptanceGate",
+          "NoRegistryLookup"
+        ]
+      }
+    }
+  }
+}
