@@ -21,8 +21,16 @@ set -euo pipefail
 # Resolve paths: this script lives at multi-agent/tools/eval/fulltable/run.sh.
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fulltable_dir="$here"
-module_root="$(cd "$here/../../../.." && pwd)"      # multi-agent/
+module_root="$(cd "$here/../../.." && pwd)"         # multi-agent/
 worktree_root="$(cd "$module_root/.." && pwd)"      # repo root (has .git)
+# Guard: our tree lives at <repo>/multi-agent/tools/eval/fulltable — the
+# smoke_root_abs paths below must resolve under multi-agent/, not the
+# repo root or an accidental sibling. `basename` check keeps mis-nested
+# checkouts from writing to /tmp/… or /root/….
+if [[ "$(basename "$module_root")" != "multi-agent" ]]; then
+  echo "run.sh: module_root resolves to $module_root; expected .../multi-agent/" >&2
+  exit 2
+fi
 smoke_root_abs="$module_root/tests/eval/results/smoke"
 smoke_root_rel="tests/eval/results/smoke"           # from module_root
 export PYTHONPATH="$fulltable_dir:${PYTHONPATH:-}"
