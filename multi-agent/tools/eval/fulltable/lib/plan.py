@@ -374,18 +374,31 @@ def enumerate_matrix_argvs(
     module_root_prefix: str = "",
     timeout: str = SMOKE_ROW_TIMEOUT,
     deterministic_run_ids: bool = False,
+    use_port_pool: bool = False,
 ) -> list[RunPlan]:
     """Build the ordered plan list for `run.sh --sample N`/`--dry-run`.
 
     `deterministic_run_ids=True` swaps UUIDv4 for a stable per-row id
     derived from the resume key — required for `--dry-run` snapshot
     tests where the golden file must not churn.
+
+    `use_port_pool=True` allocates each row's stub-listen port through
+    `portpool.PortPool.assign_port()`, so an occupied 18100 skips to
+    18101 on the real dispatch path (spec §7 (b)). Off by default so
+    the deterministic dry-run snapshot stays stable across CI hosts
+    (a busy 18100 on the CI runner would otherwise churn the golden).
     """
     matrix = parse_matrix(matrix_path)
     if sample_n is not None:
         matrix = matrix[:sample_n]
     plans: list[RunPlan] = []
+    pool = None
     port = starting_port
+    if use_port_pool:
+        # Import inline so the loopback-guard tests don't have to drag
+        # in the portpool socket dependency.
+        from lib.portpool import PortPool
+        pool = PortPool(start=starting_port)
     for row in matrix:
         run_id = None
         if deterministic_run_ids:
@@ -393,9 +406,10 @@ def enumerate_matrix_argvs(
             # dry-run snapshots yet remain UUID-shaped.
             resume_key = resume_key_for_matrix_row(row)
             run_id = str(uuid.uuid5(uuid.NAMESPACE_URL, resume_key))
+        row_port = pool.assign_port() if pool is not None else port
         plan = plan_command_for_matrix_row(
             row,
-            port=port,
+            port=row_port,
             smoke_root=smoke_root,
             run_id=run_id,
             timeout=timeout,
@@ -403,7 +417,8 @@ def enumerate_matrix_argvs(
         )
         plans.append(plan)
         # baseline rows don't use the stub, but keeping the port
-        # counter monotonic makes the sequence easy to reason about.
+        # counter monotonic makes the sequence easy to reason about
+        # when pool is off.
         port += 1
     return plans
 
@@ -454,6 +469,7 @@ def _cmd_sample(args: argparse.Namespace) -> int:
         sample_n=args.n,
         module_root_prefix=args.module_root_prefix,
         timeout=args.timeout,
+        use_port_pool=True,   # spec §7 (b): real dispatch retries on EADDRINUSE
     )
     # Emit a JSON list so run.sh can iterate. One plan per line
     # (JSON-per-line) to keep bash parsing trivial.
@@ -474,6 +490,26 @@ def _cmd_sample(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_print_stub_listen(args: argparse.Namespace) -> int:
+    """Emit each planned row's --stub-listen value (spec §7 (b) test seam)."""
+    smoke_root = Path(args.smoke_root)
+    plans = enumerate_matrix_argvs(
+        Path(args.matrix),
+        smoke_root=smoke_root,
+        starting_port=args.starting_port,
+        sample_n=args.n,
+        module_root_prefix=args.module_root_prefix,
+        timeout=args.timeout,
+        use_port_pool=True,
+    )
+    for plan in plans:
+        if "--stub-listen" not in plan.argv:
+            continue  # baseline row
+        i = plan.argv.index("--stub-listen")
+        print(plan.argv[i + 1])
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="lib.plan", description="fulltable planner")
     p.add_argument("--matrix", required=True, help="path to matrix.yaml")
@@ -490,6 +526,13 @@ def main(argv: list[str] | None = None) -> int:
     sp_sample = sub.add_parser("sample")
     sp_sample.add_argument("--n", type=int, required=True)
     sp_sample.set_defaults(fn=_cmd_sample)
+
+    # print-planned-stub-listen: test seam for spec §7 (b). Runs the
+    # real dispatch-planning path (use_port_pool=True) and prints
+    # each row's --stub-listen value one per line, no subprocess.
+    sp_print = sub.add_parser("print-planned-stub-listen")
+    sp_print.add_argument("--n", type=int, required=True)
+    sp_print.set_defaults(fn=_cmd_print_stub_listen)
 
     args = p.parse_args(argv)
     return args.fn(args)
