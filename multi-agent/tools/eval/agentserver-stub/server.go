@@ -148,6 +148,11 @@ func (s *Server) Handler() http.Handler {
 	// Peer proxy (spec §4.4)
 	mux.HandleFunc("/api/agent/peer/", s.handlePeerProxy)
 
+	// Tasks (spec §4.5–4.8)
+	mux.HandleFunc("/api/agent/tasks", s.handleCreateTask)
+	mux.HandleFunc("/api/agent/tasks/poll", s.handlePollTasks)
+	mux.HandleFunc("/api/agent/tasks/", s.dispatchTaskByID)
+
 	return mux
 }
 
