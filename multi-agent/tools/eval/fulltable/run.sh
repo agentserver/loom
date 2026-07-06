@@ -189,14 +189,35 @@ runs_csv="$smoke_root_abs/runs.csv"
 failures_jsonl="$smoke_root_abs/failures.jsonl"
 metrics_csv="$smoke_root_abs/metrics.csv"
 
-# Fresh files on each smoke run — the smoke path always regenerates from
-# scratch (rerun-idempotent). The .gitignore keeps these paths out of
-# the tree until the operator force-adds them (spec §Step 11.1).
-: > "$runs_csv"
-: > "$failures_jsonl"
-: > "$metrics_csv"
-rm -f "$smoke_root_abs/dbs/"*.db "$smoke_root_abs/runs/"*.done \
-      "$smoke_root_abs/runs/"*.csv 2>/dev/null || true
+# --- Cleanup step ---------------------------------------------------------
+# Non-resume smoke rebuilds every output from scratch (rerun-idempotent).
+# --resume PRESERVES every completed sidecar + its per-row .csv + the
+# accumulating runs.csv/metrics.csv/failures.jsonl/dbs/ so the operator
+# can inspect what was done vs what is being retried (spec §4.5). Only
+# stale per-row CSVs whose resume_key has NO matching .done marker are
+# removed.
+if (( resume )); then
+  # Build the set of completed resume_keys via `.done` filenames, then
+  # unlink any `.csv` under runs/ whose resume_key isn't in that set.
+  # runs.csv / metrics.csv / failures.jsonl / dbs/ are left alone.
+  find "$smoke_root_abs/runs" -maxdepth 1 -type f -name '*.csv' 2>/dev/null | \
+  while IFS= read -r csv_file; do
+    base=$(basename "$csv_file")
+    # basename shape: <resume_key>__<uuid>.csv — rsplit on '__' once,
+    # take everything before.
+    rk_uuid="${base%.csv}"
+    rk="${rk_uuid%__*}"
+    if ! compgen -G "$smoke_root_abs/runs/${rk}__"*.done > /dev/null; then
+      rm -f "$csv_file"
+    fi
+  done
+else
+  : > "$runs_csv"
+  : > "$failures_jsonl"
+  : > "$metrics_csv"
+  rm -f "$smoke_root_abs/dbs/"*.db "$smoke_root_abs/runs/"*.done \
+        "$smoke_root_abs/runs/"*.csv 2>/dev/null || true
+fi
 
 row_index=0
 while IFS= read -r plan_json; do
