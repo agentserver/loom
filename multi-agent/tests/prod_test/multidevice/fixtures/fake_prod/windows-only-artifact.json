@@ -1,0 +1,36 @@
+{
+  "workload_id": "windows-only-artifact",
+  "configuration": "full_loom",
+  "run_count": 3,
+  "harness_only": true,
+  "note": "Deterministic sample values — no real Windows device involved.",
+  "runs": [
+    {
+      "run_index": 1,
+      "TaskSuccessRate": 1.0,
+      "TimeToCompletion": 62.0,
+      "WrongContextFailureRate": 0.0,
+      "RoutingAccuracy": 1.0
+    },
+    {
+      "run_index": 2,
+      "TaskSuccessRate": 1.0,
+      "TimeToCompletion": 60.0,
+      "WrongContextFailureRate": 0.0,
+      "RoutingAccuracy": 1.0
+    },
+    {
+      "run_index": 3,
+      "TaskSuccessRate": 1.0,
+      "TimeToCompletion": 64.0,
+      "WrongContextFailureRate": 0.0,
+      "RoutingAccuracy": 1.0
+    }
+  ],
+  "median": {
+    "TaskSuccessRate": 1.0,
+    "TimeToCompletion": 62.0,
+    "WrongContextFailureRate": 0.0,
+    "RoutingAccuracy": 1.0
+  }
+}

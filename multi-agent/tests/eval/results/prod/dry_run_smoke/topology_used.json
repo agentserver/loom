@@ -1,0 +1,11 @@
+{
+  "topology_enum": "4-device",
+  "generated_by": "dry_run_all.sh",
+  "harness_only": true,
+  "hosts": [
+    {"role": "driver",           "device_kind": "laptop",   "hostname_sha8": "d077eb75"},
+    {"role": "observer,slave-a", "device_kind": "headless", "hostname_sha8": "d077eb75"},
+    {"role": "slave-b",          "device_kind": "windows",  "hostname_sha8": "d077eb75"},
+    {"role": "slave-c",          "device_kind": "cloud",    "hostname_sha8": "d077eb75"}
+  ]
+}

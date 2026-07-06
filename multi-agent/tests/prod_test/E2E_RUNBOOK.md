@@ -398,3 +398,100 @@ For the **k8s commander e2e** section above:
 - Did the manifest defaults drift (image tag, postgres image, resource requests)? Update the section + `tests/k8s_commander/README.md`.
 - Did a new "what step N proves" assertion get added to `run_e2e.sh`? Update the step table here.
 - Did a new failure mode bite you under minikube? Add a row to the k8s failure-modes table.
+
+---
+
+## Multi-device deployment (§C5 smoke)
+
+**Scope banner**: this section describes the 4-device real-deployment path.
+This worktree (`paper/v3/p3-prod-multidevice`) delivers only the harness +
+configs; **real physical devices, real OAuth device flow, and real cloud
+droplets** are exercised in the follow-up worktree
+`paper/v3/p3-prod-multidevice-run`. Nothing below has been executed against
+real hardware from this worktree — the operator running the follow-up
+worktree is the intended reader of the OAuth steps.
+
+The existing host-mode section above (single-host, ports 18091–18094) is
+**untouched**. Multi-device deployment is an **additive** capability, not
+a replacement — it reuses the same Phase 2 `deploy.sh` / `deploy.ps1`
+scripts but distributes them across 4 physical machines.
+
+Cross-reference: `multi-agent/tests/prod_test/multidevice/README.md`
+holds the per-device wrapper usage examples + workspace_id lifecycle
+notes.
+
+### Multi-device topology (4-device)
+
+```
++-------------------+                                          +-------------------+
+|  laptop           |    tunnel (driver:18092 -> obs:18091)    |  headless         |
+|  (Linux)          |==========================================|  (Linux)          |
+|  driver :18092    |            daemon-link WS                |  observer :18091  |
+|  (loopback)       |                                          |  slave-A  :18093  |
++---------+---------+                                          +---------+---------+
+          |                                                              |
+          |  tunnel via agent.cs.ac.cn (windows :18094 -> obs :18091;    |
+          |                             cloud   :18093 -> obs :18091)   |
+          v                                                              v
++-------------------+                                          +-------------------+
+|  windows          |    tunnel (slave-B:18094 -> obs:18091)   |  cloud            |
+|  (Windows 11)     |==========================================|  (DigitalOcean)   |
+|  slave-B  :18094  |    tunnel (slave-C:18093 -> obs:18091)   |  slave-C  :18093  |
+|  (loopback)       |                                          |  (loopback)       |
++-------------------+                                          +-------------------+
+```
+
+All 4 devices bind loopback only; cross-device traffic goes through
+agentserver-signed tunnels (URLs returned at workspace creation time —
+never hardcoded).
+
+### Port / tunnel table (multi-device)
+
+| Device | Role | Local bind | Cross-device tunnels (via agentserver) |
+|---|---|---|---|
+| laptop   | driver          | `127.0.0.1:18092` | → headless observer `:18091` (daemon-link WS) |
+| headless | observer        | `127.0.0.1:18091` | ← laptop driver (daemon-link WS); ← slave-A/B/C daemon links |
+| headless | slave-A         | `127.0.0.1:18093` | → observer `:18091` (self-loop over LAN) |
+| windows  | slave-B         | `127.0.0.1:18094` | → observer `:18091` (via agentserver tunnel) |
+| cloud    | slave-C         | `127.0.0.1:18093` | → observer `:18091` (via agentserver tunnel across internet) |
+
+Note: the multi-device port map reuses host-mode's port numbers
+device-by-device — each device gets one or two of the host-mode ports.
+This lets the same Phase 2 `deploy.sh` command work on each machine
+with only its intended `--observer-port` / `--driver-port` /
+`--slave-port` flag set.
+
+### OAuth device flow (per device — documentation only)
+
+**Not executed by this worktree.** Steps below are what the follow-up
+worktree's operator runs on each machine to authorize it against
+`agent.cs.ac.cn`. Real tokens are stored **outside** the repo in the
+operator's `~/.codex/tokens.yaml` (or the OS-appropriate equivalent);
+they are never committed and never live under
+`multi-agent/tests/prod_test/multidevice/tokens/` (that path is
+gitignored and only ever holds fake test tokens).
+
+Per device (repeat 4×, once each on laptop / headless / windows /
+cloud):
+
+1. On the device, run `codex auth login` (or `agentserver-cli login`,
+   depending on the follow-up worktree's chosen tool).
+2. Codex prints a URL + device code. Open the URL in a browser on any
+   machine.
+3. Paste the device code and authorize.
+4. Codex writes the token to `~/.codex/tokens.yaml` (Linux/macOS) or
+   `$env:USERPROFILE/.codex/tokens.yaml` (Windows). The follow-up
+   worktree's wrappers point at this path via env var — no token
+   value flows through repo files.
+5. Repeat on the next device (each device gets its own OAuth session
+   tied to the same `workspace_id`).
+
+### Handoff pointer
+
+**真设备真跑步骤由 `paper/v3/p3-prod-multidevice-run` 补齐；本 section
+是那份 runbook 的 config anchor.** The follow-up worktree consumes the
+templates in `multidevice/*.yaml.template`, the wrappers in
+`multidevice/wrappers/`, the `build_prod_vs_stub.py` comparison script,
+and the `teardown.sh --execute` shutdown checklist — none of which are
+executed against real hardware from this worktree.
+

@@ -43,4 +43,21 @@ testdata/fake-mcp-stdio/fake-mcp-stdio
 !/tests/prod_test/E2E_RUNBOOK.md
 !/tests/prod_test/run_e2e.sh
 !/tests/prod_test/driver_mcp_e2e.py
+# WT-3-prod-multidevice (harness-only) — whitelist the multidevice
+# subtree so per-device configs, wrappers, tests, and README are
+# tracked. Re-ignore any token-bearing paths below so OAuth material
+# never gets committed even if an operator drops a real token into
+# the checkout. Order matters: whitelist first, re-ignore after, so
+# later patterns win for the token paths.
+!/tests/prod_test/multidevice/
+!/tests/prod_test/multidevice/**
+/tests/prod_test/multidevice/tokens/
+/tests/prod_test/multidevice/**/*.token
+/tests/prod_test/multidevice/**/*.pem
+/tests/prod_test/multidevice/**/tokens.yaml
+# Re-ignore Python bytecode + pytest cache under multidevice so the
+# whitelist above doesn't accidentally track generated artifacts.
+/tests/prod_test/multidevice/**/__pycache__/
+/tests/prod_test/multidevice/**/*.pyc
+/tests/prod_test/multidevice/.pytest_cache/
 tests/claude_driver/.mcp.json

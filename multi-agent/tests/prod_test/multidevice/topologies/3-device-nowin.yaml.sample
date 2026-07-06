@@ -1,0 +1,25 @@
+# 3-device fallback — Windows machine unavailable (spec §2.2).
+# A second Linux host takes the slave-B role, labeled "降级 3 设备-noWin"
+# so downstream analysis knows this run has no cross-OS coverage.
+
+kind: topology
+topology_enum: 3-device-nowin
+devices:
+  - device_kind: laptop
+    role: driver
+    listen: 127.0.0.1:18092
+  - device_kind: headless
+    role: observer,slave-a
+    listen: 127.0.0.1:18091
+  - device_kind: cloud
+    role: slave-c
+    listen: 127.0.0.1:18093
+    vendor: digitalocean
+    fallback_label: "降级 3 设备-noWin (Linux 顶替 slave-B; 无 cross-OS 覆盖)"
+workloads:
+  - cross-device-code-mod
+per_workload_reps: 3
+notes: |
+  Dropped coverage: cross-OS (Windows). windows-only-artifact workload
+  becomes stub-only in this config — remove it from the workloads list
+  because a Linux slave-B cannot produce Windows-native artifacts.

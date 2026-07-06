@@ -1,0 +1,36 @@
+{
+  "workload_id": "cross-device-code-mod",
+  "configuration": "full_loom",
+  "run_count": 3,
+  "harness_only": true,
+  "note": "Deterministic sample values — no real device involved.",
+  "runs": [
+    {
+      "run_index": 1,
+      "TaskSuccessRate": 1.0,
+      "TimeToCompletion": 48.0,
+      "WrongContextFailureRate": 0.0,
+      "RoutingAccuracy": 1.0
+    },
+    {
+      "run_index": 2,
+      "TaskSuccessRate": 1.0,
+      "TimeToCompletion": 50.0,
+      "WrongContextFailureRate": 0.0,
+      "RoutingAccuracy": 1.0
+    },
+    {
+      "run_index": 3,
+      "TaskSuccessRate": 1.0,
+      "TimeToCompletion": 49.0,
+      "WrongContextFailureRate": 0.0,
+      "RoutingAccuracy": 1.0
+    }
+  ],
+  "median": {
+    "TaskSuccessRate": 1.0,
+    "TimeToCompletion": 49.0,
+    "WrongContextFailureRate": 0.0,
+    "RoutingAccuracy": 1.0
+  }
+}

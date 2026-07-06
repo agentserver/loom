@@ -1,0 +1,28 @@
+# WT-3-prod-multidevice — Linux laptop device template.
+#
+# This device runs the driver (:18092) and hosts the codex CLI with
+# `.codex/config.toml` on prod runbook path (a) local proxy
+# (http://127.0.0.1:53452/v1).
+#
+# HARNESS-ONLY: this file is a template. Real OAuth tokens are NEVER
+# committed — the oauth_placeholder value below MUST stay literally
+# `<OAUTH_TOKEN_HERE_DO_NOT_COMMIT>`. Real tokens live outside the
+# repo (in the operator's `~/.codex/tokens.yaml`) and are gitignored
+# via the multi-agent/.gitignore rules that re-ignore any tokens.yaml
+# / *.token / *.pem under this directory.
+#
+# Real-device usage: paper/v3/p3-prod-multidevice-run.
+
+kind: device
+role: driver
+device_kind: laptop
+listen: 127.0.0.1:18092
+oauth_placeholder: <OAUTH_TOKEN_HERE_DO_NOT_COMMIT>
+notes: |
+  Driver device. Codex config lives in ~/.codex/config.toml (path (a)
+  local proxy). Model provider block:
+    [model_providers.modelserver]
+    base_url = "http://127.0.0.1:53452/v1"
+    experimental_bearer_token = "<OAUTH_TOKEN_HERE_DO_NOT_COMMIT>"
+  Real bearer token comes from `codex auth login` on this device;
+  never write it here.

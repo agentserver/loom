@@ -1,0 +1,24 @@
+# WT-3-prod-multidevice — Cloud sandbox device template.
+#
+# This device runs slave-C on a single cloud droplet, providing the
+# cross-internet tunnel path that host-mode / same-LAN configs cannot
+# exercise. Default vendor is DigitalOcean; alt vendors ∈ {e2b, vps}.
+#
+# HARNESS-ONLY: oauth_placeholder MUST stay literal. The `vendor:`
+# line is single-key (spec §7(h)) — change one line to switch vendor.
+# NO real droplet is created by this worktree; cloud_up.sh + teardown.sh
+# only print `doctl` / `e2b` / `ssh` commands they would run.
+
+kind: device
+role: slave-c
+device_kind: cloud
+listen: 127.0.0.1:18093
+oauth_placeholder: <OAUTH_TOKEN_HERE_DO_NOT_COMMIT>
+vendor: digitalocean
+notes: |
+  Default vendor = digitalocean (single droplet). Change `vendor:` to
+  `e2b` or `vps` to switch. Vendor-conditional commands:
+    - digitalocean → doctl compute droplet create / delete
+    - e2b          → e2b sandbox create / delete
+    - vps          → ssh <user>@<host> systemctl start/stop loom-slave
+  See wrappers/cloud_up.sh for print-only invocation.
