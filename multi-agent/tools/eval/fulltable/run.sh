@@ -156,10 +156,14 @@ runs_csv="$smoke_root_abs/runs.csv"
 failures_jsonl="$smoke_root_abs/failures.jsonl"
 metrics_csv="$smoke_root_abs/metrics.csv"
 
-# Fresh files on each smoke run.
+# Fresh files on each smoke run — the smoke path always regenerates from
+# scratch (rerun-idempotent). The .gitignore keeps these paths out of
+# the tree until the operator force-adds them (spec §Step 11.1).
 : > "$runs_csv"
 : > "$failures_jsonl"
 : > "$metrics_csv"
+rm -f "$smoke_root_abs/dbs/"*.db "$smoke_root_abs/runs/"*.done \
+      "$smoke_root_abs/runs/"*.csv 2>/dev/null || true
 
 row_index=0
 while IFS= read -r plan_json; do
