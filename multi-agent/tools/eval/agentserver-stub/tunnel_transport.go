@@ -217,7 +217,34 @@ func newStubTunnel(ctx context.Context, sid string, ws *websocket.Conn) (*stubTu
 	}
 	t := &stubTunnel{sandboxID: sid, mux: session, wsConn: conn, done: make(chan struct{})}
 	go t.watch()
+	// Accept + discard agent-opened control streams (fix code review r1 P1-1).
+	// Real agentsdk clients open a StreamTypeControl stream on connect + every
+	// heartbeat (see agentserver@v0.69.9 pkg/agentsdk/client.go:sendHeartbeat).
+	// Without an Accept loop, yamux's accept backlog fills up and eventually
+	// blocks the peer, breaking long-lived tunnels. We do not process the
+	// control payload (agent info) — smoke does not need agent-side heartbeats
+	// (spec §1.2 non-goal).
+	go t.acceptAndDiscard()
 	return t, nil
+}
+
+// acceptAndDiscard runs a background loop draining any agent-opened streams
+// (typically StreamTypeControl heartbeats). Each accepted stream is fully
+// drained and closed so yamux flow-control credit is returned promptly.
+func (t *stubTunnel) acceptAndDiscard() {
+	for {
+		stream, err := t.mux.Accept()
+		if err != nil {
+			// Session closed or shutdown; stop.
+			return
+		}
+		go func(s io.ReadWriteCloser) {
+			// Drain best-effort. writeStreamHeader/readStreamHeader is 5+N bytes;
+			// even without parsing we discard the payload up to session close.
+			_, _ = io.Copy(io.Discard, s)
+			_ = s.Close()
+		}(stream)
+	}
 }
 
 // watch closes t (through Close/closeOnce) when the yamux session dies.

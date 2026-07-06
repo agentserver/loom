@@ -115,11 +115,20 @@ func (s *Server) handlePeerProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Strip the caller's Authorization + Cookie before forwarding — the target
+	// agent should not see the driver's bearer token (fix code review r1 P1-3).
+	// If the target's HTTP handler needs auth, it must use its own registered
+	// bearer path; the stub is intentionally an authless internal proxy.
 	headers := make(map[string]string, len(r.Header))
 	for k, vs := range r.Header {
-		if len(vs) > 0 {
-			headers[k] = vs[0]
+		if len(vs) == 0 {
+			continue
 		}
+		switch strings.ToLower(k) {
+		case "authorization", "cookie", "proxy-authorization":
+			continue
+		}
+		headers[k] = vs[0]
 	}
 	meta := HTTPStreamMeta{
 		Method:  r.Method,

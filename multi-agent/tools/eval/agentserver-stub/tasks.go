@@ -96,13 +96,17 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 }
 
 // pollTaskEntry matches the shape driver-side / poller-side clients parse.
+// TimeoutSeconds included because internal/poller/poller.go decodes it and
+// forwards to dispatch (fix code review r1 P1-2).
 type pollTaskEntry struct {
-	TaskID        string  `json:"task_id"`
-	Prompt        string  `json:"prompt"`
-	SystemContext string  `json:"system_context"`
-	SessionID     string  `json:"session_id,omitempty"`
-	MaxTurns      int     `json:"max_turns"`
-	MaxBudgetUSD  float64 `json:"max_budget_usd"`
+	TaskID         string  `json:"task_id"`
+	Skill          string  `json:"skill,omitempty"`
+	Prompt         string  `json:"prompt"`
+	SystemContext  string  `json:"system_context"`
+	SessionID      string  `json:"session_id,omitempty"`
+	MaxTurns       int     `json:"max_turns"`
+	MaxBudgetUSD   float64 `json:"max_budget_usd"`
+	TimeoutSeconds int     `json:"timeout_seconds,omitempty"`
 }
 
 const pollBatchSize = 5
@@ -143,12 +147,14 @@ func (s *Server) handlePollTasks(w http.ResponseWriter, r *http.Request) {
 			}
 			t.Status = "assigned"
 			assigned = append(assigned, pollTaskEntry{
-				TaskID:        t.ID,
-				Prompt:        t.Prompt,
-				SystemContext: t.SystemContext,
-				SessionID:     t.SessionID,
-				MaxTurns:      t.MaxTurns,
-				MaxBudgetUSD:  t.MaxBudgetUSD,
+				TaskID:         t.ID,
+				Skill:          t.Skill,
+				Prompt:         t.Prompt,
+				SystemContext:  t.SystemContext,
+				SessionID:      t.SessionID,
+				MaxTurns:       t.MaxTurns,
+				MaxBudgetUSD:   t.MaxBudgetUSD,
+				TimeoutSeconds: t.Timeout,
 			})
 		} else {
 			remaining = append(remaining, tid)
