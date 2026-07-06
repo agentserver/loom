@@ -142,6 +142,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/agent/discovery/cards", s.handleDiscoveryCards)
 	mux.HandleFunc("/api/agent/discovery/agents", s.handleDiscoveryAgents)
 
+	// Tunnel WS (spec §4.3) — path is /api/tunnel/<sandboxID>
+	mux.HandleFunc("/api/tunnel/", s.handleTunnelUpgrade)
+
 	return mux
 }
 
