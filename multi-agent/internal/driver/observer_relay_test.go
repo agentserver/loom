@@ -11,11 +11,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/yourorg/multi-agent/internal/capability"
+	"github.com/yourorg/multi-agent/internal/commandiface"
 	"github.com/yourorg/multi-agent/internal/observerstore"
 )
 
@@ -472,5 +475,120 @@ func TestObserverRelay_WriteDryRunBlock(t *testing.T) {
 	var nilRelay *ObserverRelay
 	if err := nilRelay.WriteDryRunBlock(context.Background(), row); err != nil {
 		t.Errorf("nil relay must be a silent no-op; got %v", err)
+	}
+}
+
+// -------------------------------------------------------------------
+// Fix #81 T3 — ObserverRelay.WriteCapabilitySnapshot tests
+// -------------------------------------------------------------------
+
+func TestObserverRelay_WriteCapabilitySnapshot_HappyPath(t *testing.T) {
+	var gotPath, gotAuth string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	cfg := &Config{}
+	cfg.Observer.Enabled = true
+	cfg.Observer.URL = server.URL
+	relay := NewObserverRelay(cfg, stubTokenSource("tok-1"))
+	snap, err := capability.NewSnapshot(capability.Snapshot{
+		OS: "linux", Arch: "amd64",
+		Platform: commandiface.Platform{OS: "linux", Arch: "amd64"},
+		Network:  capability.NetworkLoopbackOnly,
+	})
+	if err != nil {
+		t.Fatalf("NewSnapshot: %v", err)
+	}
+	if err := relay.WriteCapabilitySnapshot(context.Background(), snap); err != nil {
+		t.Fatalf("WriteCapabilitySnapshot: %v", err)
+	}
+	if gotPath != "/api/capability-snapshots" {
+		t.Fatalf("path: want /api/capability-snapshots got %s", gotPath)
+	}
+	if gotAuth != "Bearer tok-1" {
+		t.Fatalf("auth: want 'Bearer tok-1' got %s", gotAuth)
+	}
+	var wire struct {
+		Snapshot json.RawMessage `json:"snapshot"`
+	}
+	if err := json.Unmarshal(gotBody, &wire); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if len(wire.Snapshot) == 0 {
+		t.Fatal("expected non-empty snapshot in body")
+	}
+}
+
+func TestObserverRelay_WriteCapabilitySnapshot_NilRelaySilentNoOp(t *testing.T) {
+	var relay *ObserverRelay // nil
+	snap, _ := capability.NewSnapshot(capability.Snapshot{
+		OS: "linux", Arch: "amd64",
+		Platform: commandiface.Platform{OS: "linux", Arch: "amd64"},
+		Network:  capability.NetworkLoopbackOnly,
+	})
+	if err := relay.WriteCapabilitySnapshot(context.Background(), snap); err != nil {
+		t.Fatalf("nil relay should silently succeed, got: %v", err)
+	}
+}
+
+func TestObserverRelay_WriteCapabilitySnapshot_LocalSizeCap(t *testing.T) {
+	cfg := &Config{}
+	cfg.Observer.Enabled = true
+	cfg.Observer.URL = "http://unreachable.invalid"
+	relay := NewObserverRelay(cfg, stubTokenSource("tok"))
+	// Build a Snapshot with 100 MCPTools entries, each padded with 4 KiB
+	// → canonical JSON body > 256 KiB.
+	var mcp []capability.MCPToolDescriptor
+	padding := strings.Repeat("A", 4096)
+	for i := 0; i < 100; i++ {
+		mcp = append(mcp, capability.MCPToolDescriptor{
+			Server: "srv",
+			Name:   "tool-" + strconv.Itoa(i) + "-" + padding,
+		})
+	}
+	snap, err := capability.NewSnapshot(capability.Snapshot{
+		OS: "linux", Arch: "amd64",
+		Platform: commandiface.Platform{OS: "linux", Arch: "amd64"},
+		Network:  capability.NetworkLoopbackOnly,
+		MCPTools: mcp,
+	})
+	if err != nil {
+		t.Fatalf("NewSnapshot: %v", err)
+	}
+	err = relay.WriteCapabilitySnapshot(context.Background(), snap)
+	if err == nil {
+		t.Fatal("expected pre-cap error; got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds observer cap") {
+		t.Fatalf("want pre-cap error text; got %q", err.Error())
+	}
+}
+
+func TestObserverRelay_WriteCapabilitySnapshot_ServerErrorReturned(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "snapshot contains raw token; rejected by secret scan", http.StatusUnprocessableEntity)
+	}))
+	defer server.Close()
+	cfg := &Config{}
+	cfg.Observer.Enabled = true
+	cfg.Observer.URL = server.URL
+	relay := NewObserverRelay(cfg, stubTokenSource("tok"))
+	snap, _ := capability.NewSnapshot(capability.Snapshot{
+		OS: "linux", Arch: "amd64",
+		Platform: commandiface.Platform{OS: "linux", Arch: "amd64"},
+		Network:  capability.NetworkLoopbackOnly,
+	})
+	err := relay.WriteCapabilitySnapshot(context.Background(), snap)
+	if err == nil {
+		t.Fatal("expected error on 422; got nil")
+	}
+	if !strings.Contains(err.Error(), "status 422") {
+		t.Fatalf("want 'status 422' in err; got %q", err.Error())
 	}
 }

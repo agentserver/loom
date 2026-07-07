@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/agentserver/agentserver/pkg/agentsdk"
@@ -520,5 +523,238 @@ func TestExtractExperimentID_BoundaryMatching(t *testing.T) {
 				t.Errorf("extractExperimentID(%q) = %q, want %q", tc.ctx, got, tc.want)
 			}
 		})
+	}
+}
+
+// -------------------------------------------------------------------
+// Fix #81 tests — begin
+// -------------------------------------------------------------------
+
+func TestDryRunContract_MalformedSnapshot_RedactedError(t *testing.T) {
+	sdk := &fakeSDK{discoverFunc: func() ([]agentsdk.AgentCard, error) { return nil, nil }}
+	tools := newTestTools(t, sdk)
+	d := &dryRunContractTool{t: tools}
+	badSnap := `{"os":"linux","arch":"amd64","platform":{"os":"linux","arch":"amd64"},"network":"loopback-only","files":[{"kind_detail":"NOT_A_VALID_KIND_ptok-deadbeef-must-not-leak","path_pattern":"/tmp"}]}`
+	contractJSON := `{"conversation_id":"ct-1","version":1,"intent":{"goal":"g","success_criteria":["ok"]},"data_contract":{"read_artifacts":[],"write_targets":[{"type":"artifact","kind":"log","name":"o"}]},"capability_requirements":{"skills":["bash"]},"execution_policy":{"routing":"direct_first"},"recovery_hint":"r"}`
+	payload := `{"contract":` + contractJSON + `,"capability_snapshot":` + badSnap + `}`
+
+	_, err := d.Call(context.Background(), json.RawMessage(payload))
+	if err == nil {
+		t.Fatal("expected error for malformed snapshot; got nil")
+	}
+	if strings.Contains(err.Error(), "ptok-deadbeef") || strings.Contains(err.Error(), "NOT_A_VALID_KIND") {
+		t.Fatalf("MCP error surface leaked snapshot field value: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "shape invariant rejected") {
+		t.Fatalf("expected fixed classifier text; got %q", err.Error())
+	}
+}
+
+func TestDryRunContract_MalformedSnapshot_LogDoesNotLeakSecret(t *testing.T) {
+	// The Global Constraints require driver log for NewSnapshot err use
+	// ONLY errTypeName; NEVER err.Error() (which echoes attacker fields).
+	var buf bytes.Buffer
+	prevOut := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prevOut) })
+
+	sdk := &fakeSDK{discoverFunc: func() ([]agentsdk.AgentCard, error) { return nil, nil }}
+	tools := newTestTools(t, sdk)
+	d := &dryRunContractTool{t: tools}
+	badSnap := `{"os":"linux","arch":"amd64","platform":{"os":"linux","arch":"amd64"},"network":"loopback-only","files":[{"kind_detail":"NOT_A_VALID_KIND_ghp_ABCDEFGHIJKLMNOPQRST","path_pattern":"/tmp"}]}`
+	contractJSON := `{"conversation_id":"ct-1","version":1,"intent":{"goal":"g","success_criteria":["ok"]},"data_contract":{"read_artifacts":[],"write_targets":[{"type":"artifact","kind":"log","name":"o"}]},"capability_requirements":{"skills":["bash"]},"execution_policy":{"routing":"direct_first"},"recovery_hint":"r"}`
+	payload := `{"contract":` + contractJSON + `,"capability_snapshot":` + badSnap + `}`
+
+	_, _ = d.Call(context.Background(), json.RawMessage(payload))
+	logs := buf.String()
+	if strings.Contains(logs, "ghp_ABCDEFGHIJKLMNOPQRST") || strings.Contains(logs, "NOT_A_VALID_KIND") {
+		t.Fatalf("driver log leaked secret / attacker-controlled field value: %q", logs)
+	}
+	if !strings.Contains(logs, "new_snapshot rejected") {
+		t.Fatalf("expected 'new_snapshot rejected' classifier in log; got %q", logs)
+	}
+}
+
+// -------------------------------------------------------------------
+// Fix #81 T4 — call-site tests
+// -------------------------------------------------------------------
+
+// snapshotObserver is a controllable fake for the observer's
+// /api/capability-snapshots endpoint. Tests set nextStatus/nextBody to
+// simulate happy, secret-scan, and server-error paths.
+type snapshotObserver struct {
+	srv        *httptest.Server
+	calls      atomic.Int32
+	nextStatus int
+	nextBody   string
+}
+
+func newSnapshotObserver(t *testing.T) *snapshotObserver {
+	t.Helper()
+	obs := &snapshotObserver{nextStatus: http.StatusNoContent}
+	obs.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		obs.calls.Add(1)
+		if obs.nextStatus != http.StatusNoContent {
+			http.Error(w, obs.nextBody, obs.nextStatus)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(obs.srv.Close)
+	return obs
+}
+
+func newToolsWithRelay(t *testing.T, obs *snapshotObserver) *Tools {
+	t.Helper()
+	sdk := &fakeSDK{discoverFunc: func() ([]agentsdk.AgentCard, error) { return nil, nil }}
+	tools := newTestTools(t, sdk)
+	tools.cfg.Observer.Enabled = true
+	tools.cfg.Observer.URL = obs.srv.URL
+	tools.relay = NewObserverRelay(tools.cfg, stubTokenSource("tok"))
+	return tools
+}
+
+func buildValidPayload(t *testing.T) json.RawMessage {
+	t.Helper()
+	contractJSON := `{"conversation_id":"ct-1","version":1,"intent":{"goal":"g","success_criteria":["ok"]},"data_contract":{"read_artifacts":[],"write_targets":[{"type":"artifact","kind":"log","name":"o"}]},"capability_requirements":{"skills":["bash"]},"execution_policy":{"routing":"direct_first"},"recovery_hint":"r"}`
+	snap := `{"os":"linux","arch":"amd64","platform":{"os":"linux","arch":"amd64"},"command_interfaces":[{"skill":"bash","kind":"bash","command":"/bin/bash","default":true}],"network":"loopback-only"}`
+	return json.RawMessage(`{"contract":` + contractJSON + `,"capability_snapshot":` + snap + `}`)
+}
+
+func TestDryRunContract_WriteSnapshotSuccess_NoWarnings(t *testing.T) {
+	obs := newSnapshotObserver(t)
+	tools := newToolsWithRelay(t, obs)
+	d := &dryRunContractTool{t: tools}
+	respBytes, err := d.Call(context.Background(), buildValidPayload(t))
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if obs.calls.Load() != 1 {
+		t.Fatalf("expected 1 relay call, got %d", obs.calls.Load())
+	}
+	var report dryRunReport
+	if err := json.Unmarshal(respBytes, &report); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(report.Warnings) != 0 {
+		t.Fatalf("expected no warnings on success; got %v", report.Warnings)
+	}
+}
+
+func TestDryRunContract_WriteSnapshotFailure_DegradedToWarning(t *testing.T) {
+	obs := newSnapshotObserver(t)
+	obs.nextStatus = http.StatusInternalServerError
+	obs.nextBody = "failed to persist capability_snapshot"
+	tools := newToolsWithRelay(t, obs)
+	d := &dryRunContractTool{t: tools}
+	respBytes, err := d.Call(context.Background(), buildValidPayload(t))
+	if err != nil {
+		t.Fatalf("dry_run should NOT fail on relay error; got: %v", err)
+	}
+	var report dryRunReport
+	json.Unmarshal(respBytes, &report)
+	if len(report.Warnings) == 0 {
+		t.Fatal("expected a warning on relay 500")
+	}
+	if !strings.HasPrefix(report.Warnings[0], "observer save capability snapshot: ") {
+		t.Fatalf("warning prefix wrong: %q", report.Warnings[0])
+	}
+}
+
+func TestDryRunContract_SecretScanFailure_RedactedWarning(t *testing.T) {
+	obs := newSnapshotObserver(t)
+	obs.nextStatus = http.StatusUnprocessableEntity
+	obs.nextBody = "snapshot contains raw token; rejected by secret scan"
+	tools := newToolsWithRelay(t, obs)
+	d := &dryRunContractTool{t: tools}
+	respBytes, err := d.Call(context.Background(), buildValidPayload(t))
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	var report dryRunReport
+	json.Unmarshal(respBytes, &report)
+	if len(report.Warnings) != 1 {
+		t.Fatalf("want 1 warning got %d", len(report.Warnings))
+	}
+	want := "observer save capability snapshot: rejected (secret scan)"
+	if report.Warnings[0] != want {
+		t.Fatalf("secret-scan warning must be fixed text; want %q got %q", want, report.Warnings[0])
+	}
+	if strings.Contains(report.Warnings[0], "status 422") {
+		t.Fatalf("HTTP status marker should be redacted out of warning: %q", report.Warnings[0])
+	}
+}
+
+func TestDryRunContract_NilRelay_SilentSkip(t *testing.T) {
+	// newTestTools constructs Tools with obs=nil, so relay lazy-inits to nil
+	// (NewObserverRelay returns nil when observer.Enabled=false OR
+	//  toTokenSource(nil)=nil). WriteCapabilitySnapshot on nil relay is a
+	// silent no-op per contract — dry-run must NOT emit a warning.
+	sdk := &fakeSDK{discoverFunc: func() ([]agentsdk.AgentCard, error) { return nil, nil }}
+	tools := newTestTools(t, sdk)
+	// Explicitly do NOT set Observer.Enabled/URL.
+	d := &dryRunContractTool{t: tools}
+	respBytes, err := d.Call(context.Background(), buildValidPayload(t))
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	var report dryRunReport
+	json.Unmarshal(respBytes, &report)
+	if len(report.Warnings) != 0 {
+		t.Fatalf("nil relay should be silent; got %v", report.Warnings)
+	}
+}
+
+func TestDryRunContract_UnreachableRelay_DegradesToWarning(t *testing.T) {
+	// Distinct scenario from NilRelay: relay CAN construct (Enabled+URL) but
+	// the HTTP call fails. Assert dry-run degrades to a single warning.
+	sdk := &fakeSDK{discoverFunc: func() ([]agentsdk.AgentCard, error) { return nil, nil }}
+	tools := newTestTools(t, sdk)
+	tools.cfg.Observer.Enabled = true
+	tools.cfg.Observer.URL = "http://127.0.0.1:1"
+	// Force relay to actually construct (bypass toTokenSource(nil) short-circuit)
+	tools.relay = NewObserverRelay(tools.cfg, stubTokenSource("tok"))
+	d := &dryRunContractTool{t: tools}
+	respBytes, err := d.Call(context.Background(), buildValidPayload(t))
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	var report dryRunReport
+	json.Unmarshal(respBytes, &report)
+	if len(report.Warnings) != 1 {
+		t.Fatalf("unreachable relay should degrade to 1 warning; got %d: %v", len(report.Warnings), report.Warnings)
+	}
+	if !strings.HasPrefix(report.Warnings[0], "observer save capability snapshot: ") {
+		t.Fatalf("warning prefix wrong: %q", report.Warnings[0])
+	}
+}
+
+func TestDryRunContract_NoDryRunAblation_NoSnapshotWrite(t *testing.T) {
+	obs := newSnapshotObserver(t)
+	tools := newToolsWithRelay(t, obs)
+	d := &dryRunContractTool{t: tools}
+	validator.SetDryRunDisabled(true)
+	t.Cleanup(func() { validator.SetDryRunDisabled(false) })
+	_, err := d.Call(context.Background(), buildValidPayload(t))
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if obs.calls.Load() != 0 {
+		t.Fatalf("NoDryRun ablation must skip relay call; got %d", obs.calls.Load())
+	}
+}
+
+func TestDryRunContract_NoCapabilityDiscoveryAblation_NoRelayCall(t *testing.T) {
+	obs := newSnapshotObserver(t)
+	tools := newToolsWithRelay(t, obs)
+	d := &dryRunContractTool{t: tools}
+	capability.SetDisableUpload(true)
+	t.Cleanup(func() { capability.SetDisableUpload(false) })
+	_, err := d.Call(context.Background(), buildValidPayload(t))
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if obs.calls.Load() != 0 {
+		t.Fatalf("NoCapabilityDiscovery must skip relay call at driver; got %d", obs.calls.Load())
 	}
 }

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/observerstore"
 )
 
@@ -571,4 +572,51 @@ func hashFile(path string) (string, int64, error) {
 		return "", 0, err
 	}
 	return hex.EncodeToString(hasher.Sum(nil)), n, nil
+}
+
+// WriteCapabilitySnapshot POSTs a canonical capability.Snapshot to
+// observer-server's POST /api/capability-snapshots endpoint (spec #81 §4.3).
+//
+// nil relay ⇒ silent no-op, matches the SaveResourceSnapshot / WriteDryRunBlock
+// contract; callers do not need to nil-check.
+//
+// Pre-cap: fails fast with a local error if the canonical body exceeds
+// 256 KiB (observer's default MaxBytesReader), avoiding a wasted round trip.
+//
+// Attribution: observer derives agent_id / workspace_id from the
+// authenticated Bearer token; caller has no way to forge either.
+func (r *ObserverRelay) WriteCapabilitySnapshot(ctx context.Context, snap capability.Snapshot) error {
+	if r == nil {
+		return nil
+	}
+	body, err := capability.CanonicalJSON(snap)
+	if err != nil {
+		return fmt.Errorf("canonicalize snapshot: %w", err)
+	}
+	const observerBodyCap = 256 * 1024
+	if len(body) > observerBodyCap {
+		return fmt.Errorf("snapshot body %d bytes exceeds observer cap %d", len(body), observerBodyCap)
+	}
+	payload, _ := json.Marshal(struct {
+		Snapshot json.RawMessage `json:"snapshot"`
+	}{Snapshot: body})
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		r.baseURL+"/api/capability-snapshots", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+r.src.Token())
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := r.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNoContent {
+		return nil
+	}
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	return fmt.Errorf("observer capability_snapshots status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 }
