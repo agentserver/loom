@@ -17,6 +17,7 @@ import (
 
 	"github.com/yourorg/multi-agent/internal/commanderhub"
 	"github.com/yourorg/multi-agent/internal/commanderhub/authstore"
+	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/identity"
 	"github.com/yourorg/multi-agent/internal/identity/static"
 	"github.com/yourorg/multi-agent/internal/objectstore"
@@ -131,6 +132,7 @@ func mountRoutes(mux *http.ServeMux, h *handler, usHandler *userspace.Handler) {
 	mux.HandleFunc("/api/resource-snapshots", h.resourceSnapshots)
 	mux.HandleFunc("/api/resource-snapshots/latest", h.latestResourceSnapshot)
 	mux.HandleFunc("/api/dry-run-blocks", h.dryRunBlocks)
+	mux.HandleFunc("/api/capability-snapshots", h.capabilitySnapshots)
 	mux.HandleFunc("/api/workspaces", h.guardWebToken(h.listWorkspaces))
 	if usHandler != nil {
 		userspace.MountRoutes(mux, usHandler)
@@ -1406,4 +1408,84 @@ func mintAgentToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(buf[:]), nil
+}
+
+// capabilitySnapshots persists a canonical capability.Snapshot supplied by
+// an authenticated driver. Mirrors dryRunBlocks pattern (fix #81 spec §4.2).
+//
+// Wire: POST /api/capability-snapshots
+// Body: {"snapshot": <canonical capability.Snapshot JSON>}
+// Auth: Bearer proxy_token; driver or master role.
+// Attribution: agent.ID + agent.WorkspaceID from authenticate() — NEVER body.
+// Success: 204 No Content.
+// Errors: 401 auth / 403 not-driver / 405 not-POST / 413 too-large
+//         / 422 shape or secret-scan reject / 500 persistence
+//         / 503 backend not ManagedStore.
+//
+// Security (fix #81 spec §3):
+//   - NewSnapshot / WriteSnapshot errors are LOGGED with a fixed classifier
+//     and the authenticated agent identity ONLY; never `%v` of the error.
+//   - HTTP response body is fixed text; never contains raw error text.
+func (h *handler) capabilitySnapshots(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	agent, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	if agent.Role != observer.RoleDriver && agent.Role != observer.RoleMaster {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	managed, ok := h.s.(observerstore.ManagedStore)
+	if !ok {
+		http.Error(w, "capability_snapshots endpoint requires ManagedStore-backed store", http.StatusServiceUnavailable)
+		return
+	}
+	db := managed.DB()
+
+	r.Body = http.MaxBytesReader(w, r.Body, h.maxEventBodyBytes)
+	var req struct {
+		Snapshot json.RawMessage `json:"snapshot"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if len(req.Snapshot) == 0 {
+		http.Error(w, "snapshot field required", http.StatusBadRequest)
+		return
+	}
+	var snapSpec capability.Snapshot
+	if err := json.Unmarshal(req.Snapshot, &snapSpec); err != nil {
+		http.Error(w, "invalid snapshot json", http.StatusBadRequest)
+		return
+	}
+	canon, err := capability.NewSnapshot(snapSpec)
+	if err != nil {
+		// SECURITY: NewSnapshot echoes attacker-controlled field values that
+		// may embed raw tokens. Log only a fixed classifier + authenticated
+		// identity; NEVER `%v` of err.
+		log.Printf("[capability_snapshots] NewSnapshot rejected snapshot from agent=%s ws=%s (shape invariant)", agent.ID, agent.WorkspaceID)
+		http.Error(w, "invalid snapshot shape", http.StatusUnprocessableEntity)
+		return
+	}
+	if err := observerstore.WriteSnapshot(r.Context(), db, agent.ID, agent.WorkspaceID, canon); err != nil {
+		if errors.Is(err, observerstore.ErrSnapshotContainsSecret) {
+			http.Error(w, "snapshot contains raw token; rejected by secret scan", http.StatusUnprocessableEntity)
+			return
+		}
+		// Any other error is redacted — real cause is in server logs only.
+		log.Printf("[capability_snapshots] write failed for agent=%s ws=%s: %v", agent.ID, agent.WorkspaceID, err)
+		http.Error(w, "failed to persist capability_snapshot", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
