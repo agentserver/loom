@@ -282,6 +282,37 @@ func (d *dryRunContractTool) Call(ctx context.Context, raw json.RawMessage) (jso
 		}
 		blocks = validator.New().Check(ctx, tc, snap)
 		snapHash = capability.ComputeHash(snap)
+
+		// Persist canonical snapshot for per-agent attribution (fix #81 §4.4).
+		//
+		// Position: INSIDE the `if len(args.CapabilitySnapshot) > 0` scope
+		// (needs `snap`), AFTER hash computation, BEFORE `report.Blocks=blocks`.
+		// The `NoDryRun` ablation short-circuits above at
+		// `validator.IsDryRunDisabled()`, so we already skip this section
+		// under that flag — no explicit second check.
+		//
+		// Ablation double guard (spec §3 / §4.4 defence in depth):
+		//   - driver-side: `capability.IsUploadDisabled()` skips relay call
+		//     entirely; covers split-deploy where observer flag differs
+		//   - observer-side: `WriteSnapshot` internal short-circuit;
+		//     covers single-process deploy + belt-and-suspenders
+		// Both required; both tested (L13 + L13b).
+		if capability.IsUploadDisabled() {
+			log.Printf("[ablation] NoCapabilityDiscovery: driver skipped WriteCapabilitySnapshot for conversation=%q hash=%s", tc.ConversationID, snapHash)
+		} else if err := d.t.observerRelay().WriteCapabilitySnapshot(ctx, snap); err != nil {
+			// Security: secret-scan verdict is signalled via HTTP 422 marker
+			// in the error text. Redact to fixed warning; other errors are
+			// already redacted at the observer HTTP boundary.
+			msg := "observer save capability snapshot: " + err.Error()
+			if strings.Contains(err.Error(), "status 422") {
+				msg = "observer save capability snapshot: rejected (secret scan)"
+			}
+			if report.Warnings == nil {
+				report.Warnings = []string{}
+			}
+			report.Warnings = append(report.Warnings, msg)
+			d.t.logHelperErr("observer_snapshot", "write_snapshot", err)
+		}
 	}
 	report.Blocks = blocks
 	if len(blocks) > 0 {
