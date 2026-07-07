@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"math/big"
 	"reflect"
@@ -269,7 +270,15 @@ func (d *dryRunContractTool) Call(ctx context.Context, raw json.RawMessage) (jso
 		}
 		snap, err := capability.NewSnapshot(snapSpec)
 		if err != nil {
-			return nil, &MCPToolError{Message: "capability_snapshot: " + err.Error(), Category: observerstore.FailContractViolation}
+			// SECURITY (fix #81 spec §3 + plan Global Constraints): NewSnapshot
+			// echoes attacker-controlled field values (OS / Network /
+			// Files[].KindDetail) that may embed raw tokens. Redact BOTH:
+			//   (1) MCP wire response — fixed classifier only
+			//   (2) driver-side log — only the error's Go type name
+			// NEVER include err.Error() in either surface.
+			errTypeName := fmt.Sprintf("%T", err)
+			log.Printf("[observer_snapshot] new_snapshot rejected snapshot from workspace=%s; err type=%s", d.t.cfg.Credentials.WorkspaceID, errTypeName)
+			return nil, &MCPToolError{Message: "capability_snapshot: shape invariant rejected", Category: observerstore.FailContractViolation}
 		}
 		blocks = validator.New().Check(ctx, tc, snap)
 		snapHash = capability.ComputeHash(snap)
@@ -434,6 +443,10 @@ type dryRunReport struct {
 	MissingSkills         []string          `json:"missing_skills"`
 	MissingResources      json.RawMessage   `json:"missing_resources,omitempty"`
 	Reasons               []string          `json:"reasons"`
+	// Warnings is the non-fatal helper-error surface (fix #81 spec §4.4
+	// warning stability contract). Consumers (metric extractors) grep
+	// exact prefixes; do not change existing strings without bumping schema.
+	Warnings []string `json:"warnings,omitempty"`
 	// WT-2-dry-run-validator §4.2: per-invocation attempt id + validator
 	// blocks. Runnable is AND-ed with len(Blocks)==0.
 	Blocks    []validator.Block `json:"blocks"`

@@ -522,3 +522,52 @@ func TestExtractExperimentID_BoundaryMatching(t *testing.T) {
 		})
 	}
 }
+
+// -------------------------------------------------------------------
+// Fix #81 tests — begin
+// -------------------------------------------------------------------
+
+func TestDryRunContract_MalformedSnapshot_RedactedError(t *testing.T) {
+	sdk := &fakeSDK{discoverFunc: func() ([]agentsdk.AgentCard, error) { return nil, nil }}
+	tools := newTestTools(t, sdk)
+	d := &dryRunContractTool{t: tools}
+	badSnap := `{"os":"linux","arch":"amd64","platform":{"os":"linux","arch":"amd64"},"network":"loopback-only","files":[{"kind_detail":"NOT_A_VALID_KIND_ptok-deadbeef-must-not-leak","path_pattern":"/tmp"}]}`
+	contractJSON := `{"conversation_id":"ct-1","version":1,"intent":{"goal":"g","success_criteria":["ok"]},"data_contract":{"read_artifacts":[],"write_targets":[{"type":"artifact","kind":"log","name":"o"}]},"capability_requirements":{"skills":["bash"]},"execution_policy":{"routing":"direct_first"},"recovery_hint":"r"}`
+	payload := `{"contract":` + contractJSON + `,"capability_snapshot":` + badSnap + `}`
+
+	_, err := d.Call(context.Background(), json.RawMessage(payload))
+	if err == nil {
+		t.Fatal("expected error for malformed snapshot; got nil")
+	}
+	if strings.Contains(err.Error(), "ptok-deadbeef") || strings.Contains(err.Error(), "NOT_A_VALID_KIND") {
+		t.Fatalf("MCP error surface leaked snapshot field value: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "shape invariant rejected") {
+		t.Fatalf("expected fixed classifier text; got %q", err.Error())
+	}
+}
+
+func TestDryRunContract_MalformedSnapshot_LogDoesNotLeakSecret(t *testing.T) {
+	// The Global Constraints require driver log for NewSnapshot err use
+	// ONLY errTypeName; NEVER err.Error() (which echoes attacker fields).
+	var buf bytes.Buffer
+	prevOut := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prevOut) })
+
+	sdk := &fakeSDK{discoverFunc: func() ([]agentsdk.AgentCard, error) { return nil, nil }}
+	tools := newTestTools(t, sdk)
+	d := &dryRunContractTool{t: tools}
+	badSnap := `{"os":"linux","arch":"amd64","platform":{"os":"linux","arch":"amd64"},"network":"loopback-only","files":[{"kind_detail":"NOT_A_VALID_KIND_ghp_ABCDEFGHIJKLMNOPQRST","path_pattern":"/tmp"}]}`
+	contractJSON := `{"conversation_id":"ct-1","version":1,"intent":{"goal":"g","success_criteria":["ok"]},"data_contract":{"read_artifacts":[],"write_targets":[{"type":"artifact","kind":"log","name":"o"}]},"capability_requirements":{"skills":["bash"]},"execution_policy":{"routing":"direct_first"},"recovery_hint":"r"}`
+	payload := `{"contract":` + contractJSON + `,"capability_snapshot":` + badSnap + `}`
+
+	_, _ = d.Call(context.Background(), json.RawMessage(payload))
+	logs := buf.String()
+	if strings.Contains(logs, "ghp_ABCDEFGHIJKLMNOPQRST") || strings.Contains(logs, "NOT_A_VALID_KIND") {
+		t.Fatalf("driver log leaked secret / attacker-controlled field value: %q", logs)
+	}
+	if !strings.Contains(logs, "new_snapshot rejected") {
+		t.Fatalf("expected 'new_snapshot rejected' classifier in log; got %q", logs)
+	}
+}
