@@ -3,6 +3,7 @@ package observerstore
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/yourorg/multi-agent/internal/capability"
 	"github.com/yourorg/multi-agent/internal/observer"
+	_ "modernc.org/sqlite"
 )
 
 func testStore(t *testing.T) *SQLiteStore {
@@ -70,6 +72,48 @@ func TestSchemaIncludesExternalIdentityColumns(t *testing.T) {
 	agentColumns := tableColumns(t, s, "agents")
 	require.Contains(t, agentColumns, "external_sandbox_id")
 	require.Contains(t, agentColumns, "external_user_id")
+}
+
+func TestOpenSQLiteMigratesRunsTokenColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "observer.db")
+	db, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE runs (
+		run_id                    TEXT PRIMARY KEY,
+		workload_id               TEXT NOT NULL,
+		claim_id                  TEXT NOT NULL,
+		experiment_id             TEXT NOT NULL,
+		baseline_or_ablation      TEXT NOT NULL,
+		loom_commit               TEXT NOT NULL,
+		agentserver_commit        TEXT NOT NULL,
+		modelserver_commit        TEXT NOT NULL,
+		app_commit                TEXT NOT NULL,
+		machine_topology          TEXT NOT NULL,
+		context_ground_truth      TEXT NOT NULL,
+		capability_snapshot_hash  TEXT NOT NULL DEFAULT '',
+		task_contract_hash        TEXT NOT NULL DEFAULT '',
+		dynamic_mcp_registry_hash TEXT NOT NULL DEFAULT '',
+		selected_context          TEXT NOT NULL,
+		ground_truth_context      TEXT NOT NULL,
+		start_time                TEXT NOT NULL,
+		end_time                  TEXT NOT NULL,
+		success_oracle_result     TEXT NOT NULL CHECK(success_oracle_result IN ('pass','fail','timeout')),
+		failure_category          TEXT NOT NULL DEFAULT '',
+		human_intervention_count  INTEGER NOT NULL DEFAULT 0,
+		artifact_hashes           TEXT NOT NULL DEFAULT '[]',
+		observer_trace_path       TEXT NOT NULL DEFAULT '',
+		model_trace_id            TEXT NOT NULL DEFAULT ''
+	)`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	s, err := OpenSQLite(path)
+	require.NoError(t, err)
+	defer s.Close()
+
+	cols := tableColumns(t, s, "runs")
+	require.Contains(t, cols, "model_input_tokens")
+	require.Contains(t, cols, "model_output_tokens")
 }
 
 func TestUpsertAgentRecordsExternalIdentity(t *testing.T) {
