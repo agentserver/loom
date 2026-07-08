@@ -16,9 +16,10 @@ that:
 
 | Directory | `baseline_or_ablation` | Corresponds to |
 |---|---|---|
-| `manual_ssh/`     | `manual_ssh`                  | §E1 — user manually ssh + hand-run |
-| `single_machine/` | `single_machine_claude_code`  | §E2 — Claude Code single-machine agent |
-| `cloud_sandbox/`  | `cloud_sandbox_e2b`           | §E3 — E2B cloud sandbox |
+| `manual_ssh/`           | `manual_ssh`                  | §E1 — user manually ssh + hand-run |
+| `single_machine/`       | `single_machine_claude_code`  | §E2 — Claude Code single-machine agent (reference; not in the matrix after wt4-codex-only) |
+| `single_machine_codex/` | `single_machine_codex`        | §E2 — OpenAI Codex CLI single-machine agent (active baseline for wt4-codex-only) |
+| `cloud_sandbox/`        | `cloud_sandbox_e2b`           | §E3 — E2B cloud sandbox |
 
 ## Running
 
@@ -32,7 +33,7 @@ go test -tags matrix ./tests/eval/baselines/ -run TestMatrix15Runs
 # Or via run.sh wrappers:
 for wl in cross-device-code-mod remote-data-processing windows-only-artifact \
           missing-parser-converter credential-bound-model; do
-  for bl in manual_ssh single_machine cloud_sandbox; do
+  for bl in manual_ssh single_machine_codex cloud_sandbox; do
     bash tests/eval/baselines/$bl/run.sh --workload $wl --dry-run \
       --out /tmp/smoke-$wl-$bl.csv
   done
