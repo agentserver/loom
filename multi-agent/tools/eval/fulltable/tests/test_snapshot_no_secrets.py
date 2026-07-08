@@ -14,7 +14,11 @@ SNAPSHOT = FULLTABLE_DIR / "tests" / "dry_run_snapshot.txt"
 # Ordered from most-common → most-specific so failure message is useful.
 LEAK_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("openai/anthropic sk-", re.compile(r"sk-[A-Za-z0-9_\-]{6,}")),
-    ("github token", re.compile(r"gh[opsruA-Z]_[A-Za-z0-9]{20,}")),
+    # Fresh-review P2 fix: the actual GitHub token prefixes are
+    # exactly `ghp_ ghs_ gho_ ghr_ ghu_ ghc_` (lowercase). The earlier
+    # class `[opsruA-Z]` folded in every uppercase A-Z and expanded the
+    # match past the real grammar (not a bypass, but noisy on hits).
+    ("github token", re.compile(r"gh[opsruc]_[A-Za-z0-9]{20,}")),
     ("bearer token", re.compile(r"Bearer\s+[A-Za-z0-9._\-]+", re.IGNORECASE)),
     ("refresh token literal", re.compile(r"refresh_token", re.IGNORECASE)),
     ("root path", re.compile(r"/root/")),

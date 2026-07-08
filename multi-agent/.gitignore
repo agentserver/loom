@@ -64,3 +64,6 @@ tests/claude_driver/.mcp.json
 
 # WT-4 — per-workload experiments results (plan §Task 13.5)
 tests/eval/results/experiments/
+
+# Stray build artifact from top-level go build
+/single_machine_codex

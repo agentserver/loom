@@ -35,6 +35,13 @@ smoke_root_abs="$module_root/tests/eval/results/smoke"
 smoke_root_rel="tests/eval/results/smoke"           # from module_root
 export PYTHONPATH="$fulltable_dir:${PYTHONPATH:-}"
 
+# Fresh-review P2: under `set -u`, referencing `$HOME` when HOME is
+# unset (e.g. CI running under systemd with `PrivateHome`) aborts the
+# script BEFORE any results-root guard fires — turning a security
+# refusal into a cryptic "HOME: unbound variable". Bind a safe default
+# once, then use $home in the case patterns below.
+home="${HOME:-/nonexistent-home}"
+
 usage() {
   cat <<'EOF' >&2
 Usage:
@@ -66,6 +73,7 @@ dry_flag=0
 workload=""
 workload_count=0
 results_root=""
+results_root_count=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -77,8 +85,8 @@ while [[ $# -gt 0 ]]; do
     --parallel=*) parallel="${1#--parallel=}"; shift ;;
     --workload) workload="$2"; workload_count=$((workload_count + 1)); shift 2 ;;
     --workload=*) workload="${1#--workload=}"; workload_count=$((workload_count + 1)); shift ;;
-    --results-root) results_root="$2"; shift 2 ;;
-    --results-root=*) results_root="${1#--results-root=}"; shift ;;
+    --results-root) results_root="$2"; results_root_count=$((results_root_count + 1)); shift 2 ;;
+    --results-root=*) results_root="${1#--results-root=}"; results_root_count=$((results_root_count + 1)); shift ;;
     --inject-fake-failure-on-row) inject_row="$2"; shift 2 ;;
     --inject-fake-failure-on-row=*) inject_row="${1#--inject-fake-failure-on-row=}"; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -136,18 +144,26 @@ fi
 # --results-root override: validate + rewrite smoke_root_* if set.
 # Belt-side of plan.py's _validate_results_root — this fires BEFORE
 # any mkdir so a bad path can't create partial state.
+#
+# Fresh-review P1: reject an explicitly-passed empty value. If the
+# caller wrote `--results-root ''`, that is a bug, not a silent
+# fallback to the default smoke root.
+if (( results_root_count > 0 )) && [[ -z "$results_root" ]]; then
+  echo "run.sh: --results-root requires a non-empty absolute path" >&2
+  exit 2
+fi
 if [[ -n "$results_root" ]]; then
   case "$results_root" in
     /*) : ;;
     *) echo "run.sh: --results-root must be absolute; got $results_root" >&2; exit 2 ;;
   esac
   case "$results_root" in
-    /|/tmp|/root|"$HOME"|"$HOME/.codex") \
+    /|/tmp|/root|"$home"|"$home/.codex") \
       echo "run.sh: --results-root $results_root is an unsafe root; refusing" >&2; exit 2 ;;
   esac
   case "$results_root" in
     /tmp/*) echo "run.sh: --results-root under /tmp is unsafe; refusing" >&2; exit 2 ;;
-    "$HOME/.codex/"*) echo "run.sh: --results-root $results_root resolves under \$HOME/.codex/; refusing" >&2; exit 2 ;;
+    "$home/.codex/"*) echo "run.sh: --results-root $results_root resolves under \$HOME/.codex/; refusing" >&2; exit 2 ;;
   esac
   # Canonicalize (realpath -m first, python3 fallback). Refuse if both fail.
   resolved=""
@@ -161,13 +177,26 @@ if [[ -n "$results_root" ]]; then
     echo "run.sh: --results-root $results_root cannot be canonicalized; refusing" >&2; exit 2
   fi
   case "$resolved" in
-    /|/tmp|/tmp/*|/root|"$HOME"|"$HOME/.codex"|"$HOME/.codex/"*) \
+    /|/tmp|/tmp/*|/root|"$home"|"$home/.codex"|"$home/.codex/"*) \
       echo "run.sh: --results-root $results_root resolves to unsafe $resolved; refusing" >&2; exit 2 ;;
   esac
-  # git-repo top-level rejection
-  if git_top="$(cd "$resolved" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)"; then
-    if [[ "$resolved" == "$git_top" ]]; then
-      echo "run.sh: --results-root $results_root is a git repository top-level; refusing" >&2; exit 2
+  # git-repo top-level rejection.
+  # Fresh-review P1: `cd "$resolved"` fails when $resolved doesn't yet
+  # exist (common for a fresh --results-root), so git_top would stay
+  # empty and the check silently no-ops. Mirror plan.py: probe from
+  # $resolved when it exists, else from its parent (walk up until a
+  # dir exists).
+  git_probe_dir="$resolved"
+  while [[ -n "$git_probe_dir" && ! -d "$git_probe_dir" ]]; do
+    parent="$(dirname "$git_probe_dir")"
+    [[ "$parent" == "$git_probe_dir" ]] && break
+    git_probe_dir="$parent"
+  done
+  if [[ -d "$git_probe_dir" ]]; then
+    if git_top="$(cd "$git_probe_dir" && git rev-parse --show-toplevel 2>/dev/null)"; then
+      if [[ -n "$git_top" && "$resolved" == "$git_top" ]]; then
+        echo "run.sh: --results-root $results_root is a git repository top-level; refusing" >&2; exit 2
+      fi
     fi
   fi
   # Non-empty target unless --resume

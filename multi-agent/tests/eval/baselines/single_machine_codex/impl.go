@@ -26,13 +26,19 @@ import (
 // Modifying internal/secretscrub is out-of-scope for a rename PR; we
 // pre-scrub Bearer locally, then let Sanitize handle the rest.
 //
-// Regex: `Bearer ` (case-insensitive) followed by 8+ chars from the
-// standard OAuth 2 Bearer token character class ([A-Za-z0-9._~+/-]+
-// with optional trailing `=` per RFC 6750 §2.1). 8+ is loose enough
-// to catch test-shaped values while keeping false positives cheap
-// (redaction to [REDACTED] is idempotent so a false positive is a
-// harmless cosmetic swap).
-var bearerRE = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+/\-]{8,}=*`)
+// Regex: `Bearer` (case-insensitive) followed by ANY separator run of
+// whitespace / `:` / `=` (HTTP header dumps use `Authorization: Bearer …`
+// while curl-style dumps use `Bearer=…`, and JSON dumps use
+// `"Bearer <token>"`) followed by 8+ chars from the standard OAuth 2
+// Bearer token character class ([A-Za-z0-9._~+/-]+ with optional
+// trailing `=` per RFC 6750 §2.1). 8+ is loose enough to catch
+// test-shaped values while keeping false positives cheap (redaction
+// to [REDACTED] is idempotent so a false positive is a harmless
+// cosmetic swap).
+//
+// Fresh-review P1: earlier `Bearer\s+` form missed `Bearer=…` and
+// `Bearer:…` diagnostics — now covers all three separator styles.
+var bearerRE = regexp.MustCompile(`(?i)Bearer[\s:=]+[A-Za-z0-9._~+/\-]{8,}=*`)
 
 func scrubStderr(s string) string {
 	// Pre-scrub Bearer prefix (secretscrub.Sanitize does not),

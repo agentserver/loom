@@ -78,12 +78,6 @@ E4_CONFIGURATIONS: tuple[str, ...] = (
     "NoRegistryLookup",
 )
 
-# WORKLOADS is defined once at line 33 (top-of-constants). This block
-# adds the `filter_workload`/UnknownWorkloadError helpers around it —
-# do NOT re-define WORKLOADS here; a second literal would silently
-# drift from the first.
-
-
 class UnknownWorkloadError(ValueError):
     """Raised by filter_workload() when the id is not in WORKLOADS."""
 

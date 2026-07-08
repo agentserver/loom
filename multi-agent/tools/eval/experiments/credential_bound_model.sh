@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tools/eval/experiments/cross_device_code_mod.sh
+# tools/eval/experiments/credential_bound_model.sh
 # Per-workload runner for credential-bound-model.
 # Pins workload_id. Forwards to tools/eval/fulltable/run.sh.
 set -euo pipefail

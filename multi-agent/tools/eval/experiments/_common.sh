@@ -16,8 +16,13 @@
 
 # Where's the codex config? Real code uses ~/.codex/config.toml; tests
 # override via LOOM_CODEX_CONFIG_PATH.
+# TEST SEAM: LOOM_CODEX_CONFIG_PATH overrides the default path.
+# Fresh-review P2: fall back to a stable placeholder when HOME is
+# unset (systemd PrivateHome / sandbox) so `set -u` doesn't abort
+# BEFORE codex_config_readable can return 2 cleanly.
 _codex_config_path() {
-  printf '%s\n' "${LOOM_CODEX_CONFIG_PATH:-$HOME/.codex/config.toml}"
+  local home="${HOME:-/nonexistent-home}"
+  printf '%s\n' "${LOOM_CODEX_CONFIG_PATH:-$home/.codex/config.toml}"
 }
 
 codex_bin_present() {

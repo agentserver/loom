@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tools/eval/experiments/cross_device_code_mod.sh
+# tools/eval/experiments/missing_parser_converter.sh
 # Per-workload runner for missing-parser-converter.
 # Pins workload_id. Forwards to tools/eval/fulltable/run.sh.
 set -euo pipefail

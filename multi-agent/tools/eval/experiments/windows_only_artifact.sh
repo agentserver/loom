@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tools/eval/experiments/cross_device_code_mod.sh
+# tools/eval/experiments/windows_only_artifact.sh
 # Per-workload runner for windows-only-artifact.
 # Pins workload_id. Forwards to tools/eval/fulltable/run.sh.
 set -euo pipefail

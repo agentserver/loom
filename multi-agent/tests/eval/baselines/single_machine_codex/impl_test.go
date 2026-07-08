@@ -164,6 +164,13 @@ exit 0
 	if len(lines) != 10 {
 		t.Fatalf("argv length: want 10 got %d\nargv=%q", len(lines), lines)
 	}
+	// Fresh-review P2: guard `-C` position BEFORE dereferencing lines[7]
+	// as ws.Root. Without this, a future flag reorder that moves `-C`
+	// away from position 6 would fail on the DeepEqual with a confusing
+	// "prompt drift" diff instead of a clear "-C moved" message.
+	if lines[6] != "-C" {
+		t.Fatalf("-C expected at argv[6], got %q; argv=%q", lines[6], lines)
+	}
 	wsRoot := lines[7]
 	if !filepath.IsAbs(wsRoot) {
 		t.Errorf("-C target must be absolute path; got %q", wsRoot)
@@ -193,12 +200,16 @@ func TestSingleMachineCodex_ScrubsStderr_NonzeroExit(t *testing.T) {
 	fake := filepath.Join(dir, "codex")
 	// impl.go wraps secretscrub.Sanitize with a local Bearer pre-scrub
 	// (spec §5: Bearer + sk-* + ghp_* are all stderr leak shapes that
-	// MUST redact). Test all three patterns.
+	// MUST redact). Test all three separator styles for Bearer
+	// (space / `=` / `:`) — fresh-review P1 fix on the earlier `\s+`
+	// only regex.
 	script := `#!/bin/sh
 printf 'boot line 1\n' >&2
 printf 'ERROR sk-abc123DEFabcDEFabcDEFabcDEF leak\n' >&2
 printf 'ERROR ghp_abcDEFabcDEFabcDEFabcDEFabcDEFabcDEF leak\n' >&2
-printf 'ERROR Bearer bar_baz_qux_secret_val_1234567890 leak\n' >&2
+printf 'ERROR Bearer space_sep_secret_bar_baz_qux_1234567890 leak\n' >&2
+printf 'ERROR Bearer=equals_sep_secret_bar_baz_qux_1234567890 leak\n' >&2
+printf 'ERROR Bearer:colon_sep_secret_bar_baz_qux_1234567890 leak\n' >&2
 exit 42
 `
 	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
@@ -230,7 +241,10 @@ exit 42
 	// BaselineRunRow has no stderr field; scrubbed subprocess stderr
 	// surfaces only via the wrapped %w error.
 	errStr := res.Err.Error()
-	for _, banned := range []string{"sk-abc123", "ghp_abcDEF", "bar_baz_qux_secret"} {
+	for _, banned := range []string{
+		"sk-abc123", "ghp_abcDEF",
+		"space_sep_secret", "equals_sep_secret", "colon_sep_secret",
+	} {
 		if strings.Contains(errStr, banned) {
 			t.Errorf("scrub failed: substring %q leaked into error; err=%q", banned, errStr)
 		}
