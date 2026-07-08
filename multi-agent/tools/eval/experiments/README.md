@@ -32,8 +32,8 @@ preflight, and forwards remaining args to
 ## Security notes
 
 - Preflight NEVER invokes `codex`. Only `command -v codex >/dev/null`.
-- Config parsing is read-only (via `python3 tomllib`) and NEVER prints keys or values — only `present` / `absent` / `error`.
-- Wrappers write only under `--results-root <dir>` (allowlisted) and their own `mktemp -d` handles. The default results-root is `<git-root>/multi-agent/tests/eval/results/experiments/<workload>/<isodate>-<pid>/` which is `.gitignored`.
+- Config parsing is read-only (via `python3 tomllib`). Helpers emit only `present` / `absent` / `error` — the wrappers never print the configured token value or the configured env-var name. (Static key names like `experimental_bearer_token` appear in wrapper messages as documentation, not as values.)
+- Wrappers write only under `--results-root <dir>` (allowlisted). The default results-root is `<git-root>/multi-agent/tests/eval/results/experiments/<workload>/<isodate>-<pid>/` which is `.gitignored`.
 - Route (b) [`env_key`] is DETECTED for operator visibility but DECLARED UNSUPPORTED in this PR — see spec §4.4 + handoff.
 
 ## Test seams
