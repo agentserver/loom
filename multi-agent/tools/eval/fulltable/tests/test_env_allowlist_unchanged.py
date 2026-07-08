@@ -135,6 +135,7 @@ def _find_var_body(text: str, name: str) -> str | None:
     depth = 0
     start = i
     in_string = False
+    in_raw = False
     escape = False
     while i < len(scrubbed):
         c = scrubbed[i]
@@ -145,9 +146,19 @@ def _find_var_body(text: str, name: str) -> str | None:
                 escape = True
             elif c == '"':
                 in_string = False
+        elif in_raw:
+            # Fresh-review r3 P1: raw strings `…` may contain `}`.
+            # Without this state, `raw with } brace` fake-closes the
+            # walker mid-block — evil keys added AFTER become invisible.
+            # Go raw strings have NO escape sequences; only the
+            # terminating backtick ends them.
+            if c == "`":
+                in_raw = False
         else:
             if c == '"':
                 in_string = True
+            elif c == "`":
+                in_raw = True
             elif c == "{":
                 depth += 1
             elif c == "}":
@@ -159,9 +170,13 @@ def _find_var_body(text: str, name: str) -> str | None:
 
 
 def _extract_string_literals(body: str) -> list[str]:
-    """Return every double-quoted string literal in `body`. Handles
-    escape sequences (skips `\\"` so escaped quotes don't split a
+    """Return every string literal in `body` — both double-quoted
+    (`"…"`) and raw (`` `…` ``). Handles escape sequences in
+    double-quoted strings (skips `\\"` so escaped quotes don't split a
     literal). Sorted for stable comparison.
+
+    Fresh-review r3 P1: raw strings need to be extracted so a tamper
+    using `` `EVIL_KEY` `` as an allowlist entry is caught.
     """
     out: list[str] = []
     i = 0
@@ -178,6 +193,14 @@ def _extract_string_literals(body: str) -> list[str]:
                 if c == '"':
                     break
                 buf.append(c)
+                j += 1
+            out.append("".join(buf))
+            i = j + 1
+        elif body[i] == "`":
+            j = i + 1
+            buf = []
+            while j < len(body) and body[j] != "`":
+                buf.append(body[j])
                 j += 1
             out.append("".join(buf))
             i = j + 1
@@ -335,6 +358,41 @@ var perWorkloadAllowedEnvKeys = map[string][]string{}
     ext = _extract_allowlists(tampered)
     assert "EVIL_KEY" in ext["alwaysAllowedEnvKeys"], (
         f"block-comment bypass regression; got {ext['alwaysAllowedEnvKeys']!r}"
+    )
+
+
+def test_extractor_catches_tampered_with_brace_in_raw_string() -> None:
+    """Fresh-review r3 P1 regression — Go raw strings `…` can contain
+    `}`. Without in_raw state in the brace walker, `raw with } brace`
+    fake-closes the walker mid-block; evil keys added AFTER become
+    invisible. Attacker who also removes an existing key can hold the
+    extracted length constant and slip a real allowlist change past
+    the anti-drift comparison.
+
+    Verified: `go run` accepts a `[]string{"PATH", ` + "`raw with } brace`" +
+    `, "EVIL_KEY"}` literal (raw strings are valid slice elements), so
+    this tamper is a real compile-clean bypass.
+    """
+    tampered = (
+        "package harness\n\n"
+        "var alwaysAllowedEnvKeys = []string{\n"
+        '\t"PATH",\n'
+        "\t`raw with } brace`,\n"
+        '\t"EVIL_KEY",\n'
+        "}\n\n"
+        "var alwaysAllowedIfSetEnvKeys = []string{}\n\n"
+        "var perWorkloadAllowedEnvKeys = map[string][]string{}\n"
+    )
+    ext = _extract_allowlists(tampered)
+    assert "EVIL_KEY" in ext["alwaysAllowedEnvKeys"], (
+        f"raw-string-brace bypass regression — ``…}}…`` inside "
+        f"the block terminated the walker early; got "
+        f"{ext['alwaysAllowedEnvKeys']!r}"
+    )
+    # And the raw-string entry itself should be extracted.
+    assert "raw with } brace" in ext["alwaysAllowedEnvKeys"], (
+        f"raw-string entries must be extracted alongside `\"…\"`; got "
+        f"{ext['alwaysAllowedEnvKeys']!r}"
     )
 
 
