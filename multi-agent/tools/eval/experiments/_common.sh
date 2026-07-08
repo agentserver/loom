@@ -106,7 +106,13 @@ require_fixture() {
 }
 
 require_windows_host() {
-  case "$(uname -s 2>/dev/null || echo unknown)" in
+  # Guard against missing `uname` explicitly (bash "command -v" is a
+  # shell builtin, doesn't need PATH).
+  local out=""
+  if command -v uname >/dev/null 2>&1; then
+    out="$(uname -s 2>/dev/null || true)"
+  fi
+  case "$out" in
     *NT*|MSYS*|CYGWIN*|MINGW*) return 0 ;;
     *) return 1 ;;
   esac
