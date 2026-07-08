@@ -34,30 +34,110 @@ _KNOWN_LISTS = (
 )
 
 
+def _strip_go_comments(text: str) -> str:
+    """Replace every `//…\\n` and `/*…*/` comment in `text` with an
+    equivalent-length span of spaces (preserving newlines and offsets),
+    so a subsequent brace / quote walk sees comments as whitespace.
+
+    Fresh-review r2 P1: without this pre-pass, tampered source like
+
+        alwaysAllowedEnvKeys = []string{
+            "PATH",
+            // }
+            "EVIL_KEY",
+        }
+
+    compiles fine in Go (the `}` is inside the comment) but the brace
+    walker treated the comment `}` as the real close, silently missing
+    `EVIL_KEY`. Same bypass with `/* } */`. String literals are still
+    honored (a `//` inside `"…"` is data, not a comment).
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        # Enter a string literal — copy verbatim through the terminator.
+        if c == '"':
+            out.append(c)
+            i += 1
+            while i < n:
+                d = text[i]
+                if d == "\\" and i + 1 < n:
+                    out.append(text[i : i + 2])
+                    i += 2
+                    continue
+                out.append(d)
+                i += 1
+                if d == '"':
+                    break
+            continue
+        # Enter a raw string (`…`).
+        if c == "`":
+            out.append(c)
+            i += 1
+            while i < n:
+                d = text[i]
+                out.append(d)
+                i += 1
+                if d == "`":
+                    break
+            continue
+        # Line comment.
+        if c == "/" and i + 1 < n and text[i + 1] == "/":
+            # Blank out until end-of-line (keep the newline).
+            j = i
+            while j < n and text[j] != "\n":
+                j += 1
+            out.append(" " * (j - i))
+            i = j
+            continue
+        # Block comment.
+        if c == "/" and i + 1 < n and text[i + 1] == "*":
+            j = i + 2
+            while j + 1 < n and not (text[j] == "*" and text[j + 1] == "/"):
+                j += 1
+            end = min(j + 2, n)
+            # Preserve newlines inside the block so line numbers /
+            # anchors elsewhere don't shift.
+            blanked = "".join(ch if ch == "\n" else " " for ch in text[i:end])
+            out.append(blanked)
+            i = end
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def _find_var_body(text: str, name: str) -> str | None:
     """Locate `var? <name> = ...{...}` and return the body between the
     first `{` and its matching `}`. Handles nested braces (needed for
     `map[string][]string{"k": {"v1", "v2"}}`), skips over string
     literals so `"}"` inside a string doesn't confuse the matcher.
+
+    Fresh-review r2 P1: strips Go comments FIRST so a `}` inside `//`
+    or `/* */` cannot terminate the walk early — a specific tamper
+    shape that previously slipped past the comparison test.
     """
-    # Anchor on `name` followed by `=` (allow whitespace / linebreaks).
-    # `var` may or may not appear on the same line.
     import re
-    anchor = re.search(rf"(?:^|\n)\s*(?:var\s+)?{re.escape(name)}\s*=\s*", text)
+    # Strip comments up-front — cannot use the raw source because a
+    # `}` inside a `// …` line terminates the walk one step too early.
+    scrubbed = _strip_go_comments(text)
+    anchor = re.search(rf"(?:^|\n)\s*(?:var\s+)?{re.escape(name)}\s*=\s*", scrubbed)
     if not anchor:
         return None
     i = anchor.end()
     # Advance to the first `{`.
-    while i < len(text) and text[i] != "{":
+    while i < len(scrubbed) and scrubbed[i] != "{":
         i += 1
-    if i == len(text):
+    if i == len(scrubbed):
         return None
     depth = 0
     start = i
     in_string = False
     escape = False
-    while i < len(text):
-        c = text[i]
+    while i < len(scrubbed):
+        c = scrubbed[i]
         if in_string:
             if escape:
                 escape = False
@@ -73,7 +153,7 @@ def _find_var_body(text: str, name: str) -> str | None:
             elif c == "}":
                 depth -= 1
                 if depth == 0:
-                    return text[start + 1 : i]
+                    return scrubbed[start + 1 : i]
         i += 1
     return None
 
@@ -206,4 +286,80 @@ var perWorkloadAllowedEnvKeys = map[string][]string{
     assert orig_ext != tamp_ext, (
         "extractor returned identical results for original and tampered "
         "source — the anti-drift test is silently useless."
+    )
+
+
+def test_extractor_catches_tampered_with_brace_in_line_comment() -> None:
+    """Fresh-review r2 P1 regression — a Go `//` comment containing a
+    `}` used to terminate the brace walker early, silently missing keys
+    added AFTER the fake close (Go compiles fine because the `}` is
+    inside the comment).
+    """
+    tampered = """\
+package harness
+
+var alwaysAllowedEnvKeys = []string{
+\t"PATH",
+\t"HOME",
+\t// spurious close: }
+\t"EVIL_KEY",
+}
+
+var alwaysAllowedIfSetEnvKeys = []string{}
+
+var perWorkloadAllowedEnvKeys = map[string][]string{}
+"""
+    ext = _extract_allowlists(tampered)
+    assert "EVIL_KEY" in ext["alwaysAllowedEnvKeys"], (
+        f"comment-bypass regression — `// }}` inside the block "
+        f"terminated the walker early; got {ext['alwaysAllowedEnvKeys']!r}"
+    )
+
+
+def test_extractor_catches_tampered_with_brace_in_block_comment() -> None:
+    """Same regression, block-comment variant: `/* } */` inside the
+    block used to fake-close the walker."""
+    tampered = """\
+package harness
+
+var alwaysAllowedEnvKeys = []string{
+\t"PATH",
+\t/* spurious } close */
+\t"EVIL_KEY",
+}
+
+var alwaysAllowedIfSetEnvKeys = []string{}
+
+var perWorkloadAllowedEnvKeys = map[string][]string{}
+"""
+    ext = _extract_allowlists(tampered)
+    assert "EVIL_KEY" in ext["alwaysAllowedEnvKeys"], (
+        f"block-comment bypass regression; got {ext['alwaysAllowedEnvKeys']!r}"
+    )
+
+
+def test_extractor_honors_brace_inside_string_literal() -> None:
+    """String literals containing `}` must NOT terminate the walk."""
+    tampered = """\
+package harness
+
+var alwaysAllowedEnvKeys = []string{
+\t"PATH",
+\t"HAS_BRACE_}",
+\t"HOME",
+}
+
+var alwaysAllowedIfSetEnvKeys = []string{}
+
+var perWorkloadAllowedEnvKeys = map[string][]string{}
+"""
+    ext = _extract_allowlists(tampered)
+    assert "HAS_BRACE_}" in ext["alwaysAllowedEnvKeys"], (
+        f"string-literal `}}` broke the walker; got {ext['alwaysAllowedEnvKeys']!r}"
+    )
+    # And the walker must have seen HOME (i.e., the string-literal `}`
+    # didn't fake-close the block).
+    assert "HOME" in ext["alwaysAllowedEnvKeys"], (
+        f"walker terminated at string-literal `}}`; missed HOME; "
+        f"got {ext['alwaysAllowedEnvKeys']!r}"
     )

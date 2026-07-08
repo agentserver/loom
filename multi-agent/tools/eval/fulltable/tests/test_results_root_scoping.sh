@@ -35,4 +35,27 @@ if ! echo "$out" | grep -q "SHIM_RESULTS_ROOT: $alt_root"; then
   exit 1
 fi
 
+# Fresh-review r2 P2 gap: --results-root '' MUST be rejected. Empty
+# argument bypasses the validation block silently (falls through to
+# default smoke root) unless the counter-based guard fires.
+tmpdir=$(mktemp -d)
+trap "rm -rf '$alt_root' '$tmpdir'" EXIT
+
+if bash "$run_sh" --results-root '' --workload cross-device-code-mod --dry-run \
+    > "$tmpdir/empty.out" 2>&1; then
+  echo "FAIL: --results-root '' accepted; should exit 2"
+  cat "$tmpdir/empty.out"
+  exit 1
+fi
+grep -q -e "--results-root requires a non-empty" "$tmpdir/empty.out" \
+  || { echo "FAIL: --results-root '' missing rejection message"; cat "$tmpdir/empty.out"; exit 1; }
+
+# Equals form too.
+if bash "$run_sh" --results-root= --workload cross-device-code-mod --dry-run \
+    > "$tmpdir/empty2.out" 2>&1; then
+  echo "FAIL: --results-root= (equals empty) accepted; should exit 2"
+  cat "$tmpdir/empty2.out"
+  exit 1
+fi
+
 echo "OK"
