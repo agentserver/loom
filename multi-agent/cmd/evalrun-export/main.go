@@ -19,7 +19,9 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// columnNames is the 24-column header in the order defined by
+const runsColumnCount = 26
+
+// columnNames is the 26-column header in the order defined by
 // docs/specs/wt1-run-schema.spec.md §3. The CLI is intentionally
 // dependency-free with respect to internal/evalrun beyond this list —
 // it does NOT call into the Writer; it just reads the runs table.
@@ -48,6 +50,8 @@ var columnNames = []string{
 	"artifact_hashes",
 	"observer_trace_path",
 	"model_trace_id",
+	"model_input_tokens",
+	"model_output_tokens",
 }
 
 // usageError is exit code 2 — bad arguments. runtimeError is exit 1.
@@ -183,7 +187,7 @@ const (
 	selectRunsFilterSQL = `SELECT ` + columnSelectList + ` FROM runs WHERE experiment_id = ? ORDER BY run_id`
 )
 
-// columnSelectList is the 24-column projection in the canonical order.
+// columnSelectList is the 26-column projection in the canonical order.
 // Constant so the SELECT statements above are pure literals; refactors
 // that touch column order must update this AND the Insert path AND
 // schema.sql in lock-step.
@@ -193,7 +197,8 @@ machine_topology, context_ground_truth, capability_snapshot_hash,
 task_contract_hash, dynamic_mcp_registry_hash, selected_context,
 ground_truth_context, start_time, end_time, success_oracle_result,
 failure_category, human_intervention_count, artifact_hashes,
-observer_trace_path, model_trace_id`
+observer_trace_path, model_trace_id, model_input_tokens,
+model_output_tokens`
 
 // queryRuns runs the appropriate SELECT and returns *sql.Rows.
 func queryRuns(ctx context.Context, db *sql.DB, filterExperiment string) (*sql.Rows, error) {
@@ -203,37 +208,40 @@ func queryRuns(ctx context.Context, db *sql.DB, filterExperiment string) (*sql.R
 	return db.QueryContext(ctx, selectRunsFilterSQL, filterExperiment)
 }
 
-// humanCountIdx is the canonical position of human_intervention_count
-// in the 24-column ordering. The CSV path treats this column like the
-// others (string round-trip via strconv); the JSONL path emits it as
-// a JSON number.
-const humanCountIdx = 20
+// Canonical positions of INTEGER columns. The CSV path treats these
+// columns like the others (string round-trip via strconv); the JSONL
+// path emits them as JSON numbers.
+const (
+	humanCountIdx        = 20
+	modelInputTokensIdx  = 24
+	modelOutputTokensIdx = 25
+)
 
-// runRow holds one scanned row as 24 string cells. human_intervention_count
-// is the only non-string column; it's converted to its decimal string
-// form in scanOneRow so CSV/JSONL writers can decide whether to quote
-// or emit as a number.
+// runRow holds one scanned row as string cells. INTEGER columns are
+// converted to decimal string form in scanOneRow so CSV/JSONL writers
+// can decide whether to quote or emit as numbers.
 type runRow struct {
-	values [24]string
+	values [runsColumnCount]string
 }
 
 func scanOneRow(rows *sql.Rows) (*runRow, error) {
 	var (
 		r runRow
-		// int64 (not int) so a row written with
-		// human_intervention_count > 2^31 on a 32-bit build doesn't
-		// silently truncate to a negative number. SQLite INTEGER is
-		// up to 8 bytes signed; the column NOT NULL DEFAULT 0 means
-		// Scan never sees NULL — drift guard catches the NULL-able
-		// drift variant separately.
-		humanCount int64
-		// 24 dest pointers in the canonical order.
-		dest [24]any
+		// int64 (not int) so a row written with an SQLite INTEGER
+		// > 2^31 on a 32-bit build doesn't silently truncate.
+		humanCount, modelInputTokens, modelOutputTokens int64
+		// dest pointers in the canonical order.
+		dest [runsColumnCount]any
 	)
-	for i := 0; i < 24; i++ {
-		if i == humanCountIdx {
+	for i := 0; i < runsColumnCount; i++ {
+		switch i {
+		case humanCountIdx:
 			dest[i] = &humanCount
-		} else {
+		case modelInputTokensIdx:
+			dest[i] = &modelInputTokens
+		case modelOutputTokensIdx:
+			dest[i] = &modelOutputTokens
+		default:
 			dest[i] = &r.values[i]
 		}
 	}
@@ -241,6 +249,8 @@ func scanOneRow(rows *sql.Rows) (*runRow, error) {
 		return nil, err
 	}
 	r.values[humanCountIdx] = strconv.FormatInt(humanCount, 10)
+	r.values[modelInputTokensIdx] = strconv.FormatInt(modelInputTokens, 10)
+	r.values[modelOutputTokensIdx] = strconv.FormatInt(modelOutputTokens, 10)
 	return &r, nil
 }
 
@@ -261,7 +271,7 @@ func exportCSV(ctx context.Context, db *sql.DB, w io.Writer, filterExperiment st
 		if err != nil {
 			return fmt.Errorf("scan row: %w", err)
 		}
-		escaped := make([]string, 24)
+		escaped := make([]string, runsColumnCount)
 		for i, v := range r.values {
 			escaped[i] = csvEscape(v)
 		}
@@ -295,8 +305,8 @@ func csvEscape(s string) string {
 }
 
 // exportJSONL writes one JSON object per line. Key order matches
-// columnNames; human_intervention_count is emitted as a number, all
-// other fields as strings.
+// columnNames; INTEGER columns are emitted as numbers, all other
+// fields as strings.
 func exportJSONL(ctx context.Context, db *sql.DB, w io.Writer, filterExperiment string) error {
 	rows, err := queryRuns(ctx, db, filterExperiment)
 	if err != nil {
@@ -324,9 +334,9 @@ func exportJSONL(ctx context.Context, db *sql.DB, w io.Writer, filterExperiment 
 }
 
 // orderedJSONLine custom-marshals one row preserving columnNames order
-// and emitting human_intervention_count as a JSON number.
+// and emitting INTEGER columns as JSON numbers.
 type orderedJSONLine struct {
-	values [24]string
+	values [runsColumnCount]string
 }
 
 func (o orderedJSONLine) MarshalJSON() ([]byte, error) {
@@ -344,13 +354,10 @@ func (o orderedJSONLine) MarshalJSON() ([]byte, error) {
 		buf = append(buf, keyJSON...)
 		buf = append(buf, ':')
 		// value
-		if i == humanCountIdx {
-			// human_intervention_count: numeric. scanOneRow built this
-			// via strconv.FormatInt(_, 10) on an int64, so it is always
-			// a JSON-grammar-conformant decimal integer (sign + digits,
-			// no whitespace, no exponent). Direct append into the JSON
-			// stream is therefore safe — no escaping or re-encoding
-			// pass needed.
+		if isJSONNumberColumn(i) {
+			// Numeric columns are built via strconv.FormatInt(_, 10)
+			// on int64, so they are always JSON-grammar-conformant
+			// decimal integers. Direct append is safe.
 			buf = append(buf, []byte(o.values[i])...)
 		} else {
 			vJSON, err := json.Marshal(o.values[i])
@@ -362,4 +369,13 @@ func (o orderedJSONLine) MarshalJSON() ([]byte, error) {
 	}
 	buf = append(buf, '}')
 	return buf, nil
+}
+
+func isJSONNumberColumn(i int) bool {
+	switch i {
+	case humanCountIdx, modelInputTokensIdx, modelOutputTokensIdx:
+		return true
+	default:
+		return false
+	}
 }
