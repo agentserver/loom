@@ -61,3 +61,6 @@ testdata/fake-mcp-stdio/fake-mcp-stdio
 /tests/prod_test/multidevice/**/*.pyc
 /tests/prod_test/multidevice/.pytest_cache/
 tests/claude_driver/.mcp.json
+
+# WT-4 — per-workload experiments results (plan §Task 13.5)
+tests/eval/results/experiments/
