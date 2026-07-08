@@ -102,7 +102,15 @@ if (( sample_n > 3 )) && [[ "${ALLOW_FULL_RUN:-}" != "1" ]]; then
 fi
 
 # Workload allowlist derived from plan.py (avoids literal duplication).
-if [[ -n "$workload" ]]; then
+# Plan-review Phase C P0: `grep -qx "$workload"` treats $workload as a
+# regex and empty $workload is silently accepted. Fix: iterate the
+# allowlist with EXACT string equality via `[[ ]]`, and reject an
+# explicitly-given `--workload ''` at the count level.
+if (( workload_count > 0 )); then
+  if [[ -z "$workload" ]]; then
+    echo "run.sh: --workload requires a non-empty id" >&2
+    exit 2
+  fi
   allow=$(python3 -m lib.plan \
       --matrix "$fulltable_dir/matrix.yaml" \
       --smoke-root "$smoke_root_rel" \
@@ -111,7 +119,14 @@ if [[ -n "$workload" ]]; then
     echo "$allow" >&2
     exit 2
   }
-  if ! echo "$allow" | grep -qx "$workload"; then
+  match=0
+  while IFS= read -r allowed; do
+    if [[ "$workload" == "$allowed" ]]; then
+      match=1
+      break
+    fi
+  done <<< "$allow"
+  if (( match == 0 )); then
     echo "run.sh: unknown workload id: $workload; expected one of:" >&2
     echo "$allow" >&2
     exit 2

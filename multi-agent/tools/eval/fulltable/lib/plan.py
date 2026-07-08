@@ -78,16 +78,10 @@ E4_CONFIGURATIONS: tuple[str, ...] = (
     "NoRegistryLookup",
 )
 
-# The 5 workload ids, canonical order (Phase 0 §3.1).
-# Emitted by `--list-workloads`; run.sh reads that output to validate
-# --workload arguments against the allowlist (no literal duplication).
-WORKLOADS: tuple[str, ...] = (
-    "cross-device-code-mod",
-    "remote-data-processing",
-    "windows-only-artifact",
-    "missing-parser-converter",
-    "credential-bound-model",
-)
+# WORKLOADS is defined once at line 33 (top-of-constants). This block
+# adds the `filter_workload`/UnknownWorkloadError helpers around it —
+# do NOT re-define WORKLOADS here; a second literal would silently
+# drift from the first.
 
 
 class UnknownWorkloadError(ValueError):

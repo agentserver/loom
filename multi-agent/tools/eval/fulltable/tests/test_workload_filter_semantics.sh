@@ -29,13 +29,33 @@ else
 fi
 
 # 3) SHIM without --dry-run: dual-guard active, SHIM path NOT taken
-if LOOM_FULLTABLE_WRAPPER_SHIM=1 bash "$run_sh" --workload cross-device-code-mod --sample 1 >/tmp/case3.out 2>&1; then
+tmpdir=$(mktemp -d)
+trap "rm -rf '$tmpdir'" EXIT
+
+if LOOM_FULLTABLE_WRAPPER_SHIM=1 bash "$run_sh" --workload cross-device-code-mod --sample 1 >"$tmpdir/case3.out" 2>&1; then
   report 1 "case3: WRAPPER_SHIM without --dry-run should NOT bypass preflight"
-  cat /tmp/case3.out
+  cat "$tmpdir/case3.out"
 else
   report 0 "case3: WRAPPER_SHIM without --dry-run correctly does NOT bypass"
 fi
-rm -f /tmp/case3.out
+
+# 3a) Plan-review Phase C P0: --workload '' MUST be rejected. Otherwise
+# an explicit empty string bypasses filtering silently.
+if bash "$run_sh" --workload '' --dry-run >"$tmpdir/case3a.out" 2>&1; then
+  report 1 "case3a: --workload '' accepted; should exit 2"
+  cat "$tmpdir/case3a.out"
+else
+  report 0 "case3a: --workload '' correctly rejected"
+fi
+
+# 3b) Plan-review Phase C P0: --workload regex '.*' MUST be rejected
+# via EXACT match — grep -qx would treat this as a regex and accept.
+if LOOM_FULLTABLE_WRAPPER_SHIM=1 bash "$run_sh" --workload '.*' --dry-run >"$tmpdir/case3b.out" 2>&1; then
+  report 1 "case3b: --workload '.*' regex accepted; must be exact match rejection"
+  cat "$tmpdir/case3b.out"
+else
+  report 0 "case3b: --workload '.*' regex correctly rejected (exact-match allowlist)"
+fi
 
 # 4) Non-SHIM --workload --dry-run → 12 lines
 out=$(bash "$run_sh" --workload cross-device-code-mod --dry-run 2>&1)
@@ -99,12 +119,17 @@ elif ! echo "$shim_out" | grep -qE "SHIM: would dispatch [0-9]+ rows"; then
   echo "$shim_out"
 else
   rows=$(echo "$shim_out" | grep -oE "would dispatch [0-9]+" | grep -oE "[0-9]+")
-  if [ "$rows" -gt 12 ]; then
-    report 1 "case7: expected ≤12 rows (E4 should skip); got $rows"
-  elif [ "$rows" -lt 11 ]; then
-    report 1 "case7: expected 11 or 12 rows; got $rows"
+  # Plan-review Phase C P1: assert EXACTLY 11 (12 workload rows -
+  # 1 sidecar-matched via ${rk}__*.done glob). Accepting 12 would
+  # let a broken resume-sidecar skip pass silently.
+  if [ "$rows" -ne 11 ]; then
+    report 1 "case7: expected exactly 11 rows (12 workload minus 1 sidecar-matched); got $rows"
+    echo "$shim_out"
+  elif ! echo "$shim_out" | grep -q "resume: skip matrix__credential-bound-model__full_loom"; then
+    report 1 "case7: expected stderr to contain 'resume: skip matrix__credential-bound-model__full_loom'"
+    echo "$shim_out"
   else
-    report 0 "case7: --workload --resume dispatched $rows rows (E4 skipped)"
+    report 0 "case7: --workload --resume dispatched exactly 11 rows + skip line present"
   fi
 fi
 rm -rf "$alt_root" "$clean_repo"
