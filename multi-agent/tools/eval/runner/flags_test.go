@@ -764,12 +764,12 @@ func TestOpts_HasAblationFields(t *testing.T) {
 	}
 }
 
-// TestCSVColumns_IncludesBaselineOrAblation asserts the new column
-// is at the tail of the frozen order.
+// TestCSVColumns_IncludesBaselineOrAblation asserts the column keeps its
+// original append-only position even when later columns are appended.
 func TestCSVColumns_IncludesBaselineOrAblation(t *testing.T) {
 	cols := CSVColumns()
-	if cols[len(cols)-1] != "baseline_or_ablation" {
-		t.Fatalf("baseline_or_ablation not at CSV tail: %v", cols)
+	if cols[31] != "baseline_or_ablation" {
+		t.Fatalf("baseline_or_ablation position drifted: %v", cols)
 	}
 }
 
@@ -862,12 +862,9 @@ func TestRun_LabelDerivedFromApplied_NoAblation(t *testing.T) {
 		t.Errorf("baseline_or_ablation = %q, want %q", res.Row.BaselineOrAblation, DefaultBaselineName)
 	}
 	rows := readCSV(t, opts.OutCSV)
-	last := len(rows[0]) - 1
-	if rows[0][last] != "baseline_or_ablation" {
-		t.Fatalf("CSV last column = %q", rows[0][last])
-	}
-	if rows[1][last] != DefaultBaselineName {
-		t.Errorf("CSV data last cell = %q, want %q", rows[1][last], DefaultBaselineName)
+	gotLabel := csvCellByName(t, rows, "baseline_or_ablation")
+	if gotLabel != DefaultBaselineName {
+		t.Errorf("CSV baseline_or_ablation = %q, want %q", gotLabel, DefaultBaselineName)
 	}
 }
 
@@ -1148,15 +1145,26 @@ func TestMain_ScrubsParentEnvBeforeParse(t *testing.T) {
 	if _, err := os.Stat(outCSV); err == nil {
 		rows := readCSV(t, outCSV)
 		if len(rows) >= 2 {
-			last := len(rows[0]) - 1
-			if rows[0][last] != "baseline_or_ablation" {
-				t.Fatalf("CSV last column = %q", rows[0][last])
-			}
-			if rows[1][last] != DefaultBaselineName {
-				t.Errorf("CSV label = %q, want %q", rows[1][last], DefaultBaselineName)
+			gotLabel := csvCellByName(t, rows, "baseline_or_ablation")
+			if gotLabel != DefaultBaselineName {
+				t.Errorf("CSV label = %q, want %q", gotLabel, DefaultBaselineName)
 			}
 		}
 	}
+}
+
+func csvCellByName(t *testing.T, rows [][]string, name string) string {
+	t.Helper()
+	if len(rows) < 2 {
+		t.Fatalf("CSV needs header and data row, got %d rows", len(rows))
+	}
+	for i, h := range rows[0] {
+		if h == name {
+			return rows[1][i]
+		}
+	}
+	t.Fatalf("CSV column %q missing in %v", name, rows[0])
+	return ""
 }
 
 func TestMain_BaselineNameCollidesWithFlag_Exit2(t *testing.T) {

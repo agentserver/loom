@@ -49,7 +49,7 @@ type columnDesc struct {
 	pk      int // 0 or N for the Nth PK column
 }
 
-// expectedColumns is the source of truth: 24 ordered descriptors that
+// expectedColumns is the source of truth: 26 ordered descriptors that
 // match the §3 DDL and the canonical column order. Any future column
 // change must update this list AND the schema.sql DDL AND the Insert
 // statement column list below in lock-step.
@@ -78,6 +78,8 @@ var expectedColumns = []columnDesc{
 	{cid: 21, name: "artifact_hashes", sqlType: "TEXT", notNull: true, dflt: sql.NullString{String: "'[]'", Valid: true}, pk: 0},
 	{cid: 22, name: "observer_trace_path", sqlType: "TEXT", notNull: true, dflt: sql.NullString{String: "''", Valid: true}, pk: 0},
 	{cid: 23, name: "model_trace_id", sqlType: "TEXT", notNull: true, dflt: sql.NullString{String: "''", Valid: true}, pk: 0},
+	{cid: 24, name: "model_input_tokens", sqlType: "INTEGER", notNull: true, dflt: sql.NullString{String: "0", Valid: true}, pk: 0},
+	{cid: 25, name: "model_output_tokens", sqlType: "INTEGER", notNull: true, dflt: sql.NullString{String: "0", Valid: true}, pk: 0},
 }
 
 // insertSQL is a const so Go's vet sql-style checks see it as a literal
@@ -92,10 +94,11 @@ const insertSQL = `INSERT INTO runs (
 	task_contract_hash, dynamic_mcp_registry_hash, selected_context,
 	ground_truth_context, start_time, end_time, success_oracle_result,
 	failure_category, human_intervention_count, artifact_hashes,
-	observer_trace_path, model_trace_id
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	observer_trace_path, model_trace_id, model_input_tokens,
+	model_output_tokens
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
-// ColumnNames returns the canonical ordered list of 24 column names
+// ColumnNames returns the canonical ordered list of 26 column names
 // (sourced from the same expectedColumns slice the drift guard uses).
 // Exported so out-of-package callers (notably cmd/evalrun-export) can
 // pin their CSV header / SELECT projection to the same SOT, ruling
@@ -111,7 +114,7 @@ func ColumnNames() []string {
 
 // NewSQLWriter wraps *sql.DB into a Writer that targets the runs table.
 // Returns ErrSchemaDrift (wrapped) if the runs table is absent or its
-// column descriptors do not match the expected 24-column layout.
+// column descriptors do not match the expected 26-column layout.
 func NewSQLWriter(db *sql.DB) (Writer, error) {
 	if err := CheckSchemaDrift(db); err != nil {
 		return nil, err
@@ -176,6 +179,8 @@ func (w *SQLWriter) Insert(ctx context.Context, s Schema) error {
 		hashesJSON,
 		s.ObserverTracePath,
 		s.ModelTraceID,
+		s.ModelInputTokens,
+		s.ModelOutputTokens,
 	); err != nil {
 		return fmt.Errorf("evalrun: insert run_id=%s: %w", s.RunID, err)
 	}

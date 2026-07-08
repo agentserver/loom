@@ -55,6 +55,8 @@ func sampleSchema() Schema {
 		SuccessOracleResult:    "pass",
 		FailureCategory:        "",
 		HumanInterventionCount: 0,
+		ModelInputTokens:       0,
+		ModelOutputTokens:      0,
 		ArtifactHashes: []string{
 			"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
