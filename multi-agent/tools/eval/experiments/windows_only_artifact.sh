@@ -48,11 +48,13 @@ done
 set -- ${new_args[@]+"${new_args[@]}"}
 
 # Guard: on non-Windows, either honor the opt-out and exit 0, or fail.
+# Plan-review Phase D P2: capture uname safely (may be missing).
 if ! require_windows_host; then
+  uname_seen="$(command -v uname >/dev/null 2>&1 && uname -s 2>/dev/null || echo missing)"
   if [ "$skip_if_not_windows" -eq 1 ]; then
-    warn_and_exit_zero "wrapper:$WORKLOAD: not a Windows host (uname=$(uname -s)); --skip-if-not-windows honored, exit 0"
+    warn_and_exit_zero "wrapper:$WORKLOAD: not a Windows host (uname=$uname_seen); --skip-if-not-windows honored, exit 0"
   else
-    die "wrapper:$WORKLOAD: requires a Windows host (uname=$(uname -s)); pass --skip-if-not-windows to acknowledge and exit 0"
+    die "wrapper:$WORKLOAD: requires a Windows host (uname=$uname_seen); pass --skip-if-not-windows to acknowledge and exit 0"
   fi
 fi
 

@@ -32,7 +32,12 @@ trap "rm -rf '$tmpdir'" EXIT
 # Fake codex on PATH so codex_bin_present passes without invoking it.
 fake_bin="$tmpdir/bin"
 mkdir -p "$fake_bin"
-touch "$fake_bin/codex"; chmod +x "$fake_bin/codex"
+cat > "$fake_bin/codex" <<'CODEX'
+#!/bin/sh
+echo "IMPOSSIBLE: wrapper invoked codex (preflight must NEVER exec it)" >&2
+exit 99
+CODEX
+chmod +x "$fake_bin/codex"
 
 run_preflight() {
   local fixture="$1"

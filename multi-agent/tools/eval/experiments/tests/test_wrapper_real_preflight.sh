@@ -20,7 +20,12 @@ git -C "$clean_repo" -c user.email=t@t -c user.name=t commit --allow-empty -m in
 
 fake_bin="$tmpdir/bin"
 mkdir -p "$fake_bin"
-touch "$fake_bin/codex"; chmod +x "$fake_bin/codex"
+cat > "$fake_bin/codex" <<'CODEX'
+#!/bin/sh
+echo "IMPOSSIBLE: wrapper invoked codex (preflight must NEVER exec it)" >&2
+exit 99
+CODEX
+chmod +x "$fake_bin/codex"
 export PATH="$fake_bin:$PATH"
 export LOOM_CODEX_CONFIG_PATH="$here/fixtures/codex_config/01_route_a_only.toml"
 
