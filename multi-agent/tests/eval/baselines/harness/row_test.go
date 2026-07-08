@@ -9,7 +9,7 @@ import (
 func TestValidateBaselineName_ValidValues(t *testing.T) {
 	valid := []string{
 		"manual_ssh",
-		"single_machine_claude_code",
+		"single_machine_codex",
 		"cloud_sandbox_e2b",
 		"abc",                         // minimum length 3
 		"x-y-z_1",                     // mixed separators

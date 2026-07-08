@@ -35,6 +35,13 @@ smoke_root_abs="$module_root/tests/eval/results/smoke"
 smoke_root_rel="tests/eval/results/smoke"           # from module_root
 export PYTHONPATH="$fulltable_dir:${PYTHONPATH:-}"
 
+# Fresh-review P2: under `set -u`, referencing `$HOME` when HOME is
+# unset (e.g. CI running under systemd with `PrivateHome`) aborts the
+# script BEFORE any results-root guard fires — turning a security
+# refusal into a cryptic "HOME: unbound variable". Bind a safe default
+# once, then use $home in the case patterns below.
+home="${HOME:-/nonexistent-home}"
+
 usage() {
   cat <<'EOF' >&2
 Usage:
@@ -43,17 +50,17 @@ Usage:
   run.sh --resume [--sample N]    (defaults to --sample 3; skips rows with a
                                    completed sidecar; deletes stale per-row CSVs)
   run.sh --parallel N
-  run.sh --inject-fake-failure-on-row N   (smoke path only; injects
-                                          sk-abc… into that row's stderr)
-
---resume enumerates BOTH the matrix (5×12) and the E4 manifest
-(5×3×4×4) — completed rows in either scope short-circuit uniformly
-via smoke/runs/*.done sidecars (spec §4.5).
+  run.sh --workload <id>          (filter to one workload; at most once)
+  run.sh --results-root <abs-dir> (override results dir; absolute, allowlisted)
+  run.sh --inject-fake-failure-on-row N
 
 Env:
   ALLOW_FULL_RUN=1                allow --sample N > 3
   LOOM_FULLTABLE_DISPATCH_SHIM=1  preflight + print SHIM line; do NOT
                                   exec runner/baseline. Test seam.
+  LOOM_FULLTABLE_WRAPPER_SHIM=1   dual-guard with --dry-run: print
+                                  SHIM_WORKLOAD_FILTER + SHIM_RESULTS_ROOT
+                                  and exit 0 BEFORE preflight.
 EOF
 }
 
@@ -63,6 +70,10 @@ parallel=1
 inject_row=0
 resume=0
 dry_flag=0
+workload=""
+workload_count=0
+results_root=""
+results_root_count=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -72,12 +83,140 @@ while [[ $# -gt 0 ]]; do
     --resume) resume=1; shift ;;
     --parallel) parallel="$2"; shift 2 ;;
     --parallel=*) parallel="${1#--parallel=}"; shift ;;
+    --workload) workload="$2"; workload_count=$((workload_count + 1)); shift 2 ;;
+    --workload=*) workload="${1#--workload=}"; workload_count=$((workload_count + 1)); shift ;;
+    --results-root) results_root="$2"; results_root_count=$((results_root_count + 1)); shift 2 ;;
+    --results-root=*) results_root="${1#--results-root=}"; results_root_count=$((results_root_count + 1)); shift ;;
     --inject-fake-failure-on-row) inject_row="$2"; shift 2 ;;
     --inject-fake-failure-on-row=*) inject_row="${1#--inject-fake-failure-on-row=}"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "run.sh: unknown flag $1" >&2; usage; exit 2 ;;
   esac
 done
+# --- Task 11 additions: --workload / --results-root / SHIM guards --------
+
+# Duplicate --workload rejection (before dispatch, before preflight,
+# before sample-cap check).
+if [[ "$workload_count" -gt 1 ]]; then
+  echo "run.sh: --workload may be given at most once (got $workload_count)" >&2
+  exit 2
+fi
+
+# Sample cap fires BEFORE workload allowlist check, so a
+# --sample 60 --workload junk request always fails on the cap.
+if (( sample_n > 3 )) && [[ "${ALLOW_FULL_RUN:-}" != "1" ]]; then
+  echo "ErrFullRunNotAllowed: --sample N=$sample_n exceeds smoke cap 3; set ALLOW_FULL_RUN=1" >&2
+  exit 2
+fi
+
+# Workload allowlist derived from plan.py (avoids literal duplication).
+# Plan-review Phase C P0: `grep -qx "$workload"` treats $workload as a
+# regex and empty $workload is silently accepted. Fix: iterate the
+# allowlist with EXACT string equality via `[[ ]]`, and reject an
+# explicitly-given `--workload ''` at the count level.
+if (( workload_count > 0 )); then
+  if [[ -z "$workload" ]]; then
+    echo "run.sh: --workload requires a non-empty id" >&2
+    exit 2
+  fi
+  allow=$(python3 -m lib.plan \
+      --matrix "$fulltable_dir/matrix.yaml" \
+      --smoke-root "$smoke_root_rel" \
+      --list-workloads 2>&1) || {
+    echo "run.sh: plan.py --list-workloads failed:" >&2
+    echo "$allow" >&2
+    exit 2
+  }
+  match=0
+  while IFS= read -r allowed; do
+    if [[ "$workload" == "$allowed" ]]; then
+      match=1
+      break
+    fi
+  done <<< "$allow"
+  if (( match == 0 )); then
+    echo "run.sh: unknown workload id: $workload; expected one of:" >&2
+    echo "$allow" >&2
+    exit 2
+  fi
+fi
+
+# --results-root override: validate + rewrite smoke_root_* if set.
+# Belt-side of plan.py's _validate_results_root — this fires BEFORE
+# any mkdir so a bad path can't create partial state.
+#
+# Fresh-review P1: reject an explicitly-passed empty value. If the
+# caller wrote `--results-root ''`, that is a bug, not a silent
+# fallback to the default smoke root.
+if (( results_root_count > 0 )) && [[ -z "$results_root" ]]; then
+  echo "run.sh: --results-root requires a non-empty absolute path" >&2
+  exit 2
+fi
+if [[ -n "$results_root" ]]; then
+  case "$results_root" in
+    /*) : ;;
+    *) echo "run.sh: --results-root must be absolute; got $results_root" >&2; exit 2 ;;
+  esac
+  case "$results_root" in
+    /|/tmp|/root|"$home"|"$home/.codex") \
+      echo "run.sh: --results-root $results_root is an unsafe root; refusing" >&2; exit 2 ;;
+  esac
+  case "$results_root" in
+    /tmp/*) echo "run.sh: --results-root under /tmp is unsafe; refusing" >&2; exit 2 ;;
+    "$home/.codex/"*) echo "run.sh: --results-root $results_root resolves under \$HOME/.codex/; refusing" >&2; exit 2 ;;
+  esac
+  # Canonicalize (realpath -m first, python3 fallback). Refuse if both fail.
+  resolved=""
+  if command -v realpath >/dev/null 2>&1; then
+    resolved="$(realpath -m -- "$results_root" 2>/dev/null)" || resolved=""
+  fi
+  if [[ -z "$resolved" ]]; then
+    resolved="$(python3 -c 'import sys, pathlib; print(pathlib.Path(sys.argv[1]).resolve(strict=False))' "$results_root" 2>/dev/null)" || resolved=""
+  fi
+  if [[ -z "$resolved" ]]; then
+    echo "run.sh: --results-root $results_root cannot be canonicalized; refusing" >&2; exit 2
+  fi
+  case "$resolved" in
+    /|/tmp|/tmp/*|/root|"$home"|"$home/.codex"|"$home/.codex/"*) \
+      echo "run.sh: --results-root $results_root resolves to unsafe $resolved; refusing" >&2; exit 2 ;;
+  esac
+  # git-repo top-level rejection.
+  # Fresh-review P1: `cd "$resolved"` fails when $resolved doesn't yet
+  # exist (common for a fresh --results-root), so git_top would stay
+  # empty and the check silently no-ops. Mirror plan.py: probe from
+  # $resolved when it exists, else from its parent (walk up until a
+  # dir exists).
+  git_probe_dir="$resolved"
+  while [[ -n "$git_probe_dir" && ! -d "$git_probe_dir" ]]; do
+    parent="$(dirname "$git_probe_dir")"
+    [[ "$parent" == "$git_probe_dir" ]] && break
+    git_probe_dir="$parent"
+  done
+  if [[ -d "$git_probe_dir" ]]; then
+    if git_top="$(cd "$git_probe_dir" && git rev-parse --show-toplevel 2>/dev/null)"; then
+      if [[ -n "$git_top" && "$resolved" == "$git_top" ]]; then
+        echo "run.sh: --results-root $results_root is a git repository top-level; refusing" >&2; exit 2
+      fi
+    fi
+  fi
+  # Non-empty target unless --resume
+  if [[ -e "$resolved" && "$resume" != "1" ]]; then
+    if [[ -n "$(ls -A "$resolved" 2>/dev/null || true)" ]]; then
+      echo "run.sh: --results-root $resolved exists and is non-empty; pass --resume or point at a fresh path" >&2; exit 2
+    fi
+  fi
+  smoke_root_abs="$resolved"
+  smoke_root_rel="$resolved"
+fi
+
+# LOOM_FULLTABLE_WRAPPER_SHIM=1 + --dry-run dual-guard (Task 11 test seam).
+# Fires BEFORE preflight so wrapper tests run under a dirty worktree.
+if [[ "${LOOM_FULLTABLE_WRAPPER_SHIM:-0}" == "1" && "$dry_flag" == "1" ]]; then
+  echo "SHIM_WORKLOAD_FILTER: ${workload:-}"
+  echo "SHIM_RESULTS_ROOT: ${results_root:-<default>}"
+  exit 0
+fi
+
 # Default mode is --dry-run if no --sample and no --resume.
 if (( sample_n == 0 && resume == 0 )); then
   dry_flag=1
@@ -108,11 +247,15 @@ if (( dry_flag )); then mode="dry"; fi
 # --- Dry-run: print planned CLIs and exit ---------------------------------
 
 if [[ "$mode" == "dry" ]]; then
+  dry_extra_args=()
+  [[ -n "$workload" ]] && dry_extra_args+=(--filter-workload "$workload")
+  [[ -n "$results_root" ]] && dry_extra_args+=(--results-root "$results_root")
   python3 -m lib.plan \
     --matrix "$fulltable_dir/matrix.yaml" \
     --smoke-root "$smoke_root_rel" \
     --module-root-prefix "" \
     --timeout 3600s \
+    "${dry_extra_args[@]}" \
     dry-run
   exit 0
 fi
@@ -141,19 +284,23 @@ head=$(printf '%s\n' "$head" | tail -1)
 mkdir -p "$smoke_root_abs/dbs" "$smoke_root_abs/runs" "$smoke_root_abs/paper"
 
 plans_file="$(mktemp)"
-plan_args=(
+plan_top_args=(
   --matrix "$fulltable_dir/matrix.yaml"
   --smoke-root "$smoke_root_rel"
   --module-root-prefix ""
   --timeout 60s
-  sample --n "$sample_n"
 )
+[[ -n "$workload" ]] && plan_top_args+=(--filter-workload "$workload")
+[[ -n "$results_root" ]] && plan_top_args+=(--results-root "$results_root")
+plan_sub_args=(sample --n "$sample_n")
 if (( resume )); then
   # spec §4.5: --resume enumerates matrix AND e4, both scopes' completed
-  # sidecars short-circuit uniformly below.
-  plan_args+=(--include-e4 --e4 "$fulltable_dir/e4_stages.yaml")
+  # sidecars short-circuit uniformly below. When --workload is set,
+  # plan.py's _cmd_sample forces include_e4=False (E4 is per-family, not
+  # per-workload) — so we still forward --include-e4 harmlessly.
+  plan_sub_args+=(--include-e4 --e4 "$fulltable_dir/e4_stages.yaml")
 fi
-python3 -m lib.plan "${plan_args[@]}" > "$plans_file"
+python3 -m lib.plan "${plan_top_args[@]}" "${plan_sub_args[@]}" > "$plans_file"
 
 # Pre-filter plans against completed sidecars + stale-CSV cleanup.
 # Done here (not inside the dispatch loop) so `SHIM: would dispatch N

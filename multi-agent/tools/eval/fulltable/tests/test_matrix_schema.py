@@ -38,7 +38,7 @@ CONFIGS = [
     "NoRegistryLookup",
     "NoObserver",
     "manual_ssh",
-    "single_machine_claude_code",
+    "single_machine_codex",
     "cloud_sandbox_e2b",
 ]
 

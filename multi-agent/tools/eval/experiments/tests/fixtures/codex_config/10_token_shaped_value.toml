@@ -1,0 +1,4 @@
+# Fixture — not a real credential; sk-shaped value MUST NOT leak
+# into wrapper stdout/stderr.
+[model_providers.modelserver]
+experimental_bearer_token = "sk-TEST-NOT-REAL-abc123leakcheckXYZ7890"
