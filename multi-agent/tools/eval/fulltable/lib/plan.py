@@ -54,7 +54,7 @@ ABLATIONS: tuple[str, ...] = (
 # multi-agent/tests/eval/baselines/. WT-2-baselines README §Baselines.
 BASELINE_DIR: dict[str, str] = {
     "manual_ssh": "manual_ssh",
-    "single_machine_claude_code": "single_machine",
+    "single_machine_codex": "single_machine_codex",
     "cloud_sandbox_e2b": "cloud_sandbox",
 }
 
