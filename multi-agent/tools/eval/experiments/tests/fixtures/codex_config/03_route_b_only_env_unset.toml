@@ -1,0 +1,3 @@
+# Fixture — not a real credential.
+[model_providers.modelserver]
+env_key = "SOME_UNSET_FIXTURE_ENV_NAME"

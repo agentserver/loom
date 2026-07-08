@@ -26,7 +26,7 @@ var baselines = []struct {
 	name string
 }{
 	{"manual_ssh", "manual_ssh"},
-	{"single_machine", "single_machine_claude_code"},
+	{"single_machine_codex", "single_machine_codex"},
 	{"cloud_sandbox", "cloud_sandbox_e2b"},
 }
 

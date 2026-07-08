@@ -33,7 +33,7 @@ def test_planned_matrix_starts_with_loopback(tmp_path):
     smoke_root.mkdir(parents=True)
     plans = enumerate_matrix_argvs(matrix, smoke_root=smoke_root)
     for plan in plans:
-        if plan.configuration in {"manual_ssh", "single_machine_claude_code",
+        if plan.configuration in {"manual_ssh", "single_machine_codex",
                                   "cloud_sandbox_e2b"}:
             # Baselines don't take --stub-listen; skip.
             continue

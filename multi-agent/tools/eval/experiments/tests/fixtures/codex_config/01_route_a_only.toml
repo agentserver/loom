@@ -1,0 +1,3 @@
+# Fixture — not a real credential; used by test_credential_bound_preflight.sh
+[model_providers.modelserver]
+experimental_bearer_token = "sk-TEST-NOT-REAL-01aaaa"
