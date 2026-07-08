@@ -29,7 +29,7 @@ Copied verbatim from `wt4-codex-only.spec.md`:
 - **Stderr from `codex` subprocess passes through `internal/secretscrub`** before any file/CSV/error return (spec §5 `TestExecuteAgent_ScrubsStderr`).
 - **`baseline_or_ablation` name is `single_machine_codex`** (spec §4.2). Enum member is the ONLY authoritative literal; all tests reference it via constant, not free literal (where practical).
 - **No new secret at rest**: regenerated `dry_run_snapshot.txt` MUST NOT contain `sk-`, `ghp_`, `Bearer`, `refresh_token`, `/root/`, `$USER`, `/home/[a-z]+/` patterns. `TestSnapshotHasNoSecrets` enforces.
-- **TDD**: every task writes the failing test first, sees it fail, writes minimum impl, sees it pass, commits.
+- **TDD for behavioral tasks**: every task that adds behavior writes the failing test first, sees it fail, writes minimum impl, sees it pass, commits. Two explicit exceptions: (a) Task 1 (`package scaffold that compiles`) is a compile-only stub with no behavioral surface — no failing test is needed because compile-passes is the only assertion; (b) Task 5's `run.sh` shell script is a mirror of an existing pattern verified end-to-end by the smoke invocation in Step 3, and Task 20's README is a documentation-only artifact whose only test is the grep guard in Task 20 Step 2 (which IS TDD-ordered). All other tasks are strict TDD.
 - **Baseline HEAD**: `origin/paper/v3-integration` at `786bf60`.
 - **Baseline test suite MUST stay green throughout**: `go test ./tests/eval/baselines/... -race` and `pytest tools/eval/fulltable/tests/` after every task.
 
@@ -384,14 +384,19 @@ func extractPromptSpec(t *testing.T, e ast.Expr) promptSpec {
 		if !ok {
 			t.Fatalf("promptSpec field not KeyValueExpr: %T", elt)
 		}
-		field := kv.Key.(*ast.Ident).Name
-		switch field {
+		// Plan-review P2: type-check the field key to avoid a panic
+		// on non-Ident (e.g. selector expr) drift.
+		fieldIdent, ok := kv.Key.(*ast.Ident)
+		if !ok {
+			t.Fatalf("promptSpec field key not *ast.Ident: %T", kv.Key)
+		}
+		switch fieldIdent.Name {
 		case "Prompt":
 			ps.Prompt = astLitToString(t, kv.Value)
 		case "ExpectedOutputs":
 			ps.ExpectedOutputs = astLitToStringSlice(t, kv.Value)
 		default:
-			t.Fatalf("unknown promptSpec field %q", field)
+			t.Fatalf("unknown promptSpec field %q", fieldIdent.Name)
 		}
 	}
 	return ps
@@ -545,6 +550,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -711,37 +717,32 @@ exit 0
 		t.Fatalf("read argv file: %v", err)
 	}
 	lines := strings.Split(strings.TrimRight(string(got), "\n"), "\n")
-	// The workspace root path is dynamic — verify SHAPE:
-	//   [exec, --sandbox, workspace-write, --ephemeral,
-	//    --skip-git-repo-check, --json, -C, <ws.Root>, --, <prompt>]
-	want := []string{"exec", "--sandbox", "workspace-write", "--ephemeral", "--skip-git-repo-check", "--json", "-C"}
-	if len(lines) != len(want)+3 {
-		t.Fatalf("argv length: want %d got %d\nargv=%q", len(want)+3, len(lines), lines)
+	// Plan-review r2 P1 (pinned argv byte-exact + non-self-referential
+	// prompt check): compare argv against a fully-materialised expected
+	// slice. Only ws.Root is dynamic (harness picks a tempdir);
+	// substitute it from argv position 7. The prompt at position 9
+	// MUST equal codexPrompts["cross-device-code-mod"].Prompt exactly
+	// — do NOT source the expected prompt from argv itself.
+	if len(lines) != 10 {
+		t.Fatalf("argv length: want 10 got %d\nargv=%q", len(lines), lines)
 	}
-	for i, w := range want {
-		if lines[i] != w {
-			t.Errorf("argv[%d]: want %q got %q", i, w, lines[i])
-		}
+	wsRoot := lines[7]
+	if !filepath.IsAbs(wsRoot) {
+		t.Errorf("-C target must be absolute path; got %q", wsRoot)
 	}
-	// lines[7] is ws.Root (dynamic); lines[8] must be "--"; lines[9]
-	// must be the credential-bound-model prompt.
-	if lines[len(want)+1] != "--" {
-		t.Errorf("argv[%d]: want %q got %q", len(want)+1, "--", lines[len(want)+1])
+	expectedPrompt := codexPrompts["cross-device-code-mod"].Prompt
+	expected := []string{
+		"exec",
+		"--sandbox", "workspace-write",
+		"--ephemeral",
+		"--skip-git-repo-check",
+		"--json",
+		"-C", wsRoot,
+		"--",
+		expectedPrompt,
 	}
-	if !strings.Contains(lines[len(want)+2], "patch.diff") {
-		t.Errorf("argv[%d]: want cross-device-code-mod prompt, got %q", len(want)+2, lines[len(want)+2])
-	}
-	// Belt: ws.Root passed via -C should be an absolute path.
-	if !filepath.IsAbs(lines[len(want)]) {
-		t.Errorf("argv[%d] = -C target must be absolute path; got %q", len(want), lines[len(want)])
-	}
-	// Belt: verify absolutely NO extra flags snuck in (e.g. -c
-	// sandbox_mode=... or --dangerously-bypass-approvals-and-sandbox).
-	joined := strings.Join(lines, " ")
-	for _, forbidden := range []string{"-c sandbox_mode", "--dangerously-bypass", "-p "} {
-		if strings.Contains(joined, forbidden) {
-			t.Errorf("argv contains forbidden substring %q; argv=%q", forbidden, joined)
-		}
+	if !reflect.DeepEqual(lines, expected) {
+		t.Fatalf("argv drift:\n  got: %q\n  want: %q", lines, expected)
 	}
 	_ = fmt.Sprintf // silence unused import in stub
 }
@@ -968,6 +969,12 @@ exit 0
 	haystack := res.Err.Error()
 	if strings.Contains(haystack, "sk-testonlytokenlong") {
 		t.Errorf("scrub failed on success-then-missing-output path: leak in error; err=%q", res.Err)
+	}
+	// Plan-review P1: the "not-contains" alone can pass if stderr never
+	// made it into the error at all. Require the [REDACTED] sentinel
+	// so we know scrub actually ran on visible stderr bytes.
+	if !strings.Contains(haystack, "[REDACTED]") {
+		t.Errorf("success-then-missing-output path: expected [REDACTED] sentinel in err (proves scrub ran on stderr); err=%q", res.Err)
 	}
 }
 
@@ -1642,6 +1649,31 @@ def test_filter_workload_via_cli_dry_run() -> None:
         assert "cross-device-code-mod" in l
 
 
+def test_filter_workload_before_sample_non_prefix() -> None:
+    """Plan-review P0#2 regression — a workload that does NOT appear in
+    the first `sample_n` rows must STILL yield rows after filter+sample.
+    Without filter-first-then-sample, this returns 0 rows."""
+    import subprocess as sp
+    proc = sp.run(
+        ["python3", "-m", "lib.plan",
+         "--matrix", str(FULLTABLE_DIR / "matrix.yaml"),
+         "--smoke-root", "tests/eval/results/smoke",
+         "--filter-workload", "credential-bound-model",
+         "sample", "--n", "2"],
+        cwd=str(MODULE_ROOT), env={"PYTHONPATH": str(FULLTABLE_DIR), "PATH": "/usr/bin:/bin"},
+        capture_output=True, text=True,
+    )
+    # sample command emits one JSON line per plan; count credential-bound rows.
+    lines = [l for l in proc.stdout.splitlines() if l.strip()]
+    # Expect exactly 2 (min of sample_n=2 and 12 filtered rows).
+    assert len(lines) == 2, (
+        f"filter-first-then-sample violated: expected 2 rows, got {len(lines)}. "
+        f"If 0: enumerate_matrix_argvs samples before filter — see P0#2."
+    )
+    for l in lines:
+        assert "credential-bound-model" in l
+
+
 def test_filter_workload_cli_rejects_unknown() -> None:
     proc = subprocess.run(
         ["python3", "-m", "lib.plan",
@@ -1704,6 +1736,8 @@ BAD_ROOTS = [
     "/root",
     os.path.expanduser("~"),
     os.path.expanduser("~/.codex"),
+    os.path.expanduser("~/.codex/subdir"),                # plan-review r3 P0
+    os.path.expanduser("~/.codex/nested/deep/subdir"),    # plan-review r3 P0
 ]
 
 GOOD_ROOT_HINTS = [
@@ -1726,6 +1760,114 @@ def test_results_root_rejects_unsafe(bad: str) -> None:
     assert proc.returncode != 0, f"root {bad!r} accepted; expected rejection"
     assert "results-root" in proc.stderr.lower() or "unsafe" in proc.stderr.lower(), \
         f"stderr should name the flag / reason; got: {proc.stderr}"
+
+
+def _allowlisted_test_base(subdir: str) -> Path:
+    """Plan-review r8 P1: the symlink-prefix test MUST live UNDER an
+    allowlisted, non-/tmp base — otherwise the raw guard rejects it
+    before canonicalization is ever exercised, and the test passes
+    vacuously.
+
+    Use a stable subdir under
+    <module_root>/tests/eval/results/experiments/_symlink_test/
+    which is (a) gitignored by Task 13.5, (b) not under /tmp,
+    (c) not under $HOME/.codex.
+    """
+    base = MODULE_ROOT / "tests" / "eval" / "results" / "experiments" / "_symlink_test" / subdir
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def test_results_root_rejects_symlink_prefix_to_tmp() -> None:
+    """Plan-review r8 P1: symlink prefix + missing child MUST be
+    resolved before allowlist check. Base MUST be under an
+    allowlisted root (NOT /tmp) so the raw guard doesn't reject
+    the path vacuously.
+    """
+    import shutil, uuid
+    base = _allowlisted_test_base(f"tmp-{uuid.uuid4().hex[:8]}")
+    try:
+        link = base / "link"
+        try:
+            link.symlink_to("/tmp")
+        except FileExistsError:
+            pass
+        candidate = str(link / "missing" / "deep")
+        # Sanity: the raw candidate must NOT match /tmp/* — otherwise
+        # the test is vacuous.
+        assert not candidate.startswith("/tmp/"), (
+            f"vacuous test setup: raw candidate {candidate!r} starts with /tmp/"
+        )
+        proc = subprocess.run(
+            ["python3", "-m", "lib.plan",
+             "--matrix", str(FULLTABLE_DIR / "matrix.yaml"),
+             "--smoke-root", "tests/eval/results/smoke",
+             "--results-root", candidate,
+             "dry-run"],
+            cwd=str(MODULE_ROOT),
+            env={"PYTHONPATH": str(FULLTABLE_DIR), "PATH": "/usr/bin:/bin"},
+            capture_output=True, text=True,
+        )
+        assert proc.returncode != 0, (
+            f"symlink-prefix path {candidate!r} escaped /tmp allowlist; "
+            f"stderr={proc.stderr!r}"
+        )
+        assert "unsafe" in proc.stderr.lower() or "refusing" in proc.stderr.lower(), (
+            f"expected refusal message; got: {proc.stderr}"
+        )
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_results_root_rejects_symlink_prefix_to_codex() -> None:
+    """Plan-review r8 P1: symlink-prefix pointing at FAKE $HOME/.codex.
+
+    Base MUST be under an allowlisted root (NOT /tmp, NOT under the
+    real ~/.codex). Fake HOME lives INSIDE the same allowlisted base
+    so the raw candidate doesn't trip a /tmp or real-codex guard.
+    """
+    import shutil, uuid
+    base = _allowlisted_test_base(f"codex-{uuid.uuid4().hex[:8]}")
+    try:
+        fake_home = base / "fake_home"
+        fake_codex = fake_home / ".codex"
+        fake_codex.mkdir(parents=True, exist_ok=True)
+        link = base / "link"
+        try:
+            link.symlink_to(str(fake_codex))
+        except FileExistsError:
+            pass
+        candidate = str(link / "missing")
+        assert not candidate.startswith("/tmp/"), (
+            f"vacuous setup: raw candidate {candidate!r} starts with /tmp/"
+        )
+        real_codex = os.path.expanduser("~/.codex")
+        assert not candidate.startswith(real_codex + "/"), (
+            f"vacuous setup: raw candidate {candidate!r} starts with real ~/.codex"
+        )
+        proc = subprocess.run(
+            ["python3", "-m", "lib.plan",
+             "--matrix", str(FULLTABLE_DIR / "matrix.yaml"),
+             "--smoke-root", "tests/eval/results/smoke",
+             "--results-root", candidate,
+             "dry-run"],
+            cwd=str(MODULE_ROOT),
+            # Override HOME so `_validate_results_root`'s `home / ".codex"`
+            # resolves under the FAKE codex dir — the symlink points there.
+            # The operator's real ~/.codex is untouched.
+            env={
+                "PYTHONPATH": str(FULLTABLE_DIR),
+                "PATH": "/usr/bin:/bin",
+                "HOME": str(fake_home),
+            },
+            capture_output=True, text=True,
+        )
+        assert proc.returncode != 0, (
+            f"symlink-prefix path {candidate!r} escaped $HOME/.codex allowlist; "
+            f"stderr={proc.stderr!r}"
+        )
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
 
 
 def test_results_root_accepts_deep_subdir(tmp_path: Path) -> None:
@@ -1784,7 +1926,9 @@ def filter_workload(rows: list[dict], workload_id: str) -> list[dict]:
 
     Filter is applied BEFORE any --sample truncation (spec §4.3 P1#1
     resolution). Callers doing filter + sample MUST call this first,
-    then truncate.
+    then truncate. See also the `filter_workload_id` parameter added
+    to `enumerate_matrix_argvs` — that is where the filter runs when
+    invoked via CLI, guaranteeing filter-before-sample ordering.
     """
     if workload_id not in WORKLOADS:
         raise UnknownWorkloadError(
@@ -1792,6 +1936,96 @@ def filter_workload(rows: list[dict], workload_id: str) -> list[dict]:
         )
     return [r for r in rows if r["workload_id"] == workload_id]
 ```
+
+**CRITICAL — resolves plan-review P0#2 (filter-before-sample)**: modify
+`enumerate_matrix_argvs` to accept a `filter_workload_id` parameter and
+apply it BEFORE the existing `sample_n` truncation. Without this, a
+CLI `--filter-workload credential-bound-model --sample 2` would first
+truncate to the first 2 (full_loom cross-device-code-mod +
+full_loom remote-data-processing) THEN filter, yielding 0 rows.
+
+Locate:
+```python
+def enumerate_matrix_argvs(
+    matrix_path: Path,
+    *,
+    smoke_root: Path,
+    starting_port: int = 18100,
+    sample_n: int | None = None,
+    module_root_prefix: str = "",
+    ...
+) -> list[RunPlan]:
+    ...
+    matrix = parse_matrix(matrix_path)
+    if sample_n is not None:
+        matrix = matrix[:sample_n]
+```
+
+Replace with:
+```python
+def enumerate_matrix_argvs(
+    matrix_path: Path,
+    *,
+    smoke_root: Path,
+    starting_port: int = 18100,
+    sample_n: int | None = None,
+    module_root_prefix: str = "",
+    filter_workload_id: str | None = None,  # NEW — filter BEFORE sample
+    ...
+) -> list[RunPlan]:
+    ...
+    matrix = parse_matrix(matrix_path)
+    # Filter FIRST (plan-review P0#2 resolution — spec §4.3 filter-first-then-sample).
+    if filter_workload_id is not None:
+        matrix = filter_workload(matrix, filter_workload_id)
+    # THEN truncate.
+    if sample_n is not None:
+        matrix = matrix[:sample_n]
+```
+
+Update BOTH `_cmd_dry_run` AND `_cmd_sample` to pass the filter into
+`enumerate_matrix_argvs` INSTEAD of filtering afterward:
+
+`_cmd_dry_run`:
+```python
+def _cmd_dry_run(args: argparse.Namespace) -> int:
+    smoke_root = Path(args.results_root) if args.results_root else Path(args.smoke_root)
+    plans = enumerate_matrix_argvs(
+        Path(args.matrix),
+        smoke_root=smoke_root,
+        starting_port=args.starting_port,
+        module_root_prefix=args.module_root_prefix,
+        timeout=args.timeout,
+        deterministic_run_ids=True,
+        filter_workload_id=args.filter_workload,  # NEW — pass through
+    )
+    for plan in plans:
+        _print_plan(plan)
+    return 0
+```
+
+`_cmd_sample` — locate the existing call:
+```python
+    plans = enumerate_matrix_argvs(
+        Path(args.matrix),
+        smoke_root=smoke_root,
+        starting_port=args.starting_port,
+        module_root_prefix=args.module_root_prefix,
+        timeout=args.timeout,
+        sample_n=args.n,
+    )
+```
+
+Add `filter_workload_id=args.filter_workload` to that call (same
+pattern). Do NOT add a separate `plans = [p for p in plans if ...]`
+filter afterward — that would be filter-after-sample again.
+
+Same treatment for `_cmd_print_stub_listen` if it also calls
+`enumerate_matrix_argvs` with `sample_n`.
+
+Also handle the `--include-e4` case (spec §4.3 says "E4 rows SKIPPED
+entirely when --filter-workload is set"): keep the existing early
+warning + `args.include_e4 = False` guard from the previous draft.
 
 - [ ] **Step 4: Add allowlist + `--results-root` + `--filter-workload` + `--list-workloads` to `main()`**
 
@@ -1853,37 +2087,164 @@ In `main()`, immediately after `args = p.parse_args(argv)`:
             return 2
 ```
 
-Modify `_cmd_dry_run` to apply filter + results-root:
+**CRITICAL — plan-review r2 P0**: `plan_command_for_matrix_row` calls
+`_smoke_out_root(smoke_root)` which REJECTS any path not under
+`tests/eval/results/smoke/`. When `--results-root` provides a
+different validated root (e.g.
+`tests/eval/results/experiments/cross-device-code-mod/...`), the
+enumerator will crash with `ErrOutsideSmokeRoot`. Two coupled changes:
+
+1. Add an optional `override_out_root: Path | None = None` parameter
+   to `plan_command_for_matrix_row`, `plan_command_for_e4_row`,
+   `enumerate_matrix_argvs`, `enumerate_e4_argvs`. When set, it
+   bypasses `_smoke_out_root` and is used directly as the write root
+   (path already validated by `_validate_results_root`).
+
+2. Thread `override_out_root=args.results_root` from every `_cmd_*`
+   into the enumerator when `args.results_root is not None`.
+
+Concretely, modify `plan_command_for_matrix_row`:
 ```python
-def _cmd_dry_run(args: argparse.Namespace) -> int:
-    smoke_root = Path(args.results_root) if args.results_root else Path(args.smoke_root)
-    plans = enumerate_matrix_argvs(
-        Path(args.matrix),
-        smoke_root=smoke_root,
-        starting_port=args.starting_port,
-        module_root_prefix=args.module_root_prefix,
-        timeout=args.timeout,
-        deterministic_run_ids=True,
-    )
-    if args.filter_workload:
-        plans = [p for p in plans if p.workload_id == args.filter_workload]
-    for plan in plans:
-        _print_plan(plan)
-    return 0
+def plan_command_for_matrix_row(
+    row: dict,
+    *,
+    port: int,
+    smoke_root: Path,
+    run_id: str | None = None,
+    ...
+    override_out_root: Path | None = None,  # NEW
+) -> RunPlan:
+    ...
+    if override_out_root is not None:
+        # Caller passed --results-root; bypass smoke-only guard.
+        # Validation happened in _validate_results_root.
+        out_root = override_out_root
+    else:
+        out_root = _smoke_out_root(smoke_root)
+    # ... use out_root wherever smoke_root was used below this point
 ```
 
-Similarly modify `_cmd_sample` — filter FIRST, sample SECOND (spec §4.3 P1#1 resolution). The `--include-e4` scope MUST skip E4 rows entirely when `--filter-workload` is set (spec §4.3 line "when `--workload` is set, E4 rows are SKIPPED entirely"). Add near the top of `_cmd_sample`:
+Do the same for `plan_command_for_e4_row` and thread the parameter
+through `enumerate_matrix_argvs` / `enumerate_e4_argvs` /
+`_cmd_dry_run` / `_cmd_sample` / `_cmd_print_stub_listen`.
+
+Add git-top and symlink checks to `_validate_results_root` (parity
+with the run.sh guards — plan-review r2 P1):
 ```python
+def _validate_results_root(raw: str) -> Path:
+    """Reject unsafe --results-root arguments.
+
+    Rejected: `$HOME`, `$HOME/.codex`, `/`, `/tmp`, `/root`, any
+    git-repo top-level, any symlink whose resolved target is unsafe.
+    Requires an ABSOLUTE path.
+    """
+    import subprocess
+    if not os.path.isabs(raw):
+        raise ValueError(f"--results-root must be absolute; got {raw!r}")
+    # Plan-review r6 P0: resolve(strict=False) resolves symlink prefixes
+    # even when a trailing component is missing. Otherwise a symlink
+    # like `experiments/link_to_tmp/missing/deep` (link_to_tmp -> /tmp)
+    # would escape the /tmp rejection because resolve(strict=True)
+    # errors out on missing leaf and a naive except-clause fallback
+    # would validate the unresolved path.
+    p = Path(raw).resolve(strict=False)
+    home = Path(os.path.expanduser("~")).resolve(strict=False)
+    unsafe = _ALLOWLIST_UNSAFE_ROOTS | {str(home), str(home / ".codex")}
+    if str(p) in unsafe:
+        raise ValueError(f"--results-root {raw!r} is an unsafe root; refusing")
+    # Reject ANY path under $HOME/.codex/ — plan-review r3 P0.
+    codex_dir = home / ".codex"
+    if codex_dir in p.parents or p == codex_dir:
+        raise ValueError(
+            f"--results-root {raw!r} resolves under $HOME/.codex/; refusing"
+        )
+    if str(p).startswith("/tmp/") or str(p) == "/tmp":
+        raise ValueError(f"--results-root {raw!r} lives under /tmp; refusing")
+    # Git top-level check (parity with run.sh belt).
+    try:
+        git_top = subprocess.run(
+            ["git", "-C", str(p if p.exists() else p.parent), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=False,
+        ).stdout.strip()
+        if git_top and str(p) == git_top:
+            raise ValueError(
+                f"--results-root {raw!r} is a git repository top-level; refusing"
+            )
+    except FileNotFoundError:
+        # git not installed — skip this check silently.
+        pass
+    return p
+```
+
+Add a NEW planner-CLI test to catch the alt-root write-path case (not
+under SHIM — must exercise real enumeration):
+
+`test_results_root_planner_writes_alt.py`:
+```python
+"""Plan-review r2 P0 regression — --results-root through plan.py CLI
+must yield planner output paths under the alt root, NOT under
+tests/eval/results/smoke."""
+import subprocess
+from pathlib import Path
+from conftest import FULLTABLE_DIR, MODULE_ROOT
+
+
+def test_planner_dry_run_uses_alt_root(tmp_path_factory):
+    # Alt root must live outside /tmp for allowlist. Use module_root
+    # under experiments/ so it passes.
+    module_root = MODULE_ROOT
+    alt = module_root / "tests" / "eval" / "results" / "experiments" / "_plan_test_alt" / "run1"
+    alt.mkdir(parents=True, exist_ok=True)
+    try:
+        proc = subprocess.run(
+            ["python3", "-m", "lib.plan",
+             "--matrix", str(FULLTABLE_DIR / "matrix.yaml"),
+             "--smoke-root", "tests/eval/results/smoke",
+             "--results-root", str(alt),
+             "--filter-workload", "cross-device-code-mod",
+             "dry-run"],
+            cwd=str(module_root),
+            env={"PYTHONPATH": str(FULLTABLE_DIR), "PATH": "/usr/bin:/bin"},
+            capture_output=True, text=True,
+        )
+        assert proc.returncode == 0, f"planner failed: stderr={proc.stderr}"
+        # None of the printed lines should reference tests/eval/results/smoke.
+        for l in proc.stdout.splitlines():
+            assert "tests/eval/results/smoke" not in l, (
+                f"planner leaked smoke path into output when --results-root was set:\n"
+                f"  {l}"
+            )
+        # At least some lines should mention the alt root's tail.
+        assert any("_plan_test_alt" in l for l in proc.stdout.splitlines()), (
+            f"planner did not use --results-root; output:\n{proc.stdout}"
+        )
+    finally:
+        import shutil
+        shutil.rmtree(module_root / "tests" / "eval" / "results" / "experiments" / "_plan_test_alt", ignore_errors=True)
+```
+
+Add this test to Task 10's git add + commit message.
+
+The `_cmd_dry_run` / `_cmd_sample` modifications are captured under
+Step 3 above (pass `filter_workload_id=args.filter_workload` into
+`enumerate_matrix_argvs`). Also thread the E4 skip:
+
+```python
+def _cmd_sample(args: argparse.Namespace) -> int:
+    # Spec §4.3 — E4 rows are per-family, not per-workload; skip when
+    # a workload filter is active.
     if args.filter_workload and args.include_e4:
-        print("--filter-workload with --include-e4: E4 rows are per-family, not per-workload; skipping E4", file=sys.stderr)
+        print("--filter-workload with --include-e4: E4 rows are per-family, "
+              "not per-workload; skipping E4", file=sys.stderr)
         args.include_e4 = False
+    ...  # existing body, but enumerate_matrix_argvs call gets filter_workload_id
 ```
-Then after enumerating matrix plans:
+
+`results_root` is honored at the enumeration-root level:
 ```python
-    if args.filter_workload:
-        plans = [p for p in plans if p.workload_id == args.filter_workload]
+    smoke_root = Path(args.results_root) if args.results_root else Path(args.smoke_root)
 ```
-Then sample happens naturally on the filtered list (existing code truncates to `args.n`).
+(applied identically in `_cmd_dry_run` and `_cmd_sample`).
 
 - [ ] **Step 5: Run tests — expect PASS**
 
@@ -1900,8 +2261,12 @@ Expected: all previous tests still PASS + new tests PASS.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add multi-agent/tools/eval/fulltable/lib/plan.py multi-agent/tools/eval/fulltable/tests/test_filter_workload.py multi-agent/tools/eval/fulltable/tests/test_list_workloads.py multi-agent/tools/eval/fulltable/tests/test_results_root_allowlist.py
-git commit -m "WT-4 Task 10: plan.py --filter-workload / --list-workloads / --results-root with allowlist"
+git add multi-agent/tools/eval/fulltable/lib/plan.py \
+        multi-agent/tools/eval/fulltable/tests/test_filter_workload.py \
+        multi-agent/tools/eval/fulltable/tests/test_list_workloads.py \
+        multi-agent/tools/eval/fulltable/tests/test_results_root_allowlist.py \
+        multi-agent/tools/eval/fulltable/tests/test_results_root_planner_writes_alt.py
+git commit -m "WT-4 Task 10: plan.py --filter-workload / --list-workloads / --results-root with allowlist + override_out_root through enumerator"
 ```
 
 ---
@@ -1956,6 +2321,110 @@ if LOOM_FULLTABLE_WRAPPER_SHIM=1 bash "$run_sh" --workload cross-device-code-mod
   cat /tmp/case3.out
   exit 1
 fi
+
+# 4) NON-SHIM --dry-run: plain `run.sh --workload X --dry-run` prints
+#    exactly 12 planner lines to stdout (plan-review P1 resolution —
+#    the SHIM-only tests above don't prove filter integration end-to-end).
+out=$(bash "$run_sh" --workload cross-device-code-mod --dry-run 2>&1)
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "case4 fail — non-shim --workload --dry-run exit=$rc"; echo "$out"; exit 1
+fi
+lines=$(echo "$out" | grep -c "cross-device-code-mod" || true)
+if [ "$lines" -ne 12 ]; then
+  echo "case4 fail — non-shim --workload --dry-run expected 12 lines, got $lines"; echo "$out"; exit 1
+fi
+
+# 5) NON-SHIM --dry-run for a NON-PREFIX workload (credential-bound-model
+#    is 5th in the workload iteration). Filter-first-then-sample
+#    guarantees this still yields 12 rows even under implicit sample
+#    ordering.
+out=$(bash "$run_sh" --workload credential-bound-model --dry-run 2>&1)
+lines=$(echo "$out" | grep -c "credential-bound-model" || true)
+if [ "$lines" -ne 12 ]; then
+  echo "case5 fail — non-prefix workload expected 12 lines, got $lines"; echo "$out"; exit 1
+fi
+
+# 6) Plan-review r2 P1 — planner sample subcommand under --filter-workload
+#    respects filter-before-sample. Non-shim: exercises the real
+#    _cmd_sample path all the way to the enumerator.
+#    (This is done via `python3 -m lib.plan ... --filter-workload X sample --n 2`
+#    directly rather than run.sh to isolate the planner change.)
+alt_out=$(cd "$module_root" && PYTHONPATH="$module_root/tools/eval/fulltable" \
+  python3 -m lib.plan \
+    --matrix "$module_root/tools/eval/fulltable/matrix.yaml" \
+    --smoke-root "tests/eval/results/smoke" \
+    --filter-workload credential-bound-model \
+    sample --n 2 2>&1)
+alt_lines=$(echo "$alt_out" | grep -c "credential-bound-model" || true)
+if [ "$alt_lines" -ne 2 ]; then
+  echo "case6 fail — planner sample --n 2 --filter-workload credential-bound-model expected 2 lines, got $alt_lines"
+  echo "$alt_out"
+  exit 1
+fi
+
+# 7) Plan-review r3 P1 — run.sh --workload X --resume must (a) skip E4
+#    rows entirely (E4 is per-family, not per-workload), (b) filter
+#    matrix rows before resume-sidecar check. Uses the existing
+#    LOOM_FULLTABLE_DISPATCH_SHIM which runs preflight and dispatch
+#    planning but stops before real subprocess exec, printing
+#    `SHIM: would dispatch N rows`.
+#
+# Use a large-enough --sample cap that matrix (12) + E4 (many) would
+# both fit under ALLOW_FULL_RUN=1; if E4 leaked in, the row count
+# would exceed 12. Explicitly REQUIRE the SHIM line to appear
+# (proves the path was reached) and assert the row count equals 12
+# (all workload rows survived resume with no matching sidecars).
+
+alt_root="$module_root/tests/eval/results/experiments/_test_resume_$$"
+mkdir -p "$alt_root/runs"
+
+# Compute the resume_key so run.sh's `compgen -G .../${rk}__*.done`
+# glob matches (run.sh globs by resume_key, so the run_id in the
+# sidecar filename does NOT need to match planner's live run_id —
+# any UUID-shaped suffix suffices). This keeps the test robust even
+# though `sample`-mode run IDs are not deterministic (only dry-run
+# mode is deterministic per plan.py enumerate_matrix_argvs).
+credbm_full_loom_rk="matrix__credential-bound-model__full_loom"
+touch "$alt_root/runs/${credbm_full_loom_rk}__00000000-1111-2222-3333-444444444444.done"
+
+# Set WORKTREE_ROOT to a temp clean git repo so commit_meta preflight
+# succeeds (plan-review r4 P1 — the impl worktree is dirty during test
+# development, would fail preflight otherwise).
+clean_repo=$(mktemp -d)
+git init -q "$clean_repo" >/dev/null 2>&1
+git -C "$clean_repo" -c user.email=t@t -c user.name=t commit --allow-empty -m init -q >/dev/null 2>&1
+
+shim_out=$(ALLOW_FULL_RUN=1 WORKTREE_ROOT="$clean_repo" LOOM_FULLTABLE_DISPATCH_SHIM=1 \
+    bash "$run_sh" \
+      --workload credential-bound-model \
+      --results-root "$alt_root" \
+      --sample 50 \
+      --resume 2>&1)
+shim_rc=$?
+if [ "$shim_rc" -ne 0 ]; then
+  echo "case7 fail — dispatch-shim exit=$shim_rc; stdout+stderr:"
+  echo "$shim_out"
+  rm -rf "$alt_root" "$clean_repo"
+  exit 1
+fi
+if ! echo "$shim_out" | grep -qE "SHIM: would dispatch [0-9]+ rows"; then
+  echo "case7 fail — dispatch-shim did NOT reach dispatch-planning:"
+  echo "$shim_out"
+  rm -rf "$alt_root" "$clean_repo"
+  exit 1
+fi
+rows=$(echo "$shim_out" | grep -oE "would dispatch [0-9]+" | grep -oE "[0-9]+")
+# EXACT expected: 11 = 12 workload rows minus the 1 matching sidecar.
+# Anything else = broken filter or broken resume-sidecar match.
+if [ "$rows" -ne 11 ]; then
+  echo "case7 fail — expected exactly 11 rows (12 workload rows - 1 sidecar-matched); got $rows"
+  echo "$shim_out"
+  rm -rf "$alt_root" "$clean_repo"
+  exit 1
+fi
+
+rm -rf "$alt_root" "$clean_repo"
 
 echo "OK"
 ```
@@ -2035,7 +2504,7 @@ Add these three tests to `tools/eval/fulltable/tests/conftest.py` collection: py
 
 Create `tools/eval/fulltable/tests/test_run_sh_shell_tests.py`:
 ```python
-"""Wrap the three .sh test scripts so pytest discovers + reports them."""
+"""Wrap the .sh test scripts so pytest discovers + reports them."""
 from __future__ import annotations
 
 import subprocess
@@ -2051,6 +2520,9 @@ TESTS_DIR = Path(__file__).resolve().parent
     "test_workload_filter_semantics.sh",
     "test_sample_cap_with_workload.sh",
     "test_run_sh_duplicate_workload.sh",
+    "test_results_root_scoping.sh",             # added plan-review r2
+    "test_results_root_scoping_dispatch.sh",    # added plan-review r3
+    "test_results_root_symlink_escape.sh",      # added plan-review r6
 ])
 def test_shell_test_passes(script: str) -> None:
     path = TESTS_DIR / script
@@ -2066,7 +2538,7 @@ def test_shell_test_passes(script: str) -> None:
 
 Run: `cd multi-agent && pytest tools/eval/fulltable/tests/test_run_sh_shell_tests.py -q -v`
 
-Expected: all 3 shell tests FAIL (run.sh has no `--workload` / `--results-root` / SHIM flags yet).
+Expected: all 6 shell tests FAIL (run.sh has no `--workload` / `--results-root` / SHIM flags yet).
 
 - [ ] **Step 3: Extend run.sh usage() and parse**
 
@@ -2158,13 +2630,314 @@ if [[ "${LOOM_FULLTABLE_WRAPPER_SHIM:-0}" == "1" && "$dry_flag" == "1" ]]; then
 fi
 ```
 
-Forward `--workload` and `--results-root` to `plan.py`. Locate the two calls to `python3 -m lib.plan ...` in `run.sh` and add `--filter-workload "$workload"` (when set) and `--results-root "$results_root"` (when set) to their arg lists.
+**CRITICAL — resolves plan-review P0#1**: `--results-root` MUST be
+threaded through run.sh's own filesystem writes, not merely forwarded
+to `plan.py`. Existing `run.sh` hardcodes `smoke_root_abs` /
+`smoke_root_rel` in ~15 mkdir/rm/write sites (dbs/runs/paper/runs.csv/
+metrics.csv/failures.jsonl/sidecars). Modify the top of `run.sh` so
+`--results-root` OVERRIDES the smoke defaults across ALL these sites:
+
+Locate the top-of-file assignments:
+```bash
+smoke_root_abs="$module_root/tests/eval/results/smoke"
+smoke_root_rel="tests/eval/results/smoke"           # from module_root
+```
+
+After the arg-parse loop (where `$results_root` is populated), inject:
+```bash
+# --results-root overrides the smoke default for all downstream writes.
+# The path was already allowlist-validated by plan.py (called with
+# --results-root above) when set — but as belt-and-braces we re-validate
+# here in shell before mkdir-p'ing anywhere.
+if [[ -n "$results_root" ]]; then
+  # Absolute-path check (planner also checks, but here we exit BEFORE
+  # any mkdir).
+  case "$results_root" in
+    /*) : ;;
+    *) echo "run.sh: --results-root must be an absolute path; got $results_root" >&2; exit 2 ;;
+  esac
+  # Reject well-known dangerous roots (mirrors plan.py allowlist).
+  # Rationale: shell-side belt in case the caller passes --results-root
+  # without also going through plan.py's validation on a code path we
+  # missed.
+  case "$results_root" in
+    /|/tmp|/root|"$HOME"|"$HOME/.codex") \
+      echo "run.sh: --results-root $results_root is an unsafe root; refusing" >&2; exit 2 ;;
+  esac
+  case "$results_root" in
+    /tmp/*) echo "run.sh: --results-root under /tmp is unsafe; refusing" >&2; exit 2 ;;
+    "$HOME/.codex/"*) echo "run.sh: --results-root $results_root resolves under \$HOME/.codex/; refusing" >&2; exit 2 ;;
+  esac
+  # Reject symlinks that point into unsafe roots (readlink -f resolves).
+  # Plan-review r6 P0: `readlink -f` FAILS if any leaf is missing, and
+  # a naive `|| echo "$results_root"` fallback would then validate the
+  # UNRESOLVED raw path — allowing `symlink_to_tmp/missing/deep` to
+  # escape /tmp rejection. `realpath -m` (GNU coreutils) canonicalizes
+  # even when trailing components don't exist. If `realpath -m` isn't
+  # available, use python3 as fallback. Refuse to validate at all if
+  # both fail (safer than an unresolved raw path).
+  # Try `realpath -m` (GNU coreutils), then fall back to python3.
+  # Plan-review r7 P0: earlier draft had two bugs:
+  #   1. `python3 -c ... -- "$results_root"` puts "--" at sys.argv[1],
+  #      not the path. Fix: no `--` separator before the arg.
+  #   2. Python fallback ran only when realpath was ABSENT; on hosts
+  #      with a broken/BSD realpath that lacks -m, the -m call failed
+  #      and we returned exit 2 without trying python3. Fix: try
+  #      python3 whenever `realpath -m` failed OR was unavailable.
+  resolved=""
+  if command -v realpath >/dev/null 2>&1; then
+    resolved="$(realpath -m -- "$results_root" 2>/dev/null)" || resolved=""
+  fi
+  if [[ -z "$resolved" ]]; then
+    resolved="$(python3 -c 'import sys, pathlib; print(pathlib.Path(sys.argv[1]).resolve(strict=False))' "$results_root" 2>/dev/null)" || resolved=""
+  fi
+  if [[ -z "$resolved" ]]; then
+    echo "run.sh: --results-root $results_root cannot be canonicalized (no realpath -m / python3); refusing" >&2; exit 2
+  fi
+  case "$resolved" in
+    /|/tmp|/tmp/*|/root|"$HOME"|"$HOME/.codex"|"$HOME/.codex/"*) \
+      echo "run.sh: --results-root $results_root resolves to unsafe $resolved; refusing" >&2; exit 2 ;;
+  esac
+  # Reject git-repo top-level: safeguard against overwriting the repo.
+  if git_top="$(cd "$resolved" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)"; then
+    if [[ "$resolved" == "$git_top" ]]; then
+      echo "run.sh: --results-root $results_root is a git repository top-level; refusing" >&2; exit 2 ;
+    fi
+  fi
+  # Reject non-empty target unless --resume was passed. Non-fixture
+  # data in the target implies a stale run whose reuse the operator
+  # did not opt into.
+  if [[ -e "$resolved" && "$resume" != "1" ]]; then
+    if [[ -n "$(ls -A "$resolved" 2>/dev/null || true)" ]]; then
+      echo "run.sh: --results-root $resolved exists and is non-empty; pass --resume or point at a fresh path" >&2; exit 2
+    fi
+  fi
+  # Override all downstream smoke_root_abs / smoke_root_rel uses.
+  smoke_root_abs="$resolved"
+  # smoke_root_rel is used only in plan.py CLI arg wiring; keep it as
+  # the same absolute path when --results-root is set — plan.py's
+  # `--results-root` arg (set below) supersedes `--smoke-root` for
+  # actual output path construction.
+  smoke_root_rel="$resolved"
+fi
+```
+
+Also add the forward:
+```bash
+# Forward to plan.py — added args go INSIDE both python3 -m lib.plan
+# invocations already present in run.sh.
+plan_extra_args=()
+[[ -n "$workload" ]] && plan_extra_args+=("--filter-workload" "$workload")
+[[ -n "$results_root" ]] && plan_extra_args+=("--results-root" "$results_root")
+
+# Then each existing planner invocation:
+#   PYTHONPATH="$fulltable_dir" python3 -m lib.plan \
+#       --matrix "$fulltable_dir/matrix.yaml" \
+#       --smoke-root "$smoke_root_rel" \
+#       "${plan_extra_args[@]}" \
+#       dry-run
+```
+
+Add a new acceptance test `test_results_root_scoping.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Plan-review P0#1: --results-root MUST scope run.sh's own writes, not
+# just planner output paths. Verify nothing lands under smoke/ when
+# --results-root is set.
+set -uo pipefail
+
+here="$(cd "$(dirname "$0")" && pwd)"
+module_root="$(cd "$here/../../../.." && pwd)"
+run_sh="$module_root/tools/eval/fulltable/run.sh"
+
+alt_root=$(mktemp -d --tmpdir=/var/tmp wt4-alt-XXXXXX 2>/dev/null || echo "")
+if [ -z "$alt_root" ]; then
+  # /var/tmp not writable — synthesize under a non-/tmp dir (allowlist-safe).
+  alt_root="$module_root/tests/eval/results/experiments/_test_alt_root/$(date +%s)-$$"
+  mkdir -p "$alt_root"
+fi
+trap "rm -rf '$alt_root'" EXIT
+
+smoke_dir="$module_root/tests/eval/results/smoke"
+smoke_before=$(find "$smoke_dir" -type f 2>/dev/null | wc -l)
+
+LOOM_FULLTABLE_WRAPPER_SHIM=1 bash "$run_sh" \
+  --workload cross-device-code-mod \
+  --results-root "$alt_root" \
+  --dry-run > /dev/null
+
+# Under SHIM, no writes should happen at all — but verify smoke didn't grow.
+smoke_after=$(find "$smoke_dir" -type f 2>/dev/null | wc -l)
+if [ "$smoke_after" -gt "$smoke_before" ]; then
+  echo "FAIL: writes leaked into smoke/ under --results-root; before=$smoke_before after=$smoke_after"
+  exit 1
+fi
+
+# Belt: SHIM output must include SHIM_RESULTS_ROOT: <alt_root>
+out=$(LOOM_FULLTABLE_WRAPPER_SHIM=1 bash "$run_sh" \
+    --workload cross-device-code-mod \
+    --results-root "$alt_root" \
+    --dry-run 2>&1)
+if ! echo "$out" | grep -q "SHIM_RESULTS_ROOT: $alt_root"; then
+  echo "FAIL: SHIM output missing SHIM_RESULTS_ROOT: $alt_root"
+  echo "$out"
+  exit 1
+fi
+
+echo "OK"
+```
+
+Also add a REAL non-shim scoping test to catch a missed mkdir/rm site
+in run.sh (plan-review r3 P1 — WRAPPER_SHIM exits before writes):
+
+```bash
+#!/usr/bin/env bash
+# test_results_root_scoping_dispatch.sh — plan-review r4 P1.
+# LOOM_FULLTABLE_DISPATCH_SHIM=1 reaches the mkdir + planner path
+# (but stops before real subprocess exec). Any missed smoke_root_abs
+# reference in run.sh would create files under smoke/ during the
+# mkdir loop → caught here.
+#
+# CRITICAL: do NOT pass --dry-run. --dry-run short-circuits before
+# preflight AND before the mkdir loop, so a scoping bug would go
+# undetected.
+set -uo pipefail
+
+here="$(cd "$(dirname "$0")" && pwd)"
+module_root="$(cd "$here/../../../.." && pwd)"
+run_sh="$module_root/tools/eval/fulltable/run.sh"
+
+tmpdir=$(mktemp -d)
+trap "rm -rf '$tmpdir'" EXIT
+
+alt_root="$module_root/tests/eval/results/experiments/_test_scoping_$$"
+mkdir -p "$alt_root"
+trap "rm -rf '$alt_root' '$tmpdir'" EXIT
+
+# Clean git repo so commit_meta preflight passes (impl worktree may be
+# dirty during test dev).
+clean_repo="$tmpdir/clean_repo"
+git init -q "$clean_repo" >/dev/null 2>&1
+git -C "$clean_repo" -c user.email=t@t -c user.name=t commit --allow-empty -m init -q >/dev/null 2>&1
+
+smoke_dir="$module_root/tests/eval/results/smoke"
+snapshot_before="$tmpdir/smoke_before.txt"
+snapshot_after="$tmpdir/smoke_after.txt"
+find "$smoke_dir" \( -type f -o -type d \) 2>/dev/null | LC_ALL=C sort > "$snapshot_before"
+
+# NO --dry-run. --sample 3 reaches the DISPATCH_SHIM after preflight
+# and the mkdir loop.
+ALLOW_FULL_RUN=1 WORKTREE_ROOT="$clean_repo" LOOM_FULLTABLE_DISPATCH_SHIM=1 \
+  bash "$run_sh" \
+    --workload cross-device-code-mod \
+    --results-root "$alt_root" \
+    --sample 3 > "$tmpdir/scope.out" 2>&1
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "FAIL: dispatch-shim exit=$rc"
+  cat "$tmpdir/scope.out"
+  exit 1
+fi
+if ! grep -q "SHIM: would dispatch" "$tmpdir/scope.out"; then
+  echo "FAIL: dispatch-shim did NOT reach dispatch-planning"
+  cat "$tmpdir/scope.out"
+  exit 1
+fi
+
+find "$smoke_dir" \( -type f -o -type d \) 2>/dev/null | LC_ALL=C sort > "$snapshot_after"
+if ! diff -u "$snapshot_before" "$snapshot_after" > "$tmpdir/smoke_diff.out"; then
+  echo "FAIL: DISPATCH_SHIM wrote to smoke/ under --results-root"
+  cat "$tmpdir/smoke_diff.out"
+  exit 1
+fi
+
+# Verify alt_root DID get expected dirs (mkdir loop ran with the
+# overridden root).
+for sub in dbs runs paper; do
+  if [ ! -d "$alt_root/$sub" ]; then
+    echo "FAIL: expected $alt_root/$sub after DISPATCH_SHIM run.sh --results-root"
+    ls -la "$alt_root/"
+    exit 1
+  fi
+done
+
+echo "OK"
+```
+
+Add this AND `test_results_root_scoping.sh` to `test_run_sh_shell_tests.py` parametrize list (5 entries total now).
+
+**Also** create `test_results_root_symlink_escape.sh` (plan-review r6 P0
+— shell side):
+
+```bash
+#!/usr/bin/env bash
+# Plan-review r8 P1 — run.sh --results-root MUST reject symlink prefix
+# escapes to /tmp or $HOME/.codex. Uses a FAKE HOME AND an ALLOWLISTED
+# base (NOT /tmp) so a canonicalization regression is actually caught
+# (base under /tmp would be rejected by the raw guard vacuously).
+set -uo pipefail
+
+here="$(cd "$(dirname "$0")" && pwd)"
+module_root="$(cd "$here/../../../.." && pwd)"
+run_sh="$module_root/tools/eval/fulltable/run.sh"
+
+# Base MUST NOT be under /tmp. Use the gitignored experiments dir
+# (Task 13.5).
+base="$module_root/tests/eval/results/experiments/_symlink_test_sh_$$"
+mkdir -p "$base"
+trap "rm -rf '$base'" EXIT
+
+fake_home="$base/fake_home"
+mkdir -p "$fake_home/.codex"
+
+# Sanity: base must not accidentally be under /tmp on this host.
+case "$base" in
+  /tmp/*) echo "SETUP FAIL: base $base under /tmp — vacuous test"; exit 2 ;;
+esac
+
+fail=0
+report() { if [ "$1" -eq 0 ]; then echo "PASS  $2"; else echo "FAIL  $2"; fail=1; fi; }
+
+# Case 1: symlink → /tmp, then a missing-child path via it.
+ln -s /tmp "$base/link_to_tmp"
+candidate1="$base/link_to_tmp/missing/deep"
+case "$candidate1" in
+  /tmp/*) echo "SETUP FAIL: candidate1 under /tmp"; exit 2 ;;
+esac
+if HOME="$fake_home" bash "$run_sh" --results-root "$candidate1" \
+    --workload cross-device-code-mod --dry-run 2>"$base/case1.err"; then
+  report 1 "case1: symlink→/tmp escape accepted"
+  cat "$base/case1.err"
+else
+  report 0 "case1: symlink→/tmp escape rejected"
+fi
+
+# Case 2: symlink → $FAKE_HOME/.codex (not the real ~/.codex),
+# missing child.
+ln -s "$fake_home/.codex" "$base/link_to_codex"
+candidate2="$base/link_to_codex/missing"
+case "$candidate2" in
+  /tmp/*) echo "SETUP FAIL: candidate2 under /tmp"; exit 2 ;;
+esac
+if HOME="$fake_home" bash "$run_sh" --results-root "$candidate2" \
+    --workload cross-device-code-mod --dry-run 2>"$base/case2.err"; then
+  report 1 "case2: symlink→\$HOME/.codex escape accepted"
+  cat "$base/case2.err"
+else
+  report 0 "case2: symlink→\$HOME/.codex escape rejected"
+fi
+
+exit $fail
+```
+
+Add to param list (6 entries total now).
 
 - [ ] **Step 4: Run tests — expect PASS**
 
 Run: `cd multi-agent && pytest tools/eval/fulltable/tests/test_run_sh_shell_tests.py -q -v`
 
-Expected: all 3 shell tests PASS.
+Expected: all 6 shell tests PASS.
 
 - [ ] **Step 5: Snapshot regression check**
 
@@ -2181,8 +2954,15 @@ Expected: all green.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add multi-agent/tools/eval/fulltable/run.sh multi-agent/tools/eval/fulltable/tests/test_workload_filter_semantics.sh multi-agent/tools/eval/fulltable/tests/test_sample_cap_with_workload.sh multi-agent/tools/eval/fulltable/tests/test_run_sh_duplicate_workload.sh multi-agent/tools/eval/fulltable/tests/test_run_sh_shell_tests.py
-git commit -m "WT-4 Task 11: run.sh --workload / --results-root / LOOM_FULLTABLE_WRAPPER_SHIM"
+git add multi-agent/tools/eval/fulltable/run.sh \
+        multi-agent/tools/eval/fulltable/tests/test_workload_filter_semantics.sh \
+        multi-agent/tools/eval/fulltable/tests/test_sample_cap_with_workload.sh \
+        multi-agent/tools/eval/fulltable/tests/test_run_sh_duplicate_workload.sh \
+        multi-agent/tools/eval/fulltable/tests/test_results_root_scoping.sh \
+        multi-agent/tools/eval/fulltable/tests/test_results_root_scoping_dispatch.sh \
+        multi-agent/tools/eval/fulltable/tests/test_results_root_symlink_escape.sh \
+        multi-agent/tools/eval/fulltable/tests/test_run_sh_shell_tests.py
+git commit -m "WT-4 Task 11: run.sh --workload / --results-root / LOOM_FULLTABLE_WRAPPER_SHIM + scoping tests (SHIM + DISPATCH_SHIM) + resume/E4 assertion"
 ```
 
 ---
@@ -2687,10 +3467,11 @@ rc=$?
 # Case 8 — malformed TOML → exit 2 with parse-error msg
 run_preflight "$fixtures/08_malformed.toml" > /tmp/case08.out 2>&1
 rc=$?
-if [ "$rc" -eq 2 ]; then
-  report 0 "08 malformed → exit 2"
+if [ "$rc" -eq 2 ] && grep -q "could not parse" /tmp/case08.out; then
+  report 0 "08 malformed → exit 2 with parse-error message"
 else
-  report 1 "08 malformed → exit 2 (got $rc)"
+  report 1 "08 malformed → exit 2 with parse-error message (rc=$rc)"
+  cat /tmp/case08.out
 fi
 # Belt: no token-shape leak in stderr
 if grep -q "sk-" /tmp/case08.out; then
@@ -2699,10 +3480,15 @@ else
   report 0 "08 malformed → no sk- leak"
 fi
 
-# Case 9 — duplicate tables → exit 2 (TOML forbids)
+# Case 9 — duplicate tables → exit 2 with parse-error msg (TOML forbids)
 run_preflight "$fixtures/09_duplicate_tables.toml" > /tmp/case09.out 2>&1
 rc=$?
-[ "$rc" -eq 2 ] && report 0 "09 duplicate tables → exit 2" || report 1 "09 duplicate tables → exit 2 (got $rc)"
+if [ "$rc" -eq 2 ] && grep -q "could not parse" /tmp/case09.out; then
+  report 0 "09 duplicate tables → exit 2 with parse-error message"
+else
+  report 1 "09 duplicate tables → exit 2 with parse-error message (rc=$rc)"
+  cat /tmp/case09.out
+fi
 
 # Case 10 — token-shaped value present → exit 0 AND assert no leak
 run_preflight "$fixtures/10_token_shaped_value.toml" > /tmp/case10.out 2>&1
@@ -2751,6 +3537,58 @@ Expected: SKIP with message about missing wrapper.
 ```bash
 git add multi-agent/tools/eval/experiments/tests/fixtures/ multi-agent/tools/eval/experiments/tests/test_credential_bound_preflight.sh multi-agent/tools/eval/experiments/tests/test_credential_bound_preflight.py
 git commit -m "WT-4 Task 13: 10 credential-bound preflight fixtures + skipped test (Task 18 flips to green)"
+```
+
+---
+
+### Task 13.5 — .gitignore for `tests/eval/results/experiments/` (plan-review r5 P1)
+
+**Files:**
+- Modify: `multi-agent/.gitignore` (or root `.gitignore` if module-level doesn't exist)
+
+**Interfaces:**
+- Consumes: nothing.
+- Produces: wrappers can `mkdir -p <default_results_root>` (in a follow-up
+  design if needed) OR run.sh can create the alt root after preflight
+  without dirtying the tree — either way, `tests/eval/results/experiments/`
+  MUST be gitignored so a run there does not fail commit_meta preflight.
+
+- [ ] **Step 1: Read current .gitignore**
+
+```bash
+find multi-agent -name .gitignore -maxdepth 3 | xargs -I {} sh -c 'echo "=== {} ==="; cat {}'
+```
+
+Locate the entry for `tests/eval/results/smoke/`. If none exists, add
+the whole `tests/eval/results/` block; if only `smoke/` is ignored,
+add `experiments/` next to it.
+
+- [ ] **Step 2: Add the entry**
+
+Append to the correct .gitignore file (module-level preferred):
+```
+# WT-4 — per-workload experiments results (plan §Task 13.5)
+tests/eval/results/experiments/
+```
+
+- [ ] **Step 3: Verify with git status**
+
+Run:
+```bash
+mkdir -p multi-agent/tests/eval/results/experiments/_probe/probe_file
+echo "test" > multi-agent/tests/eval/results/experiments/_probe/probe_file/x
+git status --short multi-agent/tests/eval/results/experiments/
+```
+Expected: NO output (probe file is ignored). Then clean:
+```bash
+rm -rf multi-agent/tests/eval/results/experiments/_probe
+```
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add multi-agent/.gitignore     # or whichever .gitignore was modified
+git commit -m "WT-4 Task 13.5: .gitignore tests/eval/results/experiments/ (wrappers write here)"
 ```
 
 ---
@@ -2881,6 +3719,81 @@ def test_wrapper_forwards() -> None:
     assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
 ```
 
+Also add `test_wrapper_real_preflight.sh` (plan-review r5 P1 — proves
+wrapper's default-results-root construction doesn't dirty the tree and
+break commit_meta preflight):
+
+```bash
+#!/usr/bin/env bash
+# Plan-review r5 P1 — real-path dispatch-shim (NO WRAPPER_SHIM). Proves
+# wrappers don't create files that dirty the worktree before run.sh
+# preflight runs. If wrappers mkdir the default_results_root eagerly
+# AND experiments/ isn't gitignored, preflight fails here.
+set -uo pipefail
+
+here="$(cd "$(dirname "$0")" && pwd)"
+exp_dir="$here/.."
+module_root="$(cd "$here/../../../.." && pwd)"
+
+fail=0
+report() { if [ "$1" -eq 0 ]; then echo "PASS  $2"; else echo "FAIL  $2"; fail=1; fi; }
+
+tmpdir=$(mktemp -d)
+trap "rm -rf '$tmpdir'" EXIT
+
+clean_repo="$tmpdir/clean_repo"
+git init -q "$clean_repo"
+git -C "$clean_repo" -c user.email=t@t -c user.name=t commit --allow-empty -m init -q
+
+fake_bin="$tmpdir/bin"
+mkdir -p "$fake_bin"
+touch "$fake_bin/codex"; chmod +x "$fake_bin/codex"
+export PATH="$fake_bin:$PATH"
+export LOOM_CODEX_CONFIG_PATH="$here/fixtures/codex_config/01_route_a_only.toml"
+
+# cross_device_code_mod is representative; others share the same shape.
+wrapper="$exp_dir/cross_device_code_mod.sh"
+if [ ! -x "$wrapper" ]; then
+  echo "SKIP: $wrapper not yet created"
+  exit 0
+fi
+
+out=$(ALLOW_FULL_RUN=1 WORKTREE_ROOT="$clean_repo" LOOM_FULLTABLE_DISPATCH_SHIM=1 \
+    bash "$wrapper" --sample 1 2>&1)
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  report 1 "cross_device wrapper dispatch-shim preflight (rc=$rc)"
+  echo "$out"
+else
+  report 0 "cross_device wrapper dispatch-shim preflight passes"
+fi
+
+# Belt: after wrapper runs, git status of the worktree must NOT show
+# any new untracked files under tests/eval/results/experiments/. This
+# proves either (a) wrapper doesn't mkdir eagerly OR (b) the dir is
+# .gitignored.
+untracked=$(cd "$module_root" && git status --short -- tests/eval/results/experiments/ 2>/dev/null | wc -l)
+if [ "$untracked" -gt 0 ]; then
+  report 1 "cross_device wrapper left $untracked untracked files under experiments/ (would fail real preflight)"
+  cd "$module_root" && git status --short -- tests/eval/results/experiments/
+else
+  report 0 "cross_device wrapper left no untracked experiments/ files"
+fi
+
+exit $fail
+```
+
+Add to `test_wrapper_forwards.py` alongside the primary test (or wire
+via its own pytest wrapper). Simplest: append inside
+`test_wrapper_forwards.py`:
+
+```python
+def test_wrapper_real_preflight() -> None:
+    script = Path(__file__).parent / "test_wrapper_real_preflight.sh"
+    proc = subprocess.run(["bash", str(script)], capture_output=True, text=True)
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+```
+
 Run: `cd multi-agent && pytest tools/eval/experiments/tests/test_wrapper_forwards.py -q -v` → expect FAIL / all SKIP (no wrappers yet).
 
 - [ ] **Step 2: Write `cross_device_code_mod.sh` (Task 14)**
@@ -2936,12 +3849,21 @@ codex_bin_present || die "wrapper:$WORKLOAD: codex binary not on \$PATH; install
 codex_config_readable || die "wrapper:$WORKLOAD: ~/.codex/config.toml not readable"
 
 # Default results-root: per-invocation subdir under module-root.
+# CRITICAL — plan-review r5 P1: do NOT mkdir the default root here.
+# `commit_meta --preflight` runs inside run.sh and rejects a dirty
+# worktree (spec §7(f)); an untracked
+# tests/eval/results/experiments/<workload>/<subdir>/ would fail
+# preflight even though `.gitignore` should cover this directory (it
+# does NOT today: `.gitignore` only excludes tests/eval/results/smoke/,
+# not tests/eval/results/experiments/). Compute the path here; let
+# run.sh create it AFTER preflight passes.
 default_root_base="$module_root/tests/eval/results/experiments/$WORKLOAD"
-mkdir -p "$default_root_base"
-# ISO date + pid for uniqueness; wrappers must not collide.
 subdir="$(date -u +%Y-%m-%dT%H-%M-%SZ)-$$"
 default_results_root="$default_root_base/$subdir"
-mkdir -p "$default_results_root"
+# NB: run.sh's --results-root allowlist rejects non-existent paths only
+# for the git-top-level check; the "non-empty unless --resume" check
+# tolerates a non-existent path. All other creators (run.sh mkdir -p
+# after preflight, plan.py) create the path lazily.
 
 # If caller provided --results-root, honor it (run.sh validates the
 # allowlist). Else pass our default.
@@ -3044,8 +3966,25 @@ Same as Task 14 with `WORKLOAD="credential-bound-model"` PLUS credential-bound p
 ```bash
 # Additional preflight for credential-bound-model per spec §4.4
 # (route-b unsupported in this PR).
-route_a=$(codex_config_has_route_a 2>&1) && route_a_rc=0 || route_a_rc=$?
-route_b=$(codex_config_has_route_b 2>&1) && route_b_rc=0 || route_b_rc=$?
+#
+# Plan-review r3 P1 fix: under `set -euo pipefail`, the form
+# `route_a=$(cmd); route_a_rc=$?` triggers set -e on any non-zero exit
+# from cmd BEFORE the second statement runs. Must use if/then/else to
+# capture rc safely.
+if route_a=$(codex_config_has_route_a); then route_a_rc=0; else route_a_rc=$?; fi
+if route_b=$(codex_config_has_route_b); then route_b_rc=0; else route_b_rc=$?; fi
+
+# Helpers return `error` + rc=2 on parse failure. If either errors,
+# die BEFORE the route logic to surface the parse failure clearly.
+# Only when BOTH helpers succeeded (rc 0 or 1) do we apply the
+# route-a-required / route-b-detected logic.
+
+if [ "$route_a_rc" -eq 2 ] || [ "$route_b_rc" -eq 2 ]; then
+  # error means: file missing, malformed TOML, or duplicate tables.
+  # The helper's stdout is already sanitized to the fixed vocab
+  # ({present, absent, error}); never contains key names / values.
+  die "wrapper:$WORKLOAD: could not parse ~/.codex/config.toml (route_a=$route_a rc=$route_a_rc; route_b=$route_b rc=$route_b_rc); check file exists, is TOML-valid, and has at most one [model_providers.modelserver] table."
+fi
 
 # Log states only (never values / names)
 echo "[wrapper:$WORKLOAD] route_a: $route_a, route_b: $route_b" >&2
@@ -3174,6 +4113,239 @@ Expected: PASS. (If uname fallback fails on some Linux, adjust `_common.sh` `req
 ```bash
 git add multi-agent/tools/eval/experiments/tests/test_windows_guard.sh multi-agent/tools/eval/experiments/tests/test_windows_guard.py
 git commit -m "WT-4 Task 19: windows-guard test table (MSYS/CYGWIN/MINGW/*NT accept, Linux/Darwin/missing reject)"
+```
+
+---
+
+### Task 19.5 — env-allowlist unchanged guard (plan-review P1 resolution)
+
+**Files:**
+- Create: `multi-agent/tools/eval/fulltable/tests/test_env_allowlist_unchanged.py`
+
+**Interfaces:**
+- Consumes: git baseline `origin/paper/v3-integration` @ `786bf60`.
+- Produces: a guard test that FAILS if this PR modifies any of
+  `alwaysAllowedEnvKeys`, `alwaysAllowedIfSetEnvKeys`, or
+  `perWorkloadAllowedEnvKeys` in `tests/eval/baselines/harness/env.go`
+  (spec Global Constraints: allowlist frozen in this PR).
+
+- [ ] **Step 1: Write test**
+
+```python
+"""Plan-review P1 — env allow-list in harness/env.go MUST NOT change
+in this PR. A change belongs in a follow-up worktree with dedicated
+security review. Test compares this branch's env.go against the
+base branch's env.go."""
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+from conftest import MODULE_ROOT
+
+BASE_REF = "origin/paper/v3-integration"
+ENV_GO = "multi-agent/tests/eval/baselines/harness/env.go"
+
+
+def _extract_allowlists(text: str) -> dict[str, list[str]]:
+    """Return dict of allowlist-name → sorted contents. Tolerant of
+    formatting drift — walks the source line-by-line looking for the
+    known var names + their `{...}` block."""
+    import re
+    out = {}
+    for name in ("alwaysAllowedEnvKeys",
+                 "alwaysAllowedIfSetEnvKeys",
+                 "perWorkloadAllowedEnvKeys"):
+        m = re.search(rf"{name}\s*=\s*(?:map\[[^\]]+\][^{{]*)?{{([^}}]*)}}", text, re.S)
+        if not m:
+            out[name] = ["<not-found>"]
+            continue
+        body = m.group(1)
+        # Extract quoted strings from body.
+        strs = re.findall(r'"([^"]+)"', body)
+        out[name] = sorted(strs)
+    return out
+
+
+def test_env_allowlists_unchanged() -> None:
+    repo_root = MODULE_ROOT.parent
+    current_text = (repo_root / ENV_GO).read_text()
+    base_text = subprocess.run(
+        ["git", "-C", str(repo_root), "show", f"{BASE_REF}:{ENV_GO}"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    current = _extract_allowlists(current_text)
+    base = _extract_allowlists(base_text)
+    assert current == base, (
+        "env allowlist changed in this PR — this is out-of-scope for "
+        "wt4-codex-only per spec Global Constraints. Move the change "
+        "to a follow-up worktree with its own review.\n"
+        f"current: {current}\n"
+        f"base:    {base}"
+    )
+```
+
+- [ ] **Step 2: Run — expect PASS (nothing changed yet)**
+
+Run: `cd multi-agent && pytest tools/eval/fulltable/tests/test_env_allowlist_unchanged.py -q -v`
+
+Expected: PASS.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add multi-agent/tools/eval/fulltable/tests/test_env_allowlist_unchanged.py
+git commit -m "WT-4 Task 19.5: env-allowlist unchanged guard (harness/env.go frozen for this PR)"
+```
+
+---
+
+### Task 19.6 — P2 opportunistic fixes (long-stderr scrub, ctx-cancel, fixture token rename, mktemp per shell test)
+
+**Files:**
+- Modify: `multi-agent/tests/eval/baselines/single_machine_codex/impl_test.go` (add 2 tests)
+- Modify: `multi-agent/tools/eval/experiments/tests/fixtures/codex_config/*.toml` (rename fixture-token literals to obviously-fake prefixes)
+- Modify: shell tests using `/tmp/case*.out` → per-test `mktemp -d`
+
+- [ ] **Step 1: Add long-stderr scrub test to impl_test.go**
+
+```go
+// TestSingleMachineCodex_ScrubsLongStderr — plan-review P2: lock
+// behavior when codex stderr contains multiple secrets AND is longer
+// than secretscrub.Sanitize's 256-rune truncation cap. Assertion:
+// even if the tail is truncated (`...[truncated]`), NONE of the
+// tokens leak into the visible portion.
+func TestSingleMachineCodex_ScrubsLongStderr(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "codex")
+	// ~400 bytes of stderr with tokens at start, middle, and near end.
+	script := `#!/bin/sh
+{
+  printf 'ERROR sk-headertokenXYZlong0123456789 at start\n'
+  printf 'padding padding padding padding padding padding padding\n'
+  printf 'padding padding padding padding padding padding padding\n'
+  printf 'MID: Bearer bar_baz_qux_secret_val_middle_1234567890\n'
+  printf 'padding padding padding padding padding padding padding\n'
+  printf 'TAIL: sk-tailtokenABCDEF0123456789 near end\n'
+} >&2
+exit 42
+`
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pathDir := t.TempDir()
+	for _, tool := range []string{"sh", "cat", "printf", "bash", "ls"} {
+		src, err := exec.LookPath(tool)
+		if err != nil {
+			continue
+		}
+		_ = os.Symlink(src, filepath.Join(pathDir, tool))
+	}
+	_ = os.Symlink(fake, filepath.Join(pathDir, "codex"))
+	t.Setenv("PATH", pathDir)
+	out := filepath.Join(t.TempDir(), "row.csv")
+	res := harness.Run(context.Background(), harness.Opts{
+		WorkloadID:  "cross-device-code-mod",
+		WorkloadDir: filepath.Join(moduleRoot(t), "tests/eval/workloads"),
+		OutCSV:      out,
+		DryRun:      false,
+	}, NewImpl("cross-device-code-mod", false), io.Discard)
+	if res.Err == nil {
+		t.Fatalf("expected err from exit 42")
+	}
+	errStr := res.Err.Error()
+	// No visible-portion leaks — Sanitize replaces before truncation.
+	for _, banned := range []string{"sk-headertoken", "bar_baz_qux_secret", "sk-tailtoken"} {
+		if strings.Contains(errStr, banned) {
+			t.Errorf("long-stderr scrub leaked %q into visible error; err=%q", banned, errStr)
+		}
+	}
+}
+
+// TestSingleMachineCodex_CtxCancelScrubs — plan-review P2: cancelation
+// path also runs the scrub. Fake codex sleeps 30s; ctx is canceled
+// after 100ms with a WithCancel wrap. Assert the returned error is
+// scrubbed of any pre-sleep token stderr.
+func TestSingleMachineCodex_CtxCancelScrubs(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "codex")
+	script := `#!/bin/sh
+printf 'PRE-SLEEP sk-cancelleaktoken0123456789 leak\n' >&2
+sleep 30
+`
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pathDir := t.TempDir()
+	for _, tool := range []string{"sh", "cat", "printf", "bash", "ls", "sleep"} {
+		src, err := exec.LookPath(tool)
+		if err != nil {
+			continue
+		}
+		_ = os.Symlink(src, filepath.Join(pathDir, tool))
+	}
+	_ = os.Symlink(fake, filepath.Join(pathDir, "codex"))
+	t.Setenv("PATH", pathDir)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	out := filepath.Join(t.TempDir(), "row.csv")
+	res := harness.Run(ctx, harness.Opts{
+		WorkloadID:  "cross-device-code-mod",
+		WorkloadDir: filepath.Join(moduleRoot(t), "tests/eval/workloads"),
+		OutCSV:      out,
+		DryRun:      false,
+	}, NewImpl("cross-device-code-mod", false), io.Discard)
+	if res.Err == nil {
+		t.Fatalf("expected err from ctx cancel")
+	}
+	if strings.Contains(res.Err.Error(), "sk-cancelleak") {
+		t.Errorf("ctx-cancel path leaked token; err=%q", res.Err)
+	}
+}
+```
+
+Note the added `time` import if not already present.
+
+- [ ] **Step 2: Rename fixture tokens to obviously-fake forms**
+
+In `tools/eval/experiments/tests/fixtures/codex_config/*.toml`, replace any `sk-...` string that looks credential-shaped enough to be surprising in git-blame with `sk-TEST-NOT-REAL-...`. Example:
+
+`01_route_a_only.toml`:
+```toml
+# Fixture — obviously fake token; not a real credential.
+[model_providers.modelserver]
+experimental_bearer_token = "sk-TEST-NOT-REAL-01aaaa"
+```
+
+Do the same for `04`, `10`. Add a top-of-file comment line in each fixture: `# Fixture — not a real credential; used by test_credential_bound_preflight.sh`.
+
+- [ ] **Step 3: Convert shell tests using `/tmp/case*.out` to per-test mktemp**
+
+In `test_wrapper_forwards.sh`, `test_credential_bound_preflight.sh`, `test_workload_filter_semantics.sh`, `test_sample_cap_with_workload.sh`, `test_run_sh_duplicate_workload.sh`, replace the pattern:
+
+```bash
+out=$(... 2>&1)   # or:
+... > /tmp/caseN.out 2>&1
+```
+
+with per-test `local` capture buffers or `mktemp -d` per test invocation. Simplest fix that keeps output visible on failure: use bash local vars (`out=$(cmd 2>&1)`) throughout; only when a test needs stdout AND stderr separated does it need a tempdir. If a tempdir is needed:
+
+```bash
+casedir=$(mktemp -d); trap "rm -rf '$casedir'" RETURN
+run_preflight ... > "$casedir/out" 2>&1
+```
+
+- [ ] **Step 4: Run full test sweep**
+
+Run: `cd multi-agent && go test ./tests/eval/baselines/... -race -count=1 -timeout=180s && pytest tools/eval/fulltable/tests/ tools/eval/experiments/tests/ -q`
+
+Expected: all green.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add -u
+git commit -m "WT-4 Task 19.6: P2 fixes (long-stderr scrub + ctx-cancel + fixture rename + mktemp shell tests)"
 ```
 
 ---
@@ -3450,7 +4622,7 @@ Baseline test suite MUST stay green throughout.
 - [x] No `TBD` / `TODO` / placeholder text in any task body.
 - [x] Every step's code is complete (no "similar to previous task" without repeating).
 - [x] Type + function signature consistency: `filter_workload`, `WORKLOADS`, `UnknownWorkloadError`, `_validate_results_root`, `codex_config_has_route_a/b`, `codex_bin_present`, `require_windows_host`, `warn_and_exit_zero`, `die` — all referenced with the same names across their definition and consumer tasks.
-- [x] TDD discipline: every task writes the failing test first, verifies it fails, then writes minimum impl, verifies it passes.
+- [x] TDD discipline: every BEHAVIORAL task writes the failing test first, verifies it fails, then writes minimum impl, verifies it passes. Explicit documented exceptions: Task 1 (compile-only scaffold), Task 5's run.sh (pattern mirror + smoke-invocation verification in Step 3), Task 20's README (documentation-only; verified by Task 20 Step 2 grep guard).
 - [x] `git commit` at every task boundary.
 
 Ready for codex plan review.
