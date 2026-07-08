@@ -1,0 +1,3 @@
+# Fixture — not a real credential; token is under the wrong table.
+[model_providers.other]
+experimental_bearer_token = "sk-TEST-NOT-REAL-wrongtable"

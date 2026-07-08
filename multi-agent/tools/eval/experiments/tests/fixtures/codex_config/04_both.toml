@@ -1,0 +1,4 @@
+# Fixture — not a real credential.
+[model_providers.modelserver]
+experimental_bearer_token = "sk-TEST-NOT-REAL-both01"
+env_key = "SOME_FIXTURE_ENV_NAME"
