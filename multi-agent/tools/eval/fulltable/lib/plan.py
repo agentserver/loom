@@ -78,6 +78,85 @@ E4_CONFIGURATIONS: tuple[str, ...] = (
     "NoRegistryLookup",
 )
 
+# The 5 workload ids, canonical order (Phase 0 §3.1).
+# Emitted by `--list-workloads`; run.sh reads that output to validate
+# --workload arguments against the allowlist (no literal duplication).
+WORKLOADS: tuple[str, ...] = (
+    "cross-device-code-mod",
+    "remote-data-processing",
+    "windows-only-artifact",
+    "missing-parser-converter",
+    "credential-bound-model",
+)
+
+
+class UnknownWorkloadError(ValueError):
+    """Raised by filter_workload() when the id is not in WORKLOADS."""
+
+
+def filter_workload(rows: list[dict], workload_id: str) -> list[dict]:
+    """Return only matrix rows whose workload_id == workload_id.
+
+    Filter is applied BEFORE any --sample truncation (spec §4.3 P1#1
+    resolution). CLI callers get this ordering via the
+    `filter_workload_id` parameter on enumerate_matrix_argvs — that
+    is where the filter runs, guaranteeing filter-before-sample.
+    """
+    if workload_id not in WORKLOADS:
+        raise UnknownWorkloadError(
+            f"unknown workload id {workload_id!r}; expected one of {WORKLOADS}"
+        )
+    return [r for r in rows if r["workload_id"] == workload_id]
+
+
+_ALLOWLIST_UNSAFE_ROOTS: set[str] = {
+    os.path.abspath("/"),
+    os.path.abspath("/tmp"),
+    os.path.abspath("/root"),
+}
+
+
+def _validate_results_root(raw: str) -> Path:
+    """Reject unsafe --results-root arguments.
+
+    Rejected: `$HOME`, `$HOME/.codex` (or any subdir), `/`, `/tmp` (or
+    any subdir), `/root`, any git-repo top-level, any symlink whose
+    resolved target is unsafe. Requires an ABSOLUTE path.
+    """
+    import subprocess as _subprocess
+    if not os.path.isabs(raw):
+        raise ValueError(f"--results-root must be absolute; got {raw!r}")
+    # Plan-review r6 P0: resolve(strict=False) resolves symlink prefixes
+    # even when a trailing component is missing. Otherwise a symlink
+    # like `link_to_tmp/missing/deep` (link_to_tmp -> /tmp) would
+    # escape /tmp rejection.
+    p = Path(raw).resolve(strict=False)
+    home = Path(os.path.expanduser("~")).resolve(strict=False)
+    unsafe = _ALLOWLIST_UNSAFE_ROOTS | {str(home), str(home / ".codex")}
+    if str(p) in unsafe:
+        raise ValueError(f"--results-root {raw!r} is an unsafe root; refusing")
+    # Reject ANY path under $HOME/.codex/ — plan-review r3 P0.
+    codex_dir = home / ".codex"
+    if codex_dir in p.parents or p == codex_dir:
+        raise ValueError(
+            f"--results-root {raw!r} resolves under $HOME/.codex/; refusing"
+        )
+    if str(p).startswith("/tmp/") or str(p) == "/tmp":
+        raise ValueError(f"--results-root {raw!r} lives under /tmp; refusing")
+    # Git top-level check (parity with run.sh belt).
+    try:
+        git_top = _subprocess.run(
+            ["git", "-C", str(p if p.exists() else p.parent), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=False,
+        ).stdout.strip()
+        if git_top and str(p) == git_top:
+            raise ValueError(
+                f"--results-root {raw!r} is a git repository top-level; refusing"
+            )
+    except FileNotFoundError:
+        pass
+    return p
+
 # Smoke output root — enforced by `_smoke_out_root`; the follow-up run
 # worktree points this to `tests/eval/results/` and lifts the guard.
 SMOKE_ROOT_RELATIVE = "tests/eval/results/smoke"
@@ -243,6 +322,7 @@ def plan_command_for_matrix_row(
     timeout: str = SMOKE_ROW_TIMEOUT,
     module_root_prefix: str = "",
     dry_run: bool = False,
+    override_out_root: Path | None = None,
 ) -> RunPlan:
     """Build the argv for one matrix row.
 
@@ -254,8 +334,15 @@ def plan_command_for_matrix_row(
                    --out C [--dry-run for cloud_sandbox_e2b]
 
     Reject any cloud_sandbox_e2b row without `dry_run: true` (§7 (c)).
+
+    `override_out_root` (spec §4.3 P0#2 resolution): when set, bypasses
+    the `_smoke_out_root` guard and uses the caller-supplied path
+    directly (already validated by `_validate_results_root`).
     """
-    smoke_root = _smoke_out_root(smoke_root)
+    if override_out_root is not None:
+        smoke_root = override_out_root
+    else:
+        smoke_root = _smoke_out_root(smoke_root)
     workload = row["workload_id"]
     conf = row["baseline_or_ablation"]
     if run_id is None:
@@ -332,6 +419,7 @@ def plan_command_for_e4_row(
     run_id: str | None = None,
     timeout: str = SMOKE_ROW_TIMEOUT,
     module_root_prefix: str = "",
+    override_out_root: Path | None = None,
 ) -> RunPlan:
     """E4 dispatch — no --stage flag today (spec §4.4 handoff), so the
     argv is identical to a matrix row aside from the resume key.
@@ -339,7 +427,10 @@ def plan_command_for_e4_row(
     The follow-up run worktree adds `--stage {A,B,C}` to the runner and
     re-derives argv here; the smoke does not actually dispatch these.
     """
-    smoke_root = _smoke_out_root(smoke_root)
+    if override_out_root is not None:
+        smoke_root = override_out_root
+    else:
+        smoke_root = _smoke_out_root(smoke_root)
     if run_id is None:
         run_id = str(uuid.uuid4())
     resume_key = resume_key_for_e4_row(row)
@@ -386,6 +477,7 @@ def enumerate_e4_argvs(
     timeout: str = SMOKE_ROW_TIMEOUT,
     use_port_pool: bool = False,
     port_pool=None,
+    override_out_root: Path | None = None,
 ) -> list[RunPlan]:
     """Build the ordered plan list for the 240-row E4 manifest.
 
@@ -416,6 +508,7 @@ def enumerate_e4_argvs(
             smoke_root=smoke_root,
             timeout=timeout,
             module_root_prefix=module_root_prefix,
+            override_out_root=override_out_root,
         )
         plans.append(plan)
         port += 1
@@ -433,6 +526,8 @@ def enumerate_matrix_argvs(
     deterministic_run_ids: bool = False,
     use_port_pool: bool = False,
     port_pool=None,
+    filter_workload_id: str | None = None,
+    override_out_root: Path | None = None,
 ) -> list[RunPlan]:
     """Build the ordered plan list for `run.sh --sample N`/`--dry-run`.
 
@@ -447,6 +542,10 @@ def enumerate_matrix_argvs(
     (a busy 18100 on the CI runner would otherwise churn the golden).
     """
     matrix = parse_matrix(matrix_path)
+    # Filter FIRST (plan-review P0#2 — spec §4.3 filter-first-then-sample).
+    if filter_workload_id is not None:
+        matrix = filter_workload(matrix, filter_workload_id)
+    # THEN truncate.
     if sample_n is not None:
         matrix = matrix[:sample_n]
     plans: list[RunPlan] = []
@@ -472,6 +571,7 @@ def enumerate_matrix_argvs(
             run_id=run_id,
             timeout=timeout,
             module_root_prefix=module_root_prefix,
+            override_out_root=override_out_root,
         )
         plans.append(plan)
         # baseline rows don't use the stub, but keeping the port
@@ -505,6 +605,7 @@ def _emit_shim_line(count: int, inject_row: int | None = None) -> None:
 
 def _cmd_dry_run(args: argparse.Namespace) -> int:
     smoke_root = Path(args.smoke_root)
+    override = getattr(args, "results_root", None)
     plans = enumerate_matrix_argvs(
         Path(args.matrix),
         smoke_root=smoke_root,
@@ -512,6 +613,8 @@ def _cmd_dry_run(args: argparse.Namespace) -> int:
         module_root_prefix=args.module_root_prefix,
         timeout=args.timeout,
         deterministic_run_ids=True,
+        filter_workload_id=getattr(args, "filter_workload", None),
+        override_out_root=override,
     )
     for plan in plans:
         _print_plan(plan)
@@ -555,6 +658,14 @@ def _emit_plan_line(plan: RunPlan) -> None:
 
 def _cmd_sample(args: argparse.Namespace) -> int:
     smoke_root = Path(args.smoke_root)
+    override = getattr(args, "results_root", None)
+    filter_id = getattr(args, "filter_workload", None)
+    # Spec §4.3 — E4 rows are per-family, not per-workload; skip when a
+    # workload filter is active.
+    if filter_id and getattr(args, "include_e4", False):
+        print("--filter-workload with --include-e4: E4 rows are per-family, "
+              "not per-workload; skipping E4", file=sys.stderr)
+        args.include_e4 = False
     # spec §7 (b) + S057: matrix and E4 planning MUST share one PortPool so
     # a port skipped for one manifest isn't re-handed to the other.
     from lib.portpool import PortPool
@@ -567,6 +678,8 @@ def _cmd_sample(args: argparse.Namespace) -> int:
         timeout=args.timeout,
         use_port_pool=True,
         port_pool=shared_pool,
+        filter_workload_id=filter_id,
+        override_out_root=override,
     )
     if getattr(args, "include_e4", False) and args.e4:
         plans += enumerate_e4_argvs(
@@ -577,6 +690,7 @@ def _cmd_sample(args: argparse.Namespace) -> int:
             timeout=args.timeout,
             use_port_pool=True,
             port_pool=shared_pool,
+            override_out_root=override,
         )
     # Spec §7 (d): refuse to emit a plan where two rows would race for
     # the same observer sqlite file. Raise BEFORE any dispatch runs.
@@ -616,7 +730,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--module-root-prefix", default="",
                    help="prepend to baseline run.sh paths (e.g. tests/eval/…)")
     p.add_argument("--timeout", default=SMOKE_ROW_TIMEOUT)
-    sub = p.add_subparsers(dest="cmd", required=True)
+    p.add_argument("--filter-workload", default=None,
+                   help="if set, only include rows whose workload_id equals this")
+    p.add_argument("--results-root", default=None,
+                   help="absolute path to override smoke_root; rejects unsafe roots")
+    p.add_argument("--list-workloads", action="store_true",
+                   help="print the 5 workload ids newline-separated then exit 0")
+    sub = p.add_subparsers(dest="cmd", required=False)
 
     sp_dry = sub.add_parser("dry-run")
     sp_dry.set_defaults(fn=_cmd_dry_run)
@@ -637,6 +757,25 @@ def main(argv: list[str] | None = None) -> int:
     sp_print.set_defaults(fn=_cmd_print_stub_listen)
 
     args = p.parse_args(argv)
+    if args.list_workloads:
+        for w in WORKLOADS:
+            print(w)
+        return 0
+    if args.filter_workload is not None:
+        if args.filter_workload not in WORKLOADS:
+            print(f"unknown workload id {args.filter_workload!r}; expected one of {WORKLOADS}", file=sys.stderr)
+            return 2
+    if args.results_root is not None:
+        try:
+            args.results_root = _validate_results_root(args.results_root)
+        except ValueError as e:
+            print(f"--results-root: {e}", file=sys.stderr)
+            return 2
+    if args.cmd is None:
+        p.print_usage(sys.stderr)
+        print("lib.plan: subcommand required (dry-run | sample | print-planned-stub-listen)",
+              file=sys.stderr)
+        return 2
     try:
         return args.fn(args)
     except ErrObserverDBCollision as e:
