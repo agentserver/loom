@@ -67,3 +67,9 @@ tests/eval/results/experiments/
 
 # Stray build artifact from top-level go build
 /single_machine_codex
+
+# Local public benchmark smoke prototypes and generated experiment harnesses.
+# Keep ignored until the experiment design stabilizes.
+/tools/eval/container_smoke/
+/tests/eval/workloads/public-terminal-heterogeneous-dates/
+/tools/eval/runner/codexhome.go
