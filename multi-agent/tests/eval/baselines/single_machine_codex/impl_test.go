@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -183,7 +182,6 @@ exit 0
 	if !reflect.DeepEqual(lines, expected) {
 		t.Fatalf("argv drift:\n  got:  %q\n  want: %q", lines, expected)
 	}
-	_ = fmt.Sprintf
 }
 
 // TestSingleMachineCodex_ScrubsStderr_NonzeroExit — spec P1#6 round-2.
@@ -193,16 +191,14 @@ exit 0
 func TestSingleMachineCodex_ScrubsStderr_NonzeroExit(t *testing.T) {
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "codex")
-	// Note: secretscrub.Sanitize covers sk-*, JWT eyJ*, AKIA*, gh[opsru]_*,
-	// github_pat_*, glpat-*, AIza*, xox[baprs]-*, and PEM blocks.
-	// Test with two patterns Sanitize DOES cover: `sk-*` and github's
-	// `ghp_*`. `Bearer ...` is a snapshot-scan pattern (§4.5 test file)
-	// but is NOT in Sanitize's regex — that would need a follow-up
-	// scrub extension out of scope for this PR.
+	// impl.go wraps secretscrub.Sanitize with a local Bearer pre-scrub
+	// (spec §5: Bearer + sk-* + ghp_* are all stderr leak shapes that
+	// MUST redact). Test all three patterns.
 	script := `#!/bin/sh
 printf 'boot line 1\n' >&2
 printf 'ERROR sk-abc123DEFabcDEFabcDEFabcDEF leak\n' >&2
 printf 'ERROR ghp_abcDEFabcDEFabcDEFabcDEFabcDEFabcDEF leak\n' >&2
+printf 'ERROR Bearer bar_baz_qux_secret_val_1234567890 leak\n' >&2
 exit 42
 `
 	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
@@ -234,7 +230,7 @@ exit 42
 	// BaselineRunRow has no stderr field; scrubbed subprocess stderr
 	// surfaces only via the wrapped %w error.
 	errStr := res.Err.Error()
-	for _, banned := range []string{"sk-abc123", "ghp_abcDEF"} {
+	for _, banned := range []string{"sk-abc123", "ghp_abcDEF", "bar_baz_qux_secret"} {
 		if strings.Contains(errStr, banned) {
 			t.Errorf("scrub failed: substring %q leaked into error; err=%q", banned, errStr)
 		}
@@ -267,11 +263,15 @@ exit 0
 	for _, tool := range []string{"sh", "cat", "printf", "bash", "ls", "rm"} {
 		src, err := exec.LookPath(tool)
 		if err != nil {
-			continue
+			t.Fatalf("required tool %q missing from host PATH (test setup broken): %v", tool, err)
 		}
-		_ = os.Symlink(src, filepath.Join(pathDir, tool))
+		if err := os.Symlink(src, filepath.Join(pathDir, tool)); err != nil {
+			t.Fatalf("symlink %s: %v", tool, err)
+		}
 	}
-	_ = os.Symlink(fake, filepath.Join(pathDir, "codex"))
+	if err := os.Symlink(fake, filepath.Join(pathDir, "codex")); err != nil {
+		t.Fatalf("symlink fake codex: %v", err)
+	}
 	t.Setenv("PATH", pathDir)
 	out := filepath.Join(t.TempDir(), "row.csv")
 	res := harness.Run(context.Background(), harness.Opts{

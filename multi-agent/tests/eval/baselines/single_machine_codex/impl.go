@@ -12,11 +12,34 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"time"
 
 	"github.com/yourorg/multi-agent/internal/secretscrub"
 	"github.com/yourorg/multi-agent/tests/eval/baselines/harness"
 )
+
+// bearerRE augments internal/secretscrub.Sanitize with a `Bearer <token>`
+// pattern that the shared scrubber does not cover today. Spec §5 lists
+// `Bearer` alongside `sk-*` / `ghp_*` / etc as a stderr leak shape that
+// MUST be redacted before it reaches res.Err / row.OracleDetailsJSON.
+// Modifying internal/secretscrub is out-of-scope for a rename PR; we
+// pre-scrub Bearer locally, then let Sanitize handle the rest.
+//
+// Regex: `Bearer ` (case-insensitive) followed by 8+ chars from the
+// standard OAuth 2 Bearer token character class ([A-Za-z0-9._~+/-]+
+// with optional trailing `=` per RFC 6750 §2.1). 8+ is loose enough
+// to catch test-shaped values while keeping false positives cheap
+// (redaction to [REDACTED] is idempotent so a false positive is a
+// harmless cosmetic swap).
+var bearerRE = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+/\-]{8,}=*`)
+
+func scrubStderr(s string) string {
+	// Pre-scrub Bearer prefix (secretscrub.Sanitize does not),
+	// then delegate the token-family regexes it does cover.
+	s = bearerRE.ReplaceAllString(s, "[REDACTED]")
+	return secretscrub.Sanitize(s)
+}
 
 // ErrCodexCLIUnavailable is returned by real-mode ExecuteAgent when
 // the `codex` binary is not on $PATH. Symmetric to the
@@ -107,7 +130,7 @@ func (s *SingleMachineCodexImpl) ExecuteAgent(ctx context.Context, ws *harness.W
 		// Scrub stderr before embedding — codex may emit token-shaped
 		// bytes (auth errors, config dumps). Runs on the nonzero-exit
 		// leak path (spec §5 TestExecuteAgent_ScrubsStderr).
-		scrubbed := secretscrub.Sanitize(stderr.String())
+		scrubbed := scrubStderr(stderr.String())
 		return harness.ExecuteMetrics{
 			WallTimeMS: time.Since(start).Milliseconds(),
 		}, fmt.Errorf("single_machine_codex: codex CLI failed for %s: %w; stderr=%s", s.workloadID, err, scrubbed)
@@ -118,7 +141,7 @@ func (s *SingleMachineCodexImpl) ExecuteAgent(ctx context.Context, ws *harness.W
 			// Success (exit 0) but expected output missing. Still
 			// scrub stderr — stderr may contain diagnostic output
 			// with token-shaped bytes.
-			scrubbed := secretscrub.Sanitize(stderr.String())
+			scrubbed := scrubStderr(stderr.String())
 			return harness.ExecuteMetrics{
 					WallTimeMS: time.Since(start).Milliseconds(),
 				},

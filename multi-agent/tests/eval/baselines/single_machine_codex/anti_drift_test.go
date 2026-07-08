@@ -83,6 +83,23 @@ func extractPromptMap(t *testing.T, file, name string) map[string]promptSpec {
 				if !ok {
 					t.Fatalf("%s must be a composite literal, got %T", name, vs.Values[i])
 				}
+				// Plan-review P2: verify the top-level literal is truly
+				// `map[string]promptSpec{...}`, not some other keyed
+				// composite that would still walk. A `struct{...}` or
+				// `[]promptSpec{...}` would pass the KeyValueExpr loop
+				// with wrong semantics.
+				mt, ok := cl.Type.(*ast.MapType)
+				if !ok {
+					t.Fatalf("%s type must be a MapType, got %T", name, cl.Type)
+				}
+				keyIdent, ok := mt.Key.(*ast.Ident)
+				if !ok || keyIdent.Name != "string" {
+					t.Fatalf("%s key type must be string, got %T (%v)", name, mt.Key, mt.Key)
+				}
+				valIdent, ok := mt.Value.(*ast.Ident)
+				if !ok || valIdent.Name != "promptSpec" {
+					t.Fatalf("%s value type must be promptSpec, got %T (%v)", name, mt.Value, mt.Value)
+				}
 				for _, elt := range cl.Elts {
 					kv, ok := elt.(*ast.KeyValueExpr)
 					if !ok {
