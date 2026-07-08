@@ -31,6 +31,7 @@ func ParseCodexUsageJSONL(path string) (CodexTokenUsage, error) {
 
 	var total CodexTokenUsage
 	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64<<10), 8<<20)
 	lineNo := 0
 	for sc.Scan() {
 		lineNo++

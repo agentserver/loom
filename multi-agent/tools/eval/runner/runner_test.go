@@ -213,6 +213,43 @@ func TestRun_RecordsCodexUsageJSONL(t *testing.T) {
 	}
 }
 
+func TestRun_CodexUsageJSONLErrorDoesNotDropCompletedRun(t *testing.T) {
+	root := findRepoModuleRoot(t)
+	withShims(t, commitMetaJSON(), "alice@example.com|alice@example.com")
+
+	outCSV := filepath.Join(t.TempDir(), "run.csv")
+	stderr := discardStderr(t)
+	res := Run(context.Background(), Opts{
+		WorkloadID:      "cross-device-code-mod",
+		WorkloadDir:     filepath.Join(root, "tests/eval/workloads"),
+		StubListen:      pickFreePort(t),
+		StubBin:         stubBinaryPath(t),
+		OutCSV:          outCSV,
+		CodexUsageJSONL: filepath.Join(t.TempDir(), "missing-codex-usage.jsonl"),
+		Stderr:          stderr,
+	})
+	if res.ExitCode != 0 {
+		t.Fatalf("exit = %d (err=%v); row=%+v", res.ExitCode, res.Err, res.Row)
+	}
+	if res.Row.RunID == "" {
+		t.Fatal("completed run row was dropped")
+	}
+	if res.Row.ModelInputTokens != 0 || res.Row.ModelOutputTokens != 0 {
+		t.Fatalf("usage = input %d output %d, want zeros", res.Row.ModelInputTokens, res.Row.ModelOutputTokens)
+	}
+	rows := readCSV(t, outCSV)
+	if len(rows) != 2 {
+		t.Fatalf("CSV rows = %d, want 2", len(rows))
+	}
+	b, err := os.ReadFile(stderr.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte("--codex-usage-jsonl")) {
+		t.Fatalf("stderr missing codex usage warning: %s", b)
+	}
+}
+
 // TestCommitMetaRedacted_Email — Security §7(c). Inject a commit_meta JSON
 // and a git-email shim with named addresses; CSV columns must contain only
 // the 8-hex SHAs, never the plaintext "@".

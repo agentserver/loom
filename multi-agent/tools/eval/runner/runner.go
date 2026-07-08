@@ -371,7 +371,8 @@ func Run(ctx context.Context, opts Opts) Result {
 
 	codexUsage, err := ParseCodexUsageJSONL(opts.CodexUsageJSONL)
 	if err != nil {
-		return preflight(opts, err)
+		fmt.Fprintf(opts.Stderr, "eval-runner: warning: %v; recording zero Codex token usage\n", err)
+		codexUsage = CodexTokenUsage{}
 	}
 
 	// Assemble row.

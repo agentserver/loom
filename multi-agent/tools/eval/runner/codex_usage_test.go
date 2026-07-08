@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -44,6 +45,21 @@ func TestParseCodexUsageJSONL_EmptyPathReturnsZero(t *testing.T) {
 	}
 	if got != (CodexTokenUsage{}) {
 		t.Fatalf("empty path usage = %+v, want zero value", got)
+	}
+}
+
+func TestParseCodexUsageJSONL_AllowsLargeNonUsageRecords(t *testing.T) {
+	t.Parallel()
+	path := writeCodexUsageJSONL(t, `{"type":"item.completed","aggregated_output":"`+strings.Repeat("x", 128*1024)+`"}
+{"type":"turn.completed","usage":{"input_tokens":11,"output_tokens":3}}
+`)
+
+	got, err := ParseCodexUsageJSONL(path)
+	if err != nil {
+		t.Fatalf("ParseCodexUsageJSONL: %v", err)
+	}
+	if got.InputTokens != 11 || got.OutputTokens != 3 {
+		t.Fatalf("usage = %+v, want input=11 output=3", got)
 	}
 }
 
