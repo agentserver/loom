@@ -185,3 +185,138 @@ exit 0
 	}
 	_ = fmt.Sprintf
 }
+
+// TestSingleMachineCodex_ScrubsStderr_NonzeroExit — spec P1#6 round-2.
+// Fake `codex` emits `sk-abc123DEFabcDEFabcDEF` to stderr and exits 42.
+// The returned error string MUST have the token replaced by [REDACTED]
+// and MUST NOT contain the substrings `sk-abc123`, `abcDEF`.
+func TestSingleMachineCodex_ScrubsStderr_NonzeroExit(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "codex")
+	// Note: secretscrub.Sanitize covers sk-*, JWT eyJ*, AKIA*, gh[opsru]_*,
+	// github_pat_*, glpat-*, AIza*, xox[baprs]-*, and PEM blocks.
+	// Test with two patterns Sanitize DOES cover: `sk-*` and github's
+	// `ghp_*`. `Bearer ...` is a snapshot-scan pattern (§4.5 test file)
+	// but is NOT in Sanitize's regex — that would need a follow-up
+	// scrub extension out of scope for this PR.
+	script := `#!/bin/sh
+printf 'boot line 1\n' >&2
+printf 'ERROR sk-abc123DEFabcDEFabcDEFabcDEF leak\n' >&2
+printf 'ERROR ghp_abcDEFabcDEFabcDEFabcDEFabcDEFabcDEF leak\n' >&2
+exit 42
+`
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pathDir := t.TempDir()
+	for _, tool := range []string{"sh", "sha256sum", "grep", "cmp", "wc", "awk", "sed", "cat", "printf", "bash", "head", "tr", "ls"} {
+		src, err := exec.LookPath(tool)
+		if err != nil {
+			continue
+		}
+		_ = os.Symlink(src, filepath.Join(pathDir, tool))
+	}
+	_ = os.Symlink(fake, filepath.Join(pathDir, "codex"))
+	t.Setenv("PATH", pathDir)
+	out := filepath.Join(t.TempDir(), "row.csv")
+	res := harness.Run(context.Background(), harness.Opts{
+		WorkloadID:  "cross-device-code-mod",
+		WorkloadDir: filepath.Join(moduleRoot(t), "tests/eval/workloads"),
+		OutCSV:      out,
+		DryRun:      false,
+	}, NewImpl("cross-device-code-mod", false), io.Discard)
+	if res.ExitCode == 0 {
+		t.Fatalf("expected nonzero exit; codex fake exits 42; res=%+v", res)
+	}
+	if res.Err == nil {
+		t.Fatalf("expected non-nil res.Err on exit 42; res=%+v", res)
+	}
+	// BaselineRunRow has no stderr field; scrubbed subprocess stderr
+	// surfaces only via the wrapped %w error.
+	errStr := res.Err.Error()
+	for _, banned := range []string{"sk-abc123", "ghp_abcDEF"} {
+		if strings.Contains(errStr, banned) {
+			t.Errorf("scrub failed: substring %q leaked into error; err=%q", banned, errStr)
+		}
+	}
+	if !strings.Contains(errStr, "[REDACTED]") {
+		t.Errorf("expected [REDACTED] sentinel from secretscrub.Sanitize in err; err=%q", errStr)
+	}
+}
+
+// TestSingleMachineCodex_ScrubsStderr_SuccessButOutputMissing — success
+// path also runs stderr through the scrubber; a leak on stderr from a
+// "successful" codex run that happens to omit expected outputs still
+// gets scrubbed before it reaches the error string.
+func TestSingleMachineCodex_ScrubsStderr_SuccessButOutputMissing(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "codex")
+	// Exit 0 (success) — but DELETE the mock_workspace-projected
+	// expected outputs so the "did not produce" error path fires.
+	// Emit token-shaped stderr during that success. Delete via bash
+	// -c since the harness sets cwd=ws.Root.
+	script := `#!/bin/sh
+printf 'INFO sk-testonlytokenlong123456789 in log\n' >&2
+rm -f "$PWD/patch.diff" "$PWD/test.log"
+exit 0
+`
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pathDir := t.TempDir()
+	for _, tool := range []string{"sh", "cat", "printf", "bash", "ls", "rm"} {
+		src, err := exec.LookPath(tool)
+		if err != nil {
+			continue
+		}
+		_ = os.Symlink(src, filepath.Join(pathDir, tool))
+	}
+	_ = os.Symlink(fake, filepath.Join(pathDir, "codex"))
+	t.Setenv("PATH", pathDir)
+	out := filepath.Join(t.TempDir(), "row.csv")
+	res := harness.Run(context.Background(), harness.Opts{
+		WorkloadID:  "cross-device-code-mod",
+		WorkloadDir: filepath.Join(moduleRoot(t), "tests/eval/workloads"),
+		OutCSV:      out,
+		DryRun:      false,
+	}, NewImpl("cross-device-code-mod", false), io.Discard)
+	if res.Err == nil {
+		t.Fatalf("expected non-nil err (missing outputs), got nil; res=%+v", res)
+	}
+	haystack := res.Err.Error()
+	if strings.Contains(haystack, "sk-testonlytokenlong") {
+		t.Errorf("scrub failed on success-then-missing-output path: leak in error; err=%q", res.Err)
+	}
+	// Plan-review r1 P1: not-contains alone can pass if stderr never
+	// made it into the error. Require [REDACTED] sentinel.
+	if !strings.Contains(haystack, "[REDACTED]") {
+		t.Errorf("success-then-missing-output path: expected [REDACTED] sentinel in err (proves scrub ran on stderr); err=%q", res.Err)
+	}
+}
+
+// TestSingleMachineCodex_ForwardFlag_ControlsKeyPropagation — mirrors
+// single_machine's ForwardFlag test but for OPENAI_API_KEY.
+func TestSingleMachineCodex_ForwardFlag_ControlsKeyPropagation(t *testing.T) {
+	parent := []string{"OPENAI_API_KEY=sk-oai-testonly-1234567890abcd", "PATH=/usr/bin"}
+
+	noForward := NewImpl("cross-device-code-mod", false)
+	env := harness.WhitelistEnvForAgent(parent, "cross-device-code-mod", noForward.AgentForwards(), nil)
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "OPENAI_API_KEY=") {
+			t.Errorf("forward=false must drop OPENAI_API_KEY; env=%v", env)
+		}
+	}
+
+	withForward := NewImpl("cross-device-code-mod", true)
+	env2 := harness.WhitelistEnvForAgent(parent, "cross-device-code-mod", withForward.AgentForwards(), nil)
+	found := false
+	for _, kv := range env2 {
+		if strings.HasPrefix(kv, "OPENAI_API_KEY=") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("forward=true must include OPENAI_API_KEY; env=%v", env2)
+	}
+}

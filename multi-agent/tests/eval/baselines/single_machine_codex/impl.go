@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/yourorg/multi-agent/internal/secretscrub"
 	"github.com/yourorg/multi-agent/tests/eval/baselines/harness"
 )
 
@@ -103,17 +104,25 @@ func (s *SingleMachineCodexImpl) ExecuteAgent(ctx context.Context, ws *harness.W
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		// Scrub stderr before embedding — codex may emit token-shaped
+		// bytes (auth errors, config dumps). Runs on the nonzero-exit
+		// leak path (spec §5 TestExecuteAgent_ScrubsStderr).
+		scrubbed := secretscrub.Sanitize(stderr.String())
 		return harness.ExecuteMetrics{
 			WallTimeMS: time.Since(start).Milliseconds(),
-		}, fmt.Errorf("single_machine_codex: codex CLI failed for %s: %w; stderr=%s", s.workloadID, err, stderr.String())
+		}, fmt.Errorf("single_machine_codex: codex CLI failed for %s: %w; stderr=%s", s.workloadID, err, scrubbed)
 	}
 	// Verify codex produced the expected outputs.
 	for _, outName := range prompt.ExpectedOutputs {
 		if _, err := os.Stat(filepath.Join(ws.Root, outName)); err != nil {
+			// Success (exit 0) but expected output missing. Still
+			// scrub stderr — stderr may contain diagnostic output
+			// with token-shaped bytes.
+			scrubbed := secretscrub.Sanitize(stderr.String())
 			return harness.ExecuteMetrics{
 					WallTimeMS: time.Since(start).Milliseconds(),
 				},
-				fmt.Errorf("single_machine_codex: codex did not produce %q for %s: %w", outName, s.workloadID, err)
+				fmt.Errorf("single_machine_codex: codex did not produce %q for %s: %w; stderr=%s", outName, s.workloadID, err, scrubbed)
 		}
 	}
 	return harness.ExecuteMetrics{
