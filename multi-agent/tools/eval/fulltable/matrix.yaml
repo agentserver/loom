@@ -105,15 +105,15 @@
 - workload_id: credential-bound-model
   baseline_or_ablation: manual_ssh
 - workload_id: cross-device-code-mod
-  baseline_or_ablation: single_machine_claude_code
+  baseline_or_ablation: single_machine_codex
 - workload_id: remote-data-processing
-  baseline_or_ablation: single_machine_claude_code
+  baseline_or_ablation: single_machine_codex
 - workload_id: windows-only-artifact
-  baseline_or_ablation: single_machine_claude_code
+  baseline_or_ablation: single_machine_codex
 - workload_id: missing-parser-converter
-  baseline_or_ablation: single_machine_claude_code
+  baseline_or_ablation: single_machine_codex
 - workload_id: credential-bound-model
-  baseline_or_ablation: single_machine_claude_code
+  baseline_or_ablation: single_machine_codex
 - workload_id: cross-device-code-mod
   baseline_or_ablation: cloud_sandbox_e2b
   dry_run: true
