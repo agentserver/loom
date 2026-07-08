@@ -294,6 +294,22 @@ exit 0
 	}
 }
 
+// TestSingleMachineCodex_BuildsBinary — belt-and-braces build check.
+func TestSingleMachineCodex_BuildsBinary(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping build in -short")
+	}
+	_, self, _, _ := runtime.Caller(0)
+	dir := filepath.Dir(self)
+	bin := filepath.Join(t.TempDir(), "single_machine_codex")
+	cmd := exec.Command("go", "build", "-o", bin, ".")
+	cmd.Dir = dir
+	cmd.Env = os.Environ()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build failed: %v\n%s", err, string(out))
+	}
+}
+
 // TestSingleMachineCodex_ForwardFlag_ControlsKeyPropagation — mirrors
 // single_machine's ForwardFlag test but for OPENAI_API_KEY.
 func TestSingleMachineCodex_ForwardFlag_ControlsKeyPropagation(t *testing.T) {
