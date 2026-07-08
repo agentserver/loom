@@ -48,7 +48,15 @@ def test_extract_10k_rows_completes_under_2s(tmp_path: Path) -> None:
             0, "[]", "/t", "",
         ))
     conn.executemany(
-        "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO runs ("
+        " run_id, workload_id, claim_id, experiment_id, baseline_or_ablation,"
+        " loom_commit, agentserver_commit, modelserver_commit, app_commit,"
+        " machine_topology, context_ground_truth, capability_snapshot_hash,"
+        " task_contract_hash, dynamic_mcp_registry_hash, selected_context,"
+        " ground_truth_context, start_time, end_time, success_oracle_result,"
+        " failure_category, human_intervention_count, artifact_hashes,"
+        " observer_trace_path, model_trace_id"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
     conn.commit()

@@ -52,13 +52,14 @@ func main() {
 func runMain(args []string) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	var (
-		workload    = fs.String("workload", "", "workload id (e.g. cross-device-code-mod)")
-		workloadDir = fs.String("workload-dir", "multi-agent/tests/eval/workloads", "directory containing <workload>/spec.yaml")
-		stubListen  = fs.String("stub-listen", "127.0.0.1:18080", "agentserver-stub --listen address; MUST be loopback")
-		observerDB  = fs.String("observer-db", "", "SQLite DB for run schema; empty = NoopWriter")
+		workload        = fs.String("workload", "", "workload id (e.g. cross-device-code-mod)")
+		workloadDir     = fs.String("workload-dir", "multi-agent/tests/eval/workloads", "directory containing <workload>/spec.yaml")
+		stubListen      = fs.String("stub-listen", "127.0.0.1:18080", "agentserver-stub --listen address; MUST be loopback")
+		observerDB      = fs.String("observer-db", "", "SQLite DB for run schema; empty = NoopWriter")
 		codexConfig     = fs.String("codex-config", "", "path to codex config.toml (passed through; recorded only)")
 		codexConfigPath = fs.String("codex-config-path", "", "WT-2: filesystem path to a codex config.toml; validated against --codex-config-mode; must resolve under the repo or /tmp")
 		codexConfigMode = fs.String("codex-config-mode", "", "WT-2: \"a\" = local-proxy (experimental_bearer_token) or \"b\" = upstream-direct (env_key=OPENAI_API_KEY); enforces the auth-field / env-var preconditions")
+		codexUsageJSONL = fs.String("codex-usage-jsonl", "", "path to Codex CLI JSONL usage events; records model_input_tokens/model_output_tokens")
 		runID           = fs.String("run-id", "", "explicit run id; default = derived")
 		timeout         = fs.Duration("timeout", 0, "override spec.timeout_seconds")
 		outCSV          = fs.String("out", "", "output CSV path; required")
@@ -102,6 +103,7 @@ func runMain(args []string) int {
 		ObserverDB:      *observerDB,
 		CodexConfigPath: recordedCodexPath,
 		CodexConfigMode: *codexConfigMode,
+		CodexUsageJSONL: *codexUsageJSONL,
 		RunID:           *runID,
 		Timeout:         *timeout,
 		OutCSV:          *outCSV,

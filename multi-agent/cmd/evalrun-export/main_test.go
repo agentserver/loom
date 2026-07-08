@@ -131,6 +131,8 @@ func insertSampleRow(t *testing.T, db *sql.DB, runID, experiment string, mutate 
 		"artifact_hashes":           "[]",
 		"observer_trace_path":       "",
 		"model_trace_id":            "",
+		"model_input_tokens":        0,
+		"model_output_tokens":       0,
 	}
 	if mutate != nil {
 		mutate(row)
@@ -143,7 +145,8 @@ func insertSampleRow(t *testing.T, db *sql.DB, runID, experiment string, mutate 
 		"task_contract_hash", "dynamic_mcp_registry_hash", "selected_context",
 		"ground_truth_context", "start_time", "end_time", "success_oracle_result",
 		"failure_category", "human_intervention_count", "artifact_hashes",
-		"observer_trace_path", "model_trace_id",
+		"observer_trace_path", "model_trace_id", "model_input_tokens",
+		"model_output_tokens",
 	}
 	args := make([]any, len(cols))
 	for i, c := range cols {
@@ -192,8 +195,8 @@ func TestExportCSV_EmptyDB_HeaderOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse csv header: %v (stdout=%q)", err, stdout)
 	}
-	if len(rec) != 24 {
-		t.Fatalf("header has %d fields, want 24: %v", len(rec), rec)
+	if len(rec) != len(columnNames) {
+		t.Fatalf("header has %d fields, want %d: %v", len(rec), len(columnNames), rec)
 	}
 	for i, want := range columnNames {
 		if rec[i] != want {
@@ -430,6 +433,8 @@ func TestExportJSONL_RoundtripValues(t *testing.T) {
 	path, db := freshDB(t)
 	insertSampleRow(t, db, "run-jsonl-A-12345", "E1", func(r map[string]any) {
 		r["human_intervention_count"] = 2
+		r["model_input_tokens"] = 123
+		r["model_output_tokens"] = 45
 		r["artifact_hashes"] = `["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]`
 	})
 	insertSampleRow(t, db, "run-jsonl-B-12345", "E2", nil)
@@ -451,6 +456,16 @@ func TestExportJSONL_RoundtripValues(t *testing.T) {
 		t.Fatal("missing human_intervention_count")
 	} else if _, ok := v.(float64); !ok {
 		t.Fatalf("human_intervention_count must be number, got %T", v)
+	}
+	if v, ok := raw["model_input_tokens"]; !ok {
+		t.Fatal("missing model_input_tokens")
+	} else if got, ok := v.(float64); !ok || got != 123 {
+		t.Fatalf("model_input_tokens must be number 123, got %T %v", v, v)
+	}
+	if v, ok := raw["model_output_tokens"]; !ok {
+		t.Fatal("missing model_output_tokens")
+	} else if got, ok := v.(float64); !ok || got != 45 {
+		t.Fatalf("model_output_tokens must be number 45, got %T %v", v, v)
 	}
 	// artifact_hashes must be a string (the raw JSON-array storage form).
 	if v, ok := raw["artifact_hashes"]; !ok {

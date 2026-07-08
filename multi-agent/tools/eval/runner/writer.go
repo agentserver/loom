@@ -64,6 +64,11 @@ type RunRow struct {
 	ProbeManualSetupStepCount       *int
 	ProbeConfigTouchCount           *int
 	ProbeNotesJSON                  string // "{}" when empty; MergeIntoRow always sets this
+
+	// Codex CLI token usage. Zero means either no usage JSONL was
+	// supplied or Codex reported zero tokens for that side.
+	ModelInputTokens  int
+	ModelOutputTokens int
 }
 
 // RunWriter is the seam between this worktree and WT-1-run-schema. Skeleton
@@ -118,6 +123,9 @@ func CSVColumns() []string {
 		"probe_notes_json",
 		// WT-2-flag-integration §2.4 (append-only):
 		"baseline_or_ablation",
+		// Codex CLI token usage (append-only):
+		"model_input_tokens",
+		"model_output_tokens",
 	}
 }
 
@@ -157,6 +165,8 @@ func rowAsCSVRecord(r RunRow) []string {
 		nilOrInt(r.ProbeConfigTouchCount),
 		probeNotesOrDefault(r.ProbeNotesJSON),
 		r.BaselineOrAblation,
+		strconv.Itoa(r.ModelInputTokens),
+		strconv.Itoa(r.ModelOutputTokens),
 	}
 }
 

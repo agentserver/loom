@@ -18,19 +18,19 @@ import (
 // order matches /root/paper_writing/docs/intermediate/08_evaluation_plan_v3.md
 // lines 256–279 and the DDL in internal/observerstore/schema.sql.
 type Schema struct {
-	RunID                  string    // 08:256 PK
-	WorkloadID             string    // 08:257
-	ClaimID                string    // 08:258
-	ExperimentID           string    // 08:259
-	BaselineOrAblation     string    // 08:260
-	LoomCommit             string    // 08:261
-	AgentserverCommit      string    // 08:262
-	ModelserverCommit      string    // 08:263
-	AppCommit              string    // 08:264
-	MachineTopology        string    // 08:265
-	ContextGroundTruth     string    // 08:266
-	CapabilitySnapshotHash string    // 08:267 — interface placeholder
-	TaskContractHash       string    // 08:268 — interface placeholder
+	RunID                  string // 08:256 PK
+	WorkloadID             string // 08:257
+	ClaimID                string // 08:258
+	ExperimentID           string // 08:259
+	BaselineOrAblation     string // 08:260
+	LoomCommit             string // 08:261
+	AgentserverCommit      string // 08:262
+	ModelserverCommit      string // 08:263
+	AppCommit              string // 08:264
+	MachineTopology        string // 08:265
+	ContextGroundTruth     string // 08:266
+	CapabilitySnapshotHash string // 08:267 — interface placeholder
+	TaskContractHash       string // 08:268 — interface placeholder
 	// 08:269 — populated from driver.LastRegistryHash() by the eval
 	// runner. The publisher lives in multi-agent/internal/driver/
 	// registryhash.go (WT-2-driver-promotion-chain B6 spec §3.3);
@@ -47,6 +47,8 @@ type Schema struct {
 	ArtifactHashes         []string  // 08:277 each MUST match ^[a-f0-9]{64}$
 	ObserverTracePath      string    // 08:278
 	ModelTraceID           string    // 08:279
+	ModelInputTokens       int       // Codex CLI input token total for this run
+	ModelOutputTokens      int       // Codex CLI output token total for this run
 }
 
 // Sentinel errors returned (wrapped via fmt.Errorf("...: %w", sentinel))

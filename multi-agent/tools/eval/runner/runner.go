@@ -44,6 +44,7 @@ type Opts struct {
 	StubBin         string // path to agentserver-stub binary; empty = auto-build
 	ObserverDB      string
 	CodexConfigPath string
+	CodexUsageJSONL string
 	// CodexConfigMode is the WT-2 dual-path selector ("a" | "b" | "").
 	// When non-empty (and/or CodexConfigPath is non-empty), the runner
 	// invokes validateCodexConfig at pre-flight; see spec §7.a-.d.
@@ -368,6 +369,12 @@ func Run(ctx context.Context, opts Opts) Result {
 	// the CSV write itself is microseconds (PR #53 round 4 P2).
 	finishedAt := time.Now()
 
+	codexUsage, err := ParseCodexUsageJSONL(opts.CodexUsageJSONL)
+	if err != nil {
+		fmt.Fprintf(opts.Stderr, "eval-runner: warning: %v; recording zero Codex token usage\n", err)
+		codexUsage = CodexTokenUsage{}
+	}
+
 	// Assemble row.
 	row := RunRow{
 		RunID:              runID,
@@ -393,6 +400,8 @@ func Run(ctx context.Context, opts Opts) Result {
 		StubListen:         opts.StubListen,
 		TempdirKept:        opts.KeepTempdir,
 		BaselineOrAblation: derivedLabel,
+		ModelInputTokens:   codexUsage.InputTokens,
+		ModelOutputTokens:  codexUsage.OutputTokens,
 	}
 
 	// WT-2-e1e6-probes Edit 6: drain the emitter and merge probe

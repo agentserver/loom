@@ -33,6 +33,8 @@ func TestCSVColumns_FrozenOrder(t *testing.T) {
 		"probe_notes_json",
 		// WT-2-flag-integration §2.4:
 		"baseline_or_ablation",
+		// Codex CLI token usage (append-only):
+		"model_input_tokens", "model_output_tokens",
 	}, ",")
 	if got != want {
 		t.Fatalf("CSV columns drifted:\n got  %s\n want %s", got, want)
@@ -118,8 +120,8 @@ func TestNoopWriter_InsertIsNoop(t *testing.T) {
 func TestCSVColumns_AppendOnly_WithProbes(t *testing.T) {
 	t.Parallel()
 	cols := CSVColumns()
-	if len(cols) != 32 {
-		t.Fatalf("column count = %d, want 32", len(cols))
+	if len(cols) != 34 {
+		t.Fatalf("column count = %d, want 34", len(cols))
 	}
 	wantProbes := []string{
 		"probe_task_success_rate",
@@ -136,6 +138,46 @@ func TestCSVColumns_AppendOnly_WithProbes(t *testing.T) {
 		if cols[22+i] != want {
 			t.Fatalf("probe col[%d] = %q, want %q", 22+i, cols[22+i], want)
 		}
+	}
+}
+
+func TestRunRow_CodexTokenUsage_RoundTripCSV(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "run.csv")
+	row := RunRow{
+		RunID:             "r-token",
+		WorkloadID:        "wl-token",
+		ModelInputTokens:  1234,
+		ModelOutputTokens: 567,
+	}
+	if err := WriteCSVRow(path, row); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	r := csv.NewReader(f)
+	rows, err := r.ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	header, data := rows[0], rows[1]
+	col := func(name string) string {
+		for i, h := range header {
+			if h == name {
+				return data[i]
+			}
+		}
+		t.Fatalf("column %s missing", name)
+		return ""
+	}
+	if col("model_input_tokens") != "1234" {
+		t.Fatalf("model_input_tokens = %q", col("model_input_tokens"))
+	}
+	if col("model_output_tokens") != "567" {
+		t.Fatalf("model_output_tokens = %q", col("model_output_tokens"))
 	}
 }
 

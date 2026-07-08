@@ -101,6 +101,8 @@ func TestSchema_AllFieldsRoundtrip(t *testing.T) {
 	s.TaskContractHash = "tch-" + strings.Repeat("0", 60)
 	s.DynamicMCPRegistryHash = "dmr-" + strings.Repeat("0", 60)
 	s.HumanInterventionCount = 3
+	s.ModelInputTokens = 12345
+	s.ModelOutputTokens = 678
 	s.FailureCategory = ""
 	if err := w.Insert(context.Background(), s); err != nil {
 		t.Fatalf("Insert: %v", err)
@@ -114,14 +116,14 @@ func TestSchema_AllFieldsRoundtrip(t *testing.T) {
 		capHash, contractHash, dynRegHash, selCtx, gtCtx,
 		startStr, endStr, oracle, failCat, artifactJSON,
 		obsTrace, modelTrace string
-		humanCount int
+		humanCount, inputTokens, outputTokens int
 	)
 	if err := row.Scan(
 		&runID, &workloadID, &claimID, &experimentID, &baseline,
 		&loomCommit, &agentCommit, &modelCommit, &appCommit, &machineTopo,
 		&ctxGT, &capHash, &contractHash, &dynRegHash, &selCtx, &gtCtx,
 		&startStr, &endStr, &oracle, &failCat, &humanCount, &artifactJSON,
-		&obsTrace, &modelTrace,
+		&obsTrace, &modelTrace, &inputTokens, &outputTokens,
 	); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
@@ -153,6 +155,12 @@ func TestSchema_AllFieldsRoundtrip(t *testing.T) {
 	check("model_trace_id", modelTrace, s.ModelTraceID)
 	if humanCount != s.HumanInterventionCount {
 		t.Errorf("human_intervention_count: got %d, want %d", humanCount, s.HumanInterventionCount)
+	}
+	if inputTokens != s.ModelInputTokens {
+		t.Errorf("model_input_tokens: got %d, want %d", inputTokens, s.ModelInputTokens)
+	}
+	if outputTokens != s.ModelOutputTokens {
+		t.Errorf("model_output_tokens: got %d, want %d", outputTokens, s.ModelOutputTokens)
 	}
 	// Times: stored as fixed-9-digit-nanosecond UTC for lex-sort
 	// stability (see writer.go formatRFC3339NanoUTC).
@@ -193,13 +201,13 @@ func TestInsert_Parameterized_SQLInjection(t *testing.T) {
 			if err := w.Insert(context.Background(), s); err != nil {
 				t.Fatalf("Insert: %v", err)
 			}
-			// Table still exists (24 columns) and row count increases.
+			// Table still exists (26 columns) and row count increases.
 			var colCount int
 			if err := db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('runs')").Scan(&colCount); err != nil {
 				t.Fatal(err)
 			}
-			if colCount != 24 {
-				t.Fatalf("runs table mutated: column count %d (want 24)", colCount)
+			if colCount != 26 {
+				t.Fatalf("runs table mutated: column count %d (want 26)", colCount)
 			}
 			var rowCount int
 			if err := db.QueryRow("SELECT COUNT(*) FROM runs").Scan(&rowCount); err != nil {
@@ -401,7 +409,9 @@ func TestNewSQLWriter_DetectsSchemaDriftMissingCheck(t *testing.T) {
 		human_intervention_count INTEGER NOT NULL DEFAULT 0,
 		artifact_hashes TEXT NOT NULL DEFAULT '[]',
 		observer_trace_path TEXT NOT NULL DEFAULT '',
-		model_trace_id TEXT NOT NULL DEFAULT ''
+		model_trace_id TEXT NOT NULL DEFAULT '',
+		model_input_tokens INTEGER NOT NULL DEFAULT 0,
+		model_output_tokens INTEGER NOT NULL DEFAULT 0
 	)`); err != nil {
 		t.Fatal(err)
 	}
@@ -506,6 +516,8 @@ func driftDDL(overrides map[string]string) string {
 		{"artifact_hashes", "TEXT NOT NULL DEFAULT '[]'"},
 		{"observer_trace_path", "TEXT NOT NULL DEFAULT ''"},
 		{"model_trace_id", "TEXT NOT NULL DEFAULT ''"},
+		{"model_input_tokens", "INTEGER NOT NULL DEFAULT 0"},
+		{"model_output_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	parts := make([]string, 0, len(cols))
 	for _, c := range cols {
@@ -553,6 +565,8 @@ func driftDDLSwapOrder(a, b string) string {
 		"artifact_hashes TEXT NOT NULL DEFAULT '[]'",
 		"observer_trace_path TEXT NOT NULL DEFAULT ''",
 		"model_trace_id TEXT NOT NULL DEFAULT ''",
+		"model_input_tokens INTEGER NOT NULL DEFAULT 0",
+		"model_output_tokens INTEGER NOT NULL DEFAULT 0",
 	}
 	ai, bi := -1, -1
 	for i, c := range cols {

@@ -214,6 +214,12 @@ func ensureColumns(db *sql.DB) error {
 	if _, err := db.Exec(`ALTER TABLE promotion_audit ADD COLUMN stage_note TEXT NOT NULL DEFAULT ''`); err != nil && !isDuplicateColumn(err) {
 		return err
 	}
+	if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN model_input_tokens INTEGER NOT NULL DEFAULT 0`); err != nil && !isDuplicateColumn(err) {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE runs ADD COLUMN model_output_tokens INTEGER NOT NULL DEFAULT 0`); err != nil && !isDuplicateColumn(err) {
+		return err
+	}
 	return nil
 }
 
