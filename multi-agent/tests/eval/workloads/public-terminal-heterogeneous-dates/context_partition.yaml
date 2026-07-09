@@ -1,0 +1,27 @@
+source_benchmark: Terminal-Bench
+source_task_id: heterogeneous-dates
+source_path: original-tasks/heterogeneous-dates
+source_revision:
+  task_yaml_sha: 1f2b819a8f77ccb9f602cfca81da4b29d8cc47e0
+  test_outputs_sha: 01da0c8b9b218023d4c8c9e29598ec73410c89ae
+  high_csv_sha: ac7084eda7ff53b43113a7d227201c82756a7279
+  low_csv_sha: 84eeab94b1fed5cfa002ac3301a2fcf2c002f91f
+original_oracle: tests/test_outputs.py checks avg_temp.txt exists, parses as float, and matches 11.428571428571429 rounded to 3 decimals.
+contexts:
+  driver:
+    platform: linux
+    owns: [task_prompt, contract, final_report]
+  server:
+    platform: linux
+    owns: [daily_temp_sf_high.csv, daily_temp_sf_low.csv, avg_temp.txt]
+  codex_cli:
+    platform: linux
+    owns: [agent_execution, usage_jsonl]
+pcs_stressors:
+  - remote_dataset_location
+  - declared_output_regeneration
+  - codex_cli_token_accounting
+expected_outputs:
+  - avg_temp.txt
+  - route trace
+  - Codex CLI JSONL usage events

@@ -213,6 +213,196 @@ func TestRun_RecordsCodexUsageJSONL(t *testing.T) {
 	}
 }
 
+func TestRun_CodexCLIBackendRunsAgentAndRecordsUsage(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fake codex is Unix-only")
+	}
+	withShims(t, commitMetaJSON(), "alice@example.com|alice@example.com")
+
+	workloadDir := mkCodexCLIBackendWorkload(t)
+	binDir := t.TempDir()
+	fakeCodex := filepath.Join(binDir, "codex")
+	fakeCodexBody := `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" != "exec" ]]; then
+  echo "expected codex exec" >&2
+  exit 64
+fi
+if [[ -z "${CODEX_HOME:-}" ]]; then
+  echo "CODEX_HOME not set" >&2
+  exit 68
+fi
+if [[ ! -f "$CODEX_HOME/config.toml" ]]; then
+  echo "isolated CODEX_HOME missing config.toml" >&2
+  exit 70
+fi
+if [[ -d "$CODEX_HOME/skills" || -d "$CODEX_HOME/superpowers" ]]; then
+  echo "isolated CODEX_HOME copied skills" >&2
+  exit 71
+fi
+grep -q 'model_provider = "modelserver"' "$CODEX_HOME/config.toml" || {
+  echo "isolated config missing model provider" >&2
+  exit 72
+}
+if grep -q 'should_not_copy' "$CODEX_HOME/config.toml"; then
+  echo "isolated config copied unrelated MCP config" >&2
+  exit 74
+fi
+if [[ -n "${BENCHMARK_SECRET_SHOULD_NOT_LEAK:-}" ]]; then
+  echo "parent benchmark secret leaked into codex env" >&2
+  exit 75
+fi
+for arg in "$@"; do
+  if [[ "$arg" == "--ask-for-approval" ]]; then
+    echo "unsupported exec flag: --ask-for-approval" >&2
+    exit 66
+  fi
+  if [[ "$arg" == "--ignore-user-config" ]]; then
+    echo "ignore-user-config breaks benchmark auth" >&2
+    exit 73
+  fi
+done
+for required in --ignore-rules --ephemeral; do
+  found=0
+  for arg in "$@"; do
+    if [[ "$arg" == "$required" ]]; then
+      found=1
+    fi
+  done
+  if [[ "$found" == 0 ]]; then
+    echo "missing benchmark isolation flag: $required" >&2
+    exit 67
+  fi
+done
+if [[ -e avg_temp.txt ]]; then
+  echo "avg_temp.txt should have been removed before the agent stage" >&2
+  exit 65
+fi
+if [[ -e mock_workspace ]]; then
+  echo "mock_workspace placeholder should have been removed before the agent stage" >&2
+  exit 76
+fi
+printf '11.429\n' > avg_temp.txt
+printf '{"type":"turn.completed","usage":{"input_tokens":7,"output_tokens":3}}\n'
+`
+	if err := os.WriteFile(fakeCodex, []byte(fakeCodexBody), 0o700); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	sourceCodexHome := writeSourceCodexHomeForTest(t)
+	t.Setenv("CODEX_HOME", sourceCodexHome)
+	t.Setenv("BENCHMARK_SECRET_SHOULD_NOT_LEAK", "supersecret")
+
+	outCSV := filepath.Join(t.TempDir(), "run.csv")
+	usagePath := filepath.Join(t.TempDir(), "codex-usage.jsonl")
+	res := Run(context.Background(), Opts{
+		WorkloadID:      "codex-cli-backend-fixture",
+		WorkloadDir:     workloadDir,
+		StubListen:      pickFreePort(t),
+		StubBin:         stubBinaryPath(t),
+		OutCSV:          outCSV,
+		CodexUsageJSONL: usagePath,
+		AgentBackend:    "codex-cli",
+	})
+	if res.ExitCode != 0 {
+		t.Fatalf("exit = %d (err=%v); row=%+v", res.ExitCode, res.Err, res.Row)
+	}
+	if res.Row.ModelInputTokens != 7 {
+		t.Fatalf("row input tokens = %d, want 7", res.Row.ModelInputTokens)
+	}
+	if res.Row.ModelOutputTokens != 3 {
+		t.Fatalf("row output tokens = %d, want 3", res.Row.ModelOutputTokens)
+	}
+	b, err := os.ReadFile(usagePath)
+	if err != nil {
+		t.Fatalf("read usage JSONL: %v", err)
+	}
+	if !bytes.Contains(b, []byte(`"input_tokens":7`)) {
+		t.Fatalf("usage JSONL missing fake codex usage: %s", b)
+	}
+}
+
+func TestRun_CodexCLIBackendFailureForcesRunFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fake codex is Unix-only")
+	}
+	withShims(t, commitMetaJSON(), "alice@example.com|alice@example.com")
+
+	workloadDir := mkCodexCLIBackendWorkload(t)
+	binDir := t.TempDir()
+	fakeCodex := filepath.Join(binDir, "codex")
+	fakeCodexBody := `#!/usr/bin/env bash
+set -euo pipefail
+printf '11.429\n' > avg_temp.txt
+printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'
+exit 42
+`
+	if err := os.WriteFile(fakeCodex, []byte(fakeCodexBody), 0o700); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CODEX_HOME", writeSourceCodexHomeForTest(t))
+
+	outCSV := filepath.Join(t.TempDir(), "run.csv")
+	usagePath := filepath.Join(t.TempDir(), "codex-usage.jsonl")
+	res := Run(context.Background(), Opts{
+		WorkloadID:      "codex-cli-backend-fixture",
+		WorkloadDir:     workloadDir,
+		StubListen:      pickFreePort(t),
+		StubBin:         stubBinaryPath(t),
+		OutCSV:          outCSV,
+		CodexUsageJSONL: usagePath,
+		AgentBackend:    "codex-cli",
+		Stderr:          discardStderr(t),
+	})
+	if res.ExitCode != 1 {
+		t.Fatalf("exit = %d, want 1; err=%v row=%+v", res.ExitCode, res.Err, res.Row)
+	}
+	if res.Row.Passed {
+		t.Fatalf("row passed=true despite codex backend failure")
+	}
+	if res.Row.OracleExitCode != 0 {
+		t.Fatalf("oracle exit = %d, want 0 to prove backend failure forced the run failure", res.Row.OracleExitCode)
+	}
+	if res.Row.ModelInputTokens != 1 || res.Row.ModelOutputTokens != 1 {
+		t.Fatalf("usage = (%d,%d), want (1,1)", res.Row.ModelInputTokens, res.Row.ModelOutputTokens)
+	}
+}
+
+func TestBuildCodexPromptShowsWorkspaceRelativePaths(t *testing.T) {
+	workloadDir := mkCodexCLIBackendWorkload(t)
+	spec, err := LoadWorkloadSpec(filepath.Join(workloadDir, "codex-cli-backend-fixture", "spec.yaml"))
+	if err != nil {
+		t.Fatalf("load spec: %v", err)
+	}
+	spec.Inputs.ReadArtifacts = append(spec.Inputs.ReadArtifacts, struct {
+		Kind string `yaml:"kind"`
+		Path string `yaml:"path"`
+	}{Kind: "csv", Path: "fixtures/task-deps/input.csv"})
+	prompt := buildCodexPrompt(spec)
+	if !strings.Contains(prompt, "workspace path: task-deps/input.csv") {
+		t.Fatalf("prompt does not surface fixture workspace path:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "workspace path: avg_temp.txt") {
+		t.Fatalf("prompt does not surface output workspace path:\n%s", prompt)
+	}
+}
+
+func TestBuildCodexPromptDoesNotExposeRecoveryHint(t *testing.T) {
+	root := findRepoModuleRoot(t)
+	spec, err := LoadWorkloadSpec(filepath.Join(root, "tests/eval/workloads/public-terminal-heterogeneous-dates/spec.yaml"))
+	if err != nil {
+		t.Fatalf("load public benchmark spec: %v", err)
+	}
+	prompt := buildCodexPrompt(spec)
+	if strings.Contains(prompt, "11.428571428571429") {
+		t.Fatalf("prompt exposes exact oracle answer:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "Oracle constraints") {
+		t.Fatalf("prompt exposes recovery_hint metadata:\n%s", prompt)
+	}
+}
+
 func TestRun_CodexUsageJSONLErrorDoesNotDropCompletedRun(t *testing.T) {
 	root := findRepoModuleRoot(t)
 	withShims(t, commitMetaJSON(), "alice@example.com|alice@example.com")
@@ -609,6 +799,80 @@ timeout_seconds: %d
 	}
 	if err := os.WriteFile(filepath.Join(dir, "oracle.sh"), []byte(oracleBody), 0o755); err != nil {
 		t.Fatalf("write oracle: %v", err)
+	}
+	return parent
+}
+
+func writeSourceCodexHomeForTest(t *testing.T) string {
+	t.Helper()
+	sourceCodexHome := t.TempDir()
+	sourceCodexConfig := `model_provider = "modelserver"
+model = "gpt-5.5"
+model_reasoning_effort = "xhigh"
+
+[model_providers.modelserver]
+name = "modelserver"
+base_url = "https://example.invalid/v1"
+env_key = "OPENAI_API_KEY"
+wire_api = "responses"
+
+[mcp_servers.should_not_copy]
+command = "false"
+`
+	if err := os.WriteFile(filepath.Join(sourceCodexHome, "config.toml"), []byte(sourceCodexConfig), 0o600); err != nil {
+		t.Fatalf("write source codex config: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(sourceCodexHome, "skills", "using-superpowers"), 0o755); err != nil {
+		t.Fatalf("mkdir source skills: %v", err)
+	}
+	return sourceCodexHome
+}
+
+func mkCodexCLIBackendWorkload(t *testing.T) string {
+	t.Helper()
+	parent := t.TempDir()
+	id := "codex-cli-backend-fixture"
+	dir := filepath.Join(parent, id)
+	mockDir := filepath.Join(dir, "fixtures", "mock_workspace")
+	if err := os.MkdirAll(mockDir, 0o755); err != nil {
+		t.Fatalf("mkdir workload: %v", err)
+	}
+	spec := `id: codex-cli-backend-fixture
+description: "Write 11.429 to avg_temp.txt."
+required_contexts:
+  - role: driver
+    platform: linux
+    tools: ["codex"]
+allowed_contexts: ["*"]
+inputs:
+  read_artifacts: []
+outputs:
+  write_targets:
+    - kind: result
+      path: ${workspace}/avg_temp.txt
+success_oracle: ./oracle.sh
+recovery_hint: "avg_temp.txt must contain only 11.429."
+timeout_seconds: 60
+`
+	if err := os.WriteFile(filepath.Join(dir, "spec.yaml"), []byte(spec), 0o644); err != nil {
+		t.Fatalf("write spec: %v", err)
+	}
+	oracleBody := `#!/usr/bin/env bash
+set -u
+ws="${1:-}"
+value="$(cat "$ws/avg_temp.txt" 2>/dev/null || true)"
+if [[ "$value" == "11.429" ]]; then
+  printf '{"passed":true,"details":{"avg_temp":"matches"},"metrics":{"result_bytes":7}}\n'
+  exit 0
+fi
+printf '{"passed":false,"details":{"avg_temp":"mismatch"},"metrics":{"result_bytes":0}}\n'
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(dir, "oracle.sh"), []byte(oracleBody), 0o755); err != nil {
+		t.Fatalf("write oracle: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mockDir, "avg_temp.txt"), []byte("stale\n"), 0o644); err != nil {
+		t.Fatalf("write stale mock output: %v", err)
 	}
 	return parent
 }

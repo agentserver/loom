@@ -32,6 +32,7 @@ var (
 	ErrObserverDBPathForbidden = errors.New("eval-runner: --observer-db path is in a forbidden location")
 	ErrWorkloadSpecInvalid     = errors.New("eval-runner: workload spec.yaml invalid")
 	ErrStubFailedToStart       = errors.New("eval-runner: agentserver-stub failed to start")
+	ErrAgentBackendInvalid     = errors.New("eval-runner: --agent-backend invalid")
 	ErrOracleStdoutNotJSON     = errors.New("eval-runner: oracle stdout first line is not valid JSON {passed,details,metrics}")
 )
 
@@ -50,6 +51,7 @@ type Opts struct {
 	// invokes validateCodexConfig at pre-flight; see spec §7.a-.d.
 	// Empty preserves the PR #53 pass-through behaviour.
 	CodexConfigMode string
+	AgentBackend    string
 	RunID           string
 	Timeout         time.Duration
 	OutCSV          string
@@ -146,6 +148,9 @@ func Run(ctx context.Context, opts Opts) Result {
 	if opts.BaselineName == "" {
 		opts.BaselineName = DefaultBaselineName
 	}
+	if opts.AgentBackend == "" {
+		opts.AgentBackend = "mock"
+	}
 
 	// (Label derivation happens AFTER the origin-established
 	// validators — see below — so exit-2 precedence with a bad
@@ -174,6 +179,9 @@ func Run(ctx context.Context, opts Opts) Result {
 		Mode:     opts.CodexConfigMode,
 		RepoRoot: findCodexRepoRoot(),
 	}); err != nil {
+		return preflight(opts, err)
+	}
+	if err := validateAgentBackend(opts.AgentBackend); err != nil {
 		return preflight(opts, err)
 	}
 	// WT-2-flag-integration §7(a.3) + §7(c): derive + validate the
@@ -277,11 +285,18 @@ func Run(ctx context.Context, opts Opts) Result {
 		return preflight(opts, err)
 	}
 
-	// Agent stage — skeleton copies mock_workspace; real fanout is a
-	// future worktree's job. Errors here mark the run as fail, not a
-	// pre-flight error.
+	// Agent stage. Default skeleton behaviour is mock output flattened
+	// by SetupWorkspace; the codex-cli backend removes declared outputs
+	// and asks Codex CLI to regenerate them before the oracle runs.
+	var agentErr error
 	if opts.AgentStage != nil {
 		if err := opts.AgentStage(ctx, ws, spec); err != nil {
+			agentErr = err
+			fmt.Fprintf(opts.Stderr, "eval-runner: agent stage error: %v\n", err)
+		}
+	} else if opts.AgentBackend == "codex-cli" {
+		if err := runCodexCLIStage(ctx, ws, spec, opts, timeout, stubURL); err != nil {
+			agentErr = err
 			fmt.Fprintf(opts.Stderr, "eval-runner: agent stage error: %v\n", err)
 		}
 	}
@@ -318,15 +333,16 @@ func Run(ctx context.Context, opts Opts) Result {
 
 	// Parse oracle output (best-effort; bad JSON → run fails, not exit 2).
 	oracleOut := parseOracleStdout(res.Stdout)
-	passed := oracleOut.Passed && oracleErr == nil && res.ExitCode == 0
+	passed := agentErr == nil && oracleOut.Passed && oracleErr == nil && res.ExitCode == 0
 
 	// WT-2-e1e6-probes Edit 3: emit oracle-derived metrics +
 	// humanloop counter (spec §5.1 Edit 3). oracleOutput is unexported
 	// to package main, so lift its fields into probes.OracleOutput.
-	// `Passed` uses the runner's canonical value (oracle-json passed
-	// AND no subprocess error AND exit-code 0) — a JSON `passed:true`
-	// with a non-zero exit code is a runner-level failure, so
-	// TaskSuccessRate must reflect that, not the raw JSON field.
+	// `Passed` uses the runner's canonical value: agent stage succeeded,
+	// oracle JSON passed, no oracle subprocess error, and oracle exit code 0.
+	// A JSON `passed:true` with a non-zero exit code or failed backend is a
+	// runner-level failure, so TaskSuccessRate must reflect that, not the raw
+	// JSON field.
 	oracleOutForProbes := probes.OracleOutput{
 		Passed:      passed,
 		MetricsJSON: oracleOut.MetricsRaw,
@@ -510,6 +526,130 @@ func validateObserverDB(p string) error {
 	return fmt.Errorf("%w: %s not under cwd/$HOME/tmp", ErrObserverDBPathForbidden, abs)
 }
 
+func validateAgentBackend(backend string) error {
+	switch backend {
+	case "", "mock", "codex-cli":
+		return nil
+	default:
+		return fmt.Errorf("%w: %q (want mock or codex-cli)", ErrAgentBackendInvalid, backend)
+	}
+}
+
+func runCodexCLIStage(ctx context.Context, ws *Workspace, spec *WorkloadSpec, opts Opts, timeout time.Duration, stubURL string) error {
+	if err := removeDeclaredWriteTargets(ws.Root, spec); err != nil {
+		return err
+	}
+	if err := removeMockWorkspacePlaceholder(ws.Root); err != nil {
+		return err
+	}
+
+	args := []string{
+		"codex", "exec",
+		"--json",
+		"--skip-git-repo-check",
+		"--ignore-rules",
+		"--ephemeral",
+		"--sandbox", "workspace-write",
+		"-C", ws.Root,
+		buildCodexPrompt(spec),
+	}
+	codexHome, cleanupCodexHome, err := prepareBenchmarkCodexHome(ws.Root, opts)
+	if err != nil {
+		return err
+	}
+	defer cleanupCodexHome()
+	env := benchmarkCodexEnv(os.Environ(), codexHome, stubURL)
+
+	res, err := RunSubprocess(ctx, SubprocessOpts{
+		Cmd:            args,
+		Cwd:            ws.Root,
+		Env:            env,
+		Timeout:        timeout,
+		MaxStdoutBytes: 8 << 20,
+	})
+	if opts.CodexUsageJSONL != "" {
+		if mkErr := os.MkdirAll(filepath.Dir(opts.CodexUsageJSONL), 0o700); mkErr != nil {
+			return fmt.Errorf("codex usage mkdir: %w", mkErr)
+		}
+		if wrErr := os.WriteFile(opts.CodexUsageJSONL, res.Stdout, 0o600); wrErr != nil {
+			return fmt.Errorf("codex usage write: %w", wrErr)
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("codex cli: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("codex cli exited %d: %s", res.ExitCode, strings.TrimSpace(string(res.Stderr)))
+	}
+	return nil
+}
+
+func removeMockWorkspacePlaceholder(workspaceRoot string) error {
+	p := filepath.Join(workspaceRoot, "mock_workspace")
+	if err := os.RemoveAll(p); err != nil {
+		return fmt.Errorf("remove mock_workspace placeholder: %w", err)
+	}
+	return nil
+}
+
+func removeDeclaredWriteTargets(workspaceRoot string, spec *WorkloadSpec) error {
+	rootAbs, err := filepath.Abs(workspaceRoot)
+	if err != nil {
+		return fmt.Errorf("abs(workspace): %w", err)
+	}
+	for _, target := range spec.Outputs.WriteTargets {
+		if strings.TrimSpace(target.Path) == "" {
+			continue
+		}
+		p := SubstituteWorkspace(target.Path, rootAbs)
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(rootAbs, p)
+		}
+		cleaned := filepath.Clean(p)
+		if cleaned == rootAbs || !strings.HasPrefix(cleaned+string(filepath.Separator), rootAbs+string(filepath.Separator)) {
+			return fmt.Errorf("declared write target escapes workspace: %q", target.Path)
+		}
+		if err := os.RemoveAll(cleaned); err != nil {
+			return fmt.Errorf("remove declared write target %q: %w", target.Path, err)
+		}
+	}
+	return nil
+}
+
+func buildCodexPrompt(spec *WorkloadSpec) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Complete this evaluation workload inside the current working directory. Do not ask questions.\n\n")
+	fmt.Fprintf(&b, "Workload id: %s\n\n", spec.ID)
+	fmt.Fprintf(&b, "Task:\n%s\n\n", spec.Description)
+	if len(spec.Inputs.ReadArtifacts) > 0 {
+		b.WriteString("Input artifacts declared by the workload:\n")
+		for _, input := range spec.Inputs.ReadArtifacts {
+			fmt.Fprintf(&b, "- %s: %s (workspace path: %s)\n", input.Kind, input.Path, workspaceRelativeArtifactPath(input.Path))
+		}
+		b.WriteString("\n")
+	}
+	if len(spec.Outputs.WriteTargets) > 0 {
+		b.WriteString("Write these output artifacts in the current workspace:\n")
+		for _, output := range spec.Outputs.WriteTargets {
+			fmt.Fprintf(&b, "- %s: %s (workspace path: %s)\n", output.Kind, output.Path, workspaceRelativeArtifactPath(output.Path))
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func workspaceRelativeArtifactPath(path string) string {
+	p := strings.TrimSpace(path)
+	p = strings.TrimPrefix(p, "${workspace}/")
+	p = strings.TrimPrefix(p, "${workspace}")
+	p = strings.TrimPrefix(p, "./")
+	p = strings.TrimPrefix(p, "fixtures/")
+	if p == "" {
+		return "."
+	}
+	return p
+}
+
 // --- Workload spec ---
 
 // WorkloadSpec mirrors 13_workload_spec.md §1.2. Only the fields the runner
@@ -521,6 +661,18 @@ type WorkloadSpec struct {
 	SuccessOracle  string `yaml:"success_oracle"`
 	TimeoutSeconds int    `yaml:"timeout_seconds"`
 	RecoveryHint   string `yaml:"recovery_hint"`
+	Inputs         struct {
+		ReadArtifacts []struct {
+			Kind string `yaml:"kind"`
+			Path string `yaml:"path"`
+		} `yaml:"read_artifacts"`
+	} `yaml:"inputs"`
+	Outputs struct {
+		WriteTargets []struct {
+			Kind string `yaml:"kind"`
+			Path string `yaml:"path"`
+		} `yaml:"write_targets"`
+	} `yaml:"outputs"`
 }
 
 // LoadWorkloadSpec parses spec.yaml and validates the four fields the runner
