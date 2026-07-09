@@ -60,6 +60,7 @@ func runMain(args []string) int {
 		codexConfigPath = fs.String("codex-config-path", "", "WT-2: filesystem path to a codex config.toml; validated against --codex-config-mode; must resolve under the repo or /tmp")
 		codexConfigMode = fs.String("codex-config-mode", "", "WT-2: \"a\" = local-proxy (experimental_bearer_token) or \"b\" = upstream-direct (env_key=OPENAI_API_KEY); enforces the auth-field / env-var preconditions")
 		codexUsageJSONL = fs.String("codex-usage-jsonl", "", "path to Codex CLI JSONL usage events; records model_input_tokens/model_output_tokens")
+		agentBackend    = fs.String("agent-backend", "mock", "agent execution backend: mock or codex-cli")
 		runID           = fs.String("run-id", "", "explicit run id; default = derived")
 		timeout         = fs.Duration("timeout", 0, "override spec.timeout_seconds")
 		outCSV          = fs.String("out", "", "output CSV path; required")
@@ -104,6 +105,7 @@ func runMain(args []string) int {
 		CodexConfigPath: recordedCodexPath,
 		CodexConfigMode: *codexConfigMode,
 		CodexUsageJSONL: *codexUsageJSONL,
+		AgentBackend:    *agentBackend,
 		RunID:           *runID,
 		Timeout:         *timeout,
 		OutCSV:          *outCSV,

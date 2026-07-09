@@ -172,6 +172,7 @@ var expectedWorkloads = []string{
 // so all the other loops in this file exercise it.
 var scaffoldOnlyWorkloads = []string{
 	"motivation-e2e",
+	"public-terminal-heterogeneous-dates",
 }
 
 type contextSpec struct {
@@ -819,6 +820,18 @@ func TestRemoteDataProcessing_RejectsGoldenMismatch(t *testing.T) {
 	// R3-N2: explicitly assert the golden-tier detail is the one tripped.
 	require.Contains(t, raw, `"golden":"mismatch"`,
 		"golden tier must remain wired in; a refactor that disables it would silently regress")
+}
+
+// Public-benchmark smoke task: the Terminal-Bench heterogeneous-dates task
+// must validate the original numeric objective, not just output existence.
+func TestPublicTerminalHeterogeneousDates_RejectsWrongAverage(t *testing.T) {
+	result, raw, parsed, err := runOracle(t, "public-terminal-heterogeneous-dates", func(ws string) {
+		require.NoError(t, os.WriteFile(filepath.Join(ws, "avg_temp.txt"), []byte("0\n"), 0o644))
+	})
+	require.Error(t, err, "oracle must reject wrong average temperature; raw=%s", raw)
+	require.True(t, parsed, "oracle must emit valid JSON on failure; raw=%s", raw)
+	require.False(t, result.Passed)
+	require.Contains(t, raw, `"avg_temp":"mismatch"`)
 }
 
 // R4 (continued): negative coverage for cross-device-code-mod when the

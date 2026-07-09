@@ -1,0 +1,24 @@
+# scaffold self-check only; NOT part of §6.3 main experiment 5-workload set
+id: public-terminal-heterogeneous-dates
+description: "Terminal-Bench heterogeneous-dates adaptation: use daily_temp_sf_high.csv and daily_temp_sf_low.csv to calculate the average daily high-minus-low temperature difference, then write only that number to avg_temp.txt."
+required_contexts:
+  - role: driver
+    platform: linux
+    tools: ["codex"]
+  - role: server
+    platform: linux
+    tools: ["python3", "sh"]
+allowed_contexts: ["*"]
+inputs:
+  read_artifacts:
+    - kind: csv
+      path: fixtures/task-deps/daily_temp_sf_high.csv
+    - kind: csv
+      path: fixtures/task-deps/daily_temp_sf_low.csv
+outputs:
+  write_targets:
+    - kind: result
+      path: ${workspace}/avg_temp.txt
+success_oracle: ./oracle.sh
+recovery_hint: "avg_temp.txt must contain only a numeric value. The value must match the Terminal-Bench heterogeneous-dates oracle: round(value, 3) == round(11.428571428571429, 3)."
+timeout_seconds: 900
