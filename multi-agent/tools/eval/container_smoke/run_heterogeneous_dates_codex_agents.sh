@@ -102,17 +102,16 @@ You are verifier-agent in a multi-agent container benchmark.
 
 Visible inputs:
 - /workspace/avg_temp.txt
-- /oracle/oracle.sh
 
 Your job:
-1. Run: bash /oracle/oracle.sh /workspace > /out/oracle_result.json
-2. Read /out/oracle_result.json.
-3. Write /out/verification_report.md summarizing whether the public oracle
-   passed, including the reason if it failed.
+1. Inspect /workspace/avg_temp.txt without modifying /workspace.
+2. Verify that it exists, is non-empty, and contains only a numeric value.
+3. Write /out/verification_report.md summarizing the format check.
 
 Constraints:
 - Do not modify /workspace.
-- Keep /out/oracle_result.json as the raw JSON line emitted by oracle.sh.
+- Do not run or read oracle scripts. The harness runs the public oracle after
+  all agents finish.
 PROMPT
 
 cat >"${RUNTIME_DIR}/Dockerfile" <<'DOCKERFILE'
@@ -122,17 +121,66 @@ RUN ln -sf ../lib/node_modules/@openai/codex/bin/codex.js /usr/bin/codex
 WORKDIR /workspace
 DOCKERFILE
 
-prepare_codex_home() {
-  local agent="$1"
-  local home="${CODEX_HOME_ROOT}/${agent}"
-  mkdir -p "$home"
-  cp "$SOURCE_CODEX_CONFIG" "${home}/config.toml"
-  chmod 600 "${home}/config.toml"
+write_minimal_codex_config() {
+  local src="$1"
+  local dst="$2"
+  shift 2
+  python3 - "$src" "$dst" "$@" <<'PY'
+import json
+import sys
+import tomllib
+from pathlib import Path
+
+src, dst, *trusted_dirs = sys.argv[1:]
+data = tomllib.loads(Path(src).read_text(encoding="utf-8"))
+
+def toml_string(value):
+    return json.dumps(str(value))
+
+def table_key(value):
+    s = str(value)
+    if s.replace("_", "").replace("-", "").isalnum() and not s[:1].isdigit():
+        return s
+    return toml_string(s)
+
+provider_name = data.get("model_provider", "")
+provider = data.get("model_providers", {}).get(provider_name, {})
+lines = []
+for key in ("model_provider", "model", "model_reasoning_effort"):
+    if key in data:
+        lines.append(f"{key} = {toml_string(data[key])}")
+lines.append("")
+if provider_name and provider:
+    lines.append(f"[model_providers.{table_key(provider_name)}]")
+    for key, value in provider.items():
+        if isinstance(value, bool):
+            rendered = "true" if value else "false"
+        elif isinstance(value, (int, float)):
+            rendered = str(value)
+        else:
+            rendered = toml_string(value)
+        lines.append(f"{key} = {rendered}")
+    lines.append("")
+for project in trusted_dirs:
+    lines.append(f"[projects.{toml_string(project)}]")
+    lines.append('trust_level = "trusted"')
+    lines.append("")
+Path(dst).write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+PY
+  chmod 600 "$dst"
 }
 
-prepare_codex_home data-agent
-prepare_codex_home solver-agent
-prepare_codex_home verifier-agent
+prepare_codex_home() {
+  local agent="$1"
+  local workspace="$2"
+  local home="${CODEX_HOME_ROOT}/${agent}"
+  mkdir -p "$home"
+  write_minimal_codex_config "$SOURCE_CODEX_CONFIG" "${home}/config.toml" "$workspace" "/tmp"
+}
+
+prepare_codex_home data-agent /workspace
+prepare_codex_home solver-agent /workspace
+prepare_codex_home verifier-agent /workspace
 
 echo "Building ${IMAGE_TAG} for containerized Codex agents..."
 docker build --network host --pull=false -t "$IMAGE_TAG" "$RUNTIME_DIR" \
@@ -218,8 +266,7 @@ if ! run_codex_agent solver-agent "${PROMPT_DIR}/solver-agent.md" \
 fi
 
 if ! run_codex_agent verifier-agent "${PROMPT_DIR}/verifier-agent.md" \
-  -v "${FINAL_WORKSPACE}:/workspace:ro" \
-  -v "${WORKLOAD_DIR}/oracle.sh:/oracle/oracle.sh:ro"; then
+  -v "${FINAL_WORKSPACE}:/workspace:ro"; then
   failed=1
 fi
 
@@ -321,7 +368,7 @@ isolation = {
     "base_image": "postgres:16-alpine",
     "build_network": "host",
     "agent_network": network,
-    "codex_state": "one temporary CODEX_HOME per agent; source config.toml copied, sessions/history/skills not copied",
+    "codex_state": "one temporary CODEX_HOME per agent; only model provider config is rendered from the source config",
     "agents": [
         {
             "name": "data-agent",
@@ -345,7 +392,6 @@ isolation = {
             "name": "verifier-agent",
             "mounts": [
                 "final_workspace:/workspace:ro",
-                "oracle.sh:/oracle/oracle.sh:ro",
                 "verifier-agent:/out:rw",
                 "codex_homes/verifier-agent:/codex-home:rw",
             ],
@@ -369,7 +415,6 @@ manifest_candidates = [
     out_dir / "solver-agent" / "last_message.md",
     out_dir / "solver-agent" / "solution_report.md",
     out_dir / "verifier-agent" / "last_message.md",
-    out_dir / "verifier-agent" / "oracle_result.json",
     out_dir / "verifier-agent" / "verification_report.md",
     out_dir / "oracle_result.json",
     out_dir / "agent_usage_summary.json",
@@ -439,15 +484,15 @@ report = f"""# 真实 Codex 多 Agent 容器协作烟测报告
 | ---: | --- | --- | --- | --- |
 | 1 | `data-agent` | 运行真实 `codex exec`，检查两个 CSV，归一化日期并生成对齐后的中间表 | 原始 high/low CSV | `artifacts/aligned_temperatures.csv`, `artifacts/data_profile.md` |
 | 2 | `solver-agent` | 运行真实 `codex exec`，只基于中间 artifact 计算平均差值 | data-agent 产物 | `final_workspace/avg_temp.txt`, `solver-agent/solution_report.md` |
-| 3 | `verifier-agent` | 运行真实 `codex exec`，调用公开 oracle 并解释结果 | `avg_temp.txt`, `oracle.sh` | `verifier-agent/oracle_result.json`, `verifier-agent/verification_report.md` |
+| 3 | `verifier-agent` | 运行真实 `codex exec`，只检查最终 artifact 的格式；公开 oracle 由 harness 在 agent 结束后运行 | `avg_temp.txt` | `verifier-agent/verification_report.md` |
 
 ## 隔离与状态
 
 - 每个 agent 使用单独容器、单独输出目录、单独 `CODEX_HOME`。
-- 临时 `CODEX_HOME` 只复制源 `config.toml`，不复制 sessions、history、skills 或 superpowers。
+- 临时 `CODEX_HOME` 只渲染源配置中的模型 provider 与 trusted project，不复制 MCP、sessions、history、skills 或 superpowers。
 - `data-agent` 能看原始输入，但不能写最终 workspace。
 - `solver-agent` 不能看原始 CSV，只能看 data-agent 产物并写最终答案。
-- `verifier-agent` 以只读方式挂载最终 workspace，只能写自己的验证报告。
+- `verifier-agent` 以只读方式挂载最终 workspace，只能写自己的格式验证报告；它不能读取公开 oracle。
 
 ## 运行结果
 

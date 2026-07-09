@@ -20,6 +20,8 @@ def test_driver_isolates_agent_state_and_records_usage() -> None:
     text = SCRIPT.read_text()
 
     assert "CODEX_HOME" in text
+    assert "write_minimal_codex_config" in text
+    assert 'cp "$SOURCE_CODEX_CONFIG"' not in text
     assert "agent_usage_summary.json" in text
     assert "model_input_tokens" in text
     assert "model_output_tokens" in text
@@ -33,3 +35,18 @@ def test_driver_keeps_solution_out_of_orchestration() -> None:
     assert "avg_temp.txt must contain only" in text
     assert "oracle_result.json" in text
     assert "multi_agent_codex_container_report_cn.md" in text
+
+
+def test_verifier_agent_does_not_see_public_oracle() -> None:
+    text = SCRIPT.read_text()
+    prompt_match = re.search(
+        r"""cat >"\$\{PROMPT_DIR\}/verifier-agent\.md" <<'PROMPT'(?P<prompt>.*?)^PROMPT$""",
+        text,
+        re.S | re.M,
+    )
+    assert prompt_match, "verifier prompt heredoc missing"
+    prompt = prompt_match.group("prompt")
+
+    assert "/oracle" not in prompt
+    assert "Do not run or read oracle scripts" in prompt
+    assert 'oracle.sh:/oracle/oracle.sh' not in text
