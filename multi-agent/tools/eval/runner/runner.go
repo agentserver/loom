@@ -539,6 +539,9 @@ func runCodexCLIStage(ctx context.Context, ws *Workspace, spec *WorkloadSpec, op
 	if err := removeDeclaredWriteTargets(ws.Root, spec); err != nil {
 		return err
 	}
+	if err := removeMockWorkspacePlaceholder(ws.Root); err != nil {
+		return err
+	}
 
 	args := []string{
 		"codex", "exec",
@@ -577,6 +580,14 @@ func runCodexCLIStage(ctx context.Context, ws *Workspace, spec *WorkloadSpec, op
 	}
 	if res.ExitCode != 0 {
 		return fmt.Errorf("codex cli exited %d: %s", res.ExitCode, strings.TrimSpace(string(res.Stderr)))
+	}
+	return nil
+}
+
+func removeMockWorkspacePlaceholder(workspaceRoot string) error {
+	p := filepath.Join(workspaceRoot, "mock_workspace")
+	if err := os.RemoveAll(p); err != nil {
+		return fmt.Errorf("remove mock_workspace placeholder: %w", err)
 	}
 	return nil
 }
@@ -623,9 +634,6 @@ func buildCodexPrompt(spec *WorkloadSpec) string {
 			fmt.Fprintf(&b, "- %s: %s (workspace path: %s)\n", output.Kind, output.Path, workspaceRelativeArtifactPath(output.Path))
 		}
 		b.WriteString("\n")
-	}
-	if spec.RecoveryHint != "" {
-		fmt.Fprintf(&b, "Oracle constraints:\n%s\n", spec.RecoveryHint)
 	}
 	return b.String()
 }

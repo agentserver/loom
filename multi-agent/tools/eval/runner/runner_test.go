@@ -278,6 +278,10 @@ if [[ -e avg_temp.txt ]]; then
   echo "avg_temp.txt should have been removed before the agent stage" >&2
   exit 65
 fi
+if [[ -e mock_workspace ]]; then
+  echo "mock_workspace placeholder should have been removed before the agent stage" >&2
+  exit 76
+fi
 printf '11.429\n' > avg_temp.txt
 printf '{"type":"turn.completed","usage":{"input_tokens":7,"output_tokens":3}}\n'
 `
@@ -381,6 +385,21 @@ func TestBuildCodexPromptShowsWorkspaceRelativePaths(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "workspace path: avg_temp.txt") {
 		t.Fatalf("prompt does not surface output workspace path:\n%s", prompt)
+	}
+}
+
+func TestBuildCodexPromptDoesNotExposeRecoveryHint(t *testing.T) {
+	root := findRepoModuleRoot(t)
+	spec, err := LoadWorkloadSpec(filepath.Join(root, "tests/eval/workloads/public-terminal-heterogeneous-dates/spec.yaml"))
+	if err != nil {
+		t.Fatalf("load public benchmark spec: %v", err)
+	}
+	prompt := buildCodexPrompt(spec)
+	if strings.Contains(prompt, "11.428571428571429") {
+		t.Fatalf("prompt exposes exact oracle answer:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "Oracle constraints") {
+		t.Fatalf("prompt exposes recovery_hint metadata:\n%s", prompt)
 	}
 }
 
