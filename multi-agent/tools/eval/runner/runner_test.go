@@ -232,10 +232,6 @@ if [[ -z "${CODEX_HOME:-}" ]]; then
   echo "CODEX_HOME not set" >&2
   exit 68
 fi
-if [[ -n "${SOURCE_CODEX_HOME:-}" && "$CODEX_HOME" == "$SOURCE_CODEX_HOME" ]]; then
-  echo "CODEX_HOME was not isolated" >&2
-  exit 69
-fi
 if [[ ! -f "$CODEX_HOME/config.toml" ]]; then
   echo "isolated CODEX_HOME missing config.toml" >&2
   exit 70
@@ -251,6 +247,10 @@ grep -q 'model_provider = "modelserver"' "$CODEX_HOME/config.toml" || {
 if grep -q 'should_not_copy' "$CODEX_HOME/config.toml"; then
   echo "isolated config copied unrelated MCP config" >&2
   exit 74
+fi
+if [[ -n "${BENCHMARK_SECRET_SHOULD_NOT_LEAK:-}" ]]; then
+  echo "parent benchmark secret leaked into codex env" >&2
+  exit 75
 fi
 for arg in "$@"; do
   if [[ "$arg" == "--ask-for-approval" ]]; then
@@ -285,28 +285,9 @@ printf '{"type":"turn.completed","usage":{"input_tokens":7,"output_tokens":3}}\n
 		t.Fatalf("write fake codex: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	sourceCodexHome := t.TempDir()
-	sourceCodexConfig := `model_provider = "modelserver"
-model = "gpt-5.5"
-model_reasoning_effort = "xhigh"
-
-[model_providers.modelserver]
-name = "modelserver"
-base_url = "https://example.invalid/v1"
-env_key = "OPENAI_API_KEY"
-wire_api = "responses"
-
-[mcp_servers.should_not_copy]
-command = "false"
-`
-	if err := os.WriteFile(filepath.Join(sourceCodexHome, "config.toml"), []byte(sourceCodexConfig), 0o600); err != nil {
-		t.Fatalf("write source codex config: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(sourceCodexHome, "skills", "using-superpowers"), 0o755); err != nil {
-		t.Fatalf("mkdir source skills: %v", err)
-	}
+	sourceCodexHome := writeSourceCodexHomeForTest(t)
 	t.Setenv("CODEX_HOME", sourceCodexHome)
-	t.Setenv("SOURCE_CODEX_HOME", sourceCodexHome)
+	t.Setenv("BENCHMARK_SECRET_SHOULD_NOT_LEAK", "supersecret")
 
 	outCSV := filepath.Join(t.TempDir(), "run.csv")
 	usagePath := filepath.Join(t.TempDir(), "codex-usage.jsonl")
@@ -334,6 +315,53 @@ command = "false"
 	}
 	if !bytes.Contains(b, []byte(`"input_tokens":7`)) {
 		t.Fatalf("usage JSONL missing fake codex usage: %s", b)
+	}
+}
+
+func TestRun_CodexCLIBackendFailureForcesRunFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fake codex is Unix-only")
+	}
+	withShims(t, commitMetaJSON(), "alice@example.com|alice@example.com")
+
+	workloadDir := mkCodexCLIBackendWorkload(t)
+	binDir := t.TempDir()
+	fakeCodex := filepath.Join(binDir, "codex")
+	fakeCodexBody := `#!/usr/bin/env bash
+set -euo pipefail
+printf '11.429\n' > avg_temp.txt
+printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'
+exit 42
+`
+	if err := os.WriteFile(fakeCodex, []byte(fakeCodexBody), 0o700); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CODEX_HOME", writeSourceCodexHomeForTest(t))
+
+	outCSV := filepath.Join(t.TempDir(), "run.csv")
+	usagePath := filepath.Join(t.TempDir(), "codex-usage.jsonl")
+	res := Run(context.Background(), Opts{
+		WorkloadID:      "codex-cli-backend-fixture",
+		WorkloadDir:     workloadDir,
+		StubListen:      pickFreePort(t),
+		StubBin:         stubBinaryPath(t),
+		OutCSV:          outCSV,
+		CodexUsageJSONL: usagePath,
+		AgentBackend:    "codex-cli",
+		Stderr:          discardStderr(t),
+	})
+	if res.ExitCode != 1 {
+		t.Fatalf("exit = %d, want 1; err=%v row=%+v", res.ExitCode, res.Err, res.Row)
+	}
+	if res.Row.Passed {
+		t.Fatalf("row passed=true despite codex backend failure")
+	}
+	if res.Row.OracleExitCode != 0 {
+		t.Fatalf("oracle exit = %d, want 0 to prove backend failure forced the run failure", res.Row.OracleExitCode)
+	}
+	if res.Row.ModelInputTokens != 1 || res.Row.ModelOutputTokens != 1 {
+		t.Fatalf("usage = (%d,%d), want (1,1)", res.Row.ModelInputTokens, res.Row.ModelOutputTokens)
 	}
 }
 
@@ -754,6 +782,31 @@ timeout_seconds: %d
 		t.Fatalf("write oracle: %v", err)
 	}
 	return parent
+}
+
+func writeSourceCodexHomeForTest(t *testing.T) string {
+	t.Helper()
+	sourceCodexHome := t.TempDir()
+	sourceCodexConfig := `model_provider = "modelserver"
+model = "gpt-5.5"
+model_reasoning_effort = "xhigh"
+
+[model_providers.modelserver]
+name = "modelserver"
+base_url = "https://example.invalid/v1"
+env_key = "OPENAI_API_KEY"
+wire_api = "responses"
+
+[mcp_servers.should_not_copy]
+command = "false"
+`
+	if err := os.WriteFile(filepath.Join(sourceCodexHome, "config.toml"), []byte(sourceCodexConfig), 0o600); err != nil {
+		t.Fatalf("write source codex config: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(sourceCodexHome, "skills", "using-superpowers"), 0o755); err != nil {
+		t.Fatalf("mkdir source skills: %v", err)
+	}
+	return sourceCodexHome
 }
 
 func mkCodexCLIBackendWorkload(t *testing.T) string {

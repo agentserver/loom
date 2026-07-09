@@ -96,6 +96,50 @@ func resolveSourceCodexConfigPath(opts Opts) string {
 	return filepath.Join(".codex", "config.toml")
 }
 
+var benchmarkCodexAllowedEnv = map[string]struct{}{
+	"PATH":                {},
+	"HOME":                {},
+	"USER":                {},
+	"LANG":                {},
+	"LC_ALL":              {},
+	"LC_CTYPE":            {},
+	"TZ":                  {},
+	"OPENAI_API_KEY":      {},
+	"OPENAI_ORG_ID":       {},
+	"OPENAI_PROJECT":      {},
+	"HTTP_PROXY":          {},
+	"HTTPS_PROXY":         {},
+	"NO_PROXY":            {},
+	"http_proxy":          {},
+	"https_proxy":         {},
+	"no_proxy":            {},
+	"SSL_CERT_FILE":       {},
+	"SSL_CERT_DIR":        {},
+	"REQUESTS_CA_BUNDLE":  {},
+	"CURL_CA_BUNDLE":      {},
+	"GIT_SSL_CAINFO":      {},
+	"NODE_EXTRA_CA_CERTS": {},
+}
+
+func benchmarkCodexEnv(parent []string, codexHome, stubURL string) []string {
+	out := make([]string, 0, len(benchmarkCodexAllowedEnv)+2)
+	seen := map[string]bool{}
+	for _, kv := range parent {
+		key, _, ok := splitEnv(kv)
+		if !ok {
+			continue
+		}
+		if _, allowed := benchmarkCodexAllowedEnv[key]; !allowed || seen[key] {
+			continue
+		}
+		out = append(out, kv)
+		seen[key] = true
+	}
+	out = withEnvValue(out, "CODEX_HOME", codexHome)
+	out = withEnvValue(out, "AGENTSERVER_URL", stubURL)
+	return out
+}
+
 func withEnvValue(env []string, key, value string) []string {
 	prefix := key + "="
 	out := make([]string, 0, len(env)+1)

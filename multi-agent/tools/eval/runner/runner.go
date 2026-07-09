@@ -288,12 +288,15 @@ func Run(ctx context.Context, opts Opts) Result {
 	// Agent stage. Default skeleton behaviour is mock output flattened
 	// by SetupWorkspace; the codex-cli backend removes declared outputs
 	// and asks Codex CLI to regenerate them before the oracle runs.
+	var agentErr error
 	if opts.AgentStage != nil {
 		if err := opts.AgentStage(ctx, ws, spec); err != nil {
+			agentErr = err
 			fmt.Fprintf(opts.Stderr, "eval-runner: agent stage error: %v\n", err)
 		}
 	} else if opts.AgentBackend == "codex-cli" {
 		if err := runCodexCLIStage(ctx, ws, spec, opts, timeout, stubURL); err != nil {
+			agentErr = err
 			fmt.Fprintf(opts.Stderr, "eval-runner: agent stage error: %v\n", err)
 		}
 	}
@@ -330,15 +333,16 @@ func Run(ctx context.Context, opts Opts) Result {
 
 	// Parse oracle output (best-effort; bad JSON → run fails, not exit 2).
 	oracleOut := parseOracleStdout(res.Stdout)
-	passed := oracleOut.Passed && oracleErr == nil && res.ExitCode == 0
+	passed := agentErr == nil && oracleOut.Passed && oracleErr == nil && res.ExitCode == 0
 
 	// WT-2-e1e6-probes Edit 3: emit oracle-derived metrics +
 	// humanloop counter (spec §5.1 Edit 3). oracleOutput is unexported
 	// to package main, so lift its fields into probes.OracleOutput.
-	// `Passed` uses the runner's canonical value (oracle-json passed
-	// AND no subprocess error AND exit-code 0) — a JSON `passed:true`
-	// with a non-zero exit code is a runner-level failure, so
-	// TaskSuccessRate must reflect that, not the raw JSON field.
+	// `Passed` uses the runner's canonical value: agent stage succeeded,
+	// oracle JSON passed, no oracle subprocess error, and oracle exit code 0.
+	// A JSON `passed:true` with a non-zero exit code or failed backend is a
+	// runner-level failure, so TaskSuccessRate must reflect that, not the raw
+	// JSON field.
 	oracleOutForProbes := probes.OracleOutput{
 		Passed:      passed,
 		MetricsJSON: oracleOut.MetricsRaw,
@@ -551,9 +555,7 @@ func runCodexCLIStage(ctx context.Context, ws *Workspace, spec *WorkloadSpec, op
 		return err
 	}
 	defer cleanupCodexHome()
-	env := append([]string{}, os.Environ()...)
-	env = append(env, "AGENTSERVER_URL="+stubURL)
-	env = withEnvValue(env, "CODEX_HOME", codexHome)
+	env := benchmarkCodexEnv(os.Environ(), codexHome, stubURL)
 
 	res, err := RunSubprocess(ctx, SubprocessOpts{
 		Cmd:            args,
