@@ -19,6 +19,11 @@ type remoteExecPlan struct {
 	FetchFiles []string
 }
 
+type containerCodexPromptSpec struct {
+	Prompt          string
+	ExpectedOutputs []string
+}
+
 // cloudPlans mirrors manual_ssh's workloadScripts — same content, one
 // level of abstraction (the "which files come back" list). Reuses the
 // exact bash scripts that make manual_ssh oracles pass, so both
@@ -43,5 +48,55 @@ var cloudPlans = map[string]remoteExecPlan{
 	"credential-bound-model": {
 		ExecScript: "set -eu\nalias=\"${EXPECTED_MODEL_ALIAS:-acme-bound-model-v1}\"\ncat > route.json <<JSON\n{\"model_alias\":\"$alias\",\"proxy_context_id\":\"pctx-cloud-sandbox-e2b-0001\"}\nJSON\necho 'cloud sandbox baseline completion' > completion.txt\necho 'cloud sandbox run log' > run.log\n",
 		FetchFiles: []string{"route.json", "completion.txt", "run.log"},
+	},
+	"public-terminal-heterogeneous-dates": {
+		ExecScript: `set -eu
+python3 <<'PY'
+import csv
+from datetime import datetime
+from pathlib import Path
+
+root = Path(".")
+high = {}
+with (root / "task-deps" / "daily_temp_sf_high.csv").open(newline="", encoding="utf-8") as handle:
+    for row in csv.DictReader(handle):
+        high[row["date"]] = float(row["temperature"])
+
+low = {}
+with (root / "task-deps" / "daily_temp_sf_low.csv").open(newline="", encoding="utf-8") as handle:
+    for row in csv.DictReader(handle):
+        raw = row["date"].split()[0]
+        parsed = None
+        for fmt in ("%m/%d/%Y", "%m-%d-%Y"):
+            try:
+                parsed = datetime.strptime(raw, fmt).strftime("%Y-%m-%d")
+                break
+            except ValueError:
+                pass
+        if parsed is None:
+            raise SystemExit(f"unsupported date format: {row['date']}")
+        low[parsed] = float(row["temperature"])
+
+dates = sorted(set(high) & set(low))
+if not dates:
+    raise SystemExit("no overlapping dates")
+avg = sum(high[day] - low[day] for day in dates) / len(dates)
+(root / "avg_temp.txt").write_text(f"{avg:.15f}\n", encoding="utf-8")
+PY
+`,
+		FetchFiles: []string{"avg_temp.txt"},
+	},
+}
+
+var containerCodexPrompts = map[string]containerCodexPromptSpec{
+	"public-terminal-heterogeneous-dates": {
+		Prompt: `You are in a workspace directory for a Terminal-Bench style data task.
+
+Inputs:
+- task-deps/daily_temp_sf_high.csv has ISO dates and daily high temperatures.
+- task-deps/daily_temp_sf_low.csv has slash- or dash-formatted dates with times and daily low temperatures.
+
+Normalize the dates, align records by calendar day, compute the arithmetic mean of high-minus-low over all overlapping dates, and write only the numeric value to avg_temp.txt. Do not include units, prose, markdown, or any other files as the final answer.`,
+		ExpectedOutputs: []string{"avg_temp.txt"},
 	},
 }

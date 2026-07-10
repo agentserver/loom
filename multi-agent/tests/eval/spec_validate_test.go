@@ -172,6 +172,14 @@ var expectedWorkloads = []string{
 // so all the other loops in this file exercise it.
 var scaffoldOnlyWorkloads = []string{
 	"motivation-e2e",
+}
+
+// publicBenchmarkPilotWorkloads are public-benchmark adaptations that
+// live beside the main five-workload eval set while the paper's public
+// benchmark matrix is being built out. They are validated by the shared
+// spec/oracle tests, but remain separate from expectedWorkloads so the
+// original §6.3 five-workload contract does not silently change.
+var publicBenchmarkPilotWorkloads = []string{
 	"public-terminal-heterogeneous-dates",
 }
 
@@ -248,6 +256,10 @@ func TestWorkloadDirectoryMatchesExpectedSet(t *testing.T) {
 	for _, id := range scaffoldOnlyWorkloads {
 		scaffoldWant[id] = struct{}{}
 	}
+	publicPilotWant := map[string]struct{}{}
+	for _, id := range publicBenchmarkPilotWorkloads {
+		publicPilotWant[id] = struct{}{}
+	}
 	for _, e := range entries {
 		if _, ok := want[e.Name()]; ok {
 			require.True(t, e.IsDir(), "%s under workloads/ must be a directory (was a file)", e.Name())
@@ -257,6 +269,10 @@ func TestWorkloadDirectoryMatchesExpectedSet(t *testing.T) {
 		if _, ok := scaffoldWant[e.Name()]; ok {
 			require.True(t, e.IsDir(), "%s under workloads/ must be a directory (was a file)", e.Name())
 			scaffoldDirs[e.Name()] = struct{}{}
+			continue
+		}
+		if _, ok := publicPilotWant[e.Name()]; ok {
+			require.True(t, e.IsDir(), "%s under workloads/ must be a directory (was a file)", e.Name())
 			continue
 		}
 		extra = append(extra, e.Name())
@@ -303,9 +319,40 @@ func TestScaffoldOnlyWorkloadsAreScoped(t *testing.T) {
 	}
 }
 
+func TestPublicBenchmarkPilotWorkloadsAreScoped(t *testing.T) {
+	wantFirstLines := map[string]string{
+		"public-terminal-heterogeneous-dates": "# Public benchmark task 1 pilot; adapted from Terminal-Bench heterogeneous-dates.",
+	}
+	for _, id := range publicBenchmarkPilotWorkloads {
+		id := id
+		t.Run(id, func(t *testing.T) {
+			path := filepath.Join("workloads", id, "spec.yaml")
+			data, err := os.ReadFile(path)
+			require.NoError(t, err, "read %s", path)
+			lines := bytes.SplitN(data, []byte("\n"), 2)
+			require.NotEmpty(t, lines, "spec.yaml empty: %s", path)
+			require.Equal(t, wantFirstLines[id], string(lines[0]),
+				"%s first line must be verbatim public benchmark pilot declaration", path)
+		})
+	}
+}
+
+func TestPublicBenchmarkSpecsDoNotLeakOracleAnswer(t *testing.T) {
+	for _, id := range publicBenchmarkPilotWorkloads {
+		id := id
+		t.Run(id, func(t *testing.T) {
+			path := filepath.Join("workloads", id, "spec.yaml")
+			data, err := os.ReadFile(path)
+			require.NoError(t, err, "read %s", path)
+			require.NotContains(t, string(data), "11.428571428571429",
+				"public benchmark spec must not disclose the final oracle value")
+		})
+	}
+}
+
 func TestWorkloadSpecsExistAndValidate(t *testing.T) {
 	root := "workloads"
-	for _, id := range expectedWorkloads {
+	for _, id := range append(append([]string{}, expectedWorkloads...), publicBenchmarkPilotWorkloads...) {
 		id := id
 		t.Run(id, func(t *testing.T) {
 			dir := filepath.Join(root, id)
@@ -488,7 +535,7 @@ func runOracle(t *testing.T, workloadID string, mutate func(workspace string), e
 // mis-behaving oracle that writes to its workspace can never corrupt the
 // in-tree fixture.
 func TestWorkloadOraclesPassOnMockFixture(t *testing.T) {
-	for _, id := range expectedWorkloads {
+	for _, id := range append(append([]string{}, expectedWorkloads...), publicBenchmarkPilotWorkloads...) {
 		id := id
 		t.Run(id, func(t *testing.T) {
 			result, raw, parsed, err := runOracle(t, id, nil)

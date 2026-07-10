@@ -47,4 +47,14 @@ No other output.`,
 		Prompt:          `Write route.json = {"model_alias":"acme-bound-model-v1","proxy_context_id":"pctx-single-machine-0001"}. Also write non-empty completion.txt and run.log. No API key strings in the workspace.`,
 		ExpectedOutputs: []string{"route.json", "completion.txt", "run.log"},
 	},
+	"public-terminal-heterogeneous-dates": {
+		Prompt: `You are in a workspace directory for a Terminal-Bench style data task.
+
+Inputs:
+- task-deps/daily_temp_sf_high.csv has ISO dates and daily high temperatures.
+- task-deps/daily_temp_sf_low.csv has slash- or dash-formatted dates with times and daily low temperatures.
+
+Normalize the dates, align records by calendar day, compute the arithmetic mean of high-minus-low over all overlapping dates, and write only the numeric value to avg_temp.txt. Do not include units, prose, markdown, or any other files as the final answer.`,
+		ExpectedOutputs: []string{"avg_temp.txt"},
+	},
 }

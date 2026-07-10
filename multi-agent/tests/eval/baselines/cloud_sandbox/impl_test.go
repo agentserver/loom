@@ -167,6 +167,56 @@ func TestCloudSandbox_CIRunRequiresDryRun(t *testing.T) {
 	}
 }
 
+func TestCloudSandbox_CIRunAllowsContainerCodex(t *testing.T) {
+	dir := t.TempDir()
+	argvPath := filepath.Join(dir, "docker.argv")
+	fakeDocker := filepath.Join(dir, "docker")
+	script := `#!/bin/sh
+set -eu
+{ for a in "$@"; do printf '%s\0' "$a"; done; } > "$LOOM_DOCKER_ARGV"
+host=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-v" ] && [ "$#" -ge 2 ]; then
+    case "$2" in
+      *:/workspace*) host="${2%%:/workspace*}" ;;
+    esac
+    shift 2
+    continue
+  fi
+  shift
+done
+if [ -z "$host" ]; then
+  echo "workspace mount missing" >&2
+  exit 12
+fi
+printf '11.428571428571429\n' > "$host/avg_temp.txt"
+exit 0
+`
+	if err := os.WriteFile(fakeDocker, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, self, _, _ := runtime.Caller(0)
+	sh := filepath.Join(filepath.Dir(self), "run.sh")
+	outPath := filepath.Join(t.TempDir(), "row.csv")
+	cmd := exec.Command("bash", sh,
+		"--workload", "public-terminal-heterogeneous-dates",
+		"--out", outPath,
+		"--container-codex",
+		"--container-codex-docker", fakeDocker,
+		"--container-codex-image", "codex-baseline-test:latest",
+		"--container-codex-bin", "codex",
+	)
+	cmd.Env = append(os.Environ(), "CI=true", "LOOM_DOCKER_ARGV="+argvPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run.sh should allow CI=true when --container-codex is set: %v\n%s", err, string(out))
+	}
+	if _, err := os.Stat(argvPath); err != nil {
+		t.Fatalf("container codex docker should have been invoked: %v", err)
+	}
+}
+
 // TestCloudSandbox_RealMode_CountsAPICalls — plan #31. A countingClient
 // records the number of Do calls; the ExecuteMetrics values feed the
 // CSV columns. Confirm the row column matches.
@@ -192,6 +242,91 @@ func TestCloudSandbox_RealMode_CountsAPICalls(t *testing.T) {
 	}
 	if res.Row.MetricsBaselineAPICalls != client.APICallCount() {
 		t.Errorf("api_calls mismatch: row=%d client=%d", res.Row.MetricsBaselineAPICalls, client.APICallCount())
+	}
+}
+
+func TestCloudSandbox_PublicTerminalHeterogeneousDatesPlan(t *testing.T) {
+	plan, ok := cloudPlans["public-terminal-heterogeneous-dates"]
+	if !ok {
+		t.Fatalf("cloudPlans missing public-terminal-heterogeneous-dates")
+	}
+	if !strings.Contains(plan.ExecScript, "daily_temp_sf_high.csv") {
+		t.Errorf("ExecScript should read high-temperature CSV; script=%q", plan.ExecScript)
+	}
+	if !strings.Contains(plan.ExecScript, "daily_temp_sf_low.csv") {
+		t.Errorf("ExecScript should read low-temperature CSV; script=%q", plan.ExecScript)
+	}
+	if len(plan.FetchFiles) != 1 || plan.FetchFiles[0] != "avg_temp.txt" {
+		t.Errorf("FetchFiles = %v, want [avg_temp.txt]", plan.FetchFiles)
+	}
+}
+
+func TestCloudSandbox_ContainerCodex_PublicTerminalHeterogeneousDates(t *testing.T) {
+	dir := t.TempDir()
+	argvPath := filepath.Join(dir, "docker.argv")
+	fakeDocker := filepath.Join(dir, "docker")
+	script := `#!/bin/sh
+set -eu
+{ for a in "$@"; do printf '%s\0' "$a"; done; } > "$LOOM_DOCKER_ARGV"
+host=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-v" ] && [ "$#" -ge 2 ]; then
+    case "$2" in
+      *:/workspace*) host="${2%%:/workspace*}" ;;
+    esac
+    shift 2
+    continue
+  fi
+  shift
+done
+if [ -z "$host" ]; then
+  echo "workspace mount missing" >&2
+  exit 12
+fi
+printf '11.428571428571429\n' > "$host/avg_temp.txt"
+exit 0
+`
+	if err := os.WriteFile(fakeDocker, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOOM_DOCKER_ARGV", argvPath)
+
+	client := &noDialClient{t: t}
+	impl := &CloudSandboxE2BImpl{
+		workloadID:        "public-terminal-heterogeneous-dates",
+		client:            client,
+		forwardE2B:        false,
+		containerCodex:    true,
+		dockerBin:         fakeDocker,
+		containerImage:    "codex-baseline-test:latest",
+		containerCodexBin: "codex",
+	}
+	out := filepath.Join(t.TempDir(), "row.csv")
+	res := harness.Run(context.Background(), harness.Opts{
+		WorkloadID:  "public-terminal-heterogeneous-dates",
+		WorkloadDir: filepath.Join(moduleRoot(t), "tests/eval/workloads"),
+		OutCSV:      out,
+		DryRun:      false,
+	}, impl, io.Discard)
+	if res.ExitCode != 0 {
+		t.Fatalf("container codex public task run: want exit 0, got %d; err=%v details=%s", res.ExitCode, res.Err, res.Row.OracleDetailsJSON)
+	}
+	if client.APICallCount() != 0 {
+		t.Fatalf("container codex mode must not call E2B client; calls=%d", client.APICallCount())
+	}
+	raw, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatalf("read docker argv: %v", err)
+	}
+	args := strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
+	joined := strings.Join(args, "\n")
+	for _, want := range []string{"run", "--rm", "-v", "codex-baseline-test:latest"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("docker argv missing %q; args=%q", want, args)
+		}
+	}
+	if !strings.Contains(joined, ":/workspace") {
+		t.Errorf("docker argv must mount workspace at /workspace; args=%q", args)
 	}
 }
 

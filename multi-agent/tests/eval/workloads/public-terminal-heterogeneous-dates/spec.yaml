@@ -1,4 +1,4 @@
-# scaffold self-check only; NOT part of §6.3 main experiment 5-workload set
+# Public benchmark task 1 pilot; adapted from Terminal-Bench heterogeneous-dates.
 id: public-terminal-heterogeneous-dates
 description: "Terminal-Bench heterogeneous-dates adaptation: use daily_temp_sf_high.csv and daily_temp_sf_low.csv to calculate the average daily high-minus-low temperature difference, then write only that number to avg_temp.txt."
 required_contexts:
@@ -20,5 +20,5 @@ outputs:
     - kind: result
       path: ${workspace}/avg_temp.txt
 success_oracle: ./oracle.sh
-recovery_hint: "avg_temp.txt must contain only a numeric value. The value must match the Terminal-Bench heterogeneous-dates oracle: round(value, 3) == round(11.428571428571429, 3)."
+recovery_hint: "avg_temp.txt must contain only a numeric value computed from overlapping normalized dates in the two CSV files."
 timeout_seconds: 900
