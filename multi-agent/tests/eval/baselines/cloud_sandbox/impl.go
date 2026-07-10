@@ -10,8 +10,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 
+	"github.com/yourorg/multi-agent/internal/secretscrub"
 	"github.com/yourorg/multi-agent/tests/eval/baselines/harness"
 )
 
@@ -27,6 +30,14 @@ var ErrCloudSandboxWorkloadUnknown = errors.New("cloud_sandbox: workload has no 
 // defaultE2BBase is the (fictitious) E2B API base URL used when the
 // caller doesn't override it. Real E2B API URL would go here.
 const defaultE2BBase = "https://api.e2b.dev"
+
+const (
+	defaultContainerDockerBin       = "docker"
+	defaultContainerCodexImage      = "multi-agent-container-smoke:codex-agents"
+	defaultContainerCodexBin        = "codex"
+	defaultContainerCodexNodeModule = "/usr/lib/node_modules/@openai/codex"
+	defaultContainerCodexNetwork    = "host"
+)
 
 // CloudSandboxE2BImpl is the harness.BaselineImpl for §E3. Prepare
 // walks the workspace looking for secrets; if any file trips the scan
@@ -52,6 +63,20 @@ type CloudSandboxE2BImpl struct {
 	// "skipped ≠ safe"). A file skipped by the scan admission gates
 	// (binary / >8 MiB) is NOT in this set, so it is never uploaded.
 	safeToUpload []string
+	// containerCodex switches real execution from E2B HTTP calls to a
+	// local Docker container that runs Codex inside the mounted
+	// workspace. It exists for environments where the "cloud sandbox"
+	// baseline is represented by container isolation.
+	containerCodex bool
+	// forwardOpenAI is an explicit opt-in for propagating OPENAI_API_KEY
+	// into the Codex container. It is independent from forwardE2B.
+	forwardOpenAI            bool
+	dockerBin                string
+	containerImage           string
+	containerCodexBin        string
+	containerCodexHome       string
+	containerCodexNodeModule string
+	containerCodexNetwork    string
 	// planOverride, when non-zero, replaces the `cloudPlans[workloadID]`
 	// lookup. Used by tests that want to exercise a synthetic workload
 	// without racing on the package-level `cloudPlans` map.
@@ -77,14 +102,24 @@ func NewImpl(workloadID string, forwardE2B bool, apiKey string, dryRun bool, std
 }
 
 // Name returns the default baseline_or_ablation value.
-func (*CloudSandboxE2BImpl) Name() string { return "cloud_sandbox_e2b" }
+func (c *CloudSandboxE2BImpl) Name() string {
+	if c != nil && c.containerCodex {
+		return "cloud_sandbox_container_codex"
+	}
+	return "cloud_sandbox_e2b"
+}
 
 // AgentForwards: E2B has no *agent subprocess* — the E2B client is
 // in-process, and the key is passed to it directly at construction
-// time (never through an env var of a child). So we always return nil
-// here regardless of the opt-in bit; the opt-in gates the CONSTRUCTOR
-// input, not any subprocess env.
-func (*CloudSandboxE2BImpl) AgentForwards() harness.AgentForwards { return nil }
+// time (never through an env var of a child). Container Codex does
+// spawn an agent subprocess, so OPENAI_API_KEY is propagated only when
+// the operator explicitly opts in via the container-specific flag.
+func (c *CloudSandboxE2BImpl) AgentForwards() harness.AgentForwards {
+	if c != nil && c.containerCodex && c.forwardOpenAI {
+		return harness.AgentForwards{"OPENAI_API_KEY"}
+	}
+	return nil
+}
 
 // Prepare: run the pre-upload secret scan (spec §7(b)) — the single
 // most dangerous failure mode of this worktree. Scan runs whether
@@ -130,6 +165,9 @@ func (c *CloudSandboxE2BImpl) Prepare(ctx context.Context, ws *harness.Workspace
 // planning are what matter for §E3, not the arithmetic-correctness of
 // the shell snippet inside a remote container.
 func (c *CloudSandboxE2BImpl) ExecuteAgent(ctx context.Context, ws *harness.Workspace, agentEnv []string, dryRun bool) (harness.ExecuteMetrics, error) {
+	if c.containerCodex && !dryRun {
+		return c.executeContainerCodex(ctx, ws, agentEnv)
+	}
 	var plan remoteExecPlan
 	if c.planOverride != nil {
 		plan = *c.planOverride
@@ -174,12 +212,161 @@ func (c *CloudSandboxE2BImpl) ExecuteAgent(ctx context.Context, ws *harness.Work
 	return metricsFrom(c.client, start), nil
 }
 
+var cloudBearerRE = regexp.MustCompile(`(?i)Bearer[\s:=]+[A-Za-z0-9._~+/\-]{8,}=*`)
+
+func scrubCloudStderr(s string) string {
+	s = cloudBearerRE.ReplaceAllString(s, "[REDACTED]")
+	return secretscrub.Sanitize(s)
+}
+
+func (c *CloudSandboxE2BImpl) executeContainerCodex(ctx context.Context, ws *harness.Workspace, agentEnv []string) (harness.ExecuteMetrics, error) {
+	prompt, ok := containerCodexPrompts[c.workloadID]
+	if !ok {
+		return harness.ExecuteMetrics{}, fmt.Errorf("cloud_sandbox: workload has no container codex prompt; add one to containerCodexPrompts: %s", c.workloadID)
+	}
+
+	dockerBin := firstNonEmpty(c.dockerBin, defaultContainerDockerBin)
+	image := firstNonEmpty(c.containerImage, defaultContainerCodexImage)
+	codexBin := firstNonEmpty(c.containerCodexBin, defaultContainerCodexBin)
+	network := firstNonEmpty(c.containerCodexNetwork, defaultContainerCodexNetwork)
+
+	codexHome, cleanup, err := prepareContainerCodexHome(c.containerCodexHome)
+	if err != nil {
+		return harness.ExecuteMetrics{}, err
+	}
+	defer cleanup()
+
+	args := []string{"run", "--rm"}
+	if network != "" {
+		args = append(args, "--network", network)
+	}
+	args = append(args,
+		"-e", "CODEX_HOME=/codex-home",
+		"-e", "HOME=/tmp",
+	)
+	if openAIKey, ok := envValue(agentEnv, "OPENAI_API_KEY"); ok && openAIKey != "" {
+		args = append(args, "-e", "OPENAI_API_KEY="+openAIKey)
+	}
+	args = appendProxyEnv(args)
+	args = append(args,
+		"-v", ws.Root+":/workspace",
+		"-v", codexHome+":/codex-home",
+	)
+	if nodeModule := firstNonEmpty(c.containerCodexNodeModule, defaultContainerCodexNodeModule); nodeModule != "" && dirExists(nodeModule) {
+		args = append(args, "-v", nodeModule+":"+defaultContainerCodexNodeModule+":ro")
+	}
+	args = append(args,
+		"-w", "/workspace",
+		image,
+		codexBin,
+		"exec",
+		"--json",
+		"--skip-git-repo-check",
+		"--dangerously-bypass-approvals-and-sandbox",
+		"-C", "/workspace",
+		"--",
+		prompt.Prompt,
+	)
+
+	start := time.Now()
+	cmd := exec.CommandContext(ctx, dockerBin, args...)
+	cmd.Dir = ws.Root
+	cmd.Env = os.Environ()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return harness.ExecuteMetrics{WallTimeMS: time.Since(start).Milliseconds()},
+			fmt.Errorf("cloud_sandbox: container codex failed for %s: %w; stdout=%s; stderr=%s",
+				c.workloadID, err, truncateForError(scrubCloudStderr(stdout.String())), truncateForError(scrubCloudStderr(stderr.String())))
+	}
+	for _, outName := range prompt.ExpectedOutputs {
+		if _, err := os.Stat(filepath.Join(ws.Root, outName)); err != nil {
+			return harness.ExecuteMetrics{WallTimeMS: time.Since(start).Milliseconds()},
+				fmt.Errorf("cloud_sandbox: container codex did not produce %q for %s: %w; stderr=%s",
+					outName, c.workloadID, err, truncateForError(scrubCloudStderr(stderr.String())))
+		}
+	}
+	return harness.ExecuteMetrics{WallTimeMS: time.Since(start).Milliseconds()}, nil
+}
+
 func metricsFrom(c E2BClient, start time.Time) harness.ExecuteMetrics {
 	return harness.ExecuteMetrics{
 		WallTimeMS:  time.Since(start).Milliseconds(),
 		APICalls:    c.APICallCount(),
 		UploadBytes: c.UploadBytes(),
 	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func envValue(env []string, key string) (string, bool) {
+	prefix := key + "="
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			return strings.TrimPrefix(kv, prefix), true
+		}
+	}
+	return "", false
+}
+
+func appendProxyEnv(args []string) []string {
+	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"} {
+		if v := os.Getenv(key); v != "" {
+			args = append(args, "-e", key+"="+v)
+		}
+	}
+	return args
+}
+
+func dirExists(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && st.IsDir()
+}
+
+func prepareContainerCodexHome(sourceHome string) (string, func(), error) {
+	srcHome := strings.TrimSpace(sourceHome)
+	if srcHome == "" {
+		if envHome := strings.TrimSpace(os.Getenv("CODEX_HOME")); envHome != "" {
+			srcHome = envHome
+		} else if userHome, err := os.UserHomeDir(); err == nil && userHome != "" {
+			srcHome = filepath.Join(userHome, ".codex")
+		}
+	}
+	if srcHome == "" {
+		return "", nil, errors.New("cloud_sandbox: container codex home not configured; set CODEX_HOME or --container-codex-home")
+	}
+	srcConfig := filepath.Join(srcHome, "config.toml")
+	configBytes, err := os.ReadFile(srcConfig)
+	if err != nil {
+		return "", nil, fmt.Errorf("cloud_sandbox: read container codex config %s: %w", srcConfig, err)
+	}
+	tmp, err := os.MkdirTemp("", "cloud-sandbox-codex-home-")
+	if err != nil {
+		return "", nil, fmt.Errorf("cloud_sandbox: create temporary container codex home: %w", err)
+	}
+	cleanup := func() { _ = os.RemoveAll(tmp) }
+	if err := os.WriteFile(filepath.Join(tmp, "config.toml"), configBytes, 0o600); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("cloud_sandbox: write temporary container codex config: %w", err)
+	}
+	return tmp, cleanup, nil
+}
+
+func truncateForError(s string) string {
+	const max = 4096
+	s = strings.TrimSpace(s)
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "...[truncated]"
 }
 
 // ErrE2BNon2xx signals that an E2B API call returned a non-2xx status.

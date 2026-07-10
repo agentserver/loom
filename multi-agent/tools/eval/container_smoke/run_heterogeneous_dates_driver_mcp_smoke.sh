@@ -10,6 +10,8 @@ CODEX_NODE_MODULE="${CODEX_NODE_MODULE:-/usr/lib/node_modules/@openai/codex}"
 DRIVER_TIMEOUT_SEC="${DRIVER_TIMEOUT_SEC:-1200}"
 TELEMETRY_KEY="${TELEMETRY_KEY:-ops-smoke-secret}"
 DRIVER_PROMPT_MODE="${DRIVER_PROMPT_MODE:-guided}"
+STRICT_PARTITION="${STRICT_PARTITION:-0}"
+DRIVER_PROMPT_FILE="${DRIVER_PROMPT_FILE:-}"
 
 case "$DRIVER_PROMPT_MODE" in
   guided)
@@ -33,6 +35,7 @@ CRED_DIR="${OUT_DIR}/creds"
 LOG_DIR="${OUT_DIR}/logs"
 PROMPT_DIR="${OUT_DIR}/prompts"
 INPUT_DIR="${OUT_DIR}/driver/workspace/input"
+DATA_SLAVE_INPUT_DIR="${OUT_DIR}/smoke-data-slave/workspace/input"
 DRIVER_WORKSPACE="${OUT_DIR}/driver/workspace"
 FINAL_WORKSPACE="${OUT_DIR}/final_workspace"
 OBSERVER_DB="${OUT_DIR}/observer/observer.db"
@@ -76,6 +79,7 @@ mkdir -p \
   "${OUT_DIR}/driver/audit" \
   "${OUT_DIR}/driver/runtime" \
   "${OUT_DIR}/smoke-data-slave/workspace" \
+  "${DATA_SLAVE_INPUT_DIR}" \
   "${OUT_DIR}/smoke-data-slave/codex-home" \
   "${OUT_DIR}/smoke-data-slave/runtime" \
   "${OUT_DIR}/smoke-compute-slave/workspace" \
@@ -218,8 +222,13 @@ go build -o "${BIN_DIR}/slave-agent" ./cmd/slave-agent \
   >"${LOG_DIR}/go-build-slave-agent.stdout.log" \
   2>"${LOG_DIR}/go-build-slave-agent.stderr.log"
 
-cp "${WORKLOAD_DIR}/fixtures/task-deps/daily_temp_sf_high.csv" "${INPUT_DIR}/daily_temp_sf_high.csv"
-cp "${WORKLOAD_DIR}/fixtures/task-deps/daily_temp_sf_low.csv" "${INPUT_DIR}/daily_temp_sf_low.csv"
+if [[ "$STRICT_PARTITION" == "1" ]]; then
+  cp "${WORKLOAD_DIR}/fixtures/task-deps/daily_temp_sf_high.csv" "${DATA_SLAVE_INPUT_DIR}/daily_temp_sf_high.csv"
+  cp "${WORKLOAD_DIR}/fixtures/task-deps/daily_temp_sf_low.csv" "${DATA_SLAVE_INPUT_DIR}/daily_temp_sf_low.csv"
+else
+  cp "${WORKLOAD_DIR}/fixtures/task-deps/daily_temp_sf_high.csv" "${INPUT_DIR}/daily_temp_sf_high.csv"
+  cp "${WORKLOAD_DIR}/fixtures/task-deps/daily_temp_sf_low.csv" "${INPUT_DIR}/daily_temp_sf_low.csv"
+fi
 cat >"${INPUT_DIR}/task.md" <<'TASK'
 Public benchmark task: Terminal-Bench heterogeneous-dates adaptation.
 
@@ -227,6 +236,46 @@ Use daily_temp_sf_high.csv and daily_temp_sf_low.csv to calculate the average
 daily high-minus-low temperature difference. The final answer must be written
 to avg_temp.txt as only a numeric value.
 TASK
+cp "${INPUT_DIR}/task.md" "${DRIVER_WORKSPACE}/task.md"
+
+if [[ "$STRICT_PARTITION" == "1" ]]; then
+cat >"${DRIVER_WORKSPACE}/environment.md" <<'ENV'
+# Environment
+
+This workspace is `FullPCS_strict_partition`.
+
+The raw CSV files are forbidden in this driver workspace. They are preloaded only on `smoke-data-slave`:
+
+- `/e2e/smoke-data-slave/workspace/input/daily_temp_sf_high.csv`
+- `/e2e/smoke-data-slave/workspace/input/daily_temp_sf_low.csv`
+
+Use the driver MCP tools to discover and coordinate agents:
+
+- First call `list_agents`.
+- Use `run_slave_bash` on `smoke-data-slave` to normalize dates and create `aligned_temperatures.csv`.
+- Use `read_slave_file` to retrieve the derived aligned CSV.
+- Use `write_slave_file` to send only the derived aligned CSV to `smoke-compute-slave`.
+- Use `run_slave_bash` on `smoke-compute-slave` to compute `avg_temp.txt`.
+- Use `read_slave_file` to retrieve `avg_temp.txt`.
+
+After retrieving the compute result, write the exact numeric content to `/e2e/driver/workspace/avg_temp.txt`.
+ENV
+else
+cat >"${DRIVER_WORKSPACE}/environment.md" <<'ENV'
+# Environment
+
+This workspace is the FullPCS non-strict driver workspace.
+
+Use the driver MCP tools to coordinate `smoke-data-slave` and `smoke-compute-slave`. Inputs are under `/e2e/driver/workspace/input`. The final artifact must be `/e2e/driver/workspace/avg_temp.txt`.
+ENV
+fi
+
+if [[ "$STRICT_PARTITION" == "1" ]]; then
+  if find "$DRIVER_WORKSPACE" -name 'daily_temp_sf_*.csv' -print -quit | grep -q .; then
+    echo "STRICT_PARTITION violation: raw CSVs are not allowed in the driver workspace" >&2
+    exit 2
+  fi
+fi
 
 STUB_PORT="$(find_free_port)"
 OBSERVER_PORT="$(find_free_port)"
@@ -415,6 +464,39 @@ TOML
 
 case "$DRIVER_PROMPT_MODE" in
 guided)
+if [[ "$STRICT_PARTITION" == "1" ]]; then
+cat >"${PROMPT_DIR}/driver_prompt.md" <<'PROMPT'
+You are the driver Codex for a strict-partition multi-agent benchmark smoke.
+
+Task:
+- Solve the public Terminal-Bench heterogeneous-dates adaptation.
+- The driver workspace contains only /e2e/driver/workspace/input/task.md.
+- The raw CSVs are not in the driver workspace. They are preloaded only on smoke-data-slave at:
+  - /e2e/smoke-data-slave/workspace/input/daily_temp_sf_high.csv
+  - /e2e/smoke-data-slave/workspace/input/daily_temp_sf_low.csv
+- avg_temp.txt must contain only a numeric value and no explanatory text.
+
+Required architecture:
+- Use the driver MCP tools. Do not compute the benchmark locally in the driver.
+- This configuration is FullPCS_strict_partition: driver chooses routes through the workspace, while raw data and compute state remain separated.
+- First call list_agents and verify smoke-data-slave and smoke-compute-slave are available.
+- Use run_slave_bash on smoke-data-slave to read its local input CSV files, normalize the two date formats, align records by date, and write:
+  - aligned_temperatures.csv with columns date,high_temperature,low_temperature,difference
+  - data_profile.md with a concise description of row counts, date formats, and alignment.
+- Use read_slave_file to retrieve the aligned CSV and profile from smoke-data-slave.
+- Use write_slave_file to send only the aligned CSV to smoke-compute-slave.
+- Use run_slave_bash on smoke-compute-slave to calculate the arithmetic mean of the difference column and write:
+  - avg_temp.txt containing only the numeric value
+  - solution_report.md explaining the calculation briefly.
+- Use read_slave_file to retrieve avg_temp.txt from smoke-compute-slave.
+- After reading the compute result, you may write that exact numeric content to /e2e/driver/workspace/avg_temp.txt so the harness can run the public oracle. Do not modify the number locally.
+
+Operational constraints:
+- Do not hard-code an expected final answer.
+- Do not copy raw CSVs into the driver workspace.
+- Keep the final response short and include which MCP tools you used and where avg_temp.txt was written.
+PROMPT
+else
 cat >"${PROMPT_DIR}/driver_prompt.md" <<'PROMPT'
 You are the driver Codex for a multi-agent benchmark smoke.
 
@@ -446,6 +528,7 @@ Operational constraints:
 - This smoke uses only driver MCP plus the two named slave-agent containers.
 - Keep the final response short and include which MCP tools you used and where avg_temp.txt was written.
 PROMPT
+fi
   ;;
 autonomous)
 cat >"${PROMPT_DIR}/driver_prompt.md" <<'PROMPT'
@@ -471,8 +554,37 @@ Autonomy rules:
 Final response:
 - Briefly state the route you selected, the agents and slave skills you used, and the final output path.
 PROMPT
+if [[ "$STRICT_PARTITION" == "1" ]]; then
+cat >"${PROMPT_DIR}/driver_prompt.md" <<'PROMPT'
+You are the driver Codex for a fully autonomous strict-partition multi-agent benchmark run.
+
+Single task:
+- Solve the public Terminal-Bench heterogeneous-dates adaptation.
+- The driver workspace contains only /e2e/driver/workspace/input/task.md.
+- The raw CSVs are not in the driver workspace. They are preloaded only on smoke-data-slave under /e2e/smoke-data-slave/workspace/input/.
+- The compute context is smoke-compute-slave; it should receive only derived intermediate data, not raw CSVs.
+- The final artifact must be /e2e/driver/workspace/avg_temp.txt.
+- avg_temp.txt must contain only the numeric answer and no explanatory text.
+
+Autonomy rules:
+- Use the available driver MCP surface to inspect the workspace and coordinate available agents.
+- Decide which available agents, tools, and slave skills to use. No caller has preselected the route for you.
+- Do not compute the benchmark entirely inside the driver. The driver should coordinate and verify work performed through workspace agents.
+- Do not ask the user, request approval, or pause for human input. If you cannot finish autonomously, fail with a short reason.
+- Do not hard-code an expected final answer. Derive the result from slave-visible CSV inputs and artifacts you create.
+- Do not copy raw CSVs into the driver workspace.
+- You may create intermediate files/artifacts wherever the selected agent interfaces allow, but keep the final numeric file at the path above.
+
+Final response:
+- Briefly state the route you selected, the agents and slave skills you used, and the final output path.
+PROMPT
+fi
   ;;
 esac
+
+if [[ -n "$DRIVER_PROMPT_FILE" ]]; then
+  cp "$DRIVER_PROMPT_FILE" "${PROMPT_DIR}/driver_prompt.md"
+fi
 
 start_slave() {
   local name="$1"
@@ -536,7 +648,7 @@ set +e
 oracle_exit="$?"
 set -e
 
-python3 - "$OUT_DIR" "$OUT_ROOT" "$RUN_ID" "$IMAGE_TAG" "$WORKSPACE_ID" "$SERVER_URL" "$OBSERVER_URL" "$driver_exit" "$driver_start_ns" "$driver_end_ns" "$oracle_exit" "$DRIVER_PROMPT_MODE" "$REPORT_FILENAME" <<'PY'
+python3 - "$OUT_DIR" "$OUT_ROOT" "$RUN_ID" "$IMAGE_TAG" "$WORKSPACE_ID" "$SERVER_URL" "$OBSERVER_URL" "$driver_exit" "$driver_start_ns" "$driver_end_ns" "$oracle_exit" "$DRIVER_PROMPT_MODE" "$REPORT_FILENAME" "$STRICT_PARTITION" <<'PY'
 import hashlib
 import json
 import os
@@ -559,13 +671,15 @@ from pathlib import Path
     oracle_exit_s,
     prompt_mode,
     report_filename,
-) = sys.argv[1:14]
+    strict_partition_s,
+) = sys.argv[1:15]
 out_dir = Path(out_dir_s)
 out_root = Path(out_root_s)
 driver_exit = int(driver_exit_s)
 driver_start_ns = int(driver_start_ns_s)
 driver_end_ns = int(driver_end_ns_s)
 oracle_exit = int(oracle_exit_s)
+strict_partition = strict_partition_s == "1"
 
 def load_json(path: Path, default):
     if not path.exists():
@@ -695,7 +809,7 @@ driver_mcp_summary = {
     "target_counts": target_counts,
     "codex_log_tool_mentions": driver_usage["tool_mentions"],
     "required_tools_present": {
-        "write_slave_file": tool_counts.get("write_slave_file", 0) >= 3,
+        "write_slave_file": tool_counts.get("write_slave_file", 0) >= (1 if strict_partition else 3),
         "run_slave_bash": tool_counts.get("run_slave_bash", 0) >= 2,
         "read_slave_file": tool_counts.get("read_slave_file", 0) >= 2,
     },
@@ -752,6 +866,8 @@ container_isolation = {
     "image": image_tag,
     "network": "host",
     "workspace_id": workspace_id,
+    "configuration": "FullPCS_strict_partition" if strict_partition else "FullPCS_non_strict_partition",
+    "strict_partition": strict_partition,
     "agentserver_url": server_url,
     "observer_url": observer_url,
     "driver": {
@@ -791,6 +907,8 @@ manifest_candidates = [
     out_dir / "driver" / "workspace" / "input" / "task.md",
     out_dir / "driver" / "workspace" / "input" / "daily_temp_sf_high.csv",
     out_dir / "driver" / "workspace" / "input" / "daily_temp_sf_low.csv",
+    out_dir / "smoke-data-slave" / "workspace" / "input" / "daily_temp_sf_high.csv",
+    out_dir / "smoke-data-slave" / "workspace" / "input" / "daily_temp_sf_low.csv",
     out_dir / "driver" / "workspace" / "avg_temp.txt",
     out_dir / "final_workspace" / "avg_temp.txt",
     out_dir / "driver" / "last_message.md",
@@ -894,6 +1012,9 @@ report = f"""# {report_title}
 
 {experiment_note}
 
+- 配置：`{"FullPCS_strict_partition" if strict_partition else "FullPCS_non_strict_partition"}`
+- strict_partition：`{json.dumps(strict_partition, ensure_ascii=False)}`
+
 ## 执行流程
 
 1. 外层 harness 构建 `agentserver-stub`、`observer-server`、`driver-agent`、`slave-agent` 四个本地二进制。
@@ -981,6 +1102,8 @@ out_root.mkdir(parents=True, exist_ok=True)
 result_status = {
     "passed": passed,
     "prompt_mode": prompt_mode,
+    "strict_partition": strict_partition,
+    "configuration": "FullPCS_strict_partition" if strict_partition else "FullPCS_non_strict_partition",
     "driver_exit": driver_exit,
     "oracle_exit": oracle_exit,
     "tool_gate": tool_gate,

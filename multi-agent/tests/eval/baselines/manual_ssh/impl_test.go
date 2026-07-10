@@ -77,6 +77,24 @@ func TestManualSSH_HappyPath_CrossDeviceCodeMod(t *testing.T) {
 	}
 }
 
+func TestManualSSH_HappyPath_PublicTerminalHeterogeneousDates(t *testing.T) {
+	_, self, _, _ := runtime.Caller(0)
+	moduleRoot := filepath.Join(filepath.Dir(self), "..", "..", "..", "..")
+	out := filepath.Join(t.TempDir(), "row.csv")
+	res := harness.Run(context.Background(), harness.Opts{
+		WorkloadID:  "public-terminal-heterogeneous-dates",
+		WorkloadDir: filepath.Join(moduleRoot, "tests/eval/workloads"),
+		OutCSV:      out,
+		DryRun:      false,
+	}, NewImpl("public-terminal-heterogeneous-dates"), io.Discard)
+	if res.ExitCode != 0 {
+		t.Fatalf("real-mode public task run: want exit 0, got %d; err=%v details=%s", res.ExitCode, res.Err, res.Row.OracleDetailsJSON)
+	}
+	if !res.Row.Passed {
+		t.Errorf("oracle should pass on manual_ssh public task output; details=%s", res.Row.OracleDetailsJSON)
+	}
+}
+
 // TestManualSSH_DryRun_DegradesToMockWorkspace — plan #25. In dry-run,
 // no bash script runs; harness mock_workspace projection is what the
 // oracle grades.

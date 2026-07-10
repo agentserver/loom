@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # cloud_sandbox baseline entrypoint. See ../manual_ssh/run.sh for the
 # shared shape. Two extra guards:
-#  1. spec §7(h) — if CI=true and --dry-run is not present in args,
-#     refuse the run here (the Go binary also enforces, but bailing at
-#     the shell level makes the intent visible in the smoke recipe).
+#  1. spec §7(h) — if CI=true and neither --dry-run nor
+#     --container-codex is present in args, refuse the run here (the Go
+#     binary also enforces, but bailing at the shell level makes the
+#     intent visible in the smoke recipe).
 #  2. --forward-e2b-api-key requires the operator to have set the env
 #     var named by --e2b-api-key-env; the Go layer handles the empty
 #     case cleanly (Bearer header omitted) but a real run will fail
@@ -21,13 +22,15 @@ fi
 
 # §7(h) shell-level guard
 have_dry_run=0
+have_container_codex=0
 for arg in "$@"; do
   case "$arg" in
     --dry-run|--dry-run=*) have_dry_run=1 ;;
+    --container-codex|--container-codex=*) have_container_codex=1 ;;
   esac
 done
-if [[ "${CI:-}" == "true" && "$have_dry_run" -eq 0 ]]; then
-  echo "cloud_sandbox/run.sh: CI=true detected and --dry-run not passed; refusing (spec §7(h))" >&2
+if [[ "${CI:-}" == "true" && "$have_dry_run" -eq 0 && "$have_container_codex" -eq 0 ]]; then
+  echo "cloud_sandbox/run.sh: CI=true detected and neither --dry-run nor --container-codex was passed; refusing (spec §7(h))" >&2
   exit 2
 fi
 

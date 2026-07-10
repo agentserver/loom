@@ -191,6 +191,59 @@ exit 0
 	}
 }
 
+func TestSingleMachineCodex_PublicTerminalHeterogeneousDatesPrompt(t *testing.T) {
+	prompt, ok := codexPrompts["public-terminal-heterogeneous-dates"]
+	if !ok {
+		t.Fatalf("codexPrompts missing public-terminal-heterogeneous-dates")
+	}
+	if !strings.Contains(prompt.Prompt, "daily_temp_sf_high.csv") {
+		t.Errorf("prompt should name high-temperature CSV; prompt=%q", prompt.Prompt)
+	}
+	if !strings.Contains(prompt.Prompt, "daily_temp_sf_low.csv") {
+		t.Errorf("prompt should name low-temperature CSV; prompt=%q", prompt.Prompt)
+	}
+	if !reflect.DeepEqual(prompt.ExpectedOutputs, []string{"avg_temp.txt"}) {
+		t.Errorf("ExpectedOutputs = %v, want [avg_temp.txt]", prompt.ExpectedOutputs)
+	}
+}
+
+func TestSingleMachineCodex_PublicTerminalHeterogeneousDatesFakeCodex(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "codex")
+	script := `#!/bin/sh
+printf '11.428571428571429\n' > "$PWD/avg_temp.txt"
+exit 0
+`
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pathDir := t.TempDir()
+	for _, tool := range []string{"sh", "cat", "printf", "bash", "grep", "awk", "sed", "head", "tr", "python3"} {
+		src, err := exec.LookPath(tool)
+		if err != nil {
+			continue
+		}
+		_ = os.Symlink(src, filepath.Join(pathDir, tool))
+	}
+	if err := os.Symlink(fake, filepath.Join(pathDir, "codex")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", pathDir)
+	out := filepath.Join(t.TempDir(), "row.csv")
+	res := harness.Run(context.Background(), harness.Opts{
+		WorkloadID:  "public-terminal-heterogeneous-dates",
+		WorkloadDir: filepath.Join(moduleRoot(t), "tests/eval/workloads"),
+		OutCSV:      out,
+		DryRun:      false,
+	}, NewImpl("public-terminal-heterogeneous-dates", false), io.Discard)
+	if res.ExitCode != 0 {
+		t.Fatalf("fake codex public task run: want exit 0, got %d; err=%v details=%s", res.ExitCode, res.Err, res.Row.OracleDetailsJSON)
+	}
+	if !res.Row.Passed {
+		t.Errorf("oracle should pass on fake codex public task output; details=%s", res.Row.OracleDetailsJSON)
+	}
+}
+
 // TestSingleMachineCodex_ScrubsStderr_NonzeroExit — spec P1#6 round-2.
 // Fake `codex` emits `sk-abc123DEFabcDEFabcDEF` to stderr and exits 42.
 // The returned error string MUST have the token replaced by [REDACTED]

@@ -74,4 +74,38 @@ JSON
 echo "manual_ssh baseline completion" > completion.txt
 echo "manual_ssh run log" > run.log
 `,
+	"public-terminal-heterogeneous-dates": `set -eu
+python3 <<'PY'
+import csv
+from datetime import datetime
+from pathlib import Path
+
+root = Path(".")
+high = {}
+with (root / "task-deps" / "daily_temp_sf_high.csv").open(newline="", encoding="utf-8") as handle:
+    for row in csv.DictReader(handle):
+        high[row["date"]] = float(row["temperature"])
+
+low = {}
+with (root / "task-deps" / "daily_temp_sf_low.csv").open(newline="", encoding="utf-8") as handle:
+    for row in csv.DictReader(handle):
+        raw = row["date"].split()[0]
+        parsed = None
+        for fmt in ("%m/%d/%Y", "%m-%d-%Y"):
+            try:
+                parsed = datetime.strptime(raw, fmt).strftime("%Y-%m-%d")
+                break
+            except ValueError:
+                pass
+        if parsed is None:
+            raise SystemExit(f"unsupported date format: {row['date']}")
+        low[parsed] = float(row["temperature"])
+
+dates = sorted(set(high) & set(low))
+if not dates:
+    raise SystemExit("no overlapping dates")
+avg = sum(high[day] - low[day] for day in dates) / len(dates)
+(root / "avg_temp.txt").write_text(f"{avg:.15f}\n", encoding="utf-8")
+PY
+`,
 }
