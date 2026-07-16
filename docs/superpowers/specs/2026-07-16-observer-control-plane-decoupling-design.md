@@ -6,7 +6,9 @@
 
 ## 1. 结论
 
-Observer 成为本项目唯一的 workspace control plane：它负责用户认证后的授权、workspace 与成员管理、agent 注册与可见性、以及可靠的任务派发。
+Observer 成为本项目唯一的 workspace control plane：它负责用户认证后的授权、workspace 与成员管理、agent 注册与可见性、面向用户的 Driver 聊天网页 / 网关，以及可靠的任务派发。
+
+聊天网页不使 Observer 变成对话引擎。真实的 `Conversation`、`Message`、LLM backend session 与会话管理由被选中的 Driver 本地持久化并提供；Observer 只保存可授权、可路由的会话绑定与审计元数据，通过 Driver 已认证的 worker session 转发请求和流式响应。
 
 AgentServer 不再是身份、workspace、agent 或 task 的权威。迁移期间它可以作为一个可替换的 transport adapter，为旧 agent 提供兼容；完成迁移后项目不依赖它。
 
@@ -21,11 +23,13 @@ AgentServer 不再是身份、workspace、agent 或 task 的权威。迁移期�
 - 用户浏览器、Driver 和 Slave 均不需要向 AgentServer 请求身份或 workspace 权限。
 - 已就绪的 DAG 节点由 Observer 持久化派发，并具备 assignment、attempt、ack、heartbeat、取消、重试和失联回收语义。
 - agent 的在线状态、能力快照和 workspace 可见性由 Observer 的 agent registry 权威维护。
+- 用户可在 Observer 网页中选择可见的 Driver，新建、列出、重命名、归档、删除和继续与该 Driver 的对话；这些动作由 Observer 鉴权 / 路由、由 Driver 实际执行和保存。
 - 个人能力空间、provisioning 与节点执行使用同一 workspace / user 授权模型；权限由已验证 token 身份与 Observer ACL / policy 判定，不另发能力 bearer grant。
 
 ### 2.2 非目标
 
 - 不把自然语言规划或 DAG 语义交给 Observer 的任务总线。
+- 不把 Observer 设计成第二个 Conversation / Message / LLM context store；除明确的绑定、标题 / 状态索引和审计元数据外，它不默认持久化完整聊天正文，也不在 Driver 离线时伪造回复。
 - 不在第一阶段实现自研密码、社交登录或完整 OIDC provider；Observer 可以消费外部 OIDC 身份断言，但 application user、workspace 和授权仍由 Observer 管理。
 - 不要求旧 AgentServer agent 一次性下线；兼容 adapter 可以暂时存在。
 - 不复用当前 observer 的 event 聚合表作为队列实现。
@@ -38,6 +42,7 @@ AgentServer 不再是身份、workspace、agent 或 task 的权威。迁移期�
    ▼
 Observer Control Plane
    ├─ Identity & Workspace: user、membership、user token、device-code、agent token
+   ├─ Chat Web & Gateway: Driver 选择、会话绑定、授权、路由与流式中继
    ├─ Agent Registry: 可见性、心跳、能力快照、draining / revoke
    ├─ Task Bus: assignment、attempt、结果、取消、回收
    ├─ Event / Artifact / Capability Registry
@@ -52,13 +57,41 @@ Driver Runtime ────────────────── Slave / Wo
 AgentServer（迁移期）：仅实现 ControlPlane / WorkerGateway adapter；不保存权威业务状态。
 ```
 
-### 3.1 Driver Runtime
+浏览器只向 Observer 发送 user token；它绝不接触 Driver 的 agent token。Observer 先以
+`(user_id, workspace_id, driver_agent_id)` 校验 membership、agent role、可见性和在线状态，
+随后复用该 Driver 已建立的、以 agent token 认证的 worker session 转发会话 RPC / 流。这里没有
+第三类浏览器 token，也没有把 user token 交换成 agent token。
+
+### 3.1 Driver Conversation Service
+
+Driver 是实际对话的权威：它在本地 durable store 保存 `Conversation(conversation_id)`、
+`Message(message_id, sequence)` 和可选 `LLMBackendSession(backend_session_id)`，并把相应内容送入
+自己的 LLM backend。一个会话可以创建多个 run，但聊天记录本身不是 DAG 或 Task Bus 状态机。
+
+Driver 必须在其已认证的 worker session 上提供内部会话协议：
+`CreateConversation`、`ListConversations`、`GetConversation`、`RenameConversation`、
+`ArchiveConversation`、`DeleteConversation`、`SendMessage` 与 `StreamConversation`。浏览器不能直接调用
+这些 API；Observer 只在完成用户 / workspace / Driver 可见性检查后中继它们。Driver 返回的稳定
+`conversation_id` 同时用作 Observer 会话绑定的键。
+
+### 3.2 Driver Runtime
 
 Driver Runtime 仍是 DAG 的确定性执行面：验证 plan patch、维护依赖关系、检查 policy / concurrency budget、把 node 从 `PENDING` 变为 `READY`，并请求派发。
 
 它**不**再直接调用 AgentServer SDK。它只依赖项目内定义的窄接口，例如 `ControlPlane` 和 `WorkerGateway`。
 
-### 3.2 Observer Task Bus
+### 3.3 Observer Chat Web 与 Gateway
+
+Observer 的 Chat Web 是用户的唯一浏览器入口。它提供 workspace / Driver 选择、会话列表入口、
+新建和管理动作、消息输入及流式显示；这些都是受 user token 与 membership 保护的管理 / 协作界面。
+
+Observer 只保存 `ConversationBinding` / index：`conversation_id`、`user_id`、`workspace_id`、
+`driver_agent_id`、显示标题、状态、时间戳、关联的 `ContractSubmission` / audit reference。它不保存
+Driver 的完整 `Message` 正文、LLM private context 或 backend session。聊天字节在已鉴权的请求中暂态
+中继；若 Driver 不在 `ready` 状态或 session 中断，网页显示不可用 / 可重连状态，不能改由 Observer
+产生 LLM 回答。
+
+### 3.4 Observer Task Bus
 
 Observer 接收一个已经 `READY` 的 node 后，负责：
 
@@ -155,6 +188,8 @@ Driver、orchestrator、slave 等包应依赖本项目定义的类型，而不�
 
 初始接口应覆盖以下语义，而非复制旧 SDK 的 HTTP 形状：
 
+- **Observer Chat Web / Gateway：**`ListVisibleDrivers`、`BindConversation`、`RouteConversationCommand` 与 `RelayConversationStream`。它们只接受 user token，检查 membership / Driver visibility，并将请求转交给已经认证的 Driver worker session；不把 user token 下发给 Driver。
+- **Driver Conversation Service（仅经已认证 worker session）：**`CreateConversation`、`ListConversations`、`GetConversation`、`RenameConversation`、`ArchiveConversation`、`DeleteConversation`、`SendMessage`、`StreamConversation`。Driver 对会话与消息的持久化和 LLM backend session 负责，Observer 对绑定、授权、路由和审计负责。
 - `QueryAgents` / `QueryCapabilities`；
 - `SubmitReadyNode`、`CancelDispatch`、`GetDispatch`；
 - `OpenWorkerSession`、`ReceiveDispatch`、`AckDispatch`、`Heartbeat`；
@@ -166,11 +201,12 @@ Driver、orchestrator、slave 等包应依赖本项目定义的类型，而不�
 ## 8. 迁移顺序
 
 1. **抽象边界。** 在项目内引入 `ControlPlane` / `WorkerGateway` 类型和 fake，实现替换所有直接 `agentsdk` 依赖。
-2. **建立 Observer authority。** 增加账号密码网页登录、user token、workspace membership、Observer device-code、agent token rotation、registry 和管理 API；保持旧 telemetry 读取兼容。
-3. **建立 Task Bus。** 实现 dispatch、assignment、attempt、worker session 和故障回收；以 fake worker 覆盖协议。内部 execution claim 不成为对外 token。
-4. **接入新 Driver / Slave。** 将现有 device-code 客户端改指向 Observer；Driver 用 agent token 提交 ready node；Slave 用 agent token 直接连接 Observer 并提交结果。
-5. **兼容旧节点。** 仅通过 AgentServerAdapter 承载无法立即升级的 worker，明确标记 legacy transport。
-6. **切换并删除依赖。** 所有 workspace、agent 和 task 的权威读写均来自 Observer 后，删除 AgentServer identity resolver、external identity 映射和直接 SDK 依赖。
+2. **建立 Observer authority 与 Chat Web。** 增加账号密码网页登录、user token、workspace membership、Observer device-code、agent token rotation、registry、Driver 可见性和聊天网页 / gateway；保持旧 telemetry 读取兼容。
+3. **接入 Driver Conversation Service。** 在 Driver local durable store 实现会话、消息和 LLM backend session；经既有 authenticated worker session 暴露会话管理 / 流式协议。Observer 只保存 ConversationBinding / index，浏览器不接触 agent token。
+4. **建立 Task Bus。** 实现 dispatch、assignment、attempt、worker session 和故障回收；以 fake worker 覆盖协议。内部 execution claim 不成为对外 token。
+5. **接入新 Driver / Slave。** 将现有 device-code 客户端改指向 Observer；Driver 用 agent token 提交 ready node；Slave 用 agent token 直接连接 Observer 并提交结果。
+6. **兼容旧节点。** 仅通过 AgentServerAdapter 承载无法立即升级的 worker，明确标记 legacy transport。
+7. **切换并删除依赖。** 所有 workspace、agent 和 task 的权威读写均来自 Observer 后，删除 AgentServer identity resolver、external identity 映射和直接 SDK 依赖。
 
 每个阶段都必须避免“双写、双授权、双调度”。若 adapter 和 Observer 同时可派发，Observer 的 dispatch id / execution epoch 仍必须是唯一权威；adapter 只能运输命令。
 
@@ -184,6 +220,8 @@ Driver、orchestrator、slave 等包应依赖本项目定义的类型，而不�
 
 - 用户可在 Observer 中管理多个 workspace、成员和 agent，而无需 AgentServer 账户或 workspace API。
 - 用户只在网页端以账号密码取得 user token；机器通过 Observer device-code 取得 agent token，机器上不保存 user token。
+- 用户能在 Observer 网页选择其可见且在线的 Driver，新建、列出、重命名、归档、删除与继续对话；真实 Conversation / Message / LLM session 只由该 Driver 保存，Observer 只保存 binding / index / audit metadata。
+- 浏览器不会持有 agent token；聊天请求只能经 Observer 的 user-token 鉴权和已认证的 Driver worker session 到达 Driver。Driver 离线时网页报告不可用，不由 Observer 伪造对话结果。
 - 一个 agent 只凭 Observer agent token 即可宣告能力、接收同 workspace 任务和提交结果；普通任务不产生 node token。
 - Driver 不再导入 AgentServer SDK 类型；切换 adapter 不改变 DAG / contract 行为。
 - agent 失联、重复消息、stale execution epoch、取消和 retry 不产生重复业务执行或越过 parent contract 预算。
