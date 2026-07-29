@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>平台发布治理：active-default 生命周期</title>
+  <style>
+    :root {
+      --ink: #152337;
+      --muted: #60728a;
+      --paper: #f4f7fb;
+      --card: #fff;
+      --line: #d7e1ec;
+      --platform: #6840c4;
+      --platform-bg: #f0ebff;
+      --observer: #7c3d9a;
+      --observer-bg: #f6e9ff;
+      --pipeline: #006e70;
+      --pipeline-bg: #e1f7f4;
+      --audit: #4d596b;
+      --audit-bg: #edf1f6;
+      --good: #117042;
+      --good-bg: #e8f8ee;
+      --warn: #9a3d00;
+      --warn-bg: #fff0e7;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      --shadow: 0 16px 44px rgba(30, 51, 82, .09);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 7% -4%, #e3d9ff 0, transparent 29rem),
+        radial-gradient(circle at 93% 1%, #d9f3f0 0, transparent 30rem),
+        var(--paper);
+      font: 15px/1.65 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    main { width: min(1240px, calc(100% - 32px)); margin: 0 auto 76px; }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { font-size: clamp(34px, 5vw, 62px); line-height: 1.05; letter-spacing: -.048em; margin-bottom: 15px; }
+    h2 { font-size: clamp(24px, 3vw, 32px); line-height: 1.2; letter-spacing: -.025em; margin-bottom: 13px; }
+    h3 { font-size: 17px; line-height: 1.35; margin-bottom: 7px; }
+    p { margin-bottom: 12px; }
+    a { color: #5637aa; }
+    code { font: .91em/1.45 var(--mono); padding: 1px 4px; border-radius: 5px; background: #edf1f7; }
+    .hero { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(280px, .7fr); gap: 30px; align-items: end; padding: 66px 0 31px; }
+    .eyebrow { margin: 0 0 12px; color: var(--platform); font-size: 12px; font-weight: 850; letter-spacing: .125em; }
+    .lede { max-width: 61rem; color: var(--muted); font-size: 17px; }
+    .stamp { padding: 20px; border: 1px solid var(--line); border-radius: 18px; background: rgba(255,255,255,.8); box-shadow: var(--shadow); }
+    .stamp strong { display: block; font-size: 16px; margin-bottom: 7px; }
+    .stamp p { color: var(--muted); font-size: 13px; margin-bottom: 10px; }
+    .chip { display: inline-flex; padding: 4px 9px; margin: 0 5px 5px 0; border-radius: 99px; font-size: 11px; line-height: 1.3; font-weight: 850; letter-spacing: .02em; }
+    .platform { color: var(--platform); background: var(--platform-bg); }
+    .observer { color: var(--observer); background: var(--observer-bg); }
+    .pipeline { color: var(--pipeline); background: var(--pipeline-bg); }
+    .audit { color: var(--audit); background: var(--audit-bg); }
+    .good { color: var(--good); background: var(--good-bg); }
+    .warn { color: var(--warn); background: var(--warn-bg); }
+    .nav { position: sticky; z-index: 10; top: 0; display: flex; gap: 6px; overflow-x: auto; padding: 10px 0; border-bottom: 1px solid rgba(215,225,236,.92); background: color-mix(in srgb, var(--paper) 92%, transparent); backdrop-filter: blur(15px); }
+    .nav a { flex: 0 0 auto; padding: 6px 10px; border-radius: 99px; color: var(--ink); text-decoration: none; font-size: 13px; font-weight: 800; }
+    .nav a:hover { background: #e6edf6; }
+    section { margin-top: 38px; scroll-margin-top: 60px; }
+    .panel { padding: 25px; border: 1px solid var(--line); border-radius: 20px; background: var(--card); box-shadow: var(--shadow); }
+    .muted { color: var(--muted); }
+    .caption { margin-bottom: 0; color: var(--muted); font-size: 13px; }
+    .principle { padding: 20px 22px; border: 1px solid #cfc3fa; border-radius: 17px; background: linear-gradient(135deg, #f1edff, #fbfaff); color: #402c86; }
+    .principle strong { font-size: 19px; }
+    .principle p { margin: 8px 0 0; font-size: 16px; }
+    .flow { display: grid; grid-template-columns: repeat(5, minmax(166px, 1fr)); gap: 10px; overflow-x: auto; padding: 3px 3px 13px; }
+    .flow-card { position: relative; min-height: 158px; padding: 16px; border: 1px solid var(--line); border-radius: 15px; background: linear-gradient(158deg, #fff, #fafcff); }
+    .flow-card:not(:last-child)::after { content: "→"; position: absolute; z-index: 2; right: -16px; top: calc(50% - 16px); color: #8b9ab0; font-size: 28px; }
+    .flow-card small { display: block; color: var(--muted); font-weight: 800; }
+    .flow-card strong { display: block; margin: 5px 0; line-height: 1.22; }
+    .flow-card p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.48; }
+    .lanes { display: grid; grid-template-columns: repeat(4, minmax(205px, 1fr)); gap: 10px; overflow-x: auto; }
+    .lane { min-height: 256px; padding: 16px; border: 1px solid var(--line); border-radius: 15px; background: #fbfdff; }
+    .lane p, .lane li { color: var(--muted); font-size: 13px; }
+    .lane ul { margin: 8px 0 0; padding-left: 18px; }
+    .lane li { margin: 5px 0; }
+    .lane .title { display: flex; gap: 7px; align-items: center; }
+    .timeline { position: relative; padding-left: 39px; }
+    .timeline::before { content: ""; position: absolute; top: 9px; bottom: 9px; left: 14px; width: 2px; background: #d8e1ec; }
+    .step { position: relative; margin-bottom: 14px; padding: 17px 18px 15px; border: 1px solid var(--line); border-radius: 16px; background: #fff; }
+    .step::before { content: attr(data-step); position: absolute; top: 16px; left: -39px; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; color: #fff; background: var(--platform); font-size: 12px; font-weight: 850; }
+    .step h3 { margin: 0 0 7px; }
+    .step p { margin: 0; color: var(--muted); }
+    .trace { margin-top: 11px; padding: 13px 15px; overflow-x: auto; border-radius: 12px; background: #142035; color: #d9e8ff; font: 12px/1.65 var(--mono); }
+    .trace .p { color: #ddc5ff; } .trace .o { color: #f0a9ff; } .trace .r { color: #72e6dc; } .trace .a { color: #c9d2df; }
+    table { width: 100%; border-collapse: collapse; overflow: hidden; border-radius: 13px; font-size: 14px; }
+    th, td { padding: 12px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: var(--muted); background: #f7f9fc; font-size: 11px; letter-spacing: .055em; text-transform: uppercase; }
+    tr:last-child td { border-bottom: 0; }
+    .scroll { overflow-x: auto; margin-top: 12px; }
+    .objects { min-width: 990px; }
+    .objects td:first-child { width: 24%; font: 700 12px/1.5 var(--mono); }
+    .objects td:nth-child(2) { width: 30%; }
+    .objects td:nth-child(3) { width: 46%; }
+    .states { display: grid; grid-template-columns: repeat(5, minmax(158px, 1fr)); gap: 10px; overflow-x: auto; }
+    .state { position: relative; min-height: 150px; padding: 15px; border: 1px solid var(--line); border-radius: 15px; background: #fff; }
+    .state:not(:last-child)::after { content: "→"; position: absolute; right: -16px; top: calc(50% - 14px); z-index: 2; color: #8b9ab0; font-size: 25px; }
+    .state strong { display: block; font: 800 13px/1.35 var(--mono); }
+    .state span { display: block; margin-top: 7px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .state.ok { border-color: #bde8cb; background: #f5fff8; } .state.stop { border-color: #efc7aa; background: #fffaf6; }
+    .two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 15px; }
+    .rule { padding: 17px; border: 1px solid var(--line); border-radius: 15px; background: #fbfdff; }
+    .rule p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+    .callout { padding: 16px 18px; border-left: 5px solid var(--warn); border-radius: 0 13px 13px 0; color: #6b3200; background: var(--warn-bg); }
+    .callout strong { color: #7d3600; }
+    .success { padding: 16px 18px; border-left: 5px solid var(--good); border-radius: 0 13px 13px 0; color: #155530; background: var(--good-bg); }
+    .back { display: inline-flex; margin-top: 7px; color: #4b35a0; font-weight: 800; text-decoration: none; }
+    .back:hover { text-decoration: underline; }
+    @media (max-width: 760px) { .hero, .two { grid-template-columns: 1fr; } .panel { padding: 19px; } .flow, .lanes, .states { grid-template-columns: repeat(5, minmax(170px, 1fr)); } }
+  </style>
+</head>
+<body>
+<main>
+  <header class="hero">
+    <div>
+      <p class="eyebrow">TARGET ARCHITECTURE · EXTERNAL PLATFORM GOVERNANCE</p>
+      <h1>平台发布治理：<br><code>active-default</code> 生命周期</h1>
+      <p class="lede">这是独立的 A 方案规范页：它说明平台如何安全地提升或回滚 run-control release，而不把平台治理混入 workspace、Chat Web、Driver MCP 或 Slave 执行面。</p>
+      <a class="back" href="/refactored-driver-lifecycle-spec.html#run-events">← 返回 Driver / Slave / Observer 全生命周期规范</a>
+    </div>
+    <aside class="stamp">
+      <strong>状态：已审阅确认的目标设计，尚未实施</strong>
+      <p>本页是静态架构规范，不是运维控制台、审批 UI 或对外 API。</p>
+      <span class="chip platform">外部平台治理</span>
+      <span class="chip observer">Observer registry</span>
+      <span class="chip pipeline">受信 pipeline</span>
+      <span class="chip audit">平台审计</span>
+    </aside>
+  </header>
+
+  <nav class="nav" aria-label="页面导航">
+    <a href="#boundary">边界</a>
+    <a href="#objects">对象</a>
+    <a href="#promotion">提升</a>
+    <a href="#rollback">回滚</a>
+    <a href="#states">状态</a>
+    <a href="#outcomes">结果矩阵</a>
+    <a href="#invariants">不变量</a>
+  </nav>
+
+  <section id="boundary" class="panel">
+    <h2>一条清晰的治理边界</h2>
+    <div class="principle">
+      <strong>外部平台治理决定“是否批准”；Observer 只验证、持久化并执行受约束的指针切换。</strong>
+      <p>任何 workspace user、agent token、Chat Web、Driver MCP、Slave 或 coding agent 都不能创建、批准或直接改写 <code>active-default</code>。</p>
+    </div>
+    <div class="flow" style="margin-top:18px">
+      <article class="flow-card"><small>01 · 平台 pipeline</small><strong>构建 release</strong><p>产出不可覆盖、内容寻址的 schema、manifest、handler bundle、fixture 与 generator identity。</p></article>
+      <article class="flow-card"><small>02 · 验证证据</small><strong>验证 / 预检</strong><p>promotion 要全量验证；rollback 只做精确 bundle 与 ABI 兼容性预检。</p></article>
+      <article class="flow-card"><small>03 · 外部治理系统</small><strong>人工批准</strong><p>一名 <code>platform_release_operator</code> 签发带平台认证证据的批准证明。</p></article>
+      <article class="flow-card"><small>04 · Observer</small><strong>持久化并 CAS</strong><p>验证证明，存入 registry；受信 pipeline 仅执行 <code>expected → target</code> 的原子 CAS。</p></article>
+      <article class="flow-card"><small>05 · 新 run</small><strong>选择新默认</strong><p>只有之后成功 <code>open_run</code> 的 run 使用新 release；既有 pin 永不改写。</p></article>
+    </div>
+    <p class="caption">外部系统不是 AgentServer、workspace UI 或本项目的新 token 类型；它只向 Observer 提供可验证的平台认证 evidence ref。</p>
+  </section>
+
+  <section class="panel">
+    <h2>谁负责什么</h2>
+    <div class="lanes">
+      <article class="lane"><div class="title"><span class="chip platform">外部平台治理</span><h3>批准，而非执行</h3></div><ul><li>认证平台运维人员。</li><li>v1 恰好一名 <code>platform_release_operator</code>。</li><li>签发 approval attestation / authentication evidence。</li><li>不能写 Observer pointer、不能改 release 或 evidence。</li></ul></article>
+      <article class="lane"><div class="title"><span class="chip pipeline">平台 release pipeline</span><h3>验证，而非自批</h3></div><ul><li>生成不可变 release 与验证 evidence。</li><li>创建 pending change request。</li><li>读取批准证明并执行原子 CAS。</li><li>不持有 workspace user / agent 权限。</li></ul></article>
+      <article class="lane"><div class="title"><span class="chip observer">Observer</span><h3>注册、校验、审计</h3></div><ul><li>保存 release registry、approval 与 pointer。</li><li>独立验证 attestation / evidence binding。</li><li>拒绝陈旧、过期或冲突的变更。</li><li>绝不把平台事件写入任一 RunEvent。</li></ul></article>
+      <article class="lane"><div class="title"><span class="chip audit">workspace 运行时</span><h3>只消费 pin</h3></div><ul><li>新 run 从唯一默认 release 固定 version / digest。</li><li>既有 run 使用自己的 immutable pin。</li><li>Chat Web 不能显示或操作平台批准卡。</li><li>Driver / Slave 无法触发 pointer 修改。</li></ul></article>
+    </div>
+  </section>
+
+  <section id="objects" class="panel">
+    <h2>平台治理对象目录</h2>
+    <p class="muted">这些对象位于 Observer 的平台治理 registry，不属于 workspace 的 run、ApprovalRequest 或 Chat Web 数据模型。</p>
+    <div class="scroll"><table class="objects">
+      <thead><tr><th>对象</th><th>ID / 不可变绑定</th><th>权威方与生命周期</th></tr></thead>
+      <tbody>
+        <tr><td>RunControlSchemaRelease</td><td><code>run_control_schema_digest</code> + immutable version；schema、manifest、handler bundle、fixture、generator digest。</td><td>平台 release pipeline 产出；registry 只读保存。旧 release 因既有 Run / RunEvent / AuditRecord retention 或 legal hold 而继续可解析。</td></tr>
+        <tr><td>PromotionValidationEvidence</td><td>内容寻址 <code>evidence_ref</code>；绑定 candidate digest、manifest、签名、全量生成物、fixture、契约测试、generator compatibility。</td><td>promotion 的唯一 pass 前提；失败不创建 pointer 变更。证据不可原地修改，条件变化必须产生新的 evidence。</td></tr>
+        <tr><td>RollbackCompatibilityPreflight</td><td>内容寻址 <code>evidence_ref</code>；绑定 retained target、manifest / signature / bundle 完整性与当前 ABI。</td><td>rollback 的唯一 pass 前提；不重跑历史全量 suite。预检失败不改变默认版本。</td></tr>
+        <tr><td>PlatformReleaseChangeApproval</td><td><code>platform_release_approval_id</code>；<code>operation</code>、expected-current digest、target digest、immutable evidence ref、build identity、<code>expires_at</code>、operator ID、authn evidence。</td><td>Observer registry 权威保存。pending → approved → consumed，或 expired / conflicted；v1 24 小时 TTL、单人批准。它不是 run-scoped ApprovalRequest。</td></tr>
+        <tr><td>active-default pointer</td><td>唯一 <code>active_default_release_digest</code>，无 user / workspace scope。</td><td>仅 pipeline 在批准后以 CAS 改写。一次成功切换只作用于之后新开的 run。</td></tr>
+        <tr><td>AuditRecord</td><td><code>audit_id</code>；关联 release、approval、operator、pipeline build、evidence、old / target digest。</td><td>平台级 WORM / append-only 审计。不是 RunEvent，不能被 coding agent 读取成任务语义事件。</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section id="promotion" class="panel">
+    <h2>Promotion：候选 release 成为默认版本</h2>
+    <div class="timeline">
+      <article class="step" data-step="1"><h3>构建不可变候选</h3><p>pipeline 生成 release manifest、schema、全部 MCP / Observer / UI handler、fixture 与 generator identity；候选只能新增，不能覆盖已有 digest。</p></article>
+      <article class="step" data-step="2"><h3>取得全量 pass 证据</h3><p><code>PromotionValidationEvidence=pass</code> 必须同时覆盖 schema / manifest / signature / digest、全部生成物、fixture、契约测试与 generator compatibility check。任一失败：不提升、不写 RunEvent、不触碰 run。</p></article>
+      <article class="step" data-step="3"><h3>创建待批准变更</h3><p>Observer registry 创建 pending <code>PlatformReleaseChangeApproval</code>，固定 operation、expected-current、target、evidence ref、build identity 与 24 小时 <code>expires_at</code>。</p></article>
+      <article class="step" data-step="4"><h3>外部平台治理签发批准证明</h3><p>恰好一名平台内部 <code>platform_release_operator</code> 批准。外部治理系统提交 operator identity、platform-authentication evidence 与时间；它不能直接调用 pointer 写入接口。</p></article>
+      <article class="step" data-step="5"><h3>受信 pipeline 进行 CAS</h3><p>Observer 验证 approval binding 后，pipeline 执行 <code>CAS(expected_current_digest → target_release_digest)</code>。成功时 approval consumed，并写 <code>run_control_active_default_changed</code> 平台审计。</p><div class="trace"><span class="p">External governance</span> ── signed approval attestation ──&gt; <span class="o">Observer platform registry</span><br><span class="o">Observer</span> ── verified immutable refs ──&gt; <span class="r">trusted release pipeline</span><br><span class="r">pipeline</span> ── CAS(old → target) ──&gt; <span class="o">active-default pointer</span></div></article>
+    </div>
+  </section>
+
+  <section id="rollback" class="panel">
+    <h2>Rollback：回到曾成功 promotion 的 retained release</h2>
+    <div class="two">
+      <article class="rule"><h3>与 promotion 相同的部分</h3><p>仍需建立 <code>PlatformReleaseChangeApproval</code>、外部平台运维显式批准、24 小时 TTL、exact expected-current CAS 和完整平台审计。回滚不是自动故障转移，也不会修改既有 run。</p></article>
+      <article class="rule"><h3>与 promotion 不同的部分</h3><p>不重跑历史全量 fixture / contract suite。它只要求 <code>RollbackCompatibilityPreflight</code> 证明 retained manifest / signature / digest / bundle 完整，以及当前 Observer / Driver ABI 能加载精确 handler。</p></article>
+    </div>
+    <div class="callout" style="margin-top:16px"><strong>回滚预检失败不是 run 事件。</strong>pointer 保持不变；只写 <code>AuditRecord(type=run_control_active_default_change_failed, operation=rollback)</code> 并通知平台运维。任何 run、dispatch、attempt 与 RunEvent 都不受影响。</div>
+  </section>
+
+  <section id="states" class="panel">
+    <h2>PlatformReleaseChangeApproval 状态</h2>
+    <div class="states">
+      <article class="state"><strong>PENDING</strong><span>验证 / 预检已 pass；等待外部治理系统的单人批准。尚不能切换。</span></article>
+      <article class="state"><strong>APPROVED</strong><span>认证证据、operator ID 与 approved_at 已持久化；等待 pipeline 执行一次 CAS。</span></article>
+      <article class="state ok"><strong>CONSUMED</strong><span>CAS 成功，pointer 已更新；成功审计记录 old / target、evidence、approval、operator、build identity。</span></article>
+      <article class="state stop"><strong>EXPIRED</strong><span>24 小时到期。只写平台审计；不切换、不影响 run。需要新 approval ID 才能继续。</span></article>
+      <article class="state stop"><strong>CONFLICTED</strong><span>当前 pointer 不再等于 expected-current；拒绝旧批准，写失败审计。需新 request + 新批准。</span></article>
+    </div>
+    <p class="caption">审批、到期与 CAS 消费是同一原子状态竞争：先成功者胜出；过期后的批准或执行必定被拒绝。</p>
+  </section>
+
+  <section id="outcomes" class="panel">
+    <h2>结果矩阵：任何分支都不污染 run 事件流</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>情形</th><th>pointer</th><th>审批 / 审计</th><th>run、dispatch、attempt</th></tr></thead>
+      <tbody>
+        <tr><td>Promotion validation fail</td><td>不变</td><td><code>run_control_active_default_change_failed(operation=promotion)</code> + 平台运维告警。</td><td>不写 RunEvent；不接触任何对象。</td></tr>
+        <tr><td>Rollback preflight fail</td><td>不变</td><td><code>run_control_active_default_change_failed(operation=rollback)</code> + 平台运维告警。</td><td>不写 RunEvent；不接触任何对象。</td></tr>
+        <tr><td>Approval TTL 到期</td><td>不变</td><td>approval=<code>expired</code>；<code>run_control_active_default_change_approval_expired</code>。</td><td>不写 RunEvent；不接触任何对象。</td></tr>
+        <tr><td>CAS expected-current mismatch</td><td>不变</td><td>approval=<code>conflicted</code>；<code>failure_code=expected_current_digest_mismatch</code>。</td><td>不写 RunEvent；不接触任何对象。</td></tr>
+        <tr><td>CAS success</td><td>原子更新</td><td><code>run_control_active_default_changed</code>，含 approval / operator / authn / evidence / build refs。</td><td>只影响其后成功 <code>open_run</code> 的 pin；既有 run 不变。</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section id="invariants" class="panel">
+    <h2>v1 验收不变量</h2>
+    <div class="two">
+      <article class="success"><strong>可证明的隔离</strong><p>平台批准不是 user token、agent token、workspace role、Chat Web 操作或 Driver MCP tool。它没有被 LLM 读取、生成、重放或解释的路径。</p></article>
+      <article class="success"><strong>可证明的版本固定</strong><p>每个新 run 只在 <code>open_run</code> 成功事务中 pin 当时的唯一默认 release；默认切换永不改写已 open 或已 closed run 的 version / digest。</p></article>
+      <article class="success"><strong>可证明的单写者</strong><p>只有受信 pipeline 能以 CAS 改 pointer；平台运维只能批准 immutable request。所有成功、失败、过期和冲突均有平台审计。</p></article>
+      <article class="success"><strong>明确延期的能力</strong><p>双人 / N-of-M 签核、职责分离、平台运维控制台与用户 / workspace 自定义 run-control 协议均不属于 v1。</p></article>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>与主规范的关系</h2>
+    <p>本页展开主规范中 <code>RunControlSchemaRelease</code> 与 <code>PlatformReleaseChangeApproval</code> 的平台治理边界。任务从用户 Prompt 到完成的完整语义仍以 <a href="/refactored-driver-lifecycle-spec.html">重构后 Driver / Slave / Observer 全生命周期</a> 为主入口；本页不定义额外 Agent、token、workspace、RunEvent 或执行状态机。</p>
+  </section>
+</main>
+</body>
+</html>
