@@ -1916,6 +1916,11 @@
     </table>
 
     <div class="callout" style="margin-top:15px">
+      <strong>普通用户可提交 public 候选；平台管理员才可决定其成为 public。</strong>
+      <p style="margin:9px 0 0">任一 candidate owner（包括普通用户）只可针对平台注册且已存在的精确 <code>public_capability_key + capability_interface_digest</code>，以自己的精确 candidate digest 申请 <code>public_candidate_submit</code>；owner 的网页批准是提交认证候选的必要条件。普通用户不能创建／修改 public key、fixture、fixture target、平台签名、<code>active</code>、recommendation 或 revoke。PlatformOperator 运行认证并仅在 fixture pass 后以独立 <code>PlatformCatalogChangeApproval(operation=public_publish)</code> 决定最终发布；该平台批准绝不替代普通 owner 的 candidate approval。若候选本身归平台所有，管理员可同时是 candidate owner 与 PlatformOperator，但两次授权仍须以不同 actor-role、action digest 和审计记录保存。</p>
+    </div>
+
+    <div class="callout" style="margin-top:15px">
       <strong>工具只接收业务参数，调用者范围一律隐式附加。</strong>
       只有 <code>open_run(run_id,...)</code> 和 <code>close_run(run_id)</code> 接收 coding agent 可见的 <code>run_id</code>，并由 Driver 以 durable metadata + active RunScope 严格校验；node ID、artifact ref、filter、<code>SecretRef</code> metadata / binding reference 和经授权 snapshot 返回的 <code>runtime_handle_ref</code> 仍是可验证业务引用。其余工具没有 run_id 参数。<code>conversation_id</code>、<code>workspace_id</code>、<code>driver_agent_id</code>、raw <code>mcp_runtime_id</code> 与 agent token 一律不在 coding-agent 可调用 schema 中；<code>runtime_handle_ref</code> 不是 token、endpoint 或跨 scope 授权凭证。<strong><code>SecretRef</code> 也不是 secret 值或读取能力：</strong>Driver MCP 不提供 <code>read_secret</code>、secret export、secret-as-context / Artifact 工具；<code>resolve_secret_for_assigned_attempt</code> 仅是 Slave Daemon 与 Observer 之间、基于既有 agent token 和已 assignment Attempt 的内部执行协议，绝不进入 Driver MCP 或 LLM 工具 schema。
     </div>
