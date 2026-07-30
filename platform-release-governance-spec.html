@@ -147,14 +147,14 @@
   <section id="boundary" class="panel">
     <h2>一条清晰的治理边界</h2>
     <div class="principle">
-      <strong>外部平台治理决定“是否批准”；Observer 只验证、持久化并执行受约束的指针切换。</strong>
+      <strong>外部平台治理决定批准或拒绝；Observer 验证并持久化决定，且仅在批准者当前权限仍有效时允许受约束的指针切换。</strong>
       <p>任何 workspace user、agent token、Chat Web、Driver MCP、Slave 或 coding agent 都不能创建、批准或直接改写 <code>active-default</code>。</p>
     </div>
     <div class="flow" style="margin-top:18px">
       <article class="flow-card"><small>01 · 平台 pipeline</small><strong>构建 release</strong><p>产出不可覆盖、内容寻址的 schema、manifest、handler bundle、fixture 与 generator identity。</p></article>
       <article class="flow-card"><small>02 · 验证证据</small><strong>验证 / 预检</strong><p>promotion 要全量验证；rollback 只做精确 bundle 与 ABI 兼容性预检。</p></article>
-      <article class="flow-card"><small>03 · 外部治理系统</small><strong>人工批准</strong><p>一名 <code>platform_release_operator</code> 签发带平台认证证据的批准证明。</p></article>
-      <article class="flow-card"><small>04 · Observer</small><strong>持久化并 CAS</strong><p>验证证明，存入 registry；受信 pipeline 仅执行 <code>expected → target</code> 的原子 CAS。</p></article>
+      <article class="flow-card"><small>03 · 外部治理系统</small><strong>人工决定</strong><p>一名 <code>platform_release_operator</code> 对精确 request 批准或拒绝，并提交平台认证证据。</p></article>
+      <article class="flow-card"><small>04 · Observer</small><strong>持久化、重验并 CAS</strong><p>持久化决定；仅对 approved request 重验批准者当前权限与全部 binding 后，才允许受信 pipeline 执行 <code>expected → target</code> 的原子 CAS。</p></article>
       <article class="flow-card"><small>05 · 新 run</small><strong>选择新默认</strong><p>只有之后成功 <code>open_run</code> 的 run 使用新 release；既有 pin 永不改写。</p></article>
     </div>
     <p class="caption">外部系统不是 AgentServer、workspace UI 或本项目的新 token 类型；它只向 Observer 提供可验证的平台认证 evidence ref。</p>
@@ -165,7 +165,7 @@
     <h2>谁负责什么</h2>
     <div class="lanes">
       <article class="lane"><div class="title"><span class="chip platform">外部平台治理</span><h3>批准或拒绝，而非执行</h3></div><ul><li>认证平台运维人员。</li><li>v1 恰好一名 <code>platform_release_operator</code>。</li><li>对精确 request 签发 approval attestation，或提交带 reason code 的明确 rejection；两者都带 authentication evidence。</li><li>不能写 Observer pointer、不能改 release 或 evidence。</li></ul></article>
-      <article class="lane"><div class="title"><span class="chip pipeline">平台 release pipeline</span><h3>验证，而非自批</h3></div><ul><li>生成不可变 release 与验证 evidence。</li><li>创建 pending change request。</li><li>读取批准证明并执行原子 CAS。</li><li>不持有 workspace user / agent 权限。</li></ul></article>
+      <article class="lane"><div class="title"><span class="chip pipeline">平台 release pipeline</span><h3>验证，而非自批</h3></div><ul><li>生成不可变 release 与验证 evidence。</li><li>创建 pending change request。</li><li>请求 Observer 重验批准者当前权限与批准证明，通过后才执行原子 CAS。</li><li>不持有 workspace user / agent 权限。</li></ul></article>
       <article class="lane"><div class="title"><span class="chip observer">Observer</span><h3>注册、校验、审计</h3></div><ul><li>保存 release registry、approval 与 pointer。</li><li>独立验证 attestation / evidence binding。</li><li>拒绝陈旧、过期或冲突的变更。</li><li>绝不把<strong>本页 RunControl release 治理事件</strong>写入任一 RunEvent。</li></ul></article>
       <article class="lane"><div class="title"><span class="chip audit">workspace 运行时</span><h3>只消费 pin</h3></div><ul><li>新 run 从唯一默认 release 固定 version / digest。</li><li>既有 run 使用自己的 immutable pin。</li><li>Chat Web 不能显示或操作平台批准卡。</li><li>Driver / Slave 无法触发 pointer 修改。</li></ul></article>
     </div>
@@ -180,7 +180,7 @@
         <tr><td>RunControlSchemaRelease</td><td><code>run_control_schema_digest</code> + immutable version；schema、manifest、handler bundle、fixture、generator digest。</td><td>平台 release pipeline 产出；registry 只读保存。旧 release 因既有 Run / RunEvent / AuditRecord retention 或 legal hold 而继续可解析。</td></tr>
         <tr><td>PromotionValidationEvidence</td><td>内容寻址 <code>evidence_ref</code>；绑定 candidate digest、manifest、签名、全量生成物、fixture、契约测试、generator compatibility。</td><td>promotion 的唯一 pass 前提；失败不创建 pointer 变更。证据不可原地修改，条件变化必须产生新的 evidence。</td></tr>
         <tr><td>RollbackCompatibilityPreflight</td><td>内容寻址 <code>evidence_ref</code>；绑定 retained target、manifest / signature / bundle 完整性与当前 ABI。</td><td>rollback 的唯一 pass 前提；不重跑历史全量 suite。预检失败不改变默认版本。</td></tr>
-        <tr><td>PlatformReleaseChangeApproval</td><td><code>platform_release_approval_id</code>；<code>operation</code>、expected-current digest、target digest、immutable evidence ref、build identity、<code>expires_at</code>、operator ID、authn evidence；拒绝时另固定 closed-enum <code>rejection_reason_code</code>。</td><td>Observer registry 权威保存。pending → approved → consumed，或 rejected / expired / conflicted；v1 24 小时 TTL、单人批准／拒绝。rejected 是 exact request 的不可逆终态；以后再申请必须创建新 approval ID。它不是 run-scoped ApprovalRequest。</td></tr>
+        <tr><td>PlatformReleaseChangeApproval</td><td><code>platform_release_approval_id</code>；<code>operation</code>、expected-current digest、target digest、immutable evidence ref、build identity、<code>expires_at</code>、operator ID、exact <code>platform_operator_assignment_id</code>、authn evidence；拒绝时另固定 closed-enum <code>rejection_reason_code</code>，权限失效时固定 <code>invalidation_reason_code=operator_assignment_revoked|operator_user_disabled</code>。</td><td>Observer registry 权威保存。pending → approved → consumed，或 rejected / expired / conflicted / invalidated；v1 24 小时 TTL、单人批准／拒绝。rejected 与 invalidated 都是 exact request 的不可逆终态；以后再申请必须创建新 approval ID。它不是 run-scoped ApprovalRequest。</td></tr>
         <tr><td>active-default pointer</td><td>唯一 <code>active_default_release_digest</code>，无 user / workspace scope。</td><td>仅 pipeline 在批准后以 CAS 改写。一次成功切换只作用于之后新开的 run。</td></tr>
         <tr><td>AuditRecord</td><td><code>audit_id</code>；关联 release、approval、operator、pipeline build、evidence、old / target digest。</td><td>本页 RunControl release 的平台级 WORM / append-only 审计。不是 RunEvent，不能被 coding agent 读取成任务语义事件；这不重定义主规范中 public candidate 的 owner-scoped 认证结果回传。</td></tr>
       </tbody>
@@ -194,7 +194,7 @@
       <article class="step" data-step="2"><h3>取得全量 pass 证据</h3><p><code>PromotionValidationEvidence=pass</code> 必须同时覆盖 schema / manifest / signature / digest、全部生成物、fixture、契约测试与 generator compatibility check。任一失败：不提升、不写<strong>本页 RunControl release 的</strong> RunEvent、不触碰 run。</p></article>
       <article class="step" data-step="3"><h3>创建待批准变更</h3><p>Observer registry 创建 pending <code>PlatformReleaseChangeApproval</code>，固定 operation、expected-current、target、evidence ref、build identity 与 24 小时 <code>expires_at</code>。</p></article>
       <article class="step" data-step="4"><h3>外部平台治理批准或拒绝精确 request</h3><p>恰好一名平台内部 <code>platform_release_operator</code> 作出决定。批准时，外部治理系统提交 operator identity、platform-authentication evidence 与时间；拒绝时还提交 closed-enum reason code，并把 request 原子置为 <code>rejected</code>。两种决定都不能直接调用 pointer 写入接口；rejected request 不能恢复、批准或执行，未来重提必须创建新的 approval ID。</p></article>
-      <article class="step" data-step="5"><h3>受信 pipeline 进行 CAS</h3><p>Observer 验证 approval binding 后，pipeline 执行 <code>CAS(expected_current_digest → target_release_digest)</code>。成功时 approval consumed，并写 <code>run_control_active_default_changed</code> 平台审计。</p><div class="trace"><span class="p">External governance</span> ── signed approval attestation ──&gt; <span class="o">Observer platform registry</span><br><span class="o">Observer</span> ── verified immutable refs ──&gt; <span class="r">trusted release pipeline</span><br><span class="r">pipeline</span> ── CAS(old → target) ──&gt; <span class="o">active-default pointer</span></div></article>
+      <article class="step" data-step="5"><h3>受信 pipeline 重验权限并进行 CAS</h3><p>Observer 在消费 approved record 时重新验证其绑定的 exact <code>PlatformOperatorAssignment</code> 仍 active，且关联 User 仍 active；失败则把 approval 原子置为 <code>invalidated</code> 并拒绝 CAS。只有 authority、approval binding、TTL 与 expected-current 全部通过，pipeline 才执行 <code>CAS(expected_current_digest → target_release_digest)</code>；成功时 approval consumed，并写 <code>run_control_active_default_changed</code> 平台审计。</p><div class="trace"><span class="p">External governance</span> ── signed approval attestation ──&gt; <span class="o">Observer platform registry</span><br><span class="o">Observer</span> ── current authority + immutable refs ──&gt; <span class="r">trusted release pipeline</span><br><span class="r">pipeline</span> ── CAS(old → target) ──&gt; <span class="o">active-default pointer</span></div></article>
     </div>
   </section>
 
@@ -214,10 +214,11 @@
       <article class="state"><strong>APPROVED</strong><span>认证证据、operator ID 与 approved_at 已持久化；等待 pipeline 执行一次 CAS。</span></article>
       <article class="state ok"><strong>CONSUMED</strong><span>CAS 成功，pointer 已更新；成功审计记录 old / target、evidence、approval、operator、build identity。</span></article>
       <article class="state stop"><strong>REJECTED</strong><span>operator 对精确 request 明确拒绝；保存 actor、authn evidence、rejected_at 与 closed-enum reason code。pointer 不变，该 approval ID 永不可恢复、批准或消费；以后重提必须使用新 ID。</span></article>
+      <article class="state stop"><strong>INVALIDATED</strong><span>消费前复核发现批准时绑定的 exact PlatformOperatorAssignment 已 revoked，或关联 User 已 disabled；保存 invalidated_at 与 closed-enum reason code。pointer 不变，即使之后重新授权也必须使用新 approval ID。</span></article>
       <article class="state stop"><strong>EXPIRED</strong><span>24 小时到期。只写平台审计；不切换、不影响 run。需要新 approval ID 才能继续。</span></article>
       <article class="state stop"><strong>CONFLICTED</strong><span>当前 pointer 不再等于 expected-current；拒绝旧批准，写失败审计。需新 request + 新批准。</span></article>
     </div>
-    <p class="caption">状态转换以同一 approval ID 串行化：PENDING 只可进入 APPROVED、REJECTED 或 EXPIRED；APPROVED 只可进入 CONSUMED、CONFLICTED 或 EXPIRED，不能再被拒绝。任何终态后的批准或执行都必须拒绝。</p>
+    <p class="caption">状态转换以同一 approval ID 串行化：PENDING 只可进入 APPROVED、REJECTED 或 EXPIRED；APPROVED 只可进入 CONSUMED、CONFLICTED、INVALIDATED 或 EXPIRED，不能再被拒绝。任何终态后的批准或执行都必须拒绝。</p>
   </section>
 
   <section id="outcomes" class="panel">
@@ -228,6 +229,7 @@
         <tr><td>Promotion validation fail</td><td>不变</td><td><code>run_control_active_default_change_failed(operation=promotion)</code> + 平台运维告警。</td><td>不写 RunEvent；不接触任何对象。</td></tr>
         <tr><td>Rollback preflight fail</td><td>不变</td><td><code>run_control_active_default_change_failed(operation=rollback)</code> + 平台运维告警。</td><td>不写 RunEvent；不接触任何对象。</td></tr>
         <tr><td>Operator 明确拒绝</td><td>不变</td><td>approval=<code>rejected</code>；记录 operator / authn evidence、<code>rejection_reason_code</code> 与 <code>run_control_active_default_change_rejected</code>。重提必须使用新 approval ID。</td><td>不写 RunEvent；不接触任何对象。</td></tr>
+        <tr><td>批准者权限在消费前被撤销</td><td>不变</td><td>approval=<code>invalidated</code>；记录 exact assignment、User 状态、<code>invalidation_reason_code</code> 与 <code>run_control_active_default_change_invalidated</code>。重新授权后仍须新 approval ID。</td><td>不写 RunEvent；不接触任何对象。</td></tr>
         <tr><td>Approval TTL 到期</td><td>不变</td><td>approval=<code>expired</code>；<code>run_control_active_default_change_approval_expired</code>。</td><td>不写 RunEvent；不接触任何对象。</td></tr>
         <tr><td>CAS expected-current mismatch</td><td>不变</td><td>approval=<code>conflicted</code>；<code>failure_code=expected_current_digest_mismatch</code>。</td><td>不写 RunEvent；不接触任何对象。</td></tr>
         <tr><td>CAS success</td><td>原子更新</td><td><code>run_control_active_default_changed</code>，含 approval / operator / authn / evidence / build refs。</td><td>只影响其后成功 <code>open_run</code> 的 pin；既有 run 不变。</td></tr>
@@ -240,7 +242,7 @@
     <div class="two">
       <article class="success"><strong>可证明的隔离</strong><p>平台批准不是 user token、agent token、workspace role、Chat Web 操作或 Driver MCP tool。它没有被 LLM 读取、生成、重放或解释的路径。</p></article>
       <article class="success"><strong>可证明的版本固定</strong><p>每个新 run 只在 <code>open_run</code> 成功事务中 pin 当时的唯一默认 release；默认切换永不改写已 open 或已 closed run 的 version / digest。</p></article>
-      <article class="success"><strong>可证明的单写者</strong><p>只有受信 pipeline 能以 CAS 改 pointer；平台运维只能批准或拒绝 immutable request。所有成功、验证失败、明确拒绝、过期和冲突均有平台审计。</p></article>
+      <article class="success"><strong>可证明的单写者</strong><p>只有受信 pipeline 能以 CAS 改 pointer；平台运维只能批准或拒绝 immutable request。所有成功、验证失败、明确拒绝、批准者权限失效、过期和冲突均有平台审计。</p></article>
       <article class="success"><strong>明确延期的能力</strong><p>双人 / N-of-M 签核、职责分离、平台运维控制台与用户 / workspace 自定义 run-control 协议均不属于 v1。</p></article>
     </div>
   </section>
