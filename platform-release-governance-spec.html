@@ -158,7 +158,7 @@
       <article class="flow-card"><small>05 · 新 run</small><strong>选择新默认</strong><p>只有之后成功 <code>open_run</code> 的 run 使用新 release；既有 pin 永不改写。</p></article>
     </div>
     <p class="caption">外部系统不是 AgentServer、workspace UI 或本项目的新 token 类型；它只向 Observer 提供可验证的平台认证 evidence ref。</p>
-    <div class="principle" style="margin-top:16px"><strong>本页的“平台事件”仅指 <code>RunControlSchemaRelease</code> 的 promotion / rollback / <code>active-default</code> 变更及其验证、审批和审计。</strong><p>这些 release-governance 事件绝不写入任一用户 RunEvent。public capability candidate 的 fixture 认证是另一条 owner-scoped 流程：仍开放的 origin Run 可按主规范接收受控失败事件；来源会话被强制关闭后，结果改入 owner candidate 状态页。这不属于本页的 RunControl release 事件例外。</p></div>
+    <div class="principle" style="margin-top:16px"><strong>本页的“平台事件”仅指 <code>RunControlSchemaRelease</code> 的 promotion / rollback / <code>active-default</code> 变更及其验证、审批和审计。</strong><p>这些 release-governance 事件绝不写入任一用户 RunEvent。public capability candidate 的 fixture 认证是另一条 owner-scoped、非用户 Run 的 platform-control-plane 流程：仍开放的 origin Run 可按主规范接收受控失败事件；仅当 candidate owner 仍为 active、来源会话被强制关闭后，结果才改入 owner candidate 状态页。User disable 则优先终止／撤回该 owner 的认证中 candidate，不生成 owner-status 或 RunEvent 回传，重新启用也须以新 candidate digest 和新 owner approval 重提。这不属于本页的 RunControl release 事件例外。</p></div>
   </section>
 
   <section class="panel">
