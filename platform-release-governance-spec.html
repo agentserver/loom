@@ -158,6 +158,7 @@
       <article class="flow-card"><small>05 · 新 run</small><strong>选择新默认</strong><p>只有之后成功 <code>open_run</code> 的 run 使用新 release；既有 pin 永不改写。</p></article>
     </div>
     <p class="caption">外部系统不是 AgentServer、workspace UI 或本项目的新 token 类型；它只向 Observer 提供可验证的平台认证 evidence ref。</p>
+    <div class="principle" style="margin-top:16px"><strong>本页的“平台事件”仅指 <code>RunControlSchemaRelease</code> 的 promotion / rollback / <code>active-default</code> 变更及其验证、审批和审计。</strong><p>这些 release-governance 事件绝不写入任一用户 RunEvent。public capability candidate 的 fixture 认证是另一条 owner-scoped 流程：仍开放的 origin Run 可按主规范接收受控失败事件；来源会话被强制关闭后，结果改入 owner candidate 状态页。这不属于本页的 RunControl release 事件例外。</p></div>
   </section>
 
   <section class="panel">
@@ -165,7 +166,7 @@
     <div class="lanes">
       <article class="lane"><div class="title"><span class="chip platform">外部平台治理</span><h3>批准，而非执行</h3></div><ul><li>认证平台运维人员。</li><li>v1 恰好一名 <code>platform_release_operator</code>。</li><li>签发 approval attestation / authentication evidence。</li><li>不能写 Observer pointer、不能改 release 或 evidence。</li></ul></article>
       <article class="lane"><div class="title"><span class="chip pipeline">平台 release pipeline</span><h3>验证，而非自批</h3></div><ul><li>生成不可变 release 与验证 evidence。</li><li>创建 pending change request。</li><li>读取批准证明并执行原子 CAS。</li><li>不持有 workspace user / agent 权限。</li></ul></article>
-      <article class="lane"><div class="title"><span class="chip observer">Observer</span><h3>注册、校验、审计</h3></div><ul><li>保存 release registry、approval 与 pointer。</li><li>独立验证 attestation / evidence binding。</li><li>拒绝陈旧、过期或冲突的变更。</li><li>绝不把平台事件写入任一 RunEvent。</li></ul></article>
+      <article class="lane"><div class="title"><span class="chip observer">Observer</span><h3>注册、校验、审计</h3></div><ul><li>保存 release registry、approval 与 pointer。</li><li>独立验证 attestation / evidence binding。</li><li>拒绝陈旧、过期或冲突的变更。</li><li>绝不把<strong>本页 RunControl release 治理事件</strong>写入任一 RunEvent。</li></ul></article>
       <article class="lane"><div class="title"><span class="chip audit">workspace 运行时</span><h3>只消费 pin</h3></div><ul><li>新 run 从唯一默认 release 固定 version / digest。</li><li>既有 run 使用自己的 immutable pin。</li><li>Chat Web 不能显示或操作平台批准卡。</li><li>Driver / Slave 无法触发 pointer 修改。</li></ul></article>
     </div>
   </section>
@@ -181,7 +182,7 @@
         <tr><td>RollbackCompatibilityPreflight</td><td>内容寻址 <code>evidence_ref</code>；绑定 retained target、manifest / signature / bundle 完整性与当前 ABI。</td><td>rollback 的唯一 pass 前提；不重跑历史全量 suite。预检失败不改变默认版本。</td></tr>
         <tr><td>PlatformReleaseChangeApproval</td><td><code>platform_release_approval_id</code>；<code>operation</code>、expected-current digest、target digest、immutable evidence ref、build identity、<code>expires_at</code>、operator ID、authn evidence。</td><td>Observer registry 权威保存。pending → approved → consumed，或 expired / conflicted；v1 24 小时 TTL、单人批准。它不是 run-scoped ApprovalRequest。</td></tr>
         <tr><td>active-default pointer</td><td>唯一 <code>active_default_release_digest</code>，无 user / workspace scope。</td><td>仅 pipeline 在批准后以 CAS 改写。一次成功切换只作用于之后新开的 run。</td></tr>
-        <tr><td>AuditRecord</td><td><code>audit_id</code>；关联 release、approval、operator、pipeline build、evidence、old / target digest。</td><td>平台级 WORM / append-only 审计。不是 RunEvent，不能被 coding agent 读取成任务语义事件。</td></tr>
+        <tr><td>AuditRecord</td><td><code>audit_id</code>；关联 release、approval、operator、pipeline build、evidence、old / target digest。</td><td>本页 RunControl release 的平台级 WORM / append-only 审计。不是 RunEvent，不能被 coding agent 读取成任务语义事件；这不重定义主规范中 public candidate 的 owner-scoped 认证结果回传。</td></tr>
       </tbody>
     </table></div>
   </section>
@@ -190,7 +191,7 @@
     <h2>Promotion：候选 release 成为默认版本</h2>
     <div class="timeline">
       <article class="step" data-step="1"><h3>构建不可变候选</h3><p>pipeline 生成 release manifest、schema、全部 MCP / Observer / UI handler、fixture 与 generator identity；候选只能新增，不能覆盖已有 digest。</p></article>
-      <article class="step" data-step="2"><h3>取得全量 pass 证据</h3><p><code>PromotionValidationEvidence=pass</code> 必须同时覆盖 schema / manifest / signature / digest、全部生成物、fixture、契约测试与 generator compatibility check。任一失败：不提升、不写 RunEvent、不触碰 run。</p></article>
+      <article class="step" data-step="2"><h3>取得全量 pass 证据</h3><p><code>PromotionValidationEvidence=pass</code> 必须同时覆盖 schema / manifest / signature / digest、全部生成物、fixture、契约测试与 generator compatibility check。任一失败：不提升、不写<strong>本页 RunControl release 的</strong> RunEvent、不触碰 run。</p></article>
       <article class="step" data-step="3"><h3>创建待批准变更</h3><p>Observer registry 创建 pending <code>PlatformReleaseChangeApproval</code>，固定 operation、expected-current、target、evidence ref、build identity 与 24 小时 <code>expires_at</code>。</p></article>
       <article class="step" data-step="4"><h3>外部平台治理签发批准证明</h3><p>恰好一名平台内部 <code>platform_release_operator</code> 批准。外部治理系统提交 operator identity、platform-authentication evidence 与时间；它不能直接调用 pointer 写入接口。</p></article>
       <article class="step" data-step="5"><h3>受信 pipeline 进行 CAS</h3><p>Observer 验证 approval binding 后，pipeline 执行 <code>CAS(expected_current_digest → target_release_digest)</code>。成功时 approval consumed，并写 <code>run_control_active_default_changed</code> 平台审计。</p><div class="trace"><span class="p">External governance</span> ── signed approval attestation ──&gt; <span class="o">Observer platform registry</span><br><span class="o">Observer</span> ── verified immutable refs ──&gt; <span class="r">trusted release pipeline</span><br><span class="r">pipeline</span> ── CAS(old → target) ──&gt; <span class="o">active-default pointer</span></div></article>
@@ -203,7 +204,7 @@
       <article class="rule"><h3>与 promotion 相同的部分</h3><p>仍需建立 <code>PlatformReleaseChangeApproval</code>、外部平台运维显式批准、24 小时 TTL、exact expected-current CAS 和完整平台审计。回滚不是自动故障转移，也不会修改既有 run。</p></article>
       <article class="rule"><h3>与 promotion 不同的部分</h3><p>不重跑历史全量 fixture / contract suite。它只要求 <code>RollbackCompatibilityPreflight</code> 证明 retained manifest / signature / digest / bundle 完整，以及当前 Observer / Driver ABI 能加载精确 handler。</p></article>
     </div>
-    <div class="callout" style="margin-top:16px"><strong>回滚预检失败不是 run 事件。</strong>pointer 保持不变；只写 <code>AuditRecord(type=run_control_active_default_change_failed, operation=rollback)</code> 并通知平台运维。任何 run、dispatch、attempt 与 RunEvent 都不受影响。</div>
+    <div class="callout" style="margin-top:16px"><strong>回滚预检失败不是 RunControl run 事件。</strong>pointer 保持不变；只写 <code>AuditRecord(type=run_control_active_default_change_failed, operation=rollback)</code> 并通知平台运维。任何 run、dispatch、attempt 与 RunEvent 都不受影响；这不改变主规范中 public candidate 的独立 owner-scoped 认证结果回传。</div>
   </section>
 
   <section id="states" class="panel">
@@ -219,7 +220,7 @@
   </section>
 
   <section id="outcomes" class="panel">
-    <h2>结果矩阵：任何分支都不污染 run 事件流</h2>
+    <h2>结果矩阵：RunControl release 的任何分支都不污染 run 事件流</h2>
     <div class="scroll"><table>
       <thead><tr><th>情形</th><th>pointer</th><th>审批 / 审计</th><th>run、dispatch、attempt</th></tr></thead>
       <tbody>
@@ -244,7 +245,7 @@
 
   <section class="panel">
     <h2>与主规范的关系</h2>
-    <p>本页展开主规范中 <code>RunControlSchemaRelease</code> 与 <code>PlatformReleaseChangeApproval</code> 的平台治理边界。任务从用户 Prompt 到完成的完整语义仍以 <a href="/refactored-driver-lifecycle-spec.html">重构后 Driver / Slave / Observer 全生命周期</a> 为主入口；本页不定义额外 Agent、token、workspace、RunEvent 或执行状态机。</p>
+    <p>本页展开主规范中 <code>RunControlSchemaRelease</code> 与 <code>PlatformReleaseChangeApproval</code> 的平台治理边界。任务从用户 Prompt 到完成的完整语义仍以 <a href="/refactored-driver-lifecycle-spec.html">重构后 Driver / Slave / Observer 全生命周期</a> 为主入口；本页不定义额外 Agent、token、workspace、RunEvent 或执行状态机。<strong>这两份 HTML 共同构成 v1 的唯一规范性来源；历史 Markdown 仅作背景。</strong></p>
   </section>
 </main>
 </body>
