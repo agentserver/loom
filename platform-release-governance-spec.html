@@ -136,6 +136,7 @@
 
   <nav class="nav" aria-label="页面导航">
     <a href="#boundary">边界</a>
+    <a href="#contract-governance">接口与扩展</a>
     <a href="#genesis">首次启动</a>
     <a href="#objects">对象</a>
     <a href="#promotion">提升</a>
@@ -162,6 +163,27 @@
     <div class="principle" style="margin-top:16px"><strong>本页的“平台事件”仅指 <code>RunControlSchemaRelease</code> 的 promotion / rollback / <code>active-default</code> 变更及其验证、审批和审计。</strong><p>这些 release-governance 事件绝不写入任一用户 RunEvent。public capability candidate 的 fixture 认证是另一条 owner-scoped、非用户 Run 的 platform-control-plane 流程：仍开放的 origin Run 可按主规范接收受控失败事件；仅当 candidate owner 仍为 active、来源会话被强制关闭后，结果才改入 owner candidate 状态页。User disable 则优先终止／撤回该 owner 的认证中 candidate，不生成 owner-status 或 RunEvent 回传，重新启用也须以新 candidate digest 和新 owner approval 重提。这不属于本页的 RunControl release 事件例外。</p></div>
   </section>
 
+  <section id="contract-governance" class="panel">
+    <h2>接口、错误、扩展与依赖健康的治理边界</h2>
+    <div class="principle">
+      <strong>RunControl active-default 只选择任务控制 release；它不能偷偷改变跨组件错误语义、扩展 authority 或基础设施 degraded-mode policy。</strong>
+      <p>每个受信 deployment 固定 immutable <code>InterfaceContractBundle</code> 与 <code>DeploymentCompatibilityManifest</code>。前者除 Web OpenAPI、Worker / DriverControl protobuf 与 Driver MCP schema 外，还固定 <code>DomainErrorEnvelope</code> 和 <code>ExtensionGovernanceMatrix</code>；后者固定 exact <code>DependencyHealthPolicy</code> digest 与组件支持范围。这些内容随 deployment build / SystemConformanceEvidence 发布，不由 user token、agent token、WorkspacePolicy、ParentContract、Driver MCP、public package 或本页 RunControl pointer 修改。</p>
+    </div>
+    <div class="scroll" style="margin-top:16px"><table class="objects">
+      <thead><tr><th>契约</th><th>必须固定的内容</th><th>变更与 unknown handling</th></tr></thead>
+      <tbody>
+        <tr><td>DomainErrorEnvelope</td><td><code>code</code>、category、retry class、safe typed details、operation / authority ref、Retry-After、correlation 与 allowed-next-actions；HTTP、gRPC、MCP 只作协议映射。</td><td>随 InterfaceContractBundle / component build 生成并通过跨协议 golden fixture。tool-specific details 只能收紧；原始 exception / provider payload 不能成为兼容接口。错误 envelope 的不兼容变更要求新的 interface-contract range，不借 RunControl release 无感改变。</td></tr>
+        <tr><td>ExtensionGovernanceMatrix</td><td>逐类覆盖 Node kind、Artifact kind、Approval action kind、DecisionDefinition、RunEvent type、resource kind 与 public capability key 的 authority、创建主体、compatibility、unknown behavior、schema / handler / fixture / evidence、promotion / revoke 路径。</td><td>authority-bearing unknown 值一律 fail closed；仅矩阵明列的 display-only additive field 可忽略。矩阵不创建万能插件 registry：各类型仍走其既有 RunControl release、ArtifactKindRegistry 或 PlatformCatalogChangeApproval 等治理路径。矩阵自身的不兼容变更属于新的 InterfaceContractBundle / deployment build，并须取得 SystemConformanceEvidence=pass。</td></tr>
+        <tr><td>DependencyHealthPolicy</td><td>object storage、KMS / Vault、OIDC、LLM provider、DB / durable ledger 的 route gate、timeout / circuit-breaker profile、安全错误与恢复门。</td><td>随 DeploymentCompatibilityManifest 固定并使用成熟 health-check / breaker 实现；变更须新 build / config digest 与 conformance，不是 Run、LLM 或 workspace 可配置 policy。局部故障只关闭受影响 route；DB / ledger 领域写 fail closed，stale cache 不能裁决授权或完成。</td></tr>
+        <tr><td>RunControlSchemaRelease compatibility</td><td>候选 release 使用的 node / decision / event / approval 等 authority-bearing 类型必须全部存在于当前 ExtensionGovernanceMatrix，并携带矩阵要求的 handler、fixture、generator 与 evidence。</td><td>promotion / rollback preflight 都要验证 exact matrix compatibility；unknown、缺 handler 或证据不全固定拒绝。通过后仍只改变 active-default，InterfaceContractBundle、matrix 与 DependencyHealthPolicy 均不随 pointer 漂移。</td></tr>
+      </tbody>
+    </table></div>
+    <div class="callout" style="margin-top:16px">
+      <strong>本节不是第二套发布状态机。</strong>
+      InterfaceContractBundle / deployment build 由既有受信软件发布与 SystemConformanceEvidence gate 管理；public capability key 继续走 PlatformCatalogChangeApproval；RunControl release 继续只走本页 promotion / rollback。ExtensionGovernanceMatrix 负责把这些 authority 和失败规则统一写清，而不是把它们合并成一个超级管理员接口。
+    </div>
+  </section>
+
   <section id="genesis" class="panel">
     <h2>Genesis：空平台唯一的一次性启动例外</h2>
     <div class="principle">
@@ -169,9 +191,9 @@
       <p>该操作只由 deployment-scoped CLI / job 在平台 <code>bootstrap_pending</code> 时执行，认证依赖部署环境的 OS / cloud IAM 与 KMS trust，不接受 user token、agent token、OIDC browser session、Chat Web、Driver MCP、Slave、LLM 或普通 release pipeline 请求。bootstrap pending 期间只开放无内容 health 与该部署入口，拒绝普通登录 token 签发、Workspace / Agent / Conversation / Run 与 worker traffic。</p>
     </div>
     <div class="timeline">
-      <article class="step" data-step="1"><h3>加载并验证完整 genesis bundle</h3><p>bundle 固定 deployment identity、当前 <code>DeploymentCompatibilityManifest</code> / <code>InterfaceContractBundle</code> digests、绑定 exact component builds 的 <code>SystemConformanceEvidence=pass</code>、预置于 KMS / secret manager 的 signing-key handle / public metadata、精确初始 operator <code>(issuer,subject)</code>、不可变默认 WorkspacePolicy template、首个 RunControlSchemaRelease bundle 及其完整 <code>PromotionValidationEvidence=pass</code>。系统 conformance、RunControl promotion 与 public capability fixture 是三条独立证据链，不能互相代替；issuer 必须在受信 allowlist，release 的 schema、manifest、handler、fixture、generator、签名、digest 与当前 ABI 使用与普通 promotion 相同的 validator 全量验证。任何字段缺失、digest / build binding 冲突、conformance 非 pass、KMS key 不可用或验证失败都在写 DB 前终止。</p></article>
+      <article class="step" data-step="1"><h3>加载并验证完整 genesis bundle</h3><p>bundle 固定 deployment identity、当前 <code>DeploymentCompatibilityManifest</code> / <code>InterfaceContractBundle</code> digests（含 DomainErrorEnvelope / ExtensionGovernanceMatrix）、exact <code>DependencyHealthPolicy</code> digest、绑定 exact component builds 的 <code>SystemConformanceEvidence=pass</code>、预置于 KMS / secret manager 的 signing-key handle / public metadata、精确初始 operator <code>(issuer,subject)</code>、不可变默认 WorkspacePolicy template、首个 RunControlSchemaRelease bundle 及其完整 <code>PromotionValidationEvidence=pass</code>。系统 conformance、RunControl promotion 与 public capability fixture 是三条独立证据链，不能互相代替；issuer 必须在受信 allowlist，release 的 schema、manifest、handler、fixture、generator、签名、digest、当前 ExtensionGovernanceMatrix 与 ABI 使用与普通 promotion 相同的 validator 全量验证。任何字段缺失、digest / build binding 冲突、unknown authority-bearing type、conformance 非 pass、KMS key 不可用或验证失败都在写 DB 前终止。</p></article>
       <article class="step" data-step="2"><h3>证明 registry 确实为空</h3><p>Observer 在 serializable transaction / 全局 bootstrap lock 下重新检查：不存在 <code>PlatformGenesisRecord</code>、User / ExternalIdentityLink、PlatformOperatorAssignment、SigningKey registry、RunControlSchemaRelease、active-default、DefaultWorkspacePolicyTemplate、Workspace、Agent、Conversation 或 Run 事实。任一对象存在即返回 <code>genesis_not_empty</code>，不能覆盖、合并、补写或把既有平台重新初始化。</p></article>
-      <article class="step" data-step="3"><h3>一个事务建立最小可信根</h3><p>Observer 原子写入 SigningKey public metadata、初始 <code>User(status=active)</code> 与精确 ExternalIdentityLink、唯一 active PlatformOperatorAssignment、immutable DefaultWorkspacePolicyTemplate + active pointer、已验证 RunControlSchemaRelease / evidence、<code>active_default_release_digest</code>、当前 deployment / interface-contract digests、匹配的 system-conformance pass evidence ref 和唯一 <code>PlatformGenesisRecord</code>。初始 pointer 直接绑定 bundle 中已全量 pass 的精确 release，不创建虚假的 PlatformReleaseChangeApproval，也不声称由尚未存在的 Operator 批准。</p></article>
+      <article class="step" data-step="3"><h3>一个事务建立最小可信根</h3><p>Observer 原子写入 SigningKey public metadata、初始 <code>User(status=active)</code> 与精确 ExternalIdentityLink、唯一 active PlatformOperatorAssignment、immutable DefaultWorkspacePolicyTemplate + active pointer、已验证 RunControlSchemaRelease / evidence、<code>active_default_release_digest</code>、当前 deployment / interface-contract / ExtensionGovernanceMatrix / DependencyHealthPolicy digests、匹配的 system-conformance pass evidence ref 和唯一 <code>PlatformGenesisRecord</code>。初始 pointer 直接绑定 bundle 中已全量 pass 的精确 release，不创建虚假的 PlatformReleaseChangeApproval，也不声称由尚未存在的 Operator 批准。</p></article>
       <article class="step" data-step="4"><h3>提交后永久关闭 bootstrap</h3><p>只有整个 DB 事务成功才从 <code>bootstrap_pending</code> 进入 normal；KMS 中预创建但未被成功引用的 key 不构成已初始化平台。成功的 genesis record 是永久 fence：同一或不同 bundle 的任何再次调用都固定拒绝并审计，不存在 reset、delete、rollback-to-empty 或第二个 genesis。首个 operator 后续通过正常 OIDC 登录命中预建 link；之后新增 User 走主规范的受信 OIDC JIT，所有 active-default 变化走普通 promotion / rollback。</p></article>
     </div>
     <div class="callout" style="margin-top:16px">
@@ -196,10 +218,10 @@
     <div class="scroll"><table class="objects">
       <thead><tr><th>对象</th><th>ID / 不可变绑定</th><th>权威方与生命周期</th></tr></thead>
       <tbody>
-        <tr><td>PlatformGenesisRecord</td><td><code>platform_genesis_id</code>；固定 deployment identity、genesis bundle / DeploymentCompatibilityManifest / InterfaceContractBundle / SystemConformanceEvidence / signing key / initial operator identity &amp; assignment / default WorkspacePolicy template / initial release / validation evidence digests 与 <code>completed_at</code>。</td><td>Observer platform registry 中恰好一条、永久不可删除的 bootstrap fence。只可在 registry 全空、system conformance 与首个 RunControl release validation 都独立 pass 后，与全部初始可信根在一个 serializable transaction 中创建；不存在 pending / retry / reset 状态。它不是 PlatformReleaseChangeApproval、RunEvent、token、public fixture 或可重复运维 API。</td></tr>
+        <tr><td>PlatformGenesisRecord</td><td><code>platform_genesis_id</code>；固定 deployment identity、genesis bundle / DeploymentCompatibilityManifest / InterfaceContractBundle / DomainErrorEnvelope / ExtensionGovernanceMatrix / DependencyHealthPolicy / SystemConformanceEvidence / signing key / initial operator identity &amp; assignment / default WorkspacePolicy template / initial release / validation evidence digests 与 <code>completed_at</code>。</td><td>Observer platform registry 中恰好一条、永久不可删除的 bootstrap fence。只可在 registry 全空、system conformance 与首个 RunControl release validation 都独立 pass 后，与全部初始可信根在一个 serializable transaction 中创建；不存在 pending / retry / reset 状态。它不是 PlatformReleaseChangeApproval、RunEvent、token、public fixture 或可重复运维 API。</td></tr>
         <tr><td>RunControlSchemaRelease</td><td><code>run_control_schema_digest</code> + immutable version；schema、manifest、handler bundle、fixture、generator digest。</td><td>平台 release pipeline 产出；registry 只读保存。旧 release 因既有 Run / RunEvent / AuditRecord retention 或 legal hold 而继续可解析。</td></tr>
-        <tr><td>PromotionValidationEvidence</td><td>内容寻址 <code>evidence_ref</code>；绑定 candidate digest、manifest、签名、全量生成物、fixture、契约测试、generator compatibility。</td><td>promotion 的唯一 pass 前提；失败不创建 pointer 变更。证据不可原地修改，条件变化必须产生新的 evidence。</td></tr>
-        <tr><td>RollbackCompatibilityPreflight</td><td>内容寻址 <code>evidence_ref</code>；绑定 retained target、manifest / signature / bundle 完整性与当前 ABI。</td><td>rollback 的唯一 pass 前提；不重跑历史全量 suite。预检失败不改变默认版本。</td></tr>
+        <tr><td>PromotionValidationEvidence</td><td>内容寻址 <code>evidence_ref</code>；绑定 candidate digest、manifest、签名、全量生成物、fixture、契约测试、generator 与当前 ExtensionGovernanceMatrix compatibility。</td><td>promotion 的唯一 pass 前提；unknown authority-bearing type、缺 handler / fixture / evidence 或矩阵不兼容都失败且不创建 pointer 变更。证据不可原地修改，条件变化必须产生新的 evidence。</td></tr>
+        <tr><td>RollbackCompatibilityPreflight</td><td>内容寻址 <code>evidence_ref</code>；绑定 retained target、manifest / signature / bundle 完整性、当前 ExtensionGovernanceMatrix 与 ABI。</td><td>rollback 的唯一 pass 前提；不重跑历史全量 suite，但必须 fail closed 验证 retained release 的全部 authority-bearing type 在当前矩阵 / handler 中可解释。预检失败不改变默认版本。</td></tr>
         <tr><td>PlatformReleaseChangeApproval</td><td><code>platform_release_approval_id</code>；<code>operation</code>、expected-current digest、target digest、immutable evidence ref、build identity、<code>expires_at</code>、operator ID、exact <code>platform_operator_assignment_id</code>、authn evidence；拒绝时另固定 closed-enum <code>rejection_reason_code</code>，权限失效时固定 <code>invalidation_reason_code=operator_assignment_revoked|operator_user_disabled</code>。</td><td>Observer registry 权威保存。pending → approved → consumed，或 rejected / expired / conflicted / invalidated；v1 24 小时 TTL、单人批准／拒绝。rejected 与 invalidated 都是 exact request 的不可逆终态；以后再申请必须创建新 approval ID。它不是 run-scoped ApprovalRequest。</td></tr>
         <tr><td>active-default pointer</td><td>唯一 <code>active_default_release_digest</code>，无 user / workspace scope。</td><td>空 registry genesis 事务只可初始化一次；此后仅 pipeline 在批准后以 CAS 改写。一次成功切换只作用于之后新开的 run。</td></tr>
         <tr><td>AuditRecord</td><td><code>audit_id</code>；关联 release、approval、operator、pipeline build、evidence、old / target digest。</td><td>本页 RunControl release 的平台级 WORM / append-only 审计。不是 RunEvent，不能被 coding agent 读取成任务语义事件；这不重定义主规范中 public candidate 的 owner-scoped 认证结果回传。</td></tr>
@@ -210,8 +232,8 @@
   <section id="promotion" class="panel">
     <h2>Promotion：候选 release 成为默认版本</h2>
     <div class="timeline">
-      <article class="step" data-step="1"><h3>构建不可变候选</h3><p>pipeline 生成 release manifest、schema、全部 MCP / Observer / UI handler、fixture 与 generator identity；候选只能新增，不能覆盖已有 digest。</p></article>
-      <article class="step" data-step="2"><h3>取得全量 pass 证据</h3><p><code>PromotionValidationEvidence=pass</code> 必须同时覆盖 schema / manifest / signature / digest、全部生成物、fixture、契约测试与 generator compatibility check。任一失败：不提升、不写<strong>本页 RunControl release 的</strong> RunEvent、不触碰 run。</p></article>
+      <article class="step" data-step="1"><h3>构建不可变候选</h3><p>pipeline 生成 release manifest、schema、全部 MCP / Observer / UI handler、fixture 与 generator identity，并枚举该 release 使用的全部 authority-bearing extension values；候选只能新增，不能覆盖已有 digest。</p></article>
+      <article class="step" data-step="2"><h3>取得全量 pass 证据</h3><p><code>PromotionValidationEvidence=pass</code> 必须同时覆盖 schema / manifest / signature / digest、全部生成物、fixture、契约测试、generator compatibility 与当前 ExtensionGovernanceMatrix compatibility check。任一 unknown authority-bearing type、缺 handler / fixture / evidence 或其他失败：不提升、不写<strong>本页 RunControl release 的</strong> RunEvent、不触碰 run。</p></article>
       <article class="step" data-step="3"><h3>创建待批准变更</h3><p>Observer registry 创建 pending <code>PlatformReleaseChangeApproval</code>，固定 operation、expected-current、target、evidence ref、build identity 与 24 小时 <code>expires_at</code>。</p></article>
       <article class="step" data-step="4"><h3>外部平台治理批准或拒绝精确 request</h3><p>恰好一名平台内部 <code>platform_release_operator</code> 作出决定。批准时，外部治理系统提交 operator identity、platform-authentication evidence 与时间；拒绝时还提交 closed-enum reason code，并把 request 原子置为 <code>rejected</code>。两种决定都不能直接调用 pointer 写入接口；rejected request 不能恢复、批准或执行，未来重提必须创建新的 approval ID。</p></article>
       <article class="step" data-step="5"><h3>受信 pipeline 重验权限并进行 CAS</h3><p>Observer 在消费 approved record 时重新验证其绑定的 exact <code>PlatformOperatorAssignment</code> 仍 active，且关联 User 仍 active；失败则把 approval 原子置为 <code>invalidated</code> 并拒绝 CAS。只有 authority、approval binding、TTL 与 expected-current 全部通过，pipeline 才执行 <code>CAS(expected_current_digest → target_release_digest)</code>；成功时 approval consumed，并写 <code>run_control_active_default_changed</code> 平台审计。</p><div class="trace"><span class="p">External governance</span> ── signed approval attestation ──&gt; <span class="o">Observer platform registry</span><br><span class="o">Observer</span> ── current authority + immutable refs ──&gt; <span class="r">trusted release pipeline</span><br><span class="r">pipeline</span> ── CAS(old → target) ──&gt; <span class="o">active-default pointer</span></div></article>
@@ -222,7 +244,7 @@
     <h2>Rollback：回到曾成功 promotion 的 retained release</h2>
     <div class="two">
       <article class="rule"><h3>与 promotion 相同的部分</h3><p>仍需建立 <code>PlatformReleaseChangeApproval</code>、由外部平台运维显式批准或拒绝、24 小时 TTL、批准后的 exact expected-current CAS 和完整平台审计。拒绝是该 request 的终态，pointer 不变；回滚不是自动故障转移，也不会修改既有 run。</p></article>
-      <article class="rule"><h3>与 promotion 不同的部分</h3><p>不重跑历史全量 fixture / contract suite。它只要求 <code>RollbackCompatibilityPreflight</code> 证明 retained manifest / signature / digest / bundle 完整，以及当前 Observer / Driver ABI 能加载精确 handler。</p></article>
+      <article class="rule"><h3>与 promotion 不同的部分</h3><p>不重跑历史全量 fixture / contract suite。它只要求 <code>RollbackCompatibilityPreflight</code> 证明 retained manifest / signature / digest / bundle 完整、当前 Observer / Driver ABI 能加载精确 handler，并且 retained release 使用的全部 authority-bearing extension values 仍可由当前 ExtensionGovernanceMatrix / handler fail-closed 地解释。</p></article>
     </div>
     <div class="callout" style="margin-top:16px"><strong>回滚预检失败不是 RunControl run 事件。</strong>pointer 保持不变；只写 <code>AuditRecord(type=run_control_active_default_change_failed, operation=rollback)</code> 并通知平台运维。任何 run、dispatch、attempt 与 RunEvent 都不受影响；这不改变主规范中 public candidate 的独立 owner-scoped 认证结果回传。</div>
   </section>
@@ -266,6 +288,7 @@
       <article class="success"><strong>可证明的版本固定</strong><p>每个新 run 只在 <code>open_run</code> 成功事务中 pin 当时的唯一默认 release；默认切换永不改写已 open 或已 closed run 的 version / digest。</p></article>
       <article class="success"><strong>可证明的单写者</strong><p>仅空 registry 的 deployment genesis 可在唯一事务初始化 pointer；永久 genesis fence 建立后，只有受信 pipeline 能以 CAS 改 pointer，平台运维只能批准或拒绝 immutable request。所有 genesis、成功、验证失败、明确拒绝、批准者权限失效、过期和冲突均有平台审计或安全 deployment failure evidence。</p></article>
       <article class="success"><strong>可证明的一次性启动</strong><p>全空检查、完整 bundle validation 与可信根写入必须同一受 fence 的初始化流程完成；任何部分失败都没有可服务的半初始化 registry。成功后 bootstrap endpoint 永久拒绝，不能成为绕过 Operator / pipeline 的恢复工具。</p></article>
+      <article class="success"><strong>可证明的接口语义一致</strong><p>每个 ready/current build 固定同一 InterfaceContractBundle、DomainErrorEnvelope、ExtensionGovernanceMatrix 与 DependencyHealthPolicy digests；跨 HTTP / gRPC / MCP 的同一错误有同一 retry / authority 语义，authority-bearing unknown 值 fail closed，局部依赖故障只关闭矩阵声明的 route。RunControl pointer 变化不能改写这些 deployment contract。</p></article>
       <article class="success"><strong>明确延期的能力</strong><p>双人 / N-of-M 签核、职责分离、平台运维控制台与用户 / workspace 自定义 run-control 协议均不属于 v1。</p></article>
     </div>
   </section>
